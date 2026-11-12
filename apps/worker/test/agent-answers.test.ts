@@ -249,8 +249,8 @@ describe("An AI agent", () => {
     expect(body).toMatchObject({ model: GEMMA, max_completion_tokens: maxTokensAt({ thinking: "off", length: "short" }), reasoning_effort: "none" });
     const [instructions, ...turns] = body.messages;
     expect(instructions!.content).toMatch(/^You are Scout, an AI agent in the team chat ".*". People ask you things by mentioning @Scout in a room or a thread, or by writing to you directly\.\n\n/);
-    expect(instructions!.content).toContain(`${SCOUT.instructions}\n\nYou're asked in the room "general".`);
-    expect(instructions!.content).toContain("Answer the last one, which Ada Lovelace wrote, in at most about 150 words.");
+    expect(instructions!.content).toContain(`${SCOUT.instructions}\n\nWrite in Markdown.`);
+    expect(instructions!.content).toMatch(/\n\nYou're asked in the room "general"\. .* Answer the last one, which Ada Lovelace wrote, in at most about 150 words\.$/);
     expect(instructions!.content).not.toContain("You are Ember");
     expect(turns).toEqual([
       { role: "user", content: "Ada Lovelace: Are we still on for the picnic?" },
@@ -511,7 +511,8 @@ describe("@ember", () => {
     await post(client, `<p>${mention(EMBER)} how's the launch?</p>`);
     expect(await nextFrom(client, EMBER)).toMatchObject({ plainText: "Brilliant." });
     const [{ metadata, body }] = questions as [Asked];
-    expect(body.messages[0]!.content).toContain(`or by writing to you directly.\n\nAnswer in British English.\n\nYou're asked in the room "general".`);
+    expect(body.messages[0]!.content).toContain(`or by writing to you directly.\n\nAnswer in British English.\n\nWrite in Markdown.`);
+    expect(body.messages[0]!.content).toContain(`\n\nYou're asked in the room "general".`);
     expect(body.messages[0]!.content).toContain("as a helpful teammate would: plainly, and in at most about 400 words.");
     expect(JSON.parse(metadata!)).toEqual({ user_id: ada.user.id, agent_id: ASSISTANT_ID });
     client.close();
@@ -552,7 +553,8 @@ describe("Try it", () => {
     expect(JSON.parse(metadata!)).toEqual({ user_id: ada.user.id });
     expect(body).toMatchObject({ model: GEMMA, reasoning_effort: "none", max_completion_tokens: maxTokensAt({ thinking: "off", length: "short" }) });
     expect(body.messages[0]!.content).toMatch(/^You are Scout, an AI agent in the team chat/);
-    expect(body.messages[0]!.content).toContain(`${SCOUT.instructions}\n\nYou're asked in a direct message.`);
+    expect(body.messages[0]!.content).toContain(`${SCOUT.instructions}\n\nWrite in Markdown.`);
+    expect(body.messages[0]!.content).toContain(`\n\nYou're asked in a direct message.`);
     expect(body.messages.slice(1)).toEqual([{ role: "user", content: "Ada Lovelace: Is it sunny? https://example.com/sky.png" }]);
     // Nothing's saved, and nobody else hears of it.
     expect(await workspaceSql("SELECT count(*) AS n FROM agents")).toEqual([{ n: 0 }]);

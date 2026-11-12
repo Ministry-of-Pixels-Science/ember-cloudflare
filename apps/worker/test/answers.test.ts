@@ -698,10 +698,10 @@ describe("What @ember asks its model", () => {
 
   it("follows who it is with the instructions administrators added, and labels the question with who answers", () => {
     const told = questionFor({ ...ASSISTANT, instructions: "Answer in British English." }, [message("1", "Hi")], ADA, IN_GENERAL, DEFAULT_LEVELS, NOW);
-    expect(told.instructions).toContain(`You are Ember, the AI assistant in the team chat "Fernwood". People ask you things by mentioning @ember in a room or a thread, or by writing to you directly.\n\nAnswer in British English.\n\nYou're asked in the room "general".`);
-    expect(told.instructions).toContain("as a helpful teammate would: plainly, and in at most about 400 words.");
+    expect(told.instructions).toContain(`You are Ember, the AI assistant in the team chat "Fernwood". People ask you things by mentioning @ember in a room or a thread, or by writing to you directly.\n\nAnswer in British English.\n\nWrite in Markdown.`);
+    expect(told.instructions).toMatch(/\n\nYou're asked in the room "general"\. .* as a helpful teammate would: plainly, and in at most about 400 words\.$/);
     expect(told.agentId).toBe(ASSISTANT_ID);
-    expect(questionFor(ASSISTANT, [message("1", "Hi")], ADA, IN_GENERAL, DEFAULT_LEVELS, NOW).instructions).toContain(`directly.\n\nYou're asked in the room "general".`);
+    expect(questionFor(ASSISTANT, [message("1", "Hi")], ADA, IN_GENERAL, DEFAULT_LEVELS, NOW).instructions).toContain("directly.\n\nWrite in Markdown.");
   });
 
   it("reads the newest messages that fit, the question always, and a thread's first message first", () => {
@@ -720,11 +720,11 @@ describe("What an agent asks its model", () => {
       [
         `You are Scout, an AI agent in the team chat "Fernwood". People ask you things by mentioning @Scout in a room or a thread, or by writing to you directly.`,
         SCOUT.instructions,
-        `You're asked in a thread in the room "general". Its messages follow, oldest first, each after its writer's name. Answer the last one, which Ada Lovelace wrote, in at most about 150 words.`,
         "Write in Markdown. Links, bold, italics, lists, quotes, code blocks and tables show as they do in the chat, and a picture you show with ![what it shows](its address) appears under your answer when a person in the conversation wrote its address. Don't begin with your name.",
         CARDS_PROMPT,
         "You can't search the web or open links. When someone asks you to, say so, and that an administrator can turn on Search the web under AI assistant in community settings.",
         "Today is Saturday, October 31, 2026, in UTC.",
+        `You're asked in a thread in the room "general". Its messages follow, oldest first, each after its writer's name. Answer the last one, which Ada Lovelace wrote, in at most about 150 words.`,
       ].join("\n\n"),
     );
     expect([askerId, agentId]).toEqual(["ada", "scout"]);
@@ -823,6 +823,94 @@ describe("@ember's answer", () => {
       { source: "attachment", color: "good", parts: [{ kind: "title", text: "Checks" }, { kind: "text", html: "<p>All <strong>green</strong></p>" }] },
     ]);
     expect(answerOf(slackBlock(STATUS))).toEqual({ markup: "", cards: [STATUS_CARD], firstLink: null });
+  });
+
+  it("shows the guide's example as the card the guide says it is, under its words, wherever they're written", () => {
+    const [, example = ""] = /\n```slack\n([\s\S]*?)\n```$/.exec(CARDS_PROMPT) ?? [];
+    const answer = answerOf(`The launch slipped.\n\n\`\`\`slack\n${example}\n\`\`\`\n\nAsk me again tomorrow.`);
+    expect(answer.markup).toBe(markdownHtml("The launch slipped.\n\nAsk me again tomorrow."));
+    const field = (title: string, value: string) => ({ html: `<p><strong>${title}</strong><br>${value}</p>`, short: true });
+    expect(answer.cards).toEqual([
+      {
+        source: "attachment",
+        color: "warning",
+        parts: [
+          { kind: "header", text: "Spring launch: at risk" },
+          { kind: "section", html: "<p>Three of five tasks are done. The <strong>pricing page</strong> waits on legal review.</p>" },
+          { kind: "section", fields: [field("Owner", "Web team"), field("Launch", "March 14"), field("Done", "3 of 5"), field("Waiting on", "Legal review")] },
+          { kind: "context", items: [{ html: "<p>From the launch tracker, updated this morning</p>" }] },
+        ],
+      },
+    ]);
+  });
+
+  it("shows each kind of block the guide teaches, as the guide writes them, and its markup as it says", () => {
+    const plain = (text: string) => ({ type: "plain_text", text });
+    const mrkdwn = (text: string) => ({ type: "mrkdwn", text });
+    const cell = (text: string) => ({ type: "raw_text", text });
+    const button = (text: string, url: string, style?: string) => ({ type: "button", text: plain(text), url, ...(style && { style }) });
+    const offsite = {
+      blocks: [
+        { type: "header", text: plain("Team offsite") },
+        { type: "section", text: mrkdwn("*Two* fit _all_ of us, ~three~ `28`, on <https://maps.example/offsite|the map> :white_check_mark:\n• Lake\n• Trails"), accessory: button("Map", "https://maps.example/offsite") },
+        { type: "section", fields: [mrkdwn("*Owner*\nDana"), mrkdwn("*Pick by*\nFriday")], accessory: { type: "image", image_url: "https://example.com/lodge.png", alt_text: "The lodge" } },
+        { type: "context", elements: [mrkdwn("From <@U123|Priya>'s list, for <@U456>")] },
+        { type: "divider" },
+        { type: "image", image_url: "https://example.com/lake.png", alt_text: "The lake" },
+        { type: "table", rows: [[cell("Venue"), cell("Per day")], [cell("Juniper Lodge, by the lake"), cell("$3,200")]], column_settings: [{ align: "left", is_wrapped: true }, { align: "right" }] },
+        { type: "carousel", elements: [{ type: "card", title: plain("Juniper Lodge"), subtitle: plain("Up to 40"), body: mrkdwn("A lake and *trails*"), actions: [button("Visit", "https://juniperlodge.example")] }] },
+        { type: "actions", elements: [button("Book it", "https://juniperlodge.example/book", "primary"), button("Call it off", "https://juniperlodge.example/cancel", "danger"), button("Ask", "https://juniperlodge.example/ask")] },
+        { type: "markdown", text: "- Lake\n- **Trails**" },
+      ],
+    };
+    const answer = answerOf(slackBlock(offsite), [], ["The lodge https://example.com/lodge.png and the lake https://example.com/lake.png"]);
+    const html = (text: string) => `<p>${text}</p>`;
+    expect(answer.cards).toEqual([
+      {
+        source: "blocks",
+        parts: [
+          { kind: "header", text: "Team offsite" },
+          {
+            kind: "section",
+            html: html(`<strong>Two</strong> fit <em>all</em> of us, <s>three</s> <code>28</code>, on <a href="https://maps.example/offsite">the map</a> ✅<br>• Lake<br>• Trails`),
+            button: { text: "Map", href: "https://maps.example/offsite" },
+          },
+          {
+            kind: "section",
+            fields: [{ html: html("<strong>Owner</strong><br>Dana"), short: true }, { html: html("<strong>Pick by</strong><br>Friday"), short: true }],
+            thumb: { url: "https://example.com/lodge.png", alt: "The lodge" },
+          },
+          // A Slack mention shows as its text, which notifies nobody.
+          { kind: "context", items: [{ html: html("From @Priya's list, for @U456") }] },
+          { kind: "divider" },
+          { kind: "image", image: { url: "https://example.com/lake.png", alt: "The lake" } },
+          {
+            kind: "table",
+            rows: [
+              [html("Venue"), html("Per day")],
+              [html("Juniper Lodge, by the lake"), html("$3,200")],
+            ],
+            columns: [
+              { align: "left", wrap: true },
+              { align: "right", wrap: false },
+            ],
+          },
+          {
+            kind: "tiles",
+            tiles: [{ title: "Juniper Lodge", subtitle: "Up to 40", body: html("A lake and <strong>trails</strong>"), buttons: [{ text: "Visit", href: "https://juniperlodge.example" }] }],
+          },
+          {
+            kind: "buttons",
+            buttons: [
+              { text: "Book it", href: "https://juniperlodge.example/book", style: "primary" },
+              { text: "Call it off", href: "https://juniperlodge.example/cancel", style: "danger" },
+              { text: "Ask", href: "https://juniperlodge.example/ask" },
+            ],
+          },
+          { kind: "text", html: "<ul><li>Lake</li><li><strong>Trails</strong></li></ul>" },
+        ],
+      },
+    ]);
   });
 
   it("keeps the links and pictures its text names by reference when it takes a block out, wherever their definitions are", () => {

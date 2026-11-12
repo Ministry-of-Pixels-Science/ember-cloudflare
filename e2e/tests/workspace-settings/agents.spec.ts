@@ -1,4 +1,5 @@
 import type { AgentAnswer, Agents, NewAgent } from "@ember/protocol/agents";
+import { CARDS_PROMPT } from "@ember/protocol/prompts";
 import type { APIRequestContext, Locator, Page } from "@playwright/test";
 import { administratorSession, cookieHeader, editorField, expect, SAME_ORIGIN, signInAsAdministrator, test, useOwnAddress } from "../../fixtures";
 import { AI_GATEWAY_ACCOUNT } from "../../projects/workspace-settings";
@@ -90,7 +91,7 @@ test.describe("Agents", () => {
     await expect(tryIt).toContainText(/Answered in [\d.]+ seconds\./);
     const tried = gateway.asked.at(-1)!;
     expect(tried).toMatchObject({ path: `/accounts/${AI_GATEWAY_ACCOUNT.accountId}/ai/v1/messages`, body: { model: SONNET } });
-    expect(tried.body.system).toMatch(/^You are Recap, an AI agent in the team chat "[^"]+"\. [^\n]+\n\nSum up the conversation so far as decisions and to-dos\.\n\nYou're asked in a direct message\./);
+    expect(tried.body.system).toMatch(/^You are Recap, an AI agent in the team chat "[^"]+"\. [^\n]+\n\nSum up the conversation so far as decisions and to-dos\.\n\nWrite in Markdown\.[\s\S]+\n\nYou're asked in a direct message\./);
 
     // Making it asks its model a test question, then goes back to the tab, which lists it.
     await page.getByRole("button", { name: "Create agent" }).click();
@@ -210,7 +211,7 @@ test.describe("Agents", () => {
     await expect(tryIt).toContainText(CARDED);
     await expect(tryIt.getByRole("article", { name: CARD_HEADER }).getByRole("link", { name: "Open the plan" })).toHaveAttribute("href", CARD_LINK);
     // Its model is told how to write one.
-    expect(gateway.asked.at(-1)!.body.system).toContain("as JSON in a code block that starts with ```slack.");
+    expect(gateway.asked.at(-1)!.body.system).toContain(CARDS_PROMPT);
 
     await page.goto(`/users/${recap.id}`);
     await page.getByRole("button", { name: "Ping Recap" }).click();

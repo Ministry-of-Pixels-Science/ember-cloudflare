@@ -633,16 +633,24 @@ gateway's [Guardrails](https://developers.cloudflare.com/ai-gateway/features/gua
 dashboard, to check the questions, with the messages @ember reads, or the answers. When either blocks
 one, @ember's note says which, and that an administrator can change what it blocks there.
 
-@ember can also show cards under its answer, as a chat bot's [Slack-compatible webhook](slack-webhooks.md)
-does, for a status, a set of fields or buttons that open pages: it writes a Slack message's payload as
-JSON in a code block that starts with ```` ```slack ````, and the cards the payload posts show under the
-answer, after the card of its pictures, in place of the block. They show as a webhook's do, without
-what only a Slack app could answer, such as a menu, and without the payload's `text`, as the answer's
-own words are its text. A card's pictures show only at the addresses its Markdown's may, while its
-links and buttons, like its Markdown's links, may go anywhere. A block whose payload doesn't parse, or
-posts no card Ember keeps, stays the code it's written as, as does one in a list or a quote. An answer
-too long for a message keeps as many of its cards as fit, each whole, and as much of its text as fits
-beside them, counting the cards' text.
+@ember can also show cards under its answer, as a chat bot's [Slack-compatible
+webhook](slack-webhooks.md) does, for where something stands, a report, options to compare, a table or
+buttons that open pages: it writes a Slack message's payload as JSON in a code block that starts
+with ```` ```slack ````, and the cards the payload posts show under the answer, after the card of its
+pictures, in place of the block, with all of the answer's words above them. They show as a webhook's do,
+without what only a Slack app could answer, such as a menu, and without the payload's `text`, as the
+answer's own words are its text. A card's pictures show only at the addresses its Markdown's may, while
+its links and buttons, like its Markdown's links, may go anywhere. A block whose payload doesn't parse,
+or posts no card Ember keeps, stays the code it's written as, as does one in a list or a quote. An
+answer too long for a message keeps as many of its cards as fit, each whole, and as much of its text as
+fits beside them, counting the cards' text.
+
+What Ember tells @ember and every agent teaches them to make cards: when a card helps, as for where
+something stands, and when to leave one out, as from a conversational reply; each block a card shows,
+with how it shows and what it's for; Slack's markup, which isn't Markdown; what doesn't show; and an
+example of a focused card. That's about 1,800 tokens of each question on Claude's models. It comes with
+the rest of what's the same from question to question, ahead of the date and where the question's asked,
+so that a provider that caches the start of a prompt on its own, as OpenAI's does, can reuse it.
 
 Two dials say how much @ember does for each question. Thinking, Off, Low, Medium or High, is how much
 its model thinks before it answers, up to about 4,000, 16,000 or 32,000 tokens, asked for as each API
@@ -743,13 +751,13 @@ the model, which AI Gateway sends what it's asked to), and who set it up, but no
 
 #### What Ember adds around the instructions
 
-Ember writes the rest of @ember's and each agent's system prompt around their instructions: who they
-are, where they're asked, how the chat shows Markdown and pictures, how to show a card, what they may
-do on the web, and the date. Under What Ember adds around them, on @ember's page and each agent's, a
-box headed Modify with caution keeps it as Ember writes it until Modify is pressed, as a change there
-can leave a model unsure who it is, where it's asked or what the chat can show. Modify opens the
-template Ember fills in each time it's asked, up to 10,000 characters, with what each placeholder
-stands for:
+Ember writes the rest of @ember's and each agent's system prompt around their instructions: who they are
+before them, and after them how the chat shows Markdown and pictures, how to show cards, what they may
+do on the web, the date, and where they're asked, last, as it changes from question to question most.
+Under What Ember adds around them, on @ember's page and each agent's, a box headed Modify with caution
+keeps it as Ember writes it until Modify is pressed, as a change there can leave a model unsure who it
+is, where it's asked or what the chat can show. Modify opens the template Ember fills in each time it's
+asked, up to 10,000 characters, with what each placeholder stands for:
 
 | Placeholder | What Ember fills in |
 | --- | --- |
@@ -758,7 +766,7 @@ stands for:
 | `{{where}}` | The room, thread or direct message it's asked in |
 | `{{asker}}` | The name of whoever asked |
 | `{{words}}` | About how many words it may answer in, from Answer length |
-| `{{cards}}` | How it can show a card under its answer, with a Slack payload |
+| `{{cards}}` | How it can show cards under its answer with Slack payloads: when they help, what they can hold, and an example |
 | `{{web}}` | What it may do on the web, or who could let it |
 | `{{today}}` | Today's date, in UTC |
 | `{{instructions}}` | The instructions, which it needs once |
@@ -768,13 +776,14 @@ anything's saved: one without `{{instructions}}`, or with it twice, or with a pl
 fill in, such as a misspelt one. A template that leaves out a placeholder, such as `{{web}}` or
 `{{today}}`, is taken, though the model then isn't told what it would have said. While @ember has no
 instructions added, `{{instructions}}` on a line of its own goes with its line, and within a line it
-leaves the rest of the line as it's written. An agent's template saves with Save changes, and
-@ember's with Save beside it, or Save instructions. Try it asks an agent with the template as the page
-has it, saved or not. Use Ember's own puts Ember's back, which Ember keeps as its own, so that it
-changes as Ember's does in later releases, where a modified template stays as it was saved. So a
-template modified before `{{cards}}` came along doesn't tell its model how to show a card until
-`{{cards}}` is added to it, though a card the model writes anyway still shows. While it's modified,
-What Ember adds around them is marked Modified.
+leaves the rest of the line as it's written. An agent's template saves with Save changes, and @ember's
+with Save beside it, or Save instructions. Try it asks an agent with the template as the page has it,
+saved or not. Use Ember's own puts Ember's back, which Ember keeps as its own, so that it changes as
+Ember's does in later releases, where a modified template stays as it was saved. So a template modified
+before `{{cards}}` came along doesn't tell its model how to show a card until `{{cards}}` is added to
+it, though a card the model writes anyway still shows, while one with `{{cards}}` in it gets what Ember
+says of cards in the release it runs. While it's modified, What Ember adds around them is marked
+Modified.
 
 ### Huddles
 
