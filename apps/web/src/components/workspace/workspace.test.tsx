@@ -941,7 +941,7 @@ describe("New releases", () => {
     const idle = idleCallbacks();
     serve({
       "GET /api/account": () => Response.json({ ...workspaceSettings, canAdminister: true }),
-      "GET /api/account/release": () => Response.json({ release: "0.1", beta: false, newest: { release: "0.2", notes: NOTES, newer: true }, newestBeta: null, copy: null }),
+      "GET /api/account/release": () => Response.json({ release: "0.1", beta: false, newest: { release: "0.2", version: "0.2.0", notes: NOTES, newer: true }, newestBeta: null, copy: null }),
     });
     const { user } = showWorkspace("/rooms/random", asAdministrator);
     expect(await roomHeading()).toHaveTextContent("random");
@@ -961,7 +961,7 @@ describe("New releases", () => {
   it("asks afresh each time an administrator opens Admin, once the browser is idle, but not for going on within it, or leaving", async () => {
     const idle = idleCallbacks();
     let newest = "0.2";
-    const answer = () => Response.json({ release: "0.1", beta: false, newest: { release: newest, notes: NOTES, newer: true }, newestBeta: null, copy: null });
+    const answer = () => Response.json({ release: "0.1", beta: false, newest: { release: newest, version: `${newest}.0`, notes: NOTES, newer: true }, newestBeta: null, copy: null });
     serve({
       "GET /api/account": () => Response.json({ ...workspaceSettings, canAdminister: true }),
       "GET /api/account/release": answer,
@@ -1002,7 +1002,7 @@ describe("New releases", () => {
 
   it("leaves Admin unmarked while this is the newest release, or GitHub didn't say, as General says", async () => {
     for (const [newest, says] of [
-      [{ release: "0.1", notes: NOTES, newer: false }, "This is the newest release."],
+      [{ release: "0.1", version: "0.1.0", notes: NOTES, newer: false }, "This is the newest release."],
       [null, "GitHub didn't say whether a newer release is out."],
     ] as const) {
       const idle = idleCallbacks();
@@ -1025,10 +1025,10 @@ describe("New releases", () => {
 
   it("marks Admin for the beta after a beta's own, which Update Ember brings, but not for a beta a release could try", async () => {
     const betaNotes = "https://github.com/NYLLON-SOFTWARE/ember-cloudflare/releases/tag/v0.2.0-beta.2";
-    const newestBeta = { release: "0.2 beta 2", notes: betaNotes, newer: true };
+    const newestBeta = { release: "0.2 beta 2", version: "0.2.0-beta.2", notes: betaNotes, newer: true };
     for (const [check, card, mark] of [
-      [{ release: "0.2 beta 1", beta: true, newest: { release: "0.1", notes: NOTES, newer: false }, newestBeta, copy: null }, "Ember 0.2 beta 2 is available", "Ember 0.2 beta 2 is available"],
-      [{ release: "0.1", beta: false, newest: { release: "0.1", notes: NOTES, newer: false }, newestBeta, copy: null }, "Ember 0.1", null],
+      [{ release: "0.2 beta 1", beta: true, newest: { release: "0.1", version: "0.1.0", notes: NOTES, newer: false }, newestBeta, copy: null }, "Ember 0.2 beta 2 is available", "Ember 0.2 beta 2 is available"],
+      [{ release: "0.1", beta: false, newest: { release: "0.1", version: "0.1.0", notes: NOTES, newer: false }, newestBeta, copy: null }, "Ember 0.1", null],
     ] as const) {
       const idle = idleCallbacks();
       serve({
@@ -1050,7 +1050,7 @@ describe("New releases", () => {
 
   it("asks afresh at once for General's Check for updates, marking Admin once the Worker hears of a newer release", async () => {
     const idle = idleCallbacks();
-    let newest = { release: "0.1", notes: NOTES, newer: false };
+    let newest = { release: "0.1", version: "0.1.0", notes: NOTES, newer: false };
     serve({
       "GET /api/account": () => Response.json({ ...workspaceSettings, canAdminister: true }),
       "POST /api/account/release_checks": () => Response.json({ release: "0.1", beta: false, newest, checkedAt: new Date().toISOString(), newestBeta: null, copy: null }),
@@ -1064,7 +1064,7 @@ describe("New releases", () => {
     expect(admin).not.toHaveAccessibleDescription();
 
     // GitHub has published 0.2 since, which Check for updates hears of without waiting for the browser to be idle.
-    newest = { release: "0.2", notes: NOTES, newer: true };
+    newest = { release: "0.2", version: "0.2.0", notes: NOTES, newer: true };
     await user.click(within(card).getByRole("button", { name: "Check for updates" }));
     expect(await screen.findByRole("heading", { level: 2, name: "Ember 0.2 is available" })).toBeInTheDocument();
     expect(admin).toHaveAccessibleDescription("Ember 0.2 is available");

@@ -4,7 +4,7 @@ import { betaToTryOf, updateOf } from "./release-check";
 
 const RELEASES = "https://github.com/NYLLON-SOFTWARE/ember-cloudflare/releases/tag";
 /** Ember `release`, or its beta, as the Worker names it, newer than this one or not. */
-const named = (release: string, version: string, newer: boolean) => ({ release, notes: `${RELEASES}/v${version}`, newer });
+const named = (release: string, version: string, newer: boolean) => ({ release, version, notes: `${RELEASES}/v${version}`, newer });
 /** What the Worker says of releases to an Ember on `release`, a beta or not, having heard from GitHub just now. */
 const checkOf = (release: string, beta: boolean, newest: ReleaseCheck["newest"], newestBeta: ReleaseCheck["newestBeta"]): ReleaseCheck => ({
   release,

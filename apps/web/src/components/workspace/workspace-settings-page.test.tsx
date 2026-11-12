@@ -476,7 +476,7 @@ describe("Version", () => {
   const newerFor = (copy: CopyOnGitHub | null = null): ReleaseCheck => ({
     release: "0.1",
     beta: false,
-    newest: { release: "0.2", notes: NOTES, newer: true },
+    newest: { release: "0.2", version: "0.2.0", notes: NOTES, newer: true },
     checkedAt: CHECKED_AT,
     newestBeta: null,
     copy,
@@ -494,7 +494,7 @@ describe("Version", () => {
   it.each([null, { repository: "someone/my-ember", branch: "main", workflow: true, betaWorkflow: true }])(
     "shows administrators which release this is once the Worker has said, at the end of General (copy: %j)",
     async (copy) => {
-      release = { release: "0.1", beta: false, newest: { release: "0.1", notes: NOTES, newer: false }, checkedAt: CHECKED_AT, newestBeta: null, copy };
+      release = { release: "0.1", beta: false, newest: { release: "0.1", version: "0.1.0", notes: NOTES, newer: false }, checkedAt: CHECKED_AT, newestBeta: null, copy };
       showPage();
       const shown = await card();
       expect(shown.textContent).toBe(`Ember 0.1This is the newest release.Check for updates${LAST_CHECKED}`);
@@ -545,7 +545,7 @@ describe("Version", () => {
 
   it("says a beta is one, ahead of the newest release, until its release is out", async () => {
     const releaseNotes = "https://github.com/NYLLON-SOFTWARE/ember-cloudflare/releases/tag/v0.1.0";
-    release = { release: "0.2 beta 1", beta: true, newest: { release: "0.1", notes: releaseNotes, newer: false }, checkedAt: CHECKED_AT, newestBeta: null, copy: null };
+    release = { release: "0.2 beta 1", beta: true, newest: { release: "0.1", version: "0.1.0", notes: releaseNotes, newer: false }, checkedAt: CHECKED_AT, newestBeta: null, copy: null };
     showPage();
     let shown = await card();
     expect(shown.textContent).toBe(`Ember 0.2 beta 1This is a beta, ahead of Ember 0.1, the newest release.Check for updates${LAST_CHECKED}`);
@@ -572,9 +572,9 @@ describe("Version", () => {
     const betaOutFor = (copy: CopyOnGitHub | null = null): ReleaseCheck => ({
       release: "0.2",
       beta: false,
-      newest: { release: "0.2", notes: NOTES, newer: false },
+      newest: { release: "0.2", version: "0.2.0", notes: NOTES, newer: false },
       checkedAt: CHECKED_AT,
-      newestBeta: { release: "0.3 beta 1", notes: BETA_NOTES, newer: true },
+      newestBeta: { release: "0.3 beta 1", version: "0.3.0-beta.1", notes: BETA_NOTES, newer: true },
       copy,
     });
     /** The box that offers the beta, which is there. */
@@ -626,7 +626,7 @@ describe("Version", () => {
     });
 
     it("offers no beta while a newer release is out to update to, or the beta isn't newer", async () => {
-      release = { ...newerFor({ repository: "someone/my-ember", branch: "main", workflow: true, betaWorkflow: true }), newestBeta: { release: "0.3 beta 1", notes: BETA_NOTES, newer: true } };
+      release = { ...newerFor({ repository: "someone/my-ember", branch: "main", workflow: true, betaWorkflow: true }), newestBeta: { release: "0.3 beta 1", version: "0.3.0-beta.1", notes: BETA_NOTES, newer: true } };
       showPage();
       let shown = await card();
       expect(within(shown).getByRole("heading", { level: 2 })).toHaveTextContent("Ember 0.2 is available");
@@ -634,7 +634,7 @@ describe("Version", () => {
       expect(Object.keys(linksIn(shown))).toEqual(["What's new", "Open GitHub action to update"]);
       cleanup();
 
-      release = { ...betaOutFor(), release: "0.3 beta 1", beta: true, newestBeta: { release: "0.3 beta 1", notes: BETA_NOTES, newer: false } };
+      release = { ...betaOutFor(), release: "0.3 beta 1", beta: true, newestBeta: { release: "0.3 beta 1", version: "0.3.0-beta.1", notes: BETA_NOTES, newer: false } };
       showPage();
       shown = await card();
       // The newest beta, as no newer one is out.
@@ -645,7 +645,7 @@ describe("Version", () => {
 
     it("tells a beta of the beta after it as of an update, which Update Ember brings", async () => {
       const nextNotes = "https://github.com/NYLLON-SOFTWARE/ember-cloudflare/releases/tag/v0.3.0-beta.2";
-      release = { ...betaOutFor({ repository: "someone/my-ember", branch: "main", workflow: true, betaWorkflow: true }), release: "0.3 beta 1", beta: true, newestBeta: { release: "0.3 beta 2", notes: nextNotes, newer: true } };
+      release = { ...betaOutFor({ repository: "someone/my-ember", branch: "main", workflow: true, betaWorkflow: true }), release: "0.3 beta 1", beta: true, newestBeta: { release: "0.3 beta 2", version: "0.3.0-beta.2", notes: nextNotes, newer: true } };
       showPage();
       const shown = await card();
       expect(within(shown).getByRole("heading", { level: 2 })).toHaveTextContent("Ember 0.3 beta 2 is available");
@@ -661,7 +661,7 @@ describe("Version", () => {
     const heardOfNewer = (): ReleaseCheck => ({ ...newerFor(), checkedAt: new Date(Date.parse(CHECKED_AT) + 60_000).toISOString() });
 
     it("asks the Worker again, saying it's checking until it has answered, then when GitHub last named the newest release", async () => {
-      release = { release: "0.1", beta: false, newest: { release: "0.1", notes: NOTES, newer: false }, checkedAt: CHECKED_AT, newestBeta: null, copy: null };
+      release = { release: "0.1", beta: false, newest: { release: "0.1", version: "0.1.0", notes: NOTES, newer: false }, checkedAt: CHECKED_AT, newestBeta: null, copy: null };
       const callbacks = spies();
       let answer = () => {};
       callbacks.onCheckForUpdates.mockImplementation(() => new Promise<void>((resolve) => (answer = resolve)));

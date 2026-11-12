@@ -806,24 +806,40 @@ export const TRYING_BETAS = `${EMBER_REPOSITORY}/blob/main/docs/self-hosting.md#
  * What `GET /api/account/release` answers an administrator, for General settings to say, and `POST
  * /api/account/release_checks`, which opening Admin, and its Check for updates, make to have the Worker
  * ask GitHub afresh: the release this Ember is, named without its version's trailing ".0", such as "0.1",
- * and the newest release of Ember on GitHub, named so too, with the address of its notes there and
- * whether it's newer than this one, or null when GitHub didn't name one.
+ * and the newest release of Ember on GitHub, named so too, with its version, such as "0.1.0", the address
+ * of its notes there and whether it's newer than this one, or null when GitHub didn't name one.
  */
 export interface ReleaseCheck {
   release: string;
   /** Whether this Ember is a beta, such as "0.5 beta 1", ahead of the newest release, which GitHub never names a beta. */
   beta: boolean;
-  newest: { release: string; notes: string; newer: boolean } | null;
+  newest: { release: string; version: string; notes: string; newer: boolean } | null;
   /** When GitHub named that release, as an ISO time, which General says it last checked, or null with it. */
   checkedAt: string | null;
   /**
-   * Ember's newest beta while it's ahead of the newest release, named as "0.6 beta 1", with its notes and
-   * whether it's newer than this one, or null when it isn't ahead, or GitHub didn't say: what General
-   * offers a release to try, and a beta to update to (docs/self-hosting.md#betas).
+   * Ember's newest beta while it's ahead of the newest release, named as "0.6 beta 1", with its version,
+   * "0.6.0-beta.1", its notes and whether it's newer than this one, or null when it isn't ahead, or GitHub
+   * didn't say: what General offers a release to try, and a beta to update to (docs/self-hosting.md#betas).
    */
-  newestBeta: { release: string; notes: string; newer: boolean } | null;
+  newestBeta: { release: string; version: string; notes: string; newer: boolean } | null;
   /** The copy of Ember this is on GitHub, as its deploy said, or null where it said none. */
   copy: CopyOnGitHub | null;
+}
+
+/**
+ * A version's numbers, such as [0, 1, 0] for "0.1.0", and then its beta's, which is Infinity for a
+ * release, as it comes after its betas: [0, 5, 0, 1] for "0.5.0-beta.1", and [0, 5, 0, Infinity] for "0.5.0".
+ */
+function numbersOf(version: string): number[] {
+  const [, ...numbers] = /^(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+))?$/.exec(version) ?? [];
+  return numbers.map((number) => (number === undefined ? Infinity : Number(number)));
+}
+
+/** Whether version `a` of Ember, a release's or a beta's, comes after version `b`. */
+export function isNewer(a: string, b: string): boolean {
+  const [later, earlier] = [numbersOf(a), numbersOf(b)];
+  const differs = later.findIndex((number, at) => number !== earlier[at]);
+  return differs !== -1 && later[differs]! > (earlier[differs] ?? -1);
 }
 
 /**
