@@ -1,4 +1,4 @@
-import { EMBER_REPOSITORY, type CopyOnGitHub, type ReleaseCheck } from "@ember/protocol";
+import { EMBER_REPOSITORY, isNewer, type CopyOnGitHub, type ReleaseCheck } from "@ember/protocol";
 import type { Env } from "./env";
 import { isBeta, releaseNameOf, VERSION } from "./version";
 
@@ -103,8 +103,8 @@ export async function releaseCheck(env: Env, afresh = false): Promise<ReleaseChe
   };
 }
 
-/** A release, or a beta, as General names it, with its notes and whether it's newer than this Ember. */
-const named = ({ version, page }: Release) => ({ release: releaseNameOf(version), notes: page, newer: isNewer(version, VERSION) });
+/** A release, or a beta, as General names it, with its version, its notes and whether it's newer than this Ember. */
+const named = ({ version, page }: Release) => ({ release: releaseNameOf(version), version, notes: page, newer: isNewer(version, VERSION) });
 
 /** That asking GitHub failed, as `what` and `error` say, which is logged, answering `instead`. */
 function failed<T>(what: string, error: unknown, instead: T): T {
@@ -177,20 +177,4 @@ async function newestBetaOnGitHub(): Promise<Release | null | undefined> {
 function noBetas(why: string): undefined {
   console.warn(`GitHub didn't list Ember's betas: ${why}`);
   return undefined;
-}
-
-/**
- * A version's numbers, such as [0, 1, 0] for "0.1.0", and then its beta's, which is Infinity for a
- * release, as it comes after its betas: [0, 5, 0, 1] for "0.5.0-beta.1", and [0, 5, 0, Infinity] for "0.5.0".
- */
-function numbersOf(version: string): number[] {
-  const [, ...numbers] = /^(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+))?$/.exec(version) ?? [];
-  return numbers.map((number) => (number === undefined ? Infinity : Number(number)));
-}
-
-/** Whether version `a` comes after version `b`. */
-export function isNewer(a: string, b: string): boolean {
-  const [later, earlier] = [numbersOf(a), numbersOf(b)];
-  const differs = later.findIndex((number, at) => number !== earlier[at]);
-  return differs !== -1 && later[differs]! > (earlier[differs] ?? -1);
 }

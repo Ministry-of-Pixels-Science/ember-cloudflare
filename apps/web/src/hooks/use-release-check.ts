@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
-import type { ReleaseCheck } from "@ember/protocol";
+import { isNewer, type ReleaseCheck } from "@ember/protocol";
 import { checkForRelease, checkForReleaseAfresh } from "@/lib/api";
 import { whenIdle } from "@/lib/idle";
+import type { NamedRelease } from "@/lib/release-check";
 
 /** What the Worker says of Ember's releases, and Check for updates, which asks it afresh. */
 export interface ReleaseChecking {
@@ -27,8 +28,8 @@ export function useReleaseCheck(administrator: boolean, ready: boolean, inAdmin:
   if (admin.open !== inAdmin) setAdmin({ open: inAdmin, openings: admin.openings + (inAdmin ? 1 : 0) });
   const asking = administrator && ready;
   // Each of the Worker's isolates keeps what GitHub told it, so answers can disagree, and opening Admin's
-  // can answer after Check for updates'.
-  const heard = useCallback((answer: ReleaseCheck) => setCheck((kept) => (kept && keeps(kept, answer) ? kept : answer)), []);
+  // can answer after Check for updates', so each is put together with what was heard before.
+  const heard = useCallback((answer: ReleaseCheck) => setCheck((kept) => (kept ? together(kept, answer) : answer)), []);
   // Not run for `inAdmin` itself, so that leaving Admin doesn't ask, but whenever this runs in Admin, it's
   // for opening it, or for the page becoming ready, or someone made an administrator, there.
   useEffect(() => {
@@ -52,17 +53,27 @@ export function useReleaseCheck(administrator: boolean, ready: boolean, inAdmin:
 }
 
 /**
- * Whether the answer `kept` stands over `answer`. One that names a release or beta newer than this Ember
- * stands over one that names none, whenever each heard from GitHub, since a release or beta once out stays
- * out, and an isolate whose ask for the newest release failed, or for the tags, says what it heard of that
- * before, though it heard of the other just now. Otherwise the one that heard of the newest release last
- * stands. An answer from this Ember as another release, once one is deployed, always replaces it.
+ * What the answers `kept` and `answer` say together. An isolate asks GitHub for the newest release apart
+ * from listing the tags for the newest beta, and says what it heard of either before when asking for it
+ * fails, so either answer can know the later release, and either the later beta, whenever each heard. A
+ * release or a beta once out stays out, so together they name the later release either names, with when
+ * GitHub last named it, and the later beta either names, while it's ahead of that release. An answer from
+ * this Ember as another release, once one is deployed, replaces what was heard before.
  */
-function keeps(kept: ReleaseCheck, answer: ReleaseCheck): boolean {
-  if (answer.release !== kept.release) return false;
-  if (namesNewer(kept) !== namesNewer(answer)) return namesNewer(kept);
+function together(kept: ReleaseCheck, answer: ReleaseCheck): ReleaseCheck {
+  if (answer.release !== kept.release) return answer;
+  const release = namesLaterRelease(kept, answer) ? kept : answer;
+  const beta = laterOf(kept.newestBeta, answer.newestBeta);
+  const ahead = beta && release.newest && isNewer(beta.version, release.newest.version);
+  return { ...release, newestBeta: ahead ? beta : null };
+}
+
+/** Whether `kept` names a later release than `answer` does, or the same one, heard from GitHub after it. */
+function namesLaterRelease(kept: ReleaseCheck, answer: ReleaseCheck): boolean {
+  const [ours, theirs] = [kept.newest, answer.newest];
+  if (ours && theirs && ours.version !== theirs.version) return isNewer(ours.version, theirs.version);
   return (answer.checkedAt ?? "") < (kept.checkedAt ?? "");
 }
 
-/** Whether `check` names a release, or a beta, newer than this Ember: an update, or a beta to try. */
-const namesNewer = ({ newest, newestBeta }: ReleaseCheck) => Boolean(newest?.newer || newestBeta?.newer);
+/** The later of two betas, where an answer may name none. */
+const laterOf = (one: NamedRelease | null, other: NamedRelease | null) => (one && other && isNewer(other.version, one.version) ? other : (one ?? other));
