@@ -281,7 +281,7 @@ describe("Check that people are people with Cloudflare Turnstile", () => {
       expect(html).toContain(`${TURNSTILE}/turnstile/v0/api.js?render=explicit`);
       const policy = response.headers.get("Content-Security-Policy")!;
       const [hash] = await inlineScriptHashes(html);
-      expect(policy).toContain(`script-src 'self' 'sha256-${hash}' ${TURNSTILE};`);
+      expect(policy).toContain(`script-src 'self' https://static.cloudflareinsights.com/beacon.min.js/ 'sha256-${hash}' ${TURNSTILE};`);
       expect(policy).toContain(`; frame-src ${TURNSTILE};`);
       expect(policy).toContain("; frame-ancestors 'self';");
     });

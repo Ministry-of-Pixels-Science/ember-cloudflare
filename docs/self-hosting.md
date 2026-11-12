@@ -898,8 +898,11 @@ What a self-hoster should know, beyond keeping the setup password and link to th
 - The API token Deploy to Cloudflare's builds run with may edit nearly everything in your account,
   every R2 bucket included, so trim it, as [The build's token](#the-builds-token) says.
 - Every answer carries a `Content-Security-Policy` beside Rails' headers: scripts only from your
-  Worker, images from any HTTPS site, since link previews show their page's image, and no page of
-  Ember's in a frame elsewhere. When the policy gets in the way of something in a browser, the
+  Worker and from Cloudflare Web Analytics' beacon, images from any HTTPS site, since link previews
+  show their page's image, and no page of Ember's in a frame elsewhere. Cloudflare adds the beacon to
+  Ember's pages when Ember has a custom domain in a zone with
+  [Web Analytics](https://developers.cloudflare.com/web-analytics/) on, and it measures how fast pages
+  load and respond for the people who open them. When the policy gets in the way of something in a browser, the
   browser reports it to `/csp-report` and the Worker logs it, so look there if a page misbehaves.
 - Link previews and bot cards show images from other sites, which load without a referrer: a site
   sees the reader's IP address, but not which Ember shows its image.

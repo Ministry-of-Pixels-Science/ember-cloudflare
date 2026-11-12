@@ -38,9 +38,12 @@ function expectRailsDefaults(response: Response) {
   for (const [name, value] of Object.entries(RAILS_DEFAULTS)) expect(response.headers.get(name), name).toBe(value);
 }
 
+/** Where Cloudflare Web Analytics' beacon comes from, each version at its own address under this one. */
+const WEB_ANALYTICS_BEACON = "https://static.cloudflareinsights.com/beacon.min.js/";
+
 /** The policy every answer carries, for this suite's host, without a page's own scripts. */
 const POLICY =
-  "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; media-src 'self' blob:; connect-src 'self' wss://ember.test; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'; report-uri /csp-report";
+  `default-src 'self'; script-src 'self' ${WEB_ANALYTICS_BEACON}; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; media-src 'self' blob:; connect-src 'self' wss://ember.test; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'; report-uri /csp-report`;
 
 /** `text`'s SHA-256 in base64, as a policy names a script. */
 const sha256 = async (text: string) => btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))));
@@ -48,7 +51,7 @@ const sha256 = async (text: string) => btoa(String.fromCharCode(...new Uint8Arra
 const upgradePageScripts = async () => {
   const response = await page("/", as(OLD_CHROME));
   const hashes = await inlineScriptHashes(await response.text());
-  expect(response.headers.get("Content-Security-Policy")).toContain(`script-src 'self' ${hashes.map((hash) => `'sha256-${hash}'`).join(" ")};`);
+  expect(response.headers.get("Content-Security-Policy")).toContain(`script-src 'self' ${WEB_ANALYTICS_BEACON} ${hashes.map((hash) => `'sha256-${hash}'`).join(" ")};`);
   return hashes;
 };
 
@@ -131,7 +134,7 @@ describe("Security headers and HTTPS", () => {
     expect(sent.headers.get("X-Content-Type-Options")).toBe("nosniff");
   });
 
-  it("sets a Content-Security-Policy on every answer but a file's, opening sockets to this host alone", async () => {
+  it("sets a Content-Security-Policy on every answer but a file's, opening sockets to this host alone and running Cloudflare Web Analytics' beacon", async () => {
     for (const response of [await api("/api/bootstrap"), await api("/api/nope"), await api("/up"), await page("/rooms/general")]) {
       expect(response.headers.get("Content-Security-Policy")).toBe(POLICY);
     }
@@ -150,7 +153,7 @@ describe("Security headers and HTTPS", () => {
     const html = `<!doctype html><html><head><script>${script}</script></head><body><script type="module" crossorigin src="/assets/index-abc123.js"></script></body></html>`;
     let served = 0;
     const assets = { fetch: async () => (served++, new Response(html, { headers: { "Content-Type": "text/html", ETag: '"built-1"' } })) } as unknown as Fetcher;
-    const named = POLICY.replace("script-src 'self';", `script-src 'self' 'sha256-${await sha256(script)}';`);
+    const named = POLICY.replace(`${WEB_ANALYTICS_BEACON};`, `${WEB_ANALYTICS_BEACON} 'sha256-${await sha256(script)}';`);
     for (const path of ["/", "/rooms/general", "/session/new"]) {
       expect((await apiWith({ ASSETS: assets }, path)).headers.get("Content-Security-Policy"), path).toBe(named);
     }
@@ -184,7 +187,7 @@ describe("Security headers and HTTPS", () => {
     expect(logged).toHaveBeenCalledWith("Couldn't read the app's page for its scripts' hashes", expect.any(Error));
     logged.mockRestore();
     const second = await apiWith({ ASSETS: assets }, "/rooms/general");
-    expect(second.headers.get("Content-Security-Policy")).toBe(POLICY.replace("script-src 'self';", `script-src 'self' 'sha256-${await sha256("theme()")}';`));
+    expect(second.headers.get("Content-Security-Policy")).toBe(POLICY.replace(`${WEB_ANALYTICS_BEACON};`, `${WEB_ANALYTICS_BEACON} 'sha256-${await sha256("theme()")}';`));
     expect(calls).toBe(4);
   });
 
