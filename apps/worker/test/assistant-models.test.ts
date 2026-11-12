@@ -22,7 +22,7 @@ import { MENTION_CONTENT_TYPE, mentionSgid } from "@ember/richtext";
 import { evictDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NOTES, PICKED_MODEL_NOTES } from "../src/assistant/answers";
-import { CATALOG_UNANSWERED } from "../src/assistant/catalog";
+import { CATALOG_UNANSWERED, KEPT_CATALOG_FRESH_MS } from "../src/assistant/catalog";
 import { API_TOKEN_NEEDED, SETUP_CHANGED } from "../src/assistant/settings";
 import { api, connect, cookieOf, freshDeploy, post, shown, WITH_THE_FLAME, workspaceSql, workspaceStub, type Client, type Session } from "./support";
 
@@ -277,6 +277,95 @@ describe("Cloudflare's model catalog", () => {
     expect(await refused.json()).toEqual({ error: ACCOUNT_ID_REFUSED, field: "accountId" });
     expect(await (await listModels(ada, { accountId: ACCOUNT_ID })).json()).toEqual({ error: API_TOKEN_NEEDED, field: "apiToken" });
     expect(requests).toEqual([]);
+  });
+});
+
+describe("The copy of the catalog Ember keeps", () => {
+  afterEach(() => vi.useRealTimers());
+
+  /** The catalog as it lists for `administrator` with the API token Ember has, as New agent, an agent's settings and Add a model list it. */
+  const listedWithEmbers = async (administrator: Session) => (await (await listModels(administrator, { accountId: ACCOUNT_ID })).json()) as AssistantCatalog;
+
+  /** What the Workspace keeps of the catalog for `accountId`. */
+  const keptFor = (accountId: string) => workspaceStub().keptCatalog(accountId);
+
+  /** Sets Ember AI up as `administrator`, then stops the clock, which moves only when a test moves it. */
+  async function turnOnAndStopTheClock(administrator: Session): Promise<void> {
+    cloudflare();
+    await turnOn(administrator);
+    vi.restoreAllMocks();
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() });
+  }
+
+  it("answers with the last read at once, which is read again for the next listing once it's ten minutes old, without waiting for the read", async () => {
+    const ada = await setUp();
+    await turnOnAndStopTheClock(ada);
+    // Cloudflare's catalog without the models it adds later.
+    let catalog: () => Response | Promise<Response> = () => catalogPage(ROWS.slice(0, 3));
+    const requests = cloudflare({ catalog: () => catalog() });
+    const before = [LISTED[2]!, LISTED[4]!];
+
+    expect(await listedWithEmbers(ada)).toEqual({ models: before, refusal: null });
+    expect(await keptFor(ACCOUNT_ID)).toEqual({ accountId: ACCOUNT_ID, models: before, readAt: Date.now() });
+    // Now with them, held back until the test lets Cloudflare answer.
+    let answer = () => {};
+    const held = new Promise<void>((resolve) => (answer = resolve));
+    catalog = async () => (await held, catalogPage(ROWS));
+    vi.setSystemTime(Date.now() + KEPT_CATALOG_FRESH_MS - 1);
+    expect(await listedWithEmbers(ada)).toEqual({ models: before, refusal: null });
+    expect(requests).toHaveLength(1);
+
+    vi.setSystemTime(Date.now() + 1);
+    expect(await listedWithEmbers(ada)).toEqual({ models: before, refusal: null });
+    await vi.waitFor(() => expect(requests).toHaveLength(2));
+    expect((await keptFor(ACCOUNT_ID))?.models).toEqual(before);
+    answer();
+    await vi.waitFor(async () => expect((await keptFor(ACCOUNT_ID))?.models).toEqual(LISTED));
+    expect(await listedWithEmbers(ada)).toEqual({ models: LISTED, refusal: null });
+    expect(requests).toHaveLength(2);
+  });
+
+  it("stays while the catalog doesn't answer, saying so in the log, and goes once Cloudflare refuses the API token, so the next listing says why", async () => {
+    const ada = await setUp();
+    await turnOnAndStopTheClock(ada);
+    let catalog = () => catalogPage(ROWS);
+    const requests = cloudflare({ catalog: () => catalog() });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const readAgainLogged = (refusal: RegExp) => vi.waitFor(() => expect(errors).toHaveBeenCalledWith(expect.stringMatching(refusal)));
+    expect(await listedWithEmbers(ada)).toEqual({ models: LISTED, refusal: null });
+
+    catalog = refusing(500, 1000, "Internal error");
+    vi.setSystemTime(Date.now() + KEPT_CATALOG_FRESH_MS);
+    expect(await listedWithEmbers(ada)).toEqual({ models: LISTED, refusal: null });
+    await readAgainLogged(new RegExp(`^Cloudflare's model catalog wasn't read again: ${CATALOG_UNANSWERED}$`));
+    expect((await keptFor(ACCOUNT_ID))?.models).toEqual(LISTED);
+
+    catalog = refusing(401, 10000, "Authentication error");
+    expect(await listedWithEmbers(ada)).toEqual({ models: LISTED, refusal: null });
+    await readAgainLogged(/^Cloudflare's model catalog wasn't read again: Cloudflare didn't take that API token/);
+    expect(await keptFor(ACCOUNT_ID)).toBeNull();
+    const { models, refusal } = await listedWithEmbers(ada);
+    expect(models).toEqual(ASSISTANT_MODELS);
+    expect(refusal).toMatch(/^Cloudflare didn't take that API token for this account\./);
+    expect(requests).toHaveLength(4);
+  });
+
+  it("isn't what an API token that's given lists, as Set up Ember AI's does, nor another account, whose catalog it becomes", async () => {
+    const ada = await setUp();
+    await turnOnAndStopTheClock(ada);
+    const requests = cloudflare();
+    const otherAccountId = "fedcba9876543210fedcba9876543210";
+    await listedWithEmbers(ada);
+
+    expect((await listModels(ada, { accountId: ACCOUNT_ID, apiToken: API_TOKEN })).status).toBe(200);
+    expect((await listModels(ada, { accountId: otherAccountId })).status).toBe(200);
+    expect(requests.map(({ url }) => new URL(url).pathname)).toEqual([
+      `/client/v4/accounts/${ACCOUNT_ID}/ai/catalog/models`,
+      `/client/v4/accounts/${ACCOUNT_ID}/ai/catalog/models`,
+      `/client/v4/accounts/${otherAccountId}/ai/catalog/models`,
+    ]);
+    expect(await keptFor(ACCOUNT_ID)).toBeNull();
+    expect(await keptFor(otherAccountId)).toEqual({ accountId: otherAccountId, models: LISTED, readAt: Date.now() });
   });
 });
 

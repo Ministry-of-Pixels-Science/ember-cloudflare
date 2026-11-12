@@ -577,8 +577,11 @@ Cloudflare's [model catalog](https://developers.cloudflare.com/ai/models/), as t
 the token (`GET /accounts/{id}/ai/catalog/models`) as the dialog goes on to the model, so new models
 show up as Cloudflare adds them: Workers AI's first, then other companies', with what each
 million tokens costs where the catalog says. When the catalog can't be read, the menu has the models
-Ember knows and says why, and Another model takes any model by its ID. The Worker asks the model a
-test question before keeping the setup. @ember then joins every room open to everyone, and turning the
+Ember knows and says why, and Another model takes any model by its ID. Add a model and the agents'
+pages list the same models from a copy the Worker keeps, since Cloudflare takes a few seconds to list
+the whole catalog: the copy answers at once, and once it's ten minutes old, the Worker reads the
+catalog again in the background for the next listing. The Worker asks the model a test question before
+keeping the setup. @ember then joins every room open to everyone, and turning the
 card off takes it and the [AI agents](#ai-agents) out again and forgets the token. Nobody else can take
 the name Ember, though anyone who had it keeps it.
 
