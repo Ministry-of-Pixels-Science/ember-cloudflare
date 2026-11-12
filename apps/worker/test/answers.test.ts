@@ -854,7 +854,7 @@ describe("@ember's answer", () => {
         { type: "header", text: plain("Team offsite") },
         { type: "section", text: mrkdwn("*Two* fit _all_ of us, ~three~ `28`, on <https://maps.example/offsite|the map> :white_check_mark:\n• Lake\n• Trails"), accessory: button("Map", "https://maps.example/offsite") },
         { type: "section", fields: [mrkdwn("*Owner*\nDana"), mrkdwn("*Pick by*\nFriday")], accessory: { type: "image", image_url: "https://example.com/lodge.png", alt_text: "The lodge" } },
-        { type: "context", elements: [mrkdwn("From Priya's list")] },
+        { type: "context", elements: [mrkdwn("From <@U123|Priya>'s list, for <@U456>")] },
         { type: "divider" },
         { type: "image", image_url: "https://example.com/lake.png", alt_text: "The lake" },
         { type: "table", rows: [[cell("Venue"), cell("Per day")], [cell("Juniper Lodge, by the lake"), cell("$3,200")]], column_settings: [{ align: "left", is_wrapped: true }, { align: "right" }] },
@@ -880,7 +880,8 @@ describe("@ember's answer", () => {
             fields: [{ html: html("<strong>Owner</strong><br>Dana"), short: true }, { html: html("<strong>Pick by</strong><br>Friday"), short: true }],
             thumb: { url: "https://example.com/lodge.png", alt: "The lodge" },
           },
-          { kind: "context", items: [{ html: html("From Priya's list") }] },
+          // A Slack mention shows as its text, which notifies nobody.
+          { kind: "context", items: [{ html: html("From @Priya's list, for @U456") }] },
           { kind: "divider" },
           { kind: "image", image: { url: "https://example.com/lake.png", alt: "The lake" } },
           {
