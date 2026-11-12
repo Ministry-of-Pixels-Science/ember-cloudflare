@@ -297,23 +297,29 @@ describe("The copy of the catalog Ember keeps", () => {
     vi.useFakeTimers({ toFake: ["Date"], now: Date.now() });
   }
 
-  it("answers with the last read at once, which is read again for the next listing once it's ten minutes old", async () => {
+  it("answers with the last read at once, which is read again for the next listing once it's ten minutes old, without waiting for the read", async () => {
     const ada = await setUp();
     await turnOnAndStopTheClock(ada);
     // Cloudflare's catalog without the models it adds later.
-    let rows = ROWS.slice(0, 3);
-    const requests = cloudflare({ catalog: () => catalogPage(rows) });
+    let catalog: () => Response | Promise<Response> = () => catalogPage(ROWS.slice(0, 3));
+    const requests = cloudflare({ catalog: () => catalog() });
     const before = [LISTED[2]!, LISTED[4]!];
 
     expect(await listedWithEmbers(ada)).toEqual({ models: before, refusal: null });
     expect(await keptFor(ACCOUNT_ID)).toEqual({ accountId: ACCOUNT_ID, models: before, readAt: Date.now() });
-    rows = ROWS;
+    // Now with them, held back until the test lets Cloudflare answer.
+    let answer = () => {};
+    const held = new Promise<void>((resolve) => (answer = resolve));
+    catalog = async () => (await held, catalogPage(ROWS));
     vi.setSystemTime(Date.now() + KEPT_CATALOG_FRESH_MS - 1);
     expect(await listedWithEmbers(ada)).toEqual({ models: before, refusal: null });
     expect(requests).toHaveLength(1);
 
     vi.setSystemTime(Date.now() + 1);
     expect(await listedWithEmbers(ada)).toEqual({ models: before, refusal: null });
+    await vi.waitFor(() => expect(requests).toHaveLength(2));
+    expect((await keptFor(ACCOUNT_ID))?.models).toEqual(before);
+    answer();
     await vi.waitFor(async () => expect((await keptFor(ACCOUNT_ID))?.models).toEqual(LISTED));
     expect(await listedWithEmbers(ada)).toEqual({ models: LISTED, refusal: null });
     expect(requests).toHaveLength(2);
