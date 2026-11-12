@@ -37,7 +37,7 @@ import { pictureFormOf } from "../files/pictures";
 import { NO_STORAGE } from "../files/uploads";
 import { formAnswer } from "../pages";
 import { workspace, type Credentials } from "../workspace";
-import { catalogOf } from "./catalog";
+import { catalogOf, keptCatalogOf } from "./catalog";
 import { askInTurn, askOnce, formatsFor, thinkingLevelsOf, type Gateway, type GatewayRefusal, type Question } from "./gateway";
 
 // Ember AI's setup, as administrators turn it on, change it and turn it off on the AI assistant tab of
@@ -111,19 +111,19 @@ export async function administratorOf(request: Request, env: Env, forbidden = AS
 
 /**
  * `POST /api/account/assistant/catalog`, `{ accountId, apiToken? }`: the text models Cloudflare's catalog
- * lists for the account given, with the API token given, or the one Ember has, when none is, as Set up
- * Ember AI and Add a model list them, or else, when the catalog can't be read, the models Ember knows, and
- * why it can't. Someone who isn't an administrator hears so before anything they sent is read, and a field
- * that can't be what it's for is refused on that field.
+ * lists for the account given, read with the API token given, or else with the one Ember has, from the
+ * copy the Workspace keeps (`keptCatalogOf`), as Set up Ember AI, Add a model and the agents' pages list
+ * them, or else, when the catalog can't be read, the models Ember knows, and why it can't. Someone who
+ * isn't an administrator hears so before anything they sent is read, and a field that can't be what it's
+ * for is refused on that field.
  */
 export async function listAssistantModels(request: Request, env: Env): Promise<Response> {
   const credentials = await administratorOf(request, env);
   if (credentials instanceof Response) return credentials;
   const keys = parseAssistantKeys(await jsonBodyOf(request));
   if ("error" in keys) return formAnswer(keys, 422);
-  const apiToken = keys.apiToken ?? (await workspace(env).assistantGateway())?.apiToken;
-  if (!apiToken) return formAnswer({ error: API_TOKEN_NEEDED, field: "apiToken" }, 422);
-  const catalog = await catalogOf(env, { accountId: keys.accountId, apiToken });
+  const catalog = keys.apiToken === undefined ? await keptCatalogOf(env, keys.accountId) : await catalogOf(env, { accountId: keys.accountId, apiToken: keys.apiToken });
+  if (!catalog) return formAnswer({ error: API_TOKEN_NEEDED, field: "apiToken" }, 422);
   if ("refusal" in catalog) console.error(`Listing Ember's own models, as Cloudflare's catalog wasn't read: ${catalog.refusal}`);
   const answer: AssistantCatalog = "refusal" in catalog ? { models: [...ASSISTANT_MODELS], refusal: catalog.refusal } : { models: catalog, refusal: null };
   return Response.json(answer, { headers: PRIVATE });

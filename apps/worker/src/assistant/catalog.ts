@@ -1,12 +1,18 @@
 import { ASSISTANT_MODELS, isWorkersAiModel, modelNameOf, modelOf, type AssistantModel, type ModelFormat, type ModelPrice } from "@ember/protocol/assistant";
+import { waitUntil } from "cloudflare:workers";
 import type { Env } from "../env";
+import { workspace } from "../workspace";
 import { cloudflareApiOf, formatsFor, isObject, refusalOf, type GatewayRefusal } from "./gateway";
 
 // Cloudflare's catalog of the models AI Gateway runs, Workers AI's and other companies', which Cloudflare
 // keeps up to date, and which its docs' model catalog is made from, as Set up Ember AI and Add a model
 // list its text models. Its API isn't in Cloudflare's API reference yet, but its docs and models.dev
 // read it (`GET /accounts/{id}/ai/catalog/models`), and it takes the Workers AI Read permission that
-// Ember's API token has, as every `/ai` endpoint does.
+// Ember's API token has, as every `/ai` endpoint does. Cloudflare takes a second or two to answer each
+// page, and Ember asks for the first before the rest, so the Workspace keeps a copy of the models it
+// last listed with the API token Ember AI has, as New agent, an agent's settings and Add a model list
+// them, which they're answered with at once, while the catalog is read again for the next listing once
+// the copy is ten minutes old.
 
 /** How many models Ember asks for on each page of the catalog, the most it gives, as Cloudflare's docs read it. */
 const PER_PAGE = 100;
@@ -25,10 +31,58 @@ const FORMATS: Record<string, ModelFormat> = { "anthropic-messages": "messages",
 
 export const CATALOG_UNANSWERED = "Cloudflare's model catalog didn't answer.";
 
+/** How old the copy of the catalog the Workspace keeps gets before a listing answered with it reads the catalog again, for the next. */
+export const KEPT_CATALOG_FRESH_MS = 10 * 60 * 1000;
+
 /** What Ember reads the catalog with: a Cloudflare account, and an API token of its. */
 export interface CatalogKeys {
   accountId: string;
   apiToken: string;
+}
+
+/** The text models Cloudflare's catalog listed for an account, as the Workspace keeps them, and when they were read. */
+export interface KeptCatalog {
+  accountId: string;
+  models: AssistantModel[];
+  readAt: number;
+}
+
+/**
+ * The text models Cloudflare's catalog lists for the account `accountId`, as `catalogOf` reads them with
+ * the API token Ember AI has, or null while it has none: the copy the Workspace keeps of the last read,
+ * at once, which, once it's KEPT_CATALOG_FRESH_MS old, a read meanwhile replaces for the next listing, or
+ * else the catalog as it's read now.
+ */
+export async function keptCatalogOf(env: Env, accountId: string): Promise<AssistantModel[] | GatewayRefusal | null> {
+  const ember = workspace(env);
+  const [gateway, kept] = await Promise.all([ember.assistantGateway(), ember.keptCatalog(accountId)]);
+  if (!gateway) return null;
+  const keys = { accountId, apiToken: gateway.apiToken };
+  if (!kept) return readAndKeep(env, keys);
+  if (Date.now() - kept.readAt >= KEPT_CATALOG_FRESH_MS) waitUntil(readAgain(env, keys));
+  return kept.models;
+}
+
+/** Reads the catalog again with `keys` for the listings that follow, as `readAndKeep` does, saying in the log why it couldn't, since nobody's waiting to hear. */
+async function readAgain(env: Env, keys: CatalogKeys): Promise<void> {
+  try {
+    const catalog = await readAndKeep(env, keys);
+    if ("refusal" in catalog) console.error(`Cloudflare's model catalog wasn't read again: ${catalog.refusal}`);
+  } catch (error) {
+    console.error("Reading Cloudflare's model catalog again failed:", error);
+  }
+}
+
+/**
+ * The catalog as `catalogOf` reads it with `keys`, which the Workspace keeps, or else, when Cloudflare
+ * refuses the API token or the account, forgets the copy it kept, so that the next listing says why. A
+ * catalog that didn't answer leaves the copy as it was.
+ */
+async function readAndKeep(env: Env, keys: CatalogKeys): Promise<AssistantModel[] | GatewayRefusal> {
+  const catalog = await catalogOf(env, keys);
+  if (!("refusal" in catalog)) await workspace(env).keepCatalog({ accountId: keys.accountId, models: catalog, readAt: Date.now() });
+  else if (catalog.reason === "token" || catalog.reason === "account") await workspace(env).forgetCatalog(keys.accountId);
+  return catalog;
 }
 
 /**

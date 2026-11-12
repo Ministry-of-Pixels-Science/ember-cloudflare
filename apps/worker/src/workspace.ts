@@ -87,6 +87,7 @@ import {
   type YourAssistantChanges,
 } from "@ember/protocol/assistant";
 import { MAX_AGENTS, type Agent, type AgentChanges, type AgentProfile, type AgentRoom, type AgentSettings, type NewAgent } from "@ember/protocol/agents";
+import type { KeptCatalog } from "./assistant/catalog";
 import type { Gateway } from "./assistant/gateway";
 import { eachAtMost, ROOMS_AT_ONCE } from "./at-once";
 import { directoryOf, TooSoon, tooSoonAfter, versionOf } from "./avatar-tokens";
@@ -161,6 +162,8 @@ const SIGN_IN_WINDOW_MS = 3 * 60 * 1000;
 const SETUP_TRIES = 10;
 const SETUP_TRY_WINDOW_MS = 10 * 60 * 1000;
 const SETUP_TRY_WINDOW = "setupTryWindow";
+/** Where the Workspace's storage keeps the copy of Cloudflare's model catalog that listings with Ember AI's API token answer with (see `keptCatalogOf`). */
+const KEPT_CATALOG = "keptCatalog";
 /**
  * Open sign-up's limits' hour: the sign-ups from an IP address are counted in a fixed one, before the
  * password is hashed, which takes more CPU than the rest of a request, and the new people in the
@@ -1409,6 +1412,22 @@ export class Workspace extends DurableObject<Env> {
     if (!assistant) return null;
     const gateway = await this.openedAssistant({ assistant });
     return gateway && { ...gateway, name: modelName(gateway.model, assistant.models) };
+  }
+
+  /** The text models Cloudflare's catalog last listed for the account `accountId`, and when, if they're the ones kept. */
+  async keptCatalog(accountId: string): Promise<KeptCatalog | null> {
+    const kept = await this.ctx.storage.get<KeptCatalog>(KEPT_CATALOG);
+    return kept?.accountId === accountId ? kept : null;
+  }
+
+  /** Keeps `catalog` for the listings that follow, in place of the one kept before, whatever its account. */
+  async keepCatalog(catalog: KeptCatalog): Promise<void> {
+    await this.ctx.storage.put(KEPT_CATALOG, catalog);
+  }
+
+  /** Forgets the catalog kept for the account `accountId`, if it's the one kept. */
+  async forgetCatalog(accountId: string): Promise<void> {
+    if ((await this.keptCatalog(accountId)) !== null) await this.ctx.storage.delete(KEPT_CATALOG);
   }
 
   /** How Ember AI asks AI Gateway as `account` keeps it, as `assistantGateway` answers it. */
