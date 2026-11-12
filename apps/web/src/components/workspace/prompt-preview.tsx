@@ -20,7 +20,7 @@ const TEMPLATE = cn("w-full resize-y border font-mono disabled:opacity-50", FIEL
 
 /** What the preview says of what it shows, for the agent called `name`. */
 export const aroundExplained = (name: string) =>
-  `Ember tells ${name} who it is, where it's asked and how the chat shows an answer, then gives it the conversation, each message after its writer's name. Your instructions go in between. For a question you write to it directly, it reads:`;
+  `Ember tells ${name} who it is, how the chat shows an answer and the cards it can show under one, and where it's asked, then gives it the conversation, each message after its writer's name. Your instructions go after who it is. For a question you write to it directly, it reads:`;
 
 /** What the box asks care for, of the agent called `name`. */
 export const cautionFor = (name: string) =>
@@ -36,7 +36,7 @@ export const PLACEHOLDER_MEANINGS: Record<Placeholder, string> = {
   where: "the room, thread or direct message it's asked in",
   asker: "the name of whoever asked",
   words: "about how many words it may answer in",
-  cards: "how it can show a card under its answer",
+  cards: "how it can show cards under its answer, with what they can hold and how to write them",
   web: "what it may do on the web",
   today: "today's date, in UTC",
   instructions: "your instructions, which it needs once",

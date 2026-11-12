@@ -280,10 +280,10 @@ test.describe("Ember AI", () => {
     await page.reload();
     await expect(page.getByRole("region", { name: "@ember", exact: true }).getByRole("textbox", { name: "Instructions" })).toHaveValue("Answer in British English.");
 
-    // Between who @ember is and where it's asked.
+    // Between who @ember is and how the chat shows its answer.
     await askEmber(page, "Colour or color?");
     const [told] = gateway.asked.at(-1)!.body.messages as Array<{ role: string; content: string }>;
-    expect(told!.content).toMatch(/^You are Ember, [^\n]+\n\nAnswer in British English\.\n\nYou're asked in the room "general"\./);
+    expect(told!.content).toMatch(/^You are Ember, [^\n]+\n\nAnswer in British English\.\n\nWrite in Markdown\.[\s\S]+\n\nYou're asked in the room "general"\./);
   });
 
   test("the administrator modifies what Ember adds around @ember's instructions, with caution, which @ember follows once it's saved", async ({ page, request }) => {
