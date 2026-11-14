@@ -1525,7 +1525,7 @@ export class Workspace extends DurableObject<Env> {
       const now = Date.now();
       const connection = await this.outside.byRefresh(refreshDigest);
       if (!connection) {
-        await this.outside.forgetSpent(refreshDigest);
+        await this.outside.forgetSpent(refreshDigest, new Date(now).toISOString());
         return null;
       }
       if (connection.clientId !== clientId || connection.refreshExpiresAt === null || connection.refreshExpiresAt <= new Date(now).toISOString()) return null;

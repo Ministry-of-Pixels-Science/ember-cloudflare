@@ -184,7 +184,9 @@ describe("Outside AI", () => {
     // Nor to say how it takes requests.
     expect((await api("/oauth/token")).status).toBe(404);
     expect((await api("/mcp", { method: "OPTIONS" })).status).toBe(404);
-    expect((await api("/oauth/authorize?client_id=an-app")).status).toBe(404);
+    // Nor is the page that asks there: this is the page for what Ember doesn't have, not the app's.
+    const missing = await api("/oauth/authorize?client_id=an-app");
+    expect([missing.status, missing.headers.get("Link")]).toEqual([404, null]);
     expect(await (await describeAsk(member, askOf("an-app"))).json()).toEqual({ error: OUTSIDE_OFF });
     expect(await yours(member)).toBeNull();
 
@@ -196,9 +198,8 @@ describe("Outside AI", () => {
     expect(await isOnFor(administrator)).toBe(true);
     expect(await isOnFor(member)).toBe(false);
     expect(await yours(member)).toEqual([]);
-    const page = await api("/oauth/authorize?client_id=an-app");
-    expect(page.status).toBe(200);
-    expect(page.headers.get("Content-Type")).toContain("text/html");
+    // The app's page, which is what's sent with what the app loads first, whether or not the app has been built here.
+    expect((await api("/oauth/authorize?client_id=an-app")).headers.get("Link")).toContain("/api/bootstrap");
     expect((await api("/oauth/revoke", form({}))).status).toBe(400);
     expect((await api("/oauth/token")).status).toBe(405);
     expect((await api("/mcp", { method: "OPTIONS" })).status).toBe(204);
@@ -453,9 +454,12 @@ describe("Outside AI", () => {
     const { clientId, tokens: first } = await connected(member);
     const second = (await (await refresh(clientId, first.refresh_token)).json()) as Tokens;
     await workspaceSql("UPDATE outside_spent_tokens SET expires_at = '2020-01-01T00:00:00.000Z'");
+    // One that would have expired by now is refused like any that's no good, and ends nothing, before it's forgotten or after.
+    expect((await refresh(clientId, first.refresh_token)).status).toBe(400);
+    expect((await asked(second.access_token, "tools/list")).status).toBe(200);
+    expect(await spentTokens()).toBe(1);
     const third = (await (await refresh(clientId, second.refresh_token)).json()) as Tokens;
     expect(await spentTokens()).toBe(1);
-    // One that expired is refused like any that's no good, and ends nothing.
     expect((await refresh(clientId, first.refresh_token)).status).toBe(400);
     expect((await asked(third.access_token, "tools/list")).status).toBe(200);
 
@@ -534,6 +538,11 @@ describe("Outside AI", () => {
     addresses["claude.example"] = ["10.0.0.7"];
     expect((await describeAsk(member, askOf(DOCUMENT))).status).toBe(422);
     expect((await describeAsk(member, askOf("https://10.0.0.7/client.json"))).status).toBe(422);
+    // Nor one on the computer Ember runs on, which a deployed Ember doesn't so much as ask.
+    for (const local of ["https://localhost/client.json", "https://127.0.0.1:8787/client.json", "http://localhost/client.json", "https://app.localhost/client.json"]) {
+      expect((await describeAsk(member, askOf(local))).status, local).toBe(422);
+    }
+    expect(vi.mocked(fetch).mock.calls.map(([input, init]) => new URL(new Request(input, init).url).hostname).filter((host) => /localhost|^127\./.test(host))).toEqual([]);
   });
 
   it("ends a connection when its person disconnects it, when the app revokes it, and when they're removed", async () => {

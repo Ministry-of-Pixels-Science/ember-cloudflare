@@ -207,10 +207,14 @@ export class OutsideStore {
     return rotated.length > 0;
   }
 
-  /** Forgets the connection one of whose refresh tokens, spent since, has the digest `spentDigest`: something has a copy of it. */
-  async forgetSpent(spentDigest: string): Promise<void> {
+  /**
+   * Forgets the connection one of whose refresh tokens, spent since, has the digest `spentDigest`:
+   * something has a copy of it. One that would have expired by `now` ends nothing, whether or not it's
+   * been forgotten yet, as any expired token is only refused.
+   */
+  async forgetSpent(spentDigest: string, now: string): Promise<void> {
     await this.db.batch([
-      statement(`DELETE FROM outside_connections WHERE id IN (SELECT connection_id FROM outside_spent_tokens WHERE digest = ?)`, spentDigest),
+      statement(`DELETE FROM outside_connections WHERE id IN (SELECT connection_id FROM outside_spent_tokens WHERE digest = ? AND expires_at > ?)`, spentDigest, now),
       statement(FORGET_SPENT_OF_FORGOTTEN),
     ]);
   }

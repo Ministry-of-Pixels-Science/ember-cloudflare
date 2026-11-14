@@ -174,11 +174,13 @@ export function registrationOf(body: unknown): Omit<OutsideClient, "id"> | Regis
   return { name: nameOf(name, redirectUris), redirectUris };
 }
 
-/** Whether `clientId` is the address of a document about an app, rather than an id Ember gave: an https address with a path, or an http one on this computer when Ember is `here` on it too. */
+/** Whether `clientId` is the address of a document about an app, rather than an id Ember gave: an https address with a path, or one on this computer, by http too, only when Ember is `here` on it as well. */
 export function isClientDocumentAddress(clientId: string, here: URL): boolean {
   const url = URL.parse(clientId);
   if (!url || url.pathname === "/" || url.username !== "" || url.password !== "" || clientId.includes("#")) return false;
-  return url.protocol === "https:" || (isLocal(url) && isLoopback(here));
+  // `clientDocumentAt` reads an address on this computer without checking where it leads, which only an Ember on it may.
+  if (isLoopback(url)) return isLoopback(here) && (url.protocol === "https:" || url.protocol === "http:");
+  return url.protocol === "https:";
 }
 
 /**
