@@ -1045,11 +1045,12 @@ the same client, made as them, and kept beside Ember's, sealed for that app and 
 
 ### Outside AI
 
-An AI app, such as Claude or ChatGPT, can connect to Ember and read it as one of the people in it. Ember
-is an [MCP](https://modelcontextprotocol.io) server for that, at `/mcp` on its own address, the
-other way round from [Apps](#apps), where Ember's agents call other services' servers. It's off
-until an administrator turns on **Outside AI** on the AI assistant tab, which is there whether or not
-Ember AI is on, and until then nothing about it answers: `/mcp`, and the addresses below, answer 404.
+An AI app, such as Claude or ChatGPT, can connect to Ember and read it as one of the people in it,
+and send messages as them if they let it. Ember is an [MCP](https://modelcontextprotocol.io) server
+for that, at `/mcp` on its own address, the other way round from [Apps](#apps), where Ember's agents
+call other services' servers. It's off until an administrator turns on **Outside AI** on the AI
+assistant tab, which is there whether or not Ember AI is on, and until then nothing about it answers:
+`/mcp`, and the addresses below, answer 404.
 
 To connect an app, someone gives it Ember's address ending in `/mcp`, which the card and their profile
 show, as a custom connector or MCP server. The app sends their browser to a page of Ember's, which
@@ -1060,9 +1061,15 @@ with nothing.
 
 - **What a connected app can do** is read what the person who connected it can: list the rooms
   they're in, read a room's messages 40 at a time and a thread's, and search for words across those
-  rooms, the ones they've hidden and their direct messages too, as their own search does. It can't
-  post, and it sees nothing they don't. Its tools are `list_rooms`, `read_room`, `read_thread` and
-  `search_messages`, each marked as only reading.
+  rooms, the ones they've hidden and their direct messages too, as their own search does. It sees
+  nothing they don't. Its tools are `list_rooms`, `read_room`, `read_thread` and `search_messages`,
+  each marked as only reading.
+- **It can send messages as them, if they let it.** The page that asks has a box for that, ticked
+  unless they clear it, and their profile says which apps can. `send_message` posts Markdown to a room
+  they're in, or as a reply in a thread, and everyone there sees it as theirs: nothing marks it as
+  sent by an app. It mentions nobody, so it calls neither @ember nor an agent, and one person's
+  apps send at most 20 messages a minute between them. An app that asks for nothing by name only
+  reads.
 - **Your profile lists the apps connected as you**, under **AI apps**, with when each was connected
   and last asked Ember anything, and **Disconnect**, which ends what that app was given at once. One
   person has at most 20.
@@ -1293,8 +1300,9 @@ What a self-hoster should know, beyond keeping the setup password and link to th
 - Custom CSS runs on every page for everyone, so it's an administrator's to write, like the rest of
   the workspace, and `EMBER_RECOVERY_TOKEN` can take over any account, so keep it set only while
   resetting a password, as above.
-- While [Outside AI](#outside-ai) is on, an AI app someone connects sees what they see, until they
-  disconnect it on their profile, and whoever runs that app can read it too. The page that asks them
+- While [Outside AI](#outside-ai) is on, an AI app someone connects sees what they see, and writes as
+  them if they let it send, until they disconnect it on their profile, and whoever runs that app can
+  read it too. The page that asks them
   names the site their browser goes back to, since anyone can register an app under any name.
 - `/api/health` tells strangers only whether Ember is up; administrators and whoever sends the
   recovery token hear the rest. QR codes (`/qr_code/<id>`) are drawn for people signed in.

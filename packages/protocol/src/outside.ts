@@ -1,5 +1,6 @@
 // Outside AI: the AI apps, such as Claude and ChatGPT, that people connect to Ember over the Model
-// Context Protocol (https://modelcontextprotocol.io), to read it as them. An app is given Ember's
+// Context Protocol (https://modelcontextprotocol.io), to read it as them and, where they let it, to
+// send messages as them. An app is given Ember's
 // address, `/mcp`, and signs in with OAuth, where Ember is the authorization server: it sends the
 // person's browser to a page of Ember's that asks them, and what they allow is a connection, which
 // they can end on their profile. An administrator turns it on, and until one does, none of it answers.
@@ -10,14 +11,27 @@ export const MCP_PATH = "/mcp";
 /** The page an AI app sends a person's browser to, which asks them whether to connect it as them. */
 export const OUTSIDE_AUTHORIZE_PATH = "/oauth/authorize";
 
-/** What a connection can be allowed to do. */
-export const OUTSIDE_SCOPES = ["read"] as const;
+/** What a connection can be allowed to do: read as its person, and send messages as them. */
+export const OUTSIDE_SCOPES = ["read", "write"] as const;
 export type OutsideScope = (typeof OUTSIDE_SCOPES)[number];
+
+/** What an app that asks for nothing by name is given: reading alone. */
+export const DEFAULT_OUTSIDE_SCOPES: readonly OutsideScope[] = ["read"];
 
 /** What the page says each scope lets an app do, after "It will be able to". */
 export const OUTSIDE_SCOPE_EXPLAINED: Record<OutsideScope, string> = {
   read: "See the rooms you're in, read their messages and search them, as you can",
+  write: "Send messages as you, in the rooms you're in",
 };
+
+/** The scopes among `asked` that the page lets a person leave out: sending, when the app asks to read too. */
+export const optionalOutsideScopes = (asked: readonly OutsideScope[]): OutsideScope[] => (asked.includes("read") ? asked.filter((scope) => scope !== "read") : []);
+
+/** What a connection is given of the scopes its app `asked` for, when its person leaves out `without`: all but those of them they may leave out. */
+export function grantedOutsideScopes(asked: readonly OutsideScope[], without: readonly unknown[]): OutsideScope[] {
+  const optional = optionalOutsideScopes(asked);
+  return asked.filter((scope) => !(optional.includes(scope) && without.includes(scope)));
+}
 
 /** The most connections a person has: past it, they disconnect one first. */
 export const MAX_OUTSIDE_CONNECTIONS = 20;
@@ -79,10 +93,11 @@ export interface OutsideAsked {
   scopes: OutsideScope[];
 }
 
-/** A person's answer to a request: whether to connect the app as them. */
+/** A person's answer to a request: whether to connect the app as them, and which of what it asks they leave out (`optionalOutsideScopes`), if any. */
 export interface OutsideAnswer {
   ask: OutsideAsk;
   allow: boolean;
+  without?: OutsideScope[];
 }
 
 /** Where the page sends the browser once the person has answered: back to the app, with what it takes from there. */
@@ -114,5 +129,5 @@ export interface OutsideAiSettings {
 export function outsideScopesOf(asked: string | null): OutsideScope[] {
   const named = new Set((asked ?? "").split(" "));
   const given = OUTSIDE_SCOPES.filter((scope) => named.has(scope));
-  return given.length > 0 ? given : [...OUTSIDE_SCOPES];
+  return given.length > 0 ? given : [...DEFAULT_OUTSIDE_SCOPES];
 }

@@ -229,6 +229,16 @@ export interface OutsideAccess {
   resource: string | null;
 }
 
+/** The person an AI app sends a message as, in a room they're in, as the room keeps who wrote it. */
+export interface OutsideSender {
+  user: User;
+  /** When the Workspace checked, in milliseconds since the epoch, as a room's socket has it. */
+  authorizedAt: number;
+}
+
+/** How many messages AI apps may send as one person in a minute, all their apps together. */
+export const OUTSIDE_SENDS_PER_MINUTE = 20;
+
 /** The digests of the tokens Ember gives an app next. */
 export type NextOutsideTokens = Pick<OutsideTokens, "accessDigest" | "refreshDigest">;
 
@@ -961,6 +971,7 @@ export class Workspace extends DurableObject<Env> {
   private readonly passwordResetAsks = new FixedWindowLimit(PASSWORD_RESETS_PER_NETWORK, EMAIL_ASK_WINDOW_MS);
   private readonly unfurls = new FixedWindowLimit(UNFURLS, UNFURL_WINDOW_MS);
   private readonly outsideRegistrations = new FixedWindowLimit(OUTSIDE_REGISTRATIONS_PER_ADDRESS, OUTSIDE_REGISTRATION_WINDOW_MS);
+  private readonly outsideSends = new FixedWindowLimit(OUTSIDE_SENDS_PER_MINUTE, 60_000);
   /** The probes custom domain checks send, each with its answer and when it's no longer waited for (see `expectProbe`). */
   private readonly probes = new Map<string, { answer: string; until: number }>();
   /** The access token of each app's sign-in that's being asked for now (`signInKey`). */
@@ -1575,6 +1586,19 @@ export class Workspace extends DurableObject<Env> {
   /** The rooms an AI app connected as `userId` may read and search: the ones they're in, those they've hidden and their direct messages too, as their own search has them. */
   async outsideReadable(userId: UserId): Promise<Room[]> {
     return (await this.store.searcherOf(userId, null)).rooms;
+  }
+
+  /**
+   * The person `userId` as an AI app connected as them sends a message to room `roomId`, with when this
+   * checked, as a room's socket has it: null unless they're in the room, or "limited" once their apps
+   * have sent as many in a minute as they may.
+   */
+  async outsideSender(userId: UserId, roomId: RoomId): Promise<OutsideSender | "limited" | null> {
+    // Before anything is read, as `roomAccess` takes it.
+    const authorizedAt = Date.now();
+    const [[user], { member }] = await Promise.all([this.store.peopleWithIds([userId]), this.store.roomAccess(roomId, userId, null)]);
+    if (!user || !member) return null;
+    return this.outsideSends.attempt(userId) ? { user, authorizedAt } : "limited";
   }
 
   /**

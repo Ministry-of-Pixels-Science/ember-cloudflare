@@ -6,6 +6,7 @@ import {
   OUTSIDE_FULL,
   OUTSIDE_GUEST,
   OUTSIDE_OFF,
+  grantedOutsideScopes,
   OUTSIDE_SCOPES,
   outsideScopesOf,
   type OutsideAiSettings,
@@ -238,9 +239,10 @@ function askOf(body: unknown): OutsideAsk | null {
   };
 }
 
-/** The answer `body` carries to a request to connect, or null when it carries none. */
-function answerOf(body: unknown): { ask: OutsideAsk | null; allow: boolean } | null {
-  return isObject(body) && typeof body.allow === "boolean" ? { ask: askOf(body.ask), allow: body.allow } : null;
+/** The answer `body` carries to a request to connect, with what of the request it leaves out, or null when it carries none. */
+function answerOf(body: unknown): { ask: OutsideAsk | null; allow: boolean; without: unknown[] } | null {
+  if (!isObject(body) || typeof body.allow !== "boolean") return null;
+  return { ask: askOf(body.ask), allow: body.allow, without: Array.isArray(body.without) ? body.without : [] };
 }
 
 /** Why a request about connecting an AI app isn't done, for the person asking. */
@@ -286,7 +288,8 @@ export async function answerOutsideAsk(request: Request, env: Env): Promise<Resp
   const issuer = urlOf(request).origin;
   if (!answer?.allow) return Response.json({ redirectTo: wayBack(ask, { error: "access_denied" }, issuer) } satisfies OutsideAnswered, { headers: PRIVATE });
   const code = newSessionToken();
-  const begun = { clientId: client.id, clientName: client.name, redirectUri: ask.redirectUri, scope: ask.scope, resource: ask.resource, codeDigest: await tokenDigest(code, env.SESSION_SECRET), codeChallenge: ask.codeChallenge };
+  const scope = grantedOutsideScopes(outsideScopesOf(ask.scope), answer.without).join(" ");
+  const begun = { clientId: client.id, clientName: client.name, redirectUri: ask.redirectUri, scope, resource: ask.resource, codeDigest: await tokenDigest(code, env.SESSION_SECRET), codeChallenge: ask.codeChallenge };
   const connected = await workspace(env).connectOutside(credentials, begun);
   if (connected === "full") return problem(409, OUTSIDE_FULL);
   if (connected !== true) return refused(connected);

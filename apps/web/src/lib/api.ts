@@ -114,7 +114,7 @@ import type {
   YourAppSignedIn,
   YourAppSignedOut,
 } from "@ember/protocol/apps";
-import type { OutsideAiSettings, OutsideAnswer, OutsideAnswered, OutsideAsk, OutsideAsked, YourOutsideAi } from "@ember/protocol/outside";
+import type { OutsideAiSettings, OutsideAnswer, OutsideAnswered, OutsideAsk, OutsideAsked, OutsideScope, YourOutsideAi } from "@ember/protocol/outside";
 import type { LogoVariants } from "@/lib/previews";
 
 // The session lives in an HttpOnly cookie, which the browser sends with every request and socket,
@@ -766,9 +766,9 @@ export function describeOutsideAsk(ask: OutsideAsk): Promise<OutsideAsked> {
   return request<OutsideAsked>("/api/outside/asks", { method: "POST", body: JSON.stringify(ask) });
 }
 
-/** Answers `ask`, whether to connect its app as you, answering where to send the browser: back to the app. Fails as `describeOutsideAsk` does, and with a 409 when you have as many connected as one may. */
-export async function answerOutsideAsk(ask: OutsideAsk, allow: boolean): Promise<string> {
-  return (await request<OutsideAnswered>("/api/outside/answers", { method: "POST", body: JSON.stringify({ ask, allow } satisfies OutsideAnswer) })).redirectTo;
+/** Answers `ask`, whether to connect its app as you, leaving out `without` of what it asks, answering where to send the browser: back to the app. Fails as `describeOutsideAsk` does, and with a 409 when you have as many connected as one may. */
+export async function answerOutsideAsk(ask: OutsideAsk, allow: boolean, without: OutsideScope[] = []): Promise<string> {
+  return (await request<OutsideAnswered>("/api/outside/answers", { method: "POST", body: JSON.stringify({ ask, allow, without } satisfies OutsideAnswer) })).redirectTo;
 }
 
 /** Ends the connection `id` of yours, answering the ones you have left. Fails with a 401 ApiError once the session has ended, a 409 while outside AI is off, and a 404 once the connection has ended. */

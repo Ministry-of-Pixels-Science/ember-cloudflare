@@ -86,7 +86,8 @@ describe("The page that asks whether to connect an AI app", () => {
     await user.click(await screen.findByRole("button", { name: "Allow" }));
 
     await waitFor(() => expect(loadPage).toHaveBeenCalledExactlyOnceWith(ALLOWED));
-    expect(sent[1]).toEqual(["POST /api/outside/answers", { ask: ASK, allow: true }]);
+    expect(sent[1]).toEqual(["POST /api/outside/answers", { ask: ASK, allow: true, without: [] }]);
+    expect(screen.queryByRole("checkbox")).toBeNull();
     expect(screen.getByRole("button", { name: "Allow" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Don't allow" })).toBeDisabled();
   });
@@ -99,7 +100,47 @@ describe("The page that asks whether to connect an AI app", () => {
     await user.click(await screen.findByRole("button", { name: "Don't allow" }));
 
     await waitFor(() => expect(loadPage).toHaveBeenCalledExactlyOnceWith(refused));
-    expect(sent[1]).toEqual(["POST /api/outside/answers", { ask: ASK, allow: false }]);
+    expect(sent[1]).toEqual(["POST /api/outside/answers", { ask: ASK, allow: false, without: [] }]);
+  });
+
+  it("offers what an app asks beside reading, such as sending messages, with a box to leave it out", async () => {
+    const sending = () => Response.json({ ...CLAUDE, scopes: ["read", "write"] } satisfies OutsideAsked);
+    const sent = serve({ "POST /api/outside/asks": sending, "POST /api/outside/answers": () => Response.json({ redirectTo: ALLOWED }) });
+    const user = open();
+
+    const send = await screen.findByRole("checkbox", { name: OUTSIDE_SCOPE_EXPLAINED.write });
+    expect(OUTSIDE_SCOPE_EXPLAINED.write).toBe("Send messages as you, in the rooms you're in");
+    expect(send).toBeChecked();
+    expect(screen.getByText("And, if you let it:")).toBeVisible();
+    // Reading isn't a choice: it's what connecting an app is.
+    expect(screen.getAllByRole("listitem").map((item) => item.textContent)).toEqual([OUTSIDE_SCOPE_EXPLAINED.read]);
+
+    await user.click(send);
+    expect(send).not.toBeChecked();
+    await user.click(screen.getByRole("button", { name: "Allow" }));
+
+    await waitFor(() => expect(loadPage).toHaveBeenCalledExactlyOnceWith(ALLOWED));
+    expect(sent[1]).toEqual(["POST /api/outside/answers", { ask: ASK, allow: true, without: ["write"] }]);
+    expect(send).toBeDisabled();
+  });
+
+  it("allows everything an app asks unless a box is cleared, and asks nothing about boxes when you don't allow it", async () => {
+    const sending = () => Response.json({ ...CLAUDE, scopes: ["read", "write"] } satisfies OutsideAsked);
+    const sent = serve({ "POST /api/outside/asks": sending, "POST /api/outside/answers": () => Response.json({ redirectTo: ALLOWED }) });
+    const user = open();
+
+    await user.click(await screen.findByRole("button", { name: "Allow" }));
+    await waitFor(() => expect(loadPage).toHaveBeenCalledOnce());
+    expect(sent[1]).toEqual(["POST /api/outside/answers", { ask: ASK, allow: true, without: [] }]);
+  });
+
+  it("lists as what it will do the one thing an app asks, with no box, when that isn't reading", async () => {
+    serve({ "POST /api/outside/asks": () => Response.json({ ...CLAUDE, scopes: ["write"] } satisfies OutsideAsked) });
+    open();
+
+    expect(await screen.findByRole("heading", { level: 1 })).toBeVisible();
+    expect(screen.getAllByRole("listitem").map((item) => item.textContent)).toEqual([OUTSIDE_SCOPE_EXPLAINED.write]);
+    expect(screen.queryByRole("checkbox")).toBeNull();
   });
 
   it("says a request Ember can't answer can't be connected, with the way home, and sends the browser nowhere", async () => {
