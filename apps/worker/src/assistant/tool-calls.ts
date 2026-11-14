@@ -49,6 +49,26 @@ export interface ToolResult {
   failed: boolean;
 }
 
+/** A call an answer has made: the tool's name, what the model called it with, and what the call came to, as the model read it. */
+export interface CallMade {
+  name: string;
+  input: unknown;
+  text: string;
+}
+
+/** What a model that's asked again without Ember's tools reads after the conversation, before what the calls its answer made of them came to. */
+export const CALLS_MADE =
+  "(You called tools to answer this, and can't call them now. What each call came to follows, and anything a call did is done. Answer with that, and say what the calls did.)";
+
+/**
+ * What a model that's asked again without Ember's tools reads of the calls its answer `made` of them,
+ * which stand, so that it doesn't answer as if a call that did something hadn't.
+ */
+export function whatCallsCameTo(made: readonly CallMade[]): string {
+  const each = made.map(({ name, input, text }, n) => `Call ${n + 1}: ${name} with ${typeof input === "string" ? input : JSON.stringify(input ?? {})}\n${text}`);
+  return [CALLS_MADE, ...each].join("\n\n");
+}
+
 /** `tools` as a request in `format` lists them. */
 export function toolsIn(format: ModelFormat, tools: readonly EmberTool[]): Record<string, unknown>[] {
   return tools.map(({ name, description, takes }) => {
