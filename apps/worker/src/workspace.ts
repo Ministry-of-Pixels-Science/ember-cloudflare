@@ -1690,13 +1690,14 @@ export class Workspace extends DurableObject<Env> {
   /**
    * The Memberful site Set up Memberful keeps, since people here sign in with their accounts at it, which
    * are linked to them by that site and their member id there, so that another site's members never sign
-   * in as them: the site an administrator gave while anyone is linked at it, or with none given, as when
-   * the deployment's secrets gave the keys, the site anyone is linked at. Null while nobody is.
+   * in as them: the site an administrator gave while anyone is linked at it, or else the site anyone is
+   * linked at, as when the deployment's secrets gave the keys, even after keys for another were given.
+   * Null while nobody is.
    */
   private async memberfulSiteKept(account: Pick<JoinableAccount, "memberfulKeys">): Promise<string | null> {
     const site = account.memberfulKeys?.site;
-    if (site === undefined) return this.store.linkedSite();
-    return this.linkedSites.has(site) || (await this.store.anyoneLinked(site)) ? site : null;
+    if (site !== undefined && (this.linkedSites.has(site) || (await this.store.anyoneLinked(site)))) return site;
+    return this.store.linkedSite();
   }
 
   /**

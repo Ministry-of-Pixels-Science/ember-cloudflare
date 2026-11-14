@@ -314,6 +314,15 @@ describe("Set up Memberful", () => {
     // Nor does its token endpoint not answering, once the admin API has.
     site.answer = (url) => (url.pathname === "/oauth/token" ? new Response("Service unavailable", { status: 503 }) : Response.json({ data: { members: { pageInfo: { hasNextPage: true } } } }));
     await refused(KEYS, 502, { error: MEMBERFUL_KEYS_UNCHECKED });
+    // Or answering what isn't an OAuth error: a page, a redirect, or none.
+    for (const token of [
+      () => new Response("<!doctype html><title>Sign in</title>", { headers: { "Content-Type": "text/html" } }),
+      () => new Response(null, { status: 302, headers: { Location: `${SITE}/auth/sign_in` } }),
+      () => Response.json({}, { status: 400 }),
+    ]) {
+      site.answer = (url) => (url.pathname === "/oauth/token" ? token() : Response.json({ data: { members: { pageInfo: { hasNextPage: true } } } }));
+      await refused(KEYS, 502, { error: MEMBERFUL_KEYS_UNCHECKED });
+    }
 
     expect((await storedSettings()).memberful_keys).toBeUndefined();
     expect(await memberfulOf(administrator)).toEqual({ memberfulSite: null, memberfulWebhooks: false, memberfulKeys: null, memberfulSiteKept: null });
@@ -321,6 +330,10 @@ describe("Set up Memberful", () => {
     expect(logged).toHaveBeenCalledWith("Memberful's token endpoint answered 401 to the keys Set up Memberful was given");
     const said = JSON.stringify(logged.mock.calls);
     for (const key of ["another-api-key", "another-oauth-secret", KEYS.clientSecret, KEYS.apiKey, KEYS.webhookSecret]) expect(said).not.toContain(key);
+
+    // Any OAuth error but invalid_client says Memberful knows the app, as invalid_grant does.
+    site.answer = (url) => (url.pathname === "/oauth/token" ? Response.json({ error: "invalid_request" }, { status: 400 }) : Response.json({ data: { members: { pageInfo: { hasNextPage: true } } } }));
+    expect(await saveKeys(administrator)).toEqual(savedFor(SITE));
   });
 
   it("lets only administrators give Ember Memberful's keys, asking Memberful nothing for anyone else", async () => {
@@ -420,6 +433,22 @@ describe("Set up Memberful", () => {
     // Who signed in with the deployment's keys signs in with the ones given.
     expect((await signedInAs((await signInWithMemberful()).signedIn)).name).toBe(katherine.fullName);
     expect(await workspaceSql("SELECT count(*) AS n FROM users")).toEqual([{ n: 2 }]);
+  });
+
+  it("keeps the site the deployment's keys had people sign in at over one given before them, where nobody signs in", async () => {
+    const administrator = await setUp();
+    const site = fakeMemberful();
+    await saveKeys(administrator, { ...KEYS, site: OTHER_SITE });
+    site.app = { clientId: DEPLOYMENT_KEYS.MEMBERFUL_CLIENT_ID, clientSecret: DEPLOYMENT_KEYS.MEMBERFUL_CLIENT_SECRET, apiKey: DEPLOYMENT_KEYS.MEMBERFUL_API_KEY };
+    expect((await turnMemberfulOn(administrator, { changes: DEPLOYMENT_KEYS })).status).toBe(200);
+    await signedInAs((await signInWithMemberful(DEPLOYMENT_KEYS)).signedIn);
+
+    site.app = { clientId: KEYS.clientId, clientSecret: KEYS.clientSecret, apiKey: KEYS.apiKey };
+    expect(await memberfulOf(administrator)).toEqual({ ...savedFor(OTHER_SITE), memberfulSiteKept: SITE });
+    const kept = await giveKeys(administrator, { ...KEYS, site: OTHER_SITE });
+    expect(await kept.json()).toEqual({ error: memberfulSiteKept(SITE), field: "site" });
+    expect(await saveKeys(administrator)).toEqual({ ...savedFor(SITE), memberfulSiteKept: SITE });
+    expect((await signedInAs((await signInWithMemberful()).signedIn)).name).toBe(katherine.fullName);
   });
 
   it("uses no keys sealed under another SESSION_SECRET, which it logs", async () => {

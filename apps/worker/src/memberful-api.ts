@@ -257,7 +257,10 @@ async function refusalOfClient(site: string, clientId: string, clientSecret: str
   }
   if (exchanged.status === 429 || exchanged.status >= 500) return refusing(exchanged, "token", UNCHECKED);
   const answer = (await exchanged.json().catch(() => null)) as { error?: unknown } | null;
-  return answer?.error === "invalid_client" ? refusing(exchanged, "token", CLIENT_UNKNOWN) : null;
+  if (answer?.error === "invalid_client") return refusing(exchanged, "token", CLIENT_UNKNOWN);
+  // Memberful doesn't document what it answers a code nobody was given, so any other OAuth error, as
+  // `invalid_grant` would be, says it knows the app, where an answer that isn't one says nothing.
+  return typeof answer?.error === "string" ? null : refusing(exchanged, "token", UNCHECKED);
 }
 
 /** Logs what Memberful's `endpoint` answered keys Set up Memberful was given, by its status alone, and answers `refusal`. */
