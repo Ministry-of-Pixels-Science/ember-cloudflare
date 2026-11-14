@@ -108,16 +108,19 @@ export class OutsideStore {
 
   /**
    * Keeps `client`, an app that registered itself, unless Ember keeps `max` already: answers whether it
-   * did. Once there are that many, the ones registered before `staleBefore` that nobody has connected
-   * are forgotten first.
+   * did. Once there are that many, the ones registered before `staleBefore` that nobody is connecting
+   * or connected through are forgotten first: a connection whose code or refresh token has expired
+   * keeps no app.
    */
   async register(client: OutsideClient, now: string, max: number, staleBefore: string): Promise<boolean> {
     const [, registered] = (await this.db.batch([
       statement(
         `DELETE FROM outside_clients WHERE created_at < ?1 AND (SELECT count(*) FROM outside_clients) >= ?2
-           AND NOT EXISTS (SELECT 1 FROM outside_connections WHERE client_id = outside_clients.id)`,
+           AND NOT EXISTS (SELECT 1 FROM outside_connections WHERE client_id = outside_clients.id
+             AND ((access_digest IS NULL AND code_expires_at > ?3) OR (access_digest IS NOT NULL AND refresh_expires_at > ?3)))`,
         staleBefore,
         max,
+        now,
       ),
       statement(
         `INSERT INTO outside_clients (id, name, redirect_uris, created_at)

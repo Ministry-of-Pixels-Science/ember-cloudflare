@@ -14,6 +14,7 @@ import {
 } from "@ember/protocol/outside";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toBase64url } from "../src/encoding";
+import { MAX_OUTSIDE_CLIENTS } from "../src/workspace";
 import { api, cookieOf, createRoom, direct, freshDeploy, origin, shown, signIn, workspaceSql, type Session } from "./support";
 
 // Outside AI: an AI app connects to Ember over the Model Context Protocol, at `/mcp`, and signs in
@@ -180,6 +181,9 @@ describe("Outside AI", () => {
     expect((await api("/oauth/token", form({ grant_type: "password" }))).status).toBe(404);
     expect((await api("/oauth/revoke", form({ token: "a-token", client_id: "an-app" }))).status).toBe(404);
     expect((await api("/oauth/revoke", form({}))).status).toBe(404);
+    // Nor to say how it takes requests.
+    expect((await api("/oauth/token")).status).toBe(404);
+    expect((await api("/mcp", { method: "OPTIONS" })).status).toBe(404);
     expect((await api("/oauth/authorize?client_id=an-app")).status).toBe(404);
     expect(await (await describeAsk(member, askOf("an-app"))).json()).toEqual({ error: OUTSIDE_OFF });
     expect(await yours(member)).toBeNull();
@@ -196,6 +200,8 @@ describe("Outside AI", () => {
     expect(page.status).toBe(200);
     expect(page.headers.get("Content-Type")).toContain("text/html");
     expect((await api("/oauth/revoke", form({}))).status).toBe(400);
+    expect((await api("/oauth/token")).status).toBe(405);
+    expect((await api("/mcp", { method: "OPTIONS" })).status).toBe(204);
   });
 
   it("says how to sign in to it, to an app from any origin", async () => {
@@ -248,6 +254,40 @@ describe("Outside AI", () => {
     for (let n = 0; n < 10; n++) expect((await register({ redirect_uris: [BACK] }, "198.51.100.7")).status).toBe(201);
     expect((await register({ redirect_uris: [BACK] }, "198.51.100.7")).status).toBe(429);
     expect((await register({ redirect_uris: [BACK] }, "198.51.100.8")).status).toBe(201);
+  });
+
+  it(`keeps at most ${MAX_OUTSIDE_CLIENTS} apps that registered, forgetting first the old ones nobody is connected through`, async () => {
+    const { member } = await setUpOn();
+    // As many as it keeps, registered long ago, each with someone part-way through connecting it.
+    await workspaceSql(
+      `WITH RECURSIVE n (i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ${MAX_OUTSIDE_CLIENTS})
+       INSERT INTO outside_clients (id, name, redirect_uris, created_at) SELECT 'app-' || i, 'An app', '[]', '2020-01-01T00:00:00.000Z' FROM n`,
+    );
+    await workspaceSql(
+      `INSERT INTO outside_connections (id, user_id, client_id, client_name, redirect_uri, scope, code_digest, code_challenge, code_expires_at, created_at)
+       SELECT 'connection-' || id, '${member.user.id}', id, name, '${BACK}', 'read', 'digest-' || id, 'challenge', '2999-01-01T00:00:00.000Z', created_at FROM outside_clients`,
+    );
+    const full = await register({ redirect_uris: [BACK] });
+    expect(full.status).toBe(503);
+    expect(await full.json()).toMatchObject({ error: "temporarily_unavailable" });
+
+    // A connection whose code has expired, or whose refresh token has, keeps no app.
+    await workspaceSql("UPDATE outside_connections SET code_expires_at = '2020-01-01T00:00:00.000Z' WHERE client_id <> 'app-1'");
+    await workspaceSql("UPDATE outside_connections SET access_digest = 'access', refresh_digest = 'refresh', refresh_expires_at = '2020-01-01T00:00:00.000Z' WHERE client_id = 'app-2'");
+    expect((await register({ redirect_uris: [BACK] })).status).toBe(201);
+    expect(await workspaceSql("SELECT id FROM outside_clients WHERE created_at < '2021-01-01' ORDER BY id")).toEqual([{ id: "app-1" }]);
+  });
+
+  it("leaves no connection behind when one is allowed as outside AI is turned off", async () => {
+    const { administrator, member } = await setUpOn();
+    for (let round = 0; round < 3; round++) {
+      const clientId = await registered();
+      const [, answered] = await Promise.all([turn(administrator, false), answer(member, askOf(clientId), true)]);
+      // Allowed first, it ended with the rest. Turned off first, there was nothing to allow.
+      expect([200, 409, 422]).toContain(answered.status);
+      expect((await connections())[0]!.n).toBe(0);
+      expect((await turn(administrator, true)).status).toBe(200);
+    }
   });
 
   it("connects an app as the person who allows it, which then lists the rooms they're in", async () => {
@@ -466,7 +506,8 @@ describe("Outside AI", () => {
 
     const clientId = await registered();
     const back = await allowed(member, askOf(clientId, { resource: "https://another-ember.example/mcp" }));
-    expect(back.searchParams.get("iss")).toBe("https://another-ember.example");
+    // Who sent the browser back is still this Ember, whatever the request says it's for.
+    expect(back.searchParams.get("iss")).toBe(origin);
     const elsewhere = (await (await exchange(clientId, back.searchParams.get("code")!, { resource: "https://another-ember.example/mcp" })).json()) as Tokens;
     expect((await asked(elsewhere.access_token, "tools/list")).status).toBe(401);
   });

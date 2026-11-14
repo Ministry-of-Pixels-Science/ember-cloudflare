@@ -149,9 +149,6 @@ export function wayBack(ask: Pick<ValidAsk, "redirectUri" | "state">, answer: { 
   return back.href;
 }
 
-/** Who Ember says sent a browser back for a request: the Ember the app connects to, when it said which, or else the one at `origin`, where the person answered. */
-export const issuerFor = (resource: string | null, origin: string) => (resource === null ? origin : new URL(resource).origin);
-
 /** A registration Ember refuses, as RFC 7591 says why. */
 export interface RegistrationRefused {
   error: "invalid_redirect_uri" | "invalid_client_metadata";

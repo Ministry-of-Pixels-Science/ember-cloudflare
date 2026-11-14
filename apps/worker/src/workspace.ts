@@ -1436,10 +1436,14 @@ export class Workspace extends DurableObject<Env> {
   async registerOutsideClient(client: Omit<OutsideClient, "id">, ip: string | null): Promise<OutsideClient | "off" | "limited" | "full"> {
     if (!(await this.outsideAi())) return "off";
     if (!this.outsideRegistrations.attempt(ip ?? "unknown")) return "limited";
-    const registered = { id: alphanumeric(32), ...client };
-    const now = Date.now();
-    const kept = await this.outside.register(registered, new Date(now).toISOString(), MAX_OUTSIDE_CLIENTS, new Date(now - UNCONNECTED_CLIENT_MS).toISOString());
-    return kept ? registered : "full";
+    // One at a time with the switch, as `connectOutside` is, so no app is kept once turning outside AI off has forgotten them all.
+    return this.oneAtATime(async () => {
+      if (!(await this.outsideAi())) return "off";
+      const registered = { id: alphanumeric(32), ...client };
+      const now = Date.now();
+      const kept = await this.outside.register(registered, new Date(now).toISOString(), MAX_OUTSIDE_CLIENTS, new Date(now - UNCONNECTED_CLIENT_MS).toISOString());
+      return kept ? registered : "full";
+    });
   }
 
   /** The AI app that registered itself as `id`, or null, or "off" while outside AI is. */
@@ -1468,11 +1472,15 @@ export class Workspace extends DurableObject<Env> {
    * they have as many connections as one may, or why they can't, as `outsidePerson` answers.
    */
   async connectOutside(credentials: Credentials, begun: Omit<NewOutsideConnection, "id" | "userId" | "codeExpiresAt">): Promise<true | "full" | "off" | "forbidden" | null> {
-    const person = await this.outsidePerson(credentials);
-    if (!person || typeof person === "string") return person;
-    const now = Date.now();
-    const connection = { ...begun, id: sortableId(), userId: person.user.id, codeExpiresAt: new Date(now + CODE_TTL_MS).toISOString() };
-    return (await this.outside.begin(connection, new Date(now).toISOString(), MAX_OUTSIDE_CONNECTIONS)) || "full";
+    // One at a time with the switch, which other requests run beside on D1: a connection that began
+    // after turning outside AI off had ended them all would be there when it's turned on again.
+    return this.oneAtATime(async () => {
+      const person = await this.outsidePerson(credentials);
+      if (!person || typeof person === "string") return person;
+      const now = Date.now();
+      const connection = { ...begun, id: sortableId(), userId: person.user.id, codeExpiresAt: new Date(now + CODE_TTL_MS).toISOString() };
+      return (await this.outside.begin(connection, new Date(now).toISOString(), MAX_OUTSIDE_CONNECTIONS)) || "full";
+    });
   }
 
   /**

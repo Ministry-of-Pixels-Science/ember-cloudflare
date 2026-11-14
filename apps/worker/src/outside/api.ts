@@ -27,7 +27,6 @@ import {
   clientDocumentAt,
   isClientDocumentAddress,
   isResource,
-  issuerFor,
   OUTSIDE_REGISTER_PATH,
   OUTSIDE_REVOKE_PATH,
   OUTSIDE_TOKEN_PATH,
@@ -86,9 +85,15 @@ function taking(request: Request, method: "GET" | "POST", respond: () => Promise
 
 /**
  * What answers an AI app's own request at `pathname`, if that's one of the addresses apps ask: `/mcp`,
- * the two documents that say how to sign in to it, and registering, tokens and revoking.
+ * the two documents that say how to sign in to it, and registering, tokens and revoking. While outside
+ * AI is off, each answers 404, whatever it's asked and however.
  */
 export function outsideAction(request: Request, env: Env, pathname: string): (() => Promise<Response>) | null {
+  const action = appAction(request, env, pathname);
+  return action && (async () => ((await workspace(env).outsideAi()) ? action() : notFound()));
+}
+
+function appAction(request: Request, env: Env, pathname: string): (() => Promise<Response>) | null {
   if (pathname === MCP_PATH) return () => answerApp(request, env);
   if (pathname === RESOURCE_METADATA_PATH || pathname === `${RESOURCE_METADATA_PATH}${MCP_PATH}`)
     return () => taking(request, "GET", () => described(request, env, resourceMetadata));
@@ -115,7 +120,6 @@ async function described(request: Request, env: Env, document: (origin: string, 
 
 /** `POST /oauth/register`: keeps an app that registers itself (RFC 7591), answering the id it's given. */
 async function registerApp(request: Request, env: Env): Promise<Response> {
-  if (!(await workspace(env).outsideAi())) return notFound();
   const registration = registrationOf(await jsonBodyOf(request));
   if ("error" in registration) return oauthError(registration.error, registration.error_description);
   const registered = await workspace(env).registerOutsideClient(registration, clientOf(request).ip);
@@ -149,7 +153,6 @@ async function newTokens(env: Env): Promise<{ access: string; refresh: string; n
 
 /** `POST /oauth/token`: gives an app its tokens for the code it was sent back with, or its next ones for its refresh token, which that replaces. */
 async function giveTokens(request: Request, env: Env): Promise<Response> {
-  if (!(await workspace(env).outsideAi())) return notFound();
   const form = await formOf(request);
   const [grant, clientId] = [form?.get("grant_type"), form?.get("client_id")];
   if (!form || !clientId) return oauthError("invalid_request", "The request must be a form with a client_id.");
@@ -172,7 +175,6 @@ async function giveTokens(request: Request, env: Env): Promise<Response> {
 
 /** `POST /oauth/revoke`: ends the connection a token is of (RFC 7009), answering 200 whether there was one or not. */
 async function revokeToken(request: Request, env: Env): Promise<Response> {
-  if (!(await workspace(env).outsideAi())) return notFound();
   const form = await formOf(request);
   const [token, clientId] = [form?.get("token"), form?.get("client_id")];
   if (!token || !clientId) return oauthError("invalid_request", "The request must be a form with a token and a client_id.");
@@ -200,7 +202,6 @@ function unauthorized(request: Request, presented: boolean): Response {
 /** `/mcp`: what a connected AI app asks Ember, over the Model Context Protocol, with its access token. */
 async function answerApp(request: Request, env: Env): Promise<Response> {
   if (request.method === "OPTIONS") return preflight(request, "GET, POST, DELETE");
-  if (!(await workspace(env).outsideAi())) return notFound();
   const token = bearerOf(request);
   const access = token === null ? null : await workspace(env).outsideAccess(await tokenDigest(token, env.SESSION_SECRET));
   if (access === "off") return notFound();
@@ -281,7 +282,8 @@ export async function answerOutsideAsk(request: Request, env: Env): Promise<Resp
   const made = await asked(request, env, answer?.ask ?? null);
   if (made instanceof Response) return made;
   const { ask, client } = made;
-  const issuer = issuerFor(ask.resource, urlOf(request).origin);
+  // Who sends the browser back is this Ember, at the address its documents gave the app (RFC 9207), whatever the request says it's for.
+  const issuer = urlOf(request).origin;
   if (!answer?.allow) return Response.json({ redirectTo: wayBack(ask, { error: "access_denied" }, issuer) } satisfies OutsideAnswered, { headers: PRIVATE });
   const code = newSessionToken();
   const begun = { clientId: client.id, clientName: client.name, redirectUri: ask.redirectUri, scope: ask.scope, resource: ask.resource, codeDigest: await tokenDigest(code, env.SESSION_SECRET), codeChallenge: ask.codeChallenge };
