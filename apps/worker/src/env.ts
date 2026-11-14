@@ -64,9 +64,10 @@ export interface Env {
   EMBER_RECOVERY_TOKEN?: string;
   /**
    * The address of the Memberful site whose members may join and sign in, such as
-   * https://example.memberful.com, once an administrator turns Memberful on (memberful.ts). Without it,
-   * or either of the two keys of the site's custom app below, Memberful can't be turned on, and nobody
-   * signs in with it.
+   * https://example.memberful.com, once an administrator turns Memberful on (memberful.ts). With the two
+   * keys of the site's custom app below, it takes the place of the site and every key an administrator
+   * gives in Set up Memberful, and the API key and webhook's secret below with it. Unless all three are
+   * set, Ember has only those.
    */
   MEMBERFUL_URL?: string;
   /** The OAuth identifier of the Memberful site's custom app, a server-side one. */

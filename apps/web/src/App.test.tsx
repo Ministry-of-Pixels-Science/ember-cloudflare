@@ -174,6 +174,8 @@ function serve({
         canAdminister: me.administrator,
         memberfulSite: null,
         memberfulWebhooks: false,
+        memberfulKeys: null,
+        memberfulSiteKept: null,
         turnstile: null,
         assistant: null,
         huddles: null,

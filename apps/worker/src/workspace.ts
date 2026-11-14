@@ -109,6 +109,7 @@ import {
   type YourApp,
   type YourAppSignedOut,
 } from "@ember/protocol/apps";
+import type { MemberfulKeysChange, MemberfulSaved } from "@ember/protocol/memberful";
 import type { Gateway } from "./assistant/gateway";
 import { modelsFileUrlOf, type KeptModelsFile, type KeptWorkersAiModels } from "./assistant/offered";
 import { providerMovesOf } from "./assistant/model-tests";
@@ -123,7 +124,18 @@ import { pictureObjects, type StoredPicture } from "./files/pictures";
 import type { SfuApp } from "./huddles/sfu";
 import { alphanumeric, sortableId } from "./ids";
 import { sendEmail, sendEmails, senderOf, type Sender } from "./mail";
-import { memberfulApiOf, membershipsOf, namelessMember, type MemberfulMember } from "./memberful-api";
+import {
+  deployedMemberfulOf,
+  memberfulApiOf,
+  memberfulWebhooksOf,
+  membershipsOf,
+  namelessMember,
+  openMemberfulSecrets,
+  sealMemberfulSecrets,
+  type MemberfulApi,
+  type MemberfulMember,
+  type MemberfulSetup,
+} from "./memberful-api";
 import { webPush } from "./push/keys";
 import { FixedWindowLimit } from "./rate-limit";
 import { sessionTag } from "./revocations";
@@ -1137,10 +1149,11 @@ export class Workspace extends DurableObject<Env> {
   /**
    * What the app asks first: the account, if it's set up, who `credentials` signs in, if anyone, whether
    * the sign-in page offers Sign in with Memberful at `memberfulSite`, the deployment's Memberful site, or
-   * null without its keys (`offersMemberfulSignIn`), and whether it offers to email a code to reset a
-   * password, which it does while Ember can send email, and the site key of the Turnstile widget an
-   * administrator gave Ember, while it has one (`savedTurnstileKeys`). A page opened at `deployedAddress`,
-   * where a deploy puts Ember, which it's null anywhere else, tells Ember where that is.
+   * else at the one an administrator gave the keys of (`offersMemberfulSignIn`), and whether it offers to
+   * email a code to reset a password, which it does while Ember can send email, and the site key of the
+   * Turnstile widget an administrator gave Ember, while it has one (`savedTurnstileKeys`). A page opened
+   * at `deployedAddress`, where a deploy puts Ember, which it's null anywhere else, tells Ember where that
+   * is.
    */
   async bootstrap(
     credentials: Credentials | null,
@@ -1193,13 +1206,16 @@ export class Workspace extends DurableObject<Env> {
   }
 
   /**
-   * Whether Sign in with Memberful is offered at `site`, the deployment's Memberful site, or null without
-   * its keys, when it never is: while Memberful lets its members join, or anyone here is linked to an
-   * account there, since they keep signing in with it once it's off.
+   * Whether Sign in with Memberful is offered at `deployedSite`, the deployment's Memberful site, or
+   * without its keys at the one an administrator gave Ember the keys of, if they did, and else never:
+   * while Memberful lets the site's members join, or anyone here is linked to an account there, since
+   * they keep signing in with it once it's off.
    */
-  async offersMemberfulSignIn(site: string | null): Promise<boolean> {
+  async offersMemberfulSignIn(deployedSite: string | null): Promise<boolean> {
+    const account = await this.joinableAccount();
+    const site = deployedSite ?? (account && (await this.openedMemberful(account)))?.site ?? null;
     if (site === null) return false;
-    if ((await this.joinableAccount())?.memberfulJoin || this.linkedSites.has(site)) return true;
+    if (account?.memberfulJoin || this.linkedSites.has(site)) return true;
     const unlinkings = this.unlinkings;
     if (!(await this.store.anyoneLinked(site))) return false;
     // Until a new password or Disconnect unlinks the last account there (`forgetUnlinked`).
@@ -1221,11 +1237,12 @@ export class Workspace extends DurableObject<Env> {
    * Workspace settings as the person `credentials` signs in sees them: "not set up" before first run, or
    * null without a valid session. A guest isn't given the join link's code, since a member's account
    * they made with it would stay once guests are turned away, unless they're an administrator, who
-   * could make a new code anyway. The Worker adds what it knows of the Memberful site from its keys and
-   * the Cloudflare account it's deployed to, and has the deployment's Turnstile keys take the place of
-   * any an administrator gave, and the Workspace says how it sends email, since it's what sends it.
+   * could make a new code anyway. Memberful is as an administrator set it up, if they did. The Worker
+   * adds the Cloudflare account it's deployed to, and has the deployment's Memberful and Turnstile keys
+   * take the place of any an administrator gave, and the Workspace says how it sends email, since it's
+   * what sends it.
    */
-  async workspaceSettings(credentials: Credentials): Promise<Omit<WorkspaceSettings, "memberfulSite" | "memberfulWebhooks" | "cloudflareAccountId"> | "not set up" | null> {
+  async workspaceSettings(credentials: Credentials): Promise<Omit<WorkspaceSettings, "cloudflareAccountId"> | "not set up" | null> {
     const session = await this.session(credentials);
     if (!session) return null;
     const [account, canAdminister] = await Promise.all([this.joinableAccount(), this.store.isAdministrator(session.user.id)]);
@@ -1235,6 +1252,7 @@ export class Workspace extends DurableObject<Env> {
       account: await this.shownAccount(account),
       joinCode: canAdminister || !session.guest ? account.joinCode : null,
       canAdminister,
+      ...(await this.memberfulSettings(account, canAdminister)),
       email: await this.emailSettings(account),
       turnstile: (await this.openedTurnstileKeys(account)) ? "saved" : null,
       invitations,
@@ -1599,6 +1617,86 @@ export class Workspace extends DurableObject<Env> {
     const [[user], { member }] = await Promise.all([this.store.peopleWithIds([userId]), this.store.roomAccess(roomId, userId, null)]);
     if (!user || !member) return null;
     return this.outsideSends.attempt(userId) ? { user, authorizedAt } : "limited";
+  }
+
+  /**
+   * Gives Ember `keys`, the Memberful site and keys Set up Memberful was given, which the Worker has seen
+   * Memberful take, their secrets sealed together under SESSION_SECRET (`seal`), as the person
+   * `credentials` signs in, answering Memberful as Membership's card shows it then: "forbidden" unless
+   * they're an administrator, null without a valid session, and the site Ember keeps when `keys` are for
+   * another, since people here sign in with their accounts at it (`memberfulSiteKept`). Once anyone here
+   * is linked to an account at the site, the daily check of their memberships is made due at once, as
+   * when the Workspace starts, since none may have been checked with the keys before. Only signed-in
+   * pages show the site, which they ask for, so no socket hears of it.
+   */
+  async changeMemberfulKeys(credentials: Credentials, keys: MemberfulKeysChange): Promise<MemberfulSaved | { kept: string } | "forbidden" | null> {
+    return this.administerAccount(credentials, async (account) => {
+      const kept = await this.memberfulSiteKept(account);
+      if (kept !== null && kept !== keys.site) return { kept };
+      const memberfulKeys = { site: keys.site, clientId: keys.clientId, sealedSecrets: await sealMemberfulSecrets(this.env.SESSION_SECRET, keys) };
+      const saved = await this.saveAccount({ ...account, memberfulKeys }, (now) => this.store.changeAccount({ memberfulKeys }, now));
+      await this.store.startMembershipCatchUp(keys.site, Date.now());
+      await this.scheduleDelivery();
+      return this.memberfulSettings(saved, true);
+    });
+  }
+
+  /**
+   * The Memberful site and keys an administrator gave Ember in Set up Memberful, their secrets opened,
+   * which the Worker signs members in with, and hears the site's webhooks with, while the deployment has
+   * none of its own, or null while there are none, or while they don't open under SESSION_SECRET, as once
+   * that's changed, when it's as if Ember had none until an administrator gives it them again.
+   */
+  async savedMemberful(): Promise<MemberfulSetup | null> {
+    const account = await this.joinableAccount();
+    return account && this.openedMemberful(account);
+  }
+
+  /** The Memberful site and keys `account` keeps, as `savedMemberful` has them. */
+  private async openedMemberful(account: Pick<JoinableAccount, "memberfulKeys">): Promise<MemberfulSetup | null> {
+    const saved = account.memberfulKeys;
+    if (!saved) return null;
+    const secrets = await openMemberfulSecrets(this.env.SESSION_SECRET, saved.sealedSecrets);
+    if (secrets === null) console.error("The Memberful keys Ember was given don't open under SESSION_SECRET, so they aren't used.");
+    return secrets && { site: saved.site, clientId: saved.clientId, ...secrets };
+  }
+
+  /**
+   * What asking the Memberful site's admin API takes, as the Workspace checks memberships: the
+   * deployment's keys, which take the place of any others, or else those an administrator gave, while
+   * either has the API key.
+   */
+  private async memberfulApi(): Promise<MemberfulApi | null> {
+    const deployed = deployedMemberfulOf(this.env);
+    if (deployed) return memberfulApiOf(deployed);
+    const account = await this.joinableAccount();
+    return memberfulApiOf(account && (await this.openedMemberful(account)));
+  }
+
+  /**
+   * Memberful as workspace settings show `account`'s, as an administrator set it up, which the Worker has
+   * the deployment's keys take the place of, and for `administrator`, the site Set up Memberful keeps.
+   */
+  private async memberfulSettings(account: JoinableAccount, administrator: boolean): Promise<MemberfulSaved> {
+    const memberful = await this.openedMemberful(account);
+    return {
+      memberfulSite: memberful?.site ?? null,
+      memberfulWebhooks: memberfulWebhooksOf(memberful) !== null,
+      memberfulKeys: memberful ? "saved" : null,
+      memberfulSiteKept: administrator ? await this.memberfulSiteKept(account) : null,
+    };
+  }
+
+  /**
+   * The Memberful site Set up Memberful keeps, since people here sign in with their accounts at it, which
+   * are linked to them by that site and their member id there, so that another site's members never sign
+   * in as them: the site an administrator gave while anyone is linked at it, or with none given, as when
+   * the deployment's secrets gave the keys, the site anyone is linked at. Null while nobody is.
+   */
+  private async memberfulSiteKept(account: Pick<JoinableAccount, "memberfulKeys">): Promise<string | null> {
+    const site = account.memberfulKeys?.site;
+    if (site === undefined) return this.store.linkedSite();
+    return this.linkedSites.has(site) || (await this.store.anyoneLinked(site)) ? site : null;
   }
 
   /**
@@ -2159,6 +2257,7 @@ export class Workspace extends DurableObject<Env> {
       emailFrom: null,
       resendApiKey: null,
       turnstileKeys: null,
+      memberfulKeys: null,
       assistant: null,
       assistantMost: TOP_LEVELS,
       assistantInstructions: "",
@@ -2647,7 +2746,7 @@ export class Workspace extends DurableObject<Env> {
    * account there, since the check isn't kept while nobody is.
    */
   private async keepCatchingUp(dueAt: number): Promise<void> {
-    const api = memberfulApiOf(this.env);
+    const api = await this.memberfulApi();
     if (!api) return;
     await this.store.scheduleMembershipCatchUp(api.site, dueAt);
     await this.wakeAt(dueAt);
@@ -4817,7 +4916,7 @@ export class Workspace extends DurableObject<Env> {
    * and whatever was queued is forgotten.
    */
   private async checkMemberships(): Promise<void> {
-    const api = memberfulApiOf(this.env);
+    const api = await this.memberfulApi();
     const now = Date.now();
     const due = await this.store.dueMembershipChecks(api?.site ?? null, now, now + MEMBERSHIP_CATCH_UP_MS, MEMBERSHIPS_PER_CHECK);
     if (!api || due.length === 0) return;
@@ -4963,7 +5062,7 @@ export class Workspace extends DurableObject<Env> {
    * key.
    */
   private async resumeDeliveries(): Promise<void> {
-    const api = memberfulApiOf(this.env);
+    const api = await this.memberfulApi();
     if (api) await this.store.startMembershipCatchUp(api.site, Date.now());
     await this.scheduleDelivery();
   }

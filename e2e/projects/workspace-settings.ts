@@ -6,9 +6,11 @@ import { devices, type PlaywrightTestOptions, type PlaywrightWorkerOptions, type
 // regenerating the join link would stop another's new person joining through it.
 
 export const SETTINGS_SERVER_PORT = Number(process.env.E2E_SETTINGS_PORT ?? 8789);
-/** Where the Memberful site the Memberful specs fake listens, which the second server's MEMBERFUL_URL names. */
+/** Where the Memberful site the Memberful specs fake listens. */
 export const MEMBERFUL_SITE_PORT = Number(process.env.E2E_MEMBERFUL_PORT ?? 8790);
-/** The second server's Memberful keys, which that site checks. None is a secret. */
+/** That site's address, which the Memberful specs give Ember in Set up Memberful. */
+export const MEMBERFUL_SITE = `http://127.0.0.1:${MEMBERFUL_SITE_PORT}`;
+/** The keys of that site's custom app and webhook, which the specs give Ember with it, and which the site checks. None is a secret. */
 export const MEMBERFUL_KEYS = {
   clientId: "e2e",
   clientSecret: "e2e-only-not-a-secret",

@@ -48,6 +48,8 @@ const workspaceSettings: WorkspaceSettings = {
   canAdminister: false,
   memberfulSite: null,
   memberfulWebhooks: false,
+  memberfulKeys: null,
+  memberfulSiteKept: null,
   turnstile: null,
   assistant: null,
   huddles: null,

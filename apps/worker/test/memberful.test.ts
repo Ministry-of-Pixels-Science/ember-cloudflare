@@ -371,7 +371,7 @@ describe("Sign in with Memberful", () => {
       for (const settings of [{ memberfulJoin: true }, { memberfulSignIn: true }]) {
         const refused = await change(administrator, { settings }, { keys: false });
         expect(refused.status).toBe(422);
-        expect(await refused.json()).toEqual({ error: "Memberful needs MEMBERFUL_URL, MEMBERFUL_CLIENT_ID and MEMBERFUL_CLIENT_SECRET set first" });
+        expect(await refused.json()).toEqual({ error: "Set up Memberful first, which gives Ember your Memberful site's keys." });
       }
       expect((await bootstrap()).account).toEqual(account());
 
@@ -974,7 +974,7 @@ describe("Memberful memberships", () => {
       for (const keys of [KEYS, { ...ALL_KEYS, MEMBERFUL_API_KEY: undefined }, { ...ALL_KEYS, MEMBERFUL_WEBHOOK_SECRET: "" }]) {
         expect((await webhook(subscriptionChanged(katherine), { keys })).status).toBe(404);
       }
-      expect(errors).toHaveBeenCalledWith("A Memberful webhook came, but the deployment lacks MEMBERFUL_WEBHOOK_SECRET or MEMBERFUL_API_KEY, so it's refused");
+      expect(errors).toHaveBeenCalledWith("A Memberful webhook came, but Ember lacks the webhook's secret or the custom app's API key, so it's refused");
     });
 
     it(
