@@ -42,7 +42,7 @@ export const MEMBERFUL_SITE_UNREACHABLE = "Ember couldn't reach a site at that a
 export const MEMBERFUL_SITE_UNKNOWN = "That isn't a Memberful site's address. Give the one your members sign in at, such as https://example.memberful.com.";
 export const MEMBERFUL_API_KEY_UNKNOWN = "Memberful didn't take that API key. Copy it again from your custom app.";
 export const MEMBERFUL_CLIENT_UNKNOWN = "Memberful doesn't know that OAuth identifier and secret together. Copy both again from your custom app.";
-export const MEMBERFUL_KEYS_UNCHECKED = "Ember couldn't reach Memberful to check the keys. Try again.";
+export const MEMBERFUL_KEYS_UNCHECKED = "Ember couldn't check the keys with Memberful. Try again.";
 
 /**
  * Why another site is refused once people here sign in with their accounts at `site`, which are linked

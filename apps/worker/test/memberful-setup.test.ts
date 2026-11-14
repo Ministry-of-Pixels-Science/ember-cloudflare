@@ -321,11 +321,14 @@ describe("Set up Memberful", () => {
     // Nor does its token endpoint not answering, once the admin API has.
     site.answer = (url) => (url.pathname === "/oauth/token" ? new Response("Service unavailable", { status: 503 }) : Response.json({ data: { members: { pageInfo: { hasNextPage: true } } } }));
     await refused(KEYS, 502, { error: MEMBERFUL_KEYS_UNCHECKED });
-    // Or answering what isn't an OAuth error: a page, a redirect, or none.
+    // Or answering anything but that the code is no good, which it says only of the app's: a page, a
+    // redirect, no OAuth error, or another, which can come before it checks the keys.
     for (const token of [
       () => new Response("<!doctype html><title>Sign in</title>", { headers: { "Content-Type": "text/html" } }),
       () => new Response(null, { status: 302, headers: { Location: `${SITE}/auth/sign_in` } }),
       () => Response.json({}, { status: 400 }),
+      () => Response.json({ error: "invalid_request" }, { status: 400 }),
+      () => Response.json({ error: "unauthorized_client" }, { status: 400 }),
     ]) {
       site.answer = (url) => (url.pathname === "/oauth/token" ? token() : Response.json({ data: { members: { pageInfo: { hasNextPage: true } } } }));
       await refused(KEYS, 502, { error: MEMBERFUL_KEYS_UNCHECKED });
@@ -337,10 +340,6 @@ describe("Set up Memberful", () => {
     expect(logged).toHaveBeenCalledWith("Memberful's token endpoint answered 401 to the keys Set up Memberful was given");
     const said = JSON.stringify(logged.mock.calls);
     for (const key of ["another-api-key", "another-oauth-secret", KEYS.clientSecret, KEYS.apiKey, KEYS.webhookSecret]) expect(said).not.toContain(key);
-
-    // Any OAuth error but invalid_client says Memberful knows the app, as invalid_grant does.
-    site.answer = (url) => (url.pathname === "/oauth/token" ? Response.json({ error: "invalid_request" }, { status: 400 }) : Response.json({ data: { members: { pageInfo: { hasNextPage: true } } } }));
-    expect(await saveKeys(administrator)).toEqual(savedFor(SITE));
   });
 
   it("lets only administrators give Ember Memberful's keys, asking Memberful nothing for anyone else", async () => {
