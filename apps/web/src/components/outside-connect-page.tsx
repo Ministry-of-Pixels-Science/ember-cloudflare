@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Me } from "@ember/protocol";
-import { OUTSIDE_SCOPE_EXPLAINED, outsideAskOf, type OutsideAsked } from "@ember/protocol/outside";
+import { optionalOutsideScopes, OUTSIDE_SCOPE_EXPLAINED, outsideAskOf, type OutsideAsked, type OutsideScope } from "@ember/protocol/outside";
 import { AuthCard, AuthHeading, AuthPage, type SignedOutWorkspace } from "@/components/auth-page";
 import { PRIMARY_BUTTON } from "@/components/field";
 import { Button } from "@/components/ui/button";
@@ -11,8 +11,9 @@ import { loadPage } from "@/lib/page";
 import { rememberThisPage } from "@/lib/return-path";
 
 // The page an AI app, such as Claude, sends your browser to when you connect it to Ember: it says which
-// app asks, where your browser goes back to, and what the app would be able to do as you, and sends you
-// back to the app with your answer. The request is in the address, as OAuth puts it there, and stays
+// app asks, where your browser goes back to, and what the app would be able to do as you, with a box to
+// leave out what it needn't have, such as sending messages, and sends you back to the app with your
+// answer. The request is in the address, as OAuth puts it there, and stays
 // there until you answer, so that signing in first comes back to it.
 
 const SIGN_IN_PATH = "/session/new";
@@ -47,6 +48,8 @@ export function OutsideConnectPage({ me, workspace }: Props) {
   const [asked, setAsked] = useState<OutsideAsked | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [answering, setAnswering] = useState(false);
+  /** What the app asks for that you've chosen to leave out. */
+  const [without, setWithout] = useState<OutsideScope[]>([]);
   const mounted = useMounted();
   useTitle("Connect an AI app");
 
@@ -61,7 +64,7 @@ export function OutsideConnectPage({ me, workspace }: Props) {
 
   const answer = (allow: boolean) => {
     setAnswering(true);
-    answerOutsideAsk(ask, allow).then(
+    answerOutsideAsk(ask, allow, allow ? without : []).then(
       // The app's page takes this one's place, so Back doesn't come back to a request that's answered.
       (redirectTo) => loadPage(redirectTo),
       (error: unknown) => {
@@ -86,6 +89,7 @@ export function OutsideConnectPage({ me, workspace }: Props) {
       </AuthPage>
     );
   }
+  const optional = asked ? optionalOutsideScopes(asked.scopes) : [];
   return (
     <AuthPage workspace={workspace}>
       {asked && (
@@ -97,10 +101,29 @@ export function OutsideConnectPage({ me, workspace }: Props) {
             <div>
               <p className="mb-2 font-medium">It will be able to:</p>
               <ul className="list-disc ps-5">
-                {asked.scopes.map((scope) => (
-                  <li key={scope}>{OUTSIDE_SCOPE_EXPLAINED[scope]}</li>
-                ))}
+                {asked.scopes
+                  .filter((scope) => !optional.includes(scope))
+                  .map((scope) => (
+                    <li key={scope}>{OUTSIDE_SCOPE_EXPLAINED[scope]}</li>
+                  ))}
               </ul>
+              {optional.length > 0 && (
+                <>
+                  <p className="mt-4 mb-1 font-medium">And, if you let it:</p>
+                  {optional.map((scope) => (
+                    <label key={scope} className="flex min-h-9 cursor-pointer items-center gap-[1ch] has-disabled:cursor-default touch:min-h-11">
+                      <input
+                        type="checkbox"
+                        checked={!without.includes(scope)}
+                        disabled={answering}
+                        onChange={(event) => setWithout(event.target.checked ? without.filter((left) => left !== scope) : [...without, scope])}
+                        className="size-4 flex-none accent-foreground"
+                      />
+                      <span>{OUTSIDE_SCOPE_EXPLAINED[scope]}</span>
+                    </label>
+                  ))}
+                </>
+              )}
             </div>
             <p className="text-muted-foreground wrap-anywhere">{comesBackTo(asked.comesBackTo)}</p>
             <div className="flex flex-col gap-3">

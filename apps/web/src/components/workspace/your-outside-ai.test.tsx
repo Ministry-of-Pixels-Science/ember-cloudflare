@@ -57,6 +57,8 @@ describe("The AI apps section of your profile", () => {
     expect(within(section()).getAllByRole("listitem").map((row) => row.textContent)).toEqual([`Claude${connectionStatus(CLAUDE)}Disconnect`, `ChatGPT${connectionStatus(CHATGPT)}Disconnect`]);
     expect(connectionStatus(CLAUDE)).toBe(`From claude.example, connected ${dateTimeLabel(new Date(CONNECTED))}. It last asked Ember something ${dateTimeLabel(new Date(USED))}.`);
     expect(connectionStatus(CHATGPT)).toBe(`From chatgpt.example, connected ${dateTimeLabel(new Date(CONNECTED))}. It hasn't asked Ember anything yet.`);
+    // One that may send messages says so.
+    expect(connectionStatus({ ...CHATGPT, scopes: ["read", "write"] })).toBe(`From chatgpt.example, connected ${dateTimeLabel(new Date(CONNECTED))}. It can send messages as you. It hasn't asked Ember anything yet.`);
     expect(screen.queryByText(NOTHING_CONNECTED)).toBeNull();
     expect(screen.getByRole("button", { name: "Disconnect Claude" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Disconnect ChatGPT" })).toBeEnabled();
@@ -71,7 +73,7 @@ describe("The AI apps section of your profile", () => {
     await waitFor(() => expect(onChanged).toHaveBeenCalledExactlyOnceWith([CHATGPT]));
     expect(requests).toEqual([`DELETE /api/users/me/outside/${CLAUDE.id}`]);
     expect(await screen.findByText(disconnectedNotice("Claude"))).toBeVisible();
-    expect(disconnectedNotice("Claude")).toBe("Claude is disconnected. It can't read Ember as you any more.");
+    expect(disconnectedNotice("Claude")).toBe("Claude is disconnected. It can't use Ember as you any more.");
     expect(screen.getByRole("button", { name: "Disconnect ChatGPT" })).toBeEnabled();
     expect(onFailed).not.toHaveBeenCalled();
   });

@@ -1,4 +1,4 @@
-import { HISTORY_PAGE_SIZE, MAX_SEARCH_LENGTH, type BotAnswer, type Me, type Message, type NewWorkspace, type ProfileAnswer, type RoomId, type WorkspaceSettings } from "@ember/protocol";
+import { HISTORY_PAGE_SIZE, MAX_MESSAGE_LENGTH, MAX_SEARCH_LENGTH, MESSAGE_TOO_LONG, type BotAnswer, type Me, type Message, type NewWorkspace, type ProfileAnswer, type RoomId, type WorkspaceSettings } from "@ember/protocol";
 import {
   MAX_OUTSIDE_CONNECTIONS,
   OUTSIDE_ASK_REFUSED,
@@ -14,9 +14,9 @@ import {
 } from "@ember/protocol/outside";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toBase64url } from "../src/encoding";
-import { MAX_SHOWN_LENGTH, MESSAGES_FOUND } from "../src/outside/tools";
-import { MAX_OUTSIDE_CLIENTS } from "../src/workspace";
-import { api, connect, cookieOf, createRoom, direct, freshDeploy, origin, post, roomSql, shown, signIn, upload, workspaceSql, type Session, type Socket } from "./support";
+import { MAX_SHOWN_LENGTH, MESSAGES_FOUND, SENDING_TOO_FAST } from "../src/outside/tools";
+import { MAX_OUTSIDE_CLIENTS, OUTSIDE_SENDS_PER_MINUTE } from "../src/workspace";
+import { api, connect, cookieOf, createRoom, direct, freshDeploy, origin, post, roomSql, settle, shown, signIn, upload, workspaceSql, type Session, type Socket } from "./support";
 
 // Outside AI: an AI app connects to Ember over the Model Context Protocol, at `/mcp`, and signs in
 // with OAuth, where Ember is the authorization server. The tests are the app: they find out how to sign
@@ -86,11 +86,12 @@ const askOf = (clientId: string, more: Partial<OutsideAsk> = {}): OutsideAsk => 
 });
 
 const describeAsk = (session: Session | null, ask: unknown) => api("/api/outside/asks", { method: "POST", headers: as(session), body: JSON.stringify(ask) });
-const answer = (session: Session | null, ask: unknown, allow: unknown) => api("/api/outside/answers", { method: "POST", headers: as(session), body: JSON.stringify({ ask, allow }) });
+const answer = (session: Session | null, ask: unknown, allow: unknown, without?: unknown) =>
+  api("/api/outside/answers", { method: "POST", headers: as(session), body: JSON.stringify({ ask, allow, without }) });
 
-/** Where the page sends the browser once `session` allows `ask`. */
-async function allowed(session: Session, ask: OutsideAsk): Promise<URL> {
-  const response = await answer(session, ask, true);
+/** Where the page sends the browser once `session` allows `ask`, leaving out `without` of what it asks. */
+async function allowed(session: Session, ask: OutsideAsk, without?: unknown): Promise<URL> {
+  const response = await answer(session, ask, true, without);
   expect(response.status, await response.clone().text()).toBe(200);
   expect(response.headers.get("Cache-Control")).toBe("no-store");
   return new URL(((await response.json()) as OutsideAnswered).redirectTo);
@@ -108,10 +109,10 @@ const exchange = (clientId: string, code: string, more: Record<string, string> =
   api("/oauth/token", form({ grant_type: "authorization_code", client_id: clientId, code, code_verifier: VERIFIER, redirect_uri: BACK, resource: MCP, ...more }));
 const refresh = (clientId: string, refreshToken: string) => api("/oauth/token", form({ grant_type: "refresh_token", client_id: clientId, refresh_token: refreshToken }));
 
-/** Connects the app as `session`, from registering to its tokens. */
-async function connected(session: Session): Promise<{ clientId: string; tokens: Tokens }> {
+/** Connects the app as `session`, from registering to its tokens, asking as `more` has it, which `session` allows but for `without`. */
+async function connected(session: Session, more: Partial<OutsideAsk> = {}, without?: unknown): Promise<{ clientId: string; tokens: Tokens }> {
   const clientId = await registered();
-  const back = await allowed(session, askOf(clientId));
+  const back = await allowed(session, askOf(clientId, more), without);
   const response = await exchange(clientId, back.searchParams.get("code")!);
   expect(response.status, await response.clone().text()).toBe(200);
   return { clientId, tokens: await response.json() };
@@ -249,13 +250,13 @@ describe("Outside AI", () => {
     await setUpOn();
     const unsigned = await asked(null, "tools/list");
     expect(unsigned.status).toBe(401);
-    expect(unsigned.challenge).toBe(`Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp", scope="read"`);
+    expect(unsigned.challenge).toBe(`Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp", scope="read write"`);
     expect((await asked("not-a-token", "tools/list")).challenge).toContain('error="invalid_token"');
 
     for (const path of ["/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp"]) {
       const resource = await api(path);
       expect(resource.headers.get("Access-Control-Allow-Origin")).toBe("*");
-      expect(await resource.json()).toEqual({ resource: MCP, authorization_servers: [origin], scopes_supported: ["read"], bearer_methods_supported: ["header"], resource_name: "Ember" });
+      expect(await resource.json()).toEqual({ resource: MCP, authorization_servers: [origin], scopes_supported: ["read", "write"], bearer_methods_supported: ["header"], resource_name: "Ember" });
     }
     expect(await (await api("/.well-known/oauth-authorization-server")).json()).toMatchObject({
       issuer: origin,
@@ -775,3 +776,120 @@ describe("What a connected AI app reads", () => {
   });
 });
 
+
+describe("What a connected AI app sends", () => {
+  type Listed = { tools: Array<{ name: string; annotations: unknown; inputSchema: { required?: string[] } }> };
+  type Sent = { room: unknown; message: { id: string; at: string; from: string; text: string; reply_to?: string } };
+
+  /** Grace's connection's token, which she let send, with Ada's and her sessions, and the room everyone's in. */
+  async function sending() {
+    const sessions = await setUpOn();
+    const { tokens } = await connected(sessions.member, { scope: "read write" });
+    const rooms = Object.fromEntries((await roomsFor(tokens.access_token)).map((room) => [room.name, room.id]));
+    return { ...sessions, token: tokens.access_token, general: rooms.general! };
+  }
+
+  const toolsOf = async (token: string) => ((await asked(token, "tools/list")).result as Listed).tools;
+
+  it("offers sending only to a connection whose person let it send, marked as changing things", async () => {
+    const { member } = await setUpOn();
+    const clientId = await registered();
+    expect(((await (await describeAsk(member, askOf(clientId, { scope: "read write" }))).json()) as OutsideAsked).scopes).toEqual(["read", "write"]);
+
+    const both = await connected(member, { scope: "write read" });
+    expect(both.tokens.scope).toBe("read write");
+    const send = (await toolsOf(both.tokens.access_token)).find(({ name }) => name === "send_message")!;
+    expect(send.annotations).toEqual({ readOnlyHint: false, destructiveHint: false, openWorldHint: false });
+    expect(send.inputSchema.required).toEqual(["room_id", "text"]);
+
+    // She leaves sending out, and nothing else can be: reading is what connecting is.
+    const reading = await connected(member, { scope: "read write" }, ["write", "read", "admin"]);
+    expect(reading.tokens.scope).toBe("read");
+    expect((await toolsOf(reading.tokens.access_token)).map(({ name }) => name)).toEqual(["list_rooms", "read_room", "read_thread", "search_messages"]);
+    const { status, result, error } = await asked(reading.tokens.access_token, "tools/call", { name: "send_message", arguments: { room_id: "any", text: "Hello" } });
+    expect(status).toBe(200);
+    expect(error !== undefined || result?.isError === true).toBe(true);
+
+    // An app that doesn't ask to send can't, and one that asks for nothing by name only reads.
+    expect((await connected(member)).tokens.scope).toBe("read");
+    expect((await connected(member, { scope: null })).tokens.scope).toBe("read");
+    // One that asks only to send has nothing left out.
+    const only = await connected(member, { scope: "write" }, ["write"]);
+    expect(only.tokens.scope).toBe("write");
+    expect((await toolsOf(only.tokens.access_token)).map(({ name }) => name)).toEqual(["send_message"]);
+
+    expect((await yours(member))!.map(({ scopes }) => scopes)).toEqual([["write"], ["read"], ["read"], ["read"], ["read", "write"]]);
+  });
+
+  it("sends a message as its person, in Markdown, which the room hears as theirs, and replies in a thread", async () => {
+    const { administrator, token, general } = await sending();
+    const ada = await connect(general, administrator);
+    const question = await post(ada, "<p>Shall we ship?</p>");
+
+    const sent = await found<Sent>(token, "send_message", { room_id: general, text: "**Ship** it, @Ada Lovelace: see [the plan](https://example.com/plan)" });
+    const { message: heard } = await ada.next("message.created");
+    expect(heard).toMatchObject({ id: sent.message.id, creator: { name: "Grace Hopper" }, plainText: "Ship it, @Ada Lovelace: see the plan" });
+    expect(heard.body).toContain("<strong>Ship</strong>");
+    expect(heard.body).toContain('href="https://example.com/plan"');
+    // Markdown mentions nobody, so nobody is called, @ember and the agents included.
+    expect(heard.mentions).toEqual([]);
+    expect(sent).toEqual({ room: { id: general, kind: "open", name: "general" }, message: { id: heard.id, at: heard.createdAt, from: "Grace Hopper", text: heard.plainText } });
+
+    const answered = await found<Sent>(token, "send_message", { room_id: general, text: "Yes", thread_id: question.id });
+    expect(answered.message).toEqual({ id: expect.any(String), at: expect.any(String), from: "Grace Hopper", text: "Yes", reply_to: question.id });
+    const thread = await found<{ replies: unknown[] }>(token, "read_thread", { room_id: general, message_id: question.id });
+    expect(thread.replies).toEqual([answered.message]);
+    ada.close();
+  });
+
+  it("sends what it sends to no bot, though it's to a direct message with one, where what its person writes goes to it", async () => {
+    const { administrator, member, token } = await sending();
+    const added = await api("/api/account/bots", { method: "POST", headers: { Cookie: administrator.cookie }, body: JSON.stringify({ name: "Build Bot", webhookUrl: "https://bots.example.com/build" }) });
+    const { bot } = (await added.json()) as BotAnswer;
+    const room = await direct(member, { user: { id: bot.id, name: bot.name }, cookie: "" });
+    const delivered: Array<{ message: { id: string } }> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      delivered.push(await new Request(input, init).json());
+      return new Response(null, { status: 204 });
+    });
+
+    const sent = await found<Sent>(token, "send_message", { room_id: room.id, text: "Build it" });
+    expect(sent.message).toMatchObject({ from: "Grace Hopper", text: "Build it" });
+    // Her own message, written after, is the only one the bot is sent.
+    const grace = await connect(room.id, member);
+    const written = await post(grace, "<p>Build it, please</p>");
+    await vi.waitFor(() => expect(delivered).toHaveLength(1));
+    await settle(grace);
+    expect(delivered.map(({ message }) => message.id)).toEqual([written.id]);
+    grace.close();
+  });
+
+  it("refuses a message with nothing in it or too much, one to a room that isn't theirs, and a reply to no thread", async () => {
+    const { administrator, token, general } = await sending();
+    const secret = await createRoom("Secret plans", { closedTo: [administrator.user.id], as: administrator });
+    const ada = await connect(general, administrator);
+    const question = await post(ada, "<p>Shall we ship?</p>");
+    const yes = await reply(ada, question, "<p>Yes</p>");
+
+    expect(await refusal(token, "send_message", { room_id: general, text: "  " })).toBe("Give the message to send, as `text`.");
+    expect(await refusal(token, "send_message", { room_id: general, text: "word ".repeat(MAX_MESSAGE_LENGTH) })).toBe(MESSAGE_TOO_LONG);
+    // Short enough to read as Markdown, and still more than a message holds.
+    expect(await refusal(token, "send_message", { room_id: general, text: "w".repeat(MAX_MESSAGE_LENGTH + 1) })).toBe(MESSAGE_TOO_LONG);
+    expect(await refusal(token, "send_message", { room_id: secret.id, text: "Hello" })).toBe("No room of theirs has that id. list_rooms lists the rooms they're in.");
+    expect(await refusal(token, "send_message", { room_id: general, text: "Hello", thread_id: "no-such-message" })).toBe("That message no longer exists");
+    // A reply has no thread of its own.
+    expect(await refusal(token, "send_message", { room_id: general, text: "Hello", thread_id: yes.id })).toBe("That message no longer exists");
+    expect(await refusal(token, "send_message", { room_id: general, text: "Hello", thread_id: 7 })).toMatch(/^Input validation error/);
+    expect((await found<{ messages: unknown[] }>(token, "read_room", { room_id: general })).messages).toHaveLength(1);
+    ada.close();
+  });
+
+  it(`sends at most ${OUTSIDE_SENDS_PER_MINUTE} messages as one person in a minute, whichever of their apps sends them`, async () => {
+    const { member, token, general } = await sending();
+    const other = await connected(member, { scope: "read write" });
+    for (let n = 1; n < OUTSIDE_SENDS_PER_MINUTE; n++) await found(token, "send_message", { room_id: general, text: `Message ${n}` });
+    await found(other.tokens.access_token, "send_message", { room_id: general, text: "The last" });
+    expect(await refusal(token, "send_message", { room_id: general, text: "One more" })).toBe(SENDING_TOO_FAST);
+    expect(await refusal(other.tokens.access_token, "send_message", { room_id: general, text: "One more" })).toBe(SENDING_TOO_FAST);
+  });
+});

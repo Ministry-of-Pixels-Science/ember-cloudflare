@@ -10,7 +10,7 @@ import { registerTools } from "./tools";
 
 /** What Ember tells an app of itself, which the app's model reads. */
 const INSTRUCTIONS =
-  "Ember is a team's chat: rooms that are open to everyone or private, and direct messages. This server acts as the person who connected it, and sees only what they can see. list_rooms gives the ids of their rooms, read_room reads a room's messages from the newest back, read_thread reads a thread's, and search_messages finds messages by their words across them all.";
+  "Ember is a team's chat: rooms that are open to everyone or private, and direct messages. This server acts as the person who connected it, and sees only what they can see. list_rooms gives the ids of their rooms, read_room reads a room's messages from the newest back, read_thread reads a thread's, and search_messages finds messages by their words across them all. send_message, when it's among the tools, sends a message as them, which everyone in the room sees as theirs, so send only what they ask for.";
 
 /** The server an app with `access` talks to, with the tools its connection allows. */
 function serverFor(env: Env, access: OutsideAccess): McpServer {

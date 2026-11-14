@@ -85,7 +85,7 @@ import { CLOSE_REASONS, closedAtOnce, closeTooLarge, isTooLarge, MAX_ROOM_FRAME_
 import { MessageStore, type Deletion, type InThread, type PageCursor, type PostedFile, type StoredBody } from "./store";
 import { unfurler } from "./unfurl";
 import { viewersOf, type Viewing } from "./viewing";
-import { workspace, type AssistantAccess, type BotAccess, type WebhookAccess } from "./workspace";
+import { workspace, type AssistantAccess, type BotAccess, type OutsideSender, type WebhookAccess } from "./workspace";
 import type { AssistantAsk, MessagePush, MessageWebhook } from "./workspace-store";
 
 /** What each socket remembers across hibernation. */
@@ -159,7 +159,7 @@ export interface KeptFile {
   file: StreamedFile;
 }
 
-/** How `ChatRoom.create` posts a message: as a bot's reply to a webhook delivery, with a file, or in a thread. */
+/** How `ChatRoom.create` posts a message: as a reply, which goes to no bot, as a bot's to a webhook delivery is, with a file, or in a thread. */
 interface Posting {
   kind?: "message" | "reply";
   posted?: PostedFile;
@@ -599,6 +599,27 @@ export class ChatRoom extends DurableObject<Env> {
       const body = await this.prepareWithCards(markup, cards);
       if (typeof body === "string") return body;
       return this.create(store, bot, crypto.randomUUID(), body, now, { inThread });
+    });
+  }
+
+  /**
+   * Posts `markup` as a message from the person an AI app is connected as (`outside/tools`), whom the
+   * Workspace found in the room: as their socket's message.create does, in the thread of the message
+   * `threadId` names, only there, if it names one, but as a reply is posted, which goes to no bot. So
+   * an app calls neither a webhook, @ember nor an agent, even in a direct message with one, where a
+   * message needs no mention to. Answers the message, why the room keeps nothing of it, `MESSAGE_GONE`
+   * when it has no such thread, or null once the room has heard that they were taken out of it, or it
+   * was deleted, after the Workspace checked, as it turns away a socket then.
+   */
+  async createOutsideMessage(roomId: RoomId, { user, authorizedAt }: OutsideSender, markup: string, threadId?: string): Promise<Message | string | null> {
+    return this.serially(async () => {
+      if (await this.revocationsFor(roomId).refuse([user.id], authorizedAt)) return null;
+      const store = this.storeFor(roomId);
+      const inThread = threadId === undefined ? undefined : await this.inThread(store, threadId, false);
+      if (inThread === null) return MESSAGE_GONE;
+      const body = await this.prepare(markup);
+      if (typeof body === "string") return body;
+      return this.create(store, user, crypto.randomUUID(), body, new Date().toISOString(), { kind: "reply", inThread });
     });
   }
 

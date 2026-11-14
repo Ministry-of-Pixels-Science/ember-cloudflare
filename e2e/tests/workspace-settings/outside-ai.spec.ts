@@ -6,8 +6,8 @@ import { PROFILE_PATH } from "@ember/protocol";
 import { administratorSession, cookieHeader, expect, newAddress, SAME_ORIGIN, signInAsAdministrator, test, useOwnAddress } from "../../fixtures";
 
 // Outside AI: the card on the AI assistant tab whose switch lets AI apps connect, the page that asks
-// someone whether to connect one as them, what a connected app can ask Ember, and the AI apps section of
-// their profile, where they disconnect it, on the second test server. The app is this spec: it finds
+// someone whether to connect one as them, what a connected app can ask Ember and send as them, and the
+// AI apps section of their profile, where they disconnect it, on the second test server. The app is this spec: it finds
 // how to sign in as an app does, from what Ember says of itself, and listens on this machine for the
 // browser coming back. Each test leaves the workspace as a new one is, with outside AI off.
 
@@ -54,7 +54,11 @@ interface SignIn {
 async function beginSignIn(request: APIRequestContext, address: string): Promise<SignIn> {
   const refused = await ask(request, address, null, "tools/list");
   expect(refused.status()).toBe(401);
-  const [, described] = /resource_metadata="([^"]+)"/.exec(refused.headers()["www-authenticate"] ?? "") ?? [];
+  const challenge = refused.headers()["www-authenticate"] ?? "";
+  const [, described] = /resource_metadata="([^"]+)"/.exec(challenge) ?? [];
+  // What Ember says to ask for, which is everything an app can be let do.
+  const [, scope] = /scope="([^"]+)"/.exec(challenge) ?? [];
+  expect(scope).toBe("read write");
   const { resource, authorization_servers: [issuer] } = (await (await request.get(described!)).json()) as { resource: string; authorization_servers: string[] };
   const server = (await (await request.get(`${issuer}/.well-known/oauth-authorization-server`)).json()) as Record<string, string>;
   expect(server.issuer).toBe(issuer);
@@ -62,7 +66,7 @@ async function beginSignIn(request: APIRequestContext, address: string): Promise
   const registered = await request.post(server.registration_endpoint!, { data: { client_name: APP_NAME, redirect_uris: [callback] }, headers: { "CF-Connecting-IP": newAddress() } });
   expect(registered.status(), await registered.text()).toBe(201);
   const { client_id: clientId } = (await registered.json()) as { client_id: string };
-  const query = new URLSearchParams({ response_type: "code", client_id: clientId, redirect_uri: callback, state: STATE, code_challenge: CHALLENGE, code_challenge_method: "S256", scope: "read", resource });
+  const query = new URLSearchParams({ response_type: "code", client_id: clientId, redirect_uri: callback, state: STATE, code_challenge: CHALLENGE, code_challenge_method: "S256", scope: scope!, resource });
   return { clientId, resource, authorize: `${server.authorization_endpoint}?${query}`, tokenEndpoint: server.token_endpoint! };
 }
 
@@ -92,7 +96,7 @@ async function roomsFor(request: APIRequestContext, address: string, token: stri
 }
 
 test.describe("Outside AI", () => {
-  test("an administrator lets AI apps connect, someone allows one, which lists their rooms until they disconnect it on their profile", async ({ page, request, baseURL }) => {
+  test("an administrator lets AI apps connect, someone allows one, which reads their rooms and sends a message as them until they disconnect it on their profile", async ({ page, request, baseURL }) => {
     const address = `${baseURL}/mcp`;
     // Until an administrator turns it on, nothing answers an app.
     expect((await ask(request, address, null, "tools/list")).status()).toBe(404);
@@ -110,6 +114,8 @@ test.describe("Outside AI", () => {
     await expect(page).toHaveTitle(/Connect an AI app/);
     await expect(page.getByRole("heading", { level: 1, name: new RegExp(`^Connect ${APP_NAME} to .+\\?$`) })).toBeVisible();
     await expect(page.getByRole("listitem")).toHaveText(["See the rooms you're in, read their messages and search them, as you can"]);
+    // Sending is theirs to leave out, and allowed unless they do.
+    await expect(page.getByRole("checkbox", { name: "Send messages as you, in the rooms you're in" })).toBeChecked();
     await expect(page.getByText(`You'll go back to ${new URL(callback).host}.`)).toBeVisible();
     await page.getByRole("button", { name: "Allow", exact: true }).click();
 
@@ -131,6 +137,12 @@ test.describe("Outside AI", () => {
     const read = await ask(request, address, token, "tools/call", { name: "read_room", arguments: { room_id: listed.id } });
     expect(read.status(), await read.text()).toBe(200);
     expect(await read.text()).toContain(listed.name);
+    // And it sends a message as them, which the room shows as theirs.
+    const text = `Sent by ${APP_NAME} at ${Date.now()}`;
+    const sent = await ask(request, address, token, "tools/call", { name: "send_message", arguments: { room_id: listed.id, text: `**${text}**` } });
+    expect(sent.status(), await sent.text()).toBe(200);
+    await page.getByRole("region", { name: "Rooms" }).getByRole("link", { name: listed.name }).first().click();
+    await expect(page.getByText(text)).toBeVisible();
 
     // Their profile lists it, and Disconnect ends what it was given.
     await page.goto(PROFILE_PATH);
@@ -138,8 +150,9 @@ test.describe("Outside AI", () => {
     await expect(apps.getByRole("textbox", { name: "The address to give an AI app" })).toHaveValue(address);
     await expect(apps.getByRole("listitem")).toContainText([APP_NAME]);
     await expect(apps.getByRole("listitem")).toContainText([`From ${new URL(callback).host}`]);
+    await expect(apps.getByRole("listitem")).toContainText(["It can send messages as you."]);
     await apps.getByRole("button", { name: `Disconnect ${APP_NAME}` }).click();
-    await expect(page.getByText(`${APP_NAME} is disconnected. It can't read Ember as you any more.`)).toBeVisible();
+    await expect(page.getByText(`${APP_NAME} is disconnected. It can't use Ember as you any more.`)).toBeVisible();
     await expect(apps).toContainText("No AI app is connected as you.");
     expect((await ask(request, address, token, "tools/list")).status()).toBe(401);
 
