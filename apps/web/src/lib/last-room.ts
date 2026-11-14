@@ -19,14 +19,14 @@ export function rememberLastRoom(roomId: RoomId): void {
   try {
     if (localStorage.getItem(KEY) !== roomId) localStorage.setItem(KEY, roomId);
   } catch {
-    // Storage can be refused, and then `/` goes to the oldest room.
+    // Storage can be refused, and then `/` goes to the room someone was put in first.
   }
 }
 
 /**
  * The last room visited, as Campfire's `last_room_visited` finds it: the last room shown, while it's one
- * of `rooms`, or else the oldest of them, since they come in the order they were made. Null when there
- * are none.
+ * of `rooms`. Or else, where Campfire takes the oldest room, the first of them, the room someone was put
+ * in first, since they come in the order they were put in them. Null when there are none.
  */
 export function lastRoomVisited(rooms: Room[]): Room | null {
   const lastRoomId = storedLastRoom();

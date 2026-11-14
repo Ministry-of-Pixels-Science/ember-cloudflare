@@ -1394,15 +1394,17 @@ const ACTIVE_AT = `coalesce(rooms.last_message_at, rooms.created_at) AS active_a
 
 /**
  * The rooms someone is in, hidden ones too, with whether each is marked unread for them, their level in
- * it and when it was last active, which orders DMs, in the order they were made, for the app to go home
- * to the oldest and to `/rooms` to the newest, and each room's place in the shared order. Rooms from
- * before the Workspace kept a list (`LEGACY_ROOMS`) have ids that don't sort by time, so they go by when
- * they were listed.
+ * it and when it was last active, which orders DMs, and each room's place in the shared order. They come
+ * in the order they were put in them, which the sidebar keeps for the rooms they haven't starred and the
+ * shared order doesn't rank, so a room someone's just been put in, new or not, comes last, and the app
+ * goes home to the first and `/rooms` to the latest. The rooms they were put in at once, as someone who
+ * joins is put in every open room, go in the order they were made, and rooms from before the Workspace
+ * kept a list (`LEGACY_ROOMS`), whose ids don't sort by time, by when they were listed.
  */
 export const ROOMS_FOR_USER = `SELECT rooms.id, rooms.kind, rooms.name, rooms.icon, ${ACTIVE_AT}, memberships.unread_at IS NOT NULL AS unread,
     memberships.unread_at AS unread_since, memberships.involvement, rooms.shared_position, rooms.huddle_started_at, rooms.huddle_user_ids
   FROM memberships JOIN rooms ON rooms.id = memberships.room_id
-  WHERE memberships.user_id = ? ORDER BY rooms.created_at, rooms.id`;
+  WHERE memberships.user_id = ? ORDER BY memberships.created_at, rooms.created_at, rooms.id`;
 
 /** The ids of the rooms in `rows` that the shared order ranks, in its order. */
 const sharedOrderOf = (rows: SidebarRow[]): RoomId[] =>

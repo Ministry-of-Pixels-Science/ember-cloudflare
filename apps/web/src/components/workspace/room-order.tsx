@@ -22,7 +22,7 @@ const ORDER_CHANGES = "You’ve changed the room order. Save it before you leave
 const staysInSettings = (path: string) => path === WORKSPACE_SETTINGS_PATH;
 
 interface Props {
-  /** The rooms in this administrator's sidebar, but their DMs, in any order. */
+  /** The rooms in this administrator's sidebar, but their DMs, in the order they were put in them. */
   rooms: SharedRoom[];
   /** The ones of them the shared order ranks, in its order. */
   sharedOrder: RoomId[];

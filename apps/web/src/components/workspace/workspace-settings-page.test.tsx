@@ -107,11 +107,11 @@ const asLinus: Me = { id: linus.id, name: linus.name, administrator: false };
 
 /** A room shared by name, as the sidebar lists it. */
 const shared = (id: string, name: string): SidebarRoom => ({ id, name, kind: id.startsWith("secret") ? "closed" : "open", icon: null, unread: false, involvement: "mentions" });
-/** Ada's rooms, in the order she joined them, as her sidebar lists them, with a DM, which isn't put in order. */
+/** Ada's rooms, in the order she was put in them, as her sidebar lists them, with a DM, which isn't put in order. */
 const adasRooms: SidebarRoom[] = [
+  shared("secret", "Design"),
   shared("general", "general"),
   shared("random", "random"),
-  shared("secret", "Design"),
   { id: "dm", kind: "direct", members: [asAda, { id: grace.id, name: grace.name }], activeAt: "2026-10-16T12:00:00.000Z", unread: false, involvement: "everything" },
 ];
 
@@ -2475,12 +2475,15 @@ describe("Shared room order", () => {
   /** Moves `name`'s row with Alt and an arrow. */
   const altArrow = (name: string, key: "ArrowUp" | "ArrowDown") => fireEvent.keyDown(orderRow(name), { key, altKey: true });
 
-  it("lists an administrator's rooms but their DMs, the ones the shared order ranks first, in its order, then the rest by name", async () => {
+  it("lists an administrator's rooms but their DMs, the ones the shared order ranks first, in its order, then the rest in the order they were put in them", async () => {
     showPage();
     await screen.findByRole("list", { name: "Room order" });
     expect(ordered()).toEqual(["Design", "general", "random"]);
     act(() => sidebarSays(adasRooms, ["random", "general"]));
     expect(ordered()).toEqual(["random", "general", "Design"]);
+    // Whatever their names, as a room she's just been put in comes last.
+    act(() => sidebarSays([...adasRooms, shared("annex", "Annex")], ["random"]));
+    expect(ordered()).toEqual(["random", "Design", "general", "Annex"]);
 
     expect(screen.getByText(HELP)).toBeInTheDocument();
     for (const row of orderRows()) {
@@ -2585,7 +2588,7 @@ describe("Shared room order", () => {
     expect(button("Save order")).toBeEnabled();
 
     fireEvent.click(button("Cancel"));
-    expect(ordered()).toEqual(["general", "Ops", "random"]);
+    expect(ordered()).toEqual(["general", "random", "Ops"]);
     act(() => sidebarSays(adasRooms, ["random", "secret"]));
     expect(ordered()).toEqual(["random", "Design", "general"]);
   });

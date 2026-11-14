@@ -29,10 +29,12 @@ const unstarred: Favorites = { rooms: [], version: 0 };
 const sidebar = (rooms: SidebarRoom[], favorites = unstarred): Sidebar => ({ rooms, favorites, sharedOrder: [], invitation: null, suggestions: [], huddles: {} });
 
 describe("Create an open room", () => {
-  it("puts a new room last, as the room made most recently, and the sidebar in its place by name", () => {
-    const rooms = apart(withRoom([room("r1", "Design"), room("r2", "general"), room("r3", "Zebra")], room("r4", "Finance"))).shared;
-    expect(rooms.map((r) => r.name)).toEqual(["Design", "general", "Zebra", "Finance"]);
-    expect(inSidebarOrder(rooms, []).map((r) => r.name)).toEqual(["Design", "Finance", "general", "Zebra"]);
+  it("puts a new room last, as the room someone was put in most recently, and the sidebar below every other room, whatever its name", () => {
+    const rooms = apart(withRoom([room("r1", "general"), room("r2", "Zebra"), room("r3", "Design")], room("r4", "Annex"))).shared;
+    expect(rooms.map((r) => r.name)).toEqual(["general", "Zebra", "Design", "Annex"]);
+    expect(inSidebarOrder(rooms, []).map((r) => r.name)).toEqual(["general", "Zebra", "Design", "Annex"]);
+    // Below the starred rooms and the ones the shared order ranks, which it doesn't yet.
+    expect(inSidebarOrder(rooms, ["r3"], ["r2", "r1"]).map((r) => r.name)).toEqual(["Design", "Zebra", "general", "Annex"]);
   });
 
   it("keeps a room saved before the list arrives, and adds it to the list when it does", () => {
@@ -44,10 +46,10 @@ describe("Create an open room", () => {
 });
 
 describe("Room settings page", () => {
-  it("keeps a renamed room in its place, and the sidebar moves it to its new name's", () => {
+  it("keeps a renamed room in its place, in the sidebar too", () => {
     const rooms = apart(withRoom([room("r1", "Design"), room("r2", "general")], room("r1", "Product design"))).shared;
     expect(rooms).toEqual([room("r1", "Product design"), room("r2", "general")]);
-    expect(inSidebarOrder(rooms, [])).toEqual([room("r2", "general"), room("r1", "Product design")]);
+    expect(inSidebarOrder(rooms, [])).toEqual([room("r1", "Product design"), room("r2", "general")]);
   });
 
   it("keeps a rename saved before the list arrives over the name the list has", () => {
@@ -167,31 +169,31 @@ describe("Welcome card for administrators, until they dismiss it", () => {
   });
 });
 
-/** Four rooms, in the order they were made. */
-const four = [room("r1", "Design"), room("r2", "general"), room("r3", "Ops"), room("r4", "Zebra")];
+/** Four rooms, in the order someone was put in them, which isn't by name. */
+const four = [room("r1", "general"), room("r2", "Zebra"), room("r3", "Design"), room("r4", "Ops")];
 
 describe("Room order", () => {
-  it("lists the starred rooms first, in the order they were starred, then the rest by name", () => {
-    expect(inSidebarOrder(four, ["r4", "r2"]).map((r) => r.name)).toEqual(["Zebra", "general", "Design", "Ops"]);
+  it("lists the starred rooms first, in the order they were starred, then the rest in the order they were put in them", () => {
+    expect(inSidebarOrder(four, ["r4", "r2"]).map((r) => r.name)).toEqual(["Ops", "Zebra", "general", "Design"]);
   });
 
   it("passes over stars on rooms the list hasn't got", () => {
-    expect(inSidebarOrder(four, ["gone", "r3"]).map((r) => r.name)).toEqual(["Ops", "Design", "general", "Zebra"]);
+    expect(inSidebarOrder(four, ["gone", "r3"]).map((r) => r.name)).toEqual(["Design", "general", "Zebra", "Ops"]);
   });
 
-  it("orders names as the browser's language does, whatever their case, then by id", () => {
+  it("keeps the rooms nothing ranks in the order they were put in them, whatever their names and ids", () => {
     const rooms = [room("r4", "zed"), room("r2", "alpha"), room("r3", "Éclair"), room("r1", "ALPHA")];
-    expect(inSidebarOrder(rooms, []).map((r) => r.id)).toEqual(["r1", "r2", "r3", "r4"]);
+    expect(inSidebarOrder(rooms, []).map((r) => r.id)).toEqual(["r4", "r2", "r3", "r1"]);
   });
 });
 
 describe("Shared room order", () => {
-  it("lists the rooms the shared order ranks after the stars, in its order, then the rest by name", () => {
-    expect(inSidebarOrder(four, ["r4"], ["r3", "r4", "r2"]).map((r) => r.name)).toEqual(["Zebra", "Ops", "general", "Design"]);
+  it("lists the rooms the shared order ranks after the stars, in its order, then the rest in the order they were put in them", () => {
+    expect(inSidebarOrder(four, ["r4"], ["r3", "r4", "r2"]).map((r) => r.name)).toEqual(["Ops", "Design", "Zebra", "general"]);
   });
 
   it("passes over ranks of rooms the list hasn't got", () => {
-    expect(inSidebarOrder(four, [], ["gone", "r2"]).map((r) => r.name)).toEqual(["general", "Design", "Ops", "Zebra"]);
+    expect(inSidebarOrder(four, [], ["gone", "r2"]).map((r) => r.name)).toEqual(["Zebra", "general", "Design", "Ops"]);
   });
 
   it("takes the order an administrator saves here, over a list asked for before they saved it", () => {

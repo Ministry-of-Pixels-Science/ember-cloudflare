@@ -13,13 +13,14 @@ import {
 } from "@ember/protocol";
 import { isHidden } from "./involvement";
 
-// Someone's rooms keep the order `GET /api/sidebar` gives them, the order they were made, which `/` and
-// `/rooms` go by. The sidebar lists their DMs apart from the other rooms, and lists the rooms they've
-// starred first, in the order they starred them, then the rooms the workspace's shared order ranks, in
-// its order, then the rest by name: each name lowercased and compared as `localeCompare` compares it, in
-// the browser's language, then by id. Their DMs go by when each was last active, latest first, as
-// Campfire's sorted_list_controller.js sorts them. The rooms someone has hidden, whose level is
-// "invisible", are listed too, for them to open, but their sidebar leaves them out.
+// Someone's rooms keep the order `GET /api/sidebar` gives them, the order they were put in them, which
+// `/` and `/rooms` go by. The sidebar lists their DMs apart from the other rooms, and lists the rooms
+// they've starred first, in the order they starred them, then the rooms the workspace's shared order
+// ranks, in its order, then the rest in the order they were put in them, rather than by name, as the
+// project's owner chose, so a room that's just been made, or that they've just been put in, comes last.
+// Their DMs go by when each was last active, latest first, as Campfire's sorted_list_controller.js sorts
+// them. The rooms someone has hidden, whose level is "invisible", are listed too, for them to open, but
+// their sidebar leaves them out.
 
 /** A row in the sidebar's Rooms: a room shared by name, open or private. */
 export type SharedSidebarRoom = Extract<SidebarRoom, SharedRoom>;
@@ -38,25 +39,22 @@ export function apart(rooms: SidebarRoom[]): { shared: SharedSidebarRoom[]; dire
   return { shared, directs };
 }
 
-const collator = new Intl.Collator();
-
-const byId = (a: Room, b: Room) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
-
 /** Each room's place in `order`. */
 const placesIn = (order: RoomId[]) => new Map(order.map((id, place) => [id, place]));
 
 /**
- * `rooms` in the sidebar's order, the rooms in `favorites` first, then the ones `sharedOrder` ranks, each
- * room's places and name worked out once rather than at every comparison.
+ * `rooms`, given in the order someone was put in them, in the sidebar's order: the rooms in `favorites`
+ * first, then the ones `sharedOrder` ranks, then the rest as they're given, each room's places worked
+ * out once rather than at every comparison.
  */
 export function inSidebarOrder<T extends SharedRoom>(rooms: T[], favorites: RoomId[], sharedOrder: RoomId[] = []): T[] {
   const stars = placesIn(favorites);
   const shared = placesIn(sharedOrder);
   return (
     rooms
-      .map((room) => ({ room, star: stars.get(room.id) ?? Infinity, shared: shared.get(room.id) ?? Infinity, name: room.name.toLowerCase() }))
+      .map((room, given) => ({ room, star: stars.get(room.id) ?? Infinity, shared: shared.get(room.id) ?? Infinity, given }))
       // Two rooms that neither ranks are Infinity - Infinity apart, which is NaN, so they go by what's next.
-      .sort((a, b) => a.star - b.star || a.shared - b.shared || collator.compare(a.name, b.name) || byId(a.room, b.room))
+      .sort((a, b) => a.star - b.star || a.shared - b.shared || a.given - b.given)
       .map(({ room }) => room)
   );
 }
@@ -98,8 +96,8 @@ export const markedUnread = (room: SidebarRoom, currentRoomId: RoomId | null) =>
 
 /**
  * `rooms` with `room` as it is now, in place of what it was, keeping its mark and level, or last, read
- * and at the level a room starts at, as the room made most recently, which a room someone has just been
- * put in counts as until the list loads again.
+ * and at the level a room starts at, as the room someone was put in most recently, whether it's just
+ * been made or they've just been put in it, which is where the list has it when it loads again.
  * A DM keeps the later of the two times it was last active, since a message can come between the server
  * reading it and its answer arriving.
  */
