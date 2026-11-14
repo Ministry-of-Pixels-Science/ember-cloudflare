@@ -128,7 +128,8 @@ async function searchMessages(env: Env, access: OutsideAccess, { words, room_id:
 /**
  * Sends `text`, in Markdown, to a room as the person, in the thread under the message `thread_id` names,
  * if it names one. It reads as they wrote it, to everyone in the room. Markdown has no way to mention
- * anyone, so a message sent this way calls nobody, @ember and the agents included.
+ * anyone, and the room posts it as a reply, which goes to no bot, so a message sent this way calls
+ * nobody, @ember and the agents included, even in a direct message with one.
  */
 async function sendMessage(env: Env, access: OutsideAccess, { room_id: roomId, text, thread_id: threadId }: Record<string, unknown>): Promise<unknown> {
   if (typeof text !== "string" || text.trim() === "") throw new Refused("Give the message to send, as `text`.");
@@ -202,7 +203,7 @@ const SENDING: Tool[] = [
     name: "send_message",
     title: "Send a message",
     description:
-      "Sends a message to a room as the connected person: everyone in the room sees it as theirs, so send only what they asked for, worded as they'd want. `text` is Markdown. With `thread_id`, it's a reply in the thread under that message. Answers the message as sent.",
+      "Sends a message to a room as the connected person: everyone in the room sees it as theirs, so send only what they asked for, worded as they'd want. `text` is Markdown. With `thread_id`, it's a reply in the thread under that message. No bot or AI assistant in Ember is sent it or answers it, even in a direct message with one. Answers the message as sent.",
     takes: {
       room_id: ROOM_ID,
       text: { type: "string", description: "The message, in Markdown." },

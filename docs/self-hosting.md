@@ -1067,8 +1067,9 @@ with nothing.
 - **It can send messages as them, if they let it.** The page that asks has a box for that, ticked
   unless they clear it, and their profile says which apps can. `send_message` posts Markdown to a room
   they're in, or as a reply in a thread, and everyone there sees it as theirs: nothing marks it as
-  sent by an app. It mentions nobody, so it calls neither @ember nor an agent, and one person's
-  apps send at most 20 messages a minute between them. An app that asks for nothing by name only
+  sent by an app. It mentions nobody and goes to no bot, so it calls neither @ember, an agent nor a
+  bot's webhook, even in a direct message with one, and one person's apps send at most 20 messages
+  a minute between them. An app that asks for nothing by name only
   reads.
 - **Your profile lists the apps connected as you**, under **AI apps**, with when each was connected
   and last asked Ember anything, and **Disconnect**, which ends what that app was given at once. One

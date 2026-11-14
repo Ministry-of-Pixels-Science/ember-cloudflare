@@ -16,7 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toBase64url } from "../src/encoding";
 import { MAX_SHOWN_LENGTH, MESSAGES_FOUND, SENDING_TOO_FAST } from "../src/outside/tools";
 import { MAX_OUTSIDE_CLIENTS, OUTSIDE_SENDS_PER_MINUTE } from "../src/workspace";
-import { api, connect, cookieOf, createRoom, direct, freshDeploy, origin, post, roomSql, shown, signIn, upload, workspaceSql, type Session, type Socket } from "./support";
+import { api, connect, cookieOf, createRoom, direct, freshDeploy, origin, post, roomSql, settle, shown, signIn, upload, workspaceSql, type Session, type Socket } from "./support";
 
 // Outside AI: an AI app connects to Ember over the Model Context Protocol, at `/mcp`, and signs in
 // with OAuth, where Ember is the authorization server. The tests are the app: they find out how to sign
@@ -840,6 +840,28 @@ describe("What a connected AI app sends", () => {
     const thread = await found<{ replies: unknown[] }>(token, "read_thread", { room_id: general, message_id: question.id });
     expect(thread.replies).toEqual([answered.message]);
     ada.close();
+  });
+
+  it("sends what it sends to no bot, though it's to a direct message with one, where what its person writes goes to it", async () => {
+    const { administrator, member, token } = await sending();
+    const added = await api("/api/account/bots", { method: "POST", headers: { Cookie: administrator.cookie }, body: JSON.stringify({ name: "Build Bot", webhookUrl: "https://bots.example.com/build" }) });
+    const { bot } = (await added.json()) as BotAnswer;
+    const room = await direct(member, { user: { id: bot.id, name: bot.name }, cookie: "" });
+    const delivered: Array<{ message: { id: string } }> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      delivered.push(await new Request(input, init).json());
+      return new Response(null, { status: 204 });
+    });
+
+    const sent = await found<Sent>(token, "send_message", { room_id: room.id, text: "Build it" });
+    expect(sent.message).toMatchObject({ from: "Grace Hopper", text: "Build it" });
+    // Her own message, written after, is the only one the bot is sent.
+    const grace = await connect(room.id, member);
+    const written = await post(grace, "<p>Build it, please</p>");
+    await vi.waitFor(() => expect(delivered).toHaveLength(1));
+    await settle(grace);
+    expect(delivered.map(({ message }) => message.id)).toEqual([written.id]);
+    grace.close();
   });
 
   it("refuses a message with nothing in it or too much, one to a room that isn't theirs, and a reply to no thread", async () => {
