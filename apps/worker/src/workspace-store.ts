@@ -3179,6 +3179,7 @@ export class WorkspaceStore {
       ...forgettingSearches(userId),
       statement(`DELETE FROM push_subscriptions WHERE user_id = ?`, userId),
       statement(`DELETE FROM own_app_sign_ins WHERE user_id = ?`, userId),
+      statement(`DELETE FROM outside_spent_tokens WHERE connection_id IN (SELECT id FROM outside_connections WHERE user_id = ?)`, userId),
       statement(`DELETE FROM outside_connections WHERE user_id = ?`, userId),
       statement(DEACTIVATE, `-deactivated-${uuid}@`, now, userId),
     ]);
@@ -3204,6 +3205,7 @@ export class WorkspaceStore {
       statement(`UPDATE users SET status = ${BANNED}, updated_at = ? WHERE id = ? AND status <> ${BANNED}`, now, userId),
       statement(QUEUE_PURGES, userId, dueAt),
       statement(`DELETE FROM own_app_sign_ins WHERE user_id = ?`, userId),
+      statement(`DELETE FROM outside_spent_tokens WHERE connection_id IN (SELECT id FROM outside_connections WHERE user_id = ?)`, userId),
       statement(`DELETE FROM outside_connections WHERE user_id = ?`, userId),
     ])) as unknown[][];
     return revocations!.length > 0 || reconnections!.length > 0 || purges!.length > 0;

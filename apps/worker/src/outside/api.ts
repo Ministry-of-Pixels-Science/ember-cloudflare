@@ -17,6 +17,8 @@ import {
 import { clientOf, credentialsOf, newSessionToken, tokenDigest } from "../auth";
 import { bodyUpTo, jsonBodyOf } from "../bodies";
 import type { Env } from "../env";
+import { notFound as pageNotFound } from "../error-pages";
+import { anyOtherPage } from "../pages";
 import { urlOf } from "../request-url";
 import { workspace } from "../workspace";
 import { outsideAi } from "./endpoint";
@@ -24,6 +26,7 @@ import {
   ACCESS_TTL_SECONDS,
   clientDocumentAt,
   isClientDocumentAddress,
+  isResource,
   issuerFor,
   OUTSIDE_REGISTER_PATH,
   OUTSIDE_REVOKE_PATH,
@@ -44,9 +47,9 @@ import type { OutsideClient } from "./store";
 // What the Worker answers the AI apps that connect to Ember, and the pages that have to do with them.
 // An app's own requests carry no cookie: finding out how to sign in, registering, exchanging a code
 // for tokens and asking `/mcp` with one. They're answered to any origin, since some apps run in a
-// browser, and none of them answers while outside AI is off. The page that asks a person whether to
-// connect an app, their profile and the administrator's switch go by the person's session, as the rest
-// of the API does.
+// browser, and none of them answers while outside AI is off, nor does the page that asks a person
+// whether to connect an app. What that page asks, their profile and the administrator's switch go by
+// the person's session, as the rest of the API does.
 
 const NOT_SIGNED_IN = "Not signed in";
 const PRIVATE = { "Cache-Control": "no-store" };
@@ -96,6 +99,11 @@ export function outsideAction(request: Request, env: Env, pathname: string): (()
   return null;
 }
 
+/** `GET /oauth/authorize`: the app's page that asks a person whether to connect an AI app, which isn't there while outside AI is off. */
+export async function outsideConnectPage(request: Request, env: Env, pathname: string): Promise<Response> {
+  return (await workspace(env).outsideAi()) ? anyOtherPage(request, env, pathname) : pageNotFound(request);
+}
+
 /** Whether `pathname` is where AI apps register themselves, which a banned IP address can't. */
 export const isOutsideRegistration = (pathname: string) => pathname === OUTSIDE_REGISTER_PATH;
 
@@ -141,6 +149,7 @@ async function newTokens(env: Env): Promise<{ access: string; refresh: string; n
 
 /** `POST /oauth/token`: gives an app its tokens for the code it was sent back with, or its next ones for its refresh token, which that replaces. */
 async function giveTokens(request: Request, env: Env): Promise<Response> {
+  if (!(await workspace(env).outsideAi())) return notFound();
   const form = await formOf(request);
   const [grant, clientId] = [form?.get("grant_type"), form?.get("client_id")];
   if (!form || !clientId) return oauthError("invalid_request", "The request must be a form with a client_id.");
@@ -148,10 +157,12 @@ async function giveTokens(request: Request, env: Env): Promise<Response> {
   const presented = form.get(grant === "authorization_code" ? "code" : "refresh_token");
   const verifier = form.get("code_verifier");
   if (!presented || (grant === "authorization_code" && !verifier)) return oauthError("invalid_request", "The request is missing what its grant_type takes.");
+  const resource = form.get("resource");
+  if (resource !== null && !isResource(resource)) return oauthError("invalid_target", "The resource must be the address the app connects to Ember at.");
   const [digest, tokens] = await Promise.all([tokenDigest(presented, env.SESSION_SECRET), newTokens(env)]);
   const given =
     grant === "authorization_code"
-      ? await workspace(env).exchangeOutsideCode(digest, { clientId, redirectUri: form.get("redirect_uri"), verifier: verifier!, resource: form.get("resource") }, tokens.next)
+      ? await workspace(env).exchangeOutsideCode(digest, { clientId, redirectUri: form.get("redirect_uri"), verifier: verifier!, resource }, tokens.next)
       : await workspace(env).refreshOutside(digest, clientId, tokens.next);
   if (given === "off") return notFound();
   if (!given) return oauthError("invalid_grant", grant === "authorization_code" ? "The code is no good. Start connecting again." : "The refresh token is no good. Connect again.");
@@ -161,6 +172,7 @@ async function giveTokens(request: Request, env: Env): Promise<Response> {
 
 /** `POST /oauth/revoke`: ends the connection a token is of (RFC 7009), answering 200 whether there was one or not. */
 async function revokeToken(request: Request, env: Env): Promise<Response> {
+  if (!(await workspace(env).outsideAi())) return notFound();
   const form = await formOf(request);
   const [token, clientId] = [form?.get("token"), form?.get("client_id")];
   if (!token || !clientId) return oauthError("invalid_request", "The request must be a form with a token and a client_id.");

@@ -18,9 +18,9 @@ CREATE INDEX IF NOT EXISTS outside_clients_created ON outside_clients (created_a
 -- names with spaces between, and resource the address it said it connects to, if it said. A row
 -- starts when its person allows the app, with the digest of the code the app is sent back with, the
 -- challenge the app proves it began with, and when the code expires. Once the app has exchanged the
--- code, the row holds the digests of its access and refresh tokens, with when each expires, and of
--- the refresh token before this one, which nothing but a copy presents again. used_at says when the
--- app last asked Ember anything, to the hour. No token is kept, only its HMAC under SESSION_SECRET.
+-- code, the row holds the digests of its access and refresh tokens, with when each expires. used_at
+-- says when the app last asked Ember anything, to the hour. No token is kept, only its HMAC under
+-- SESSION_SECRET.
 CREATE TABLE IF NOT EXISTS outside_connections (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users (id),
@@ -36,13 +36,21 @@ CREATE TABLE IF NOT EXISTS outside_connections (
   access_expires_at TEXT,
   refresh_digest TEXT,
   refresh_expires_at TEXT,
-  spent_refresh_digest TEXT,
   created_at TEXT NOT NULL,
   used_at TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS outside_connections_code ON outside_connections (code_digest);
 CREATE UNIQUE INDEX IF NOT EXISTS outside_connections_access ON outside_connections (access_digest) WHERE access_digest IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS outside_connections_refresh ON outside_connections (refresh_digest) WHERE refresh_digest IS NOT NULL;
-CREATE INDEX IF NOT EXISTS outside_connections_spent ON outside_connections (spent_refresh_digest) WHERE spent_refresh_digest IS NOT NULL;
 CREATE INDEX IF NOT EXISTS outside_connections_user ON outside_connections (user_id);
 CREATE INDEX IF NOT EXISTS outside_connections_client ON outside_connections (client_id);
+
+-- outside_spent_tokens holds the digest of each refresh token a connection has replaced, which
+-- nothing but a copy presents again, so one that comes ends its connection. A row is kept until the
+-- token it's of would have expired anyway, or its connection ends.
+CREATE TABLE IF NOT EXISTS outside_spent_tokens (
+  digest TEXT PRIMARY KEY,
+  connection_id TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS outside_spent_tokens_connection ON outside_spent_tokens (connection_id, expires_at);

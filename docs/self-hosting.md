@@ -1082,11 +1082,12 @@ with Ember as the authorization server:
   computer, at any port, for an app that runs there. An app that's opened by a scheme of its own,
   such as `cursor://`, can't connect yet.
 - An access token lasts an hour, and a refresh token is replaced each time it's used and lasts 90 days
-  unused. Using a spent refresh token, or a code twice, ends that connection, as either means it was
-  copied. Ember keeps only a keyed digest of each, made with `SESSION_SECRET`, so its database holds
-  nothing an app could sign in with.
-- A token works only at the address the app said it was for, so one given for another Ember, or for
-  this one at another address, is refused.
+  unused. Using a refresh token that was replaced, however long ago, or a code twice, ends that
+  connection, as either means it was copied. Ember keeps only a keyed digest of each, made with
+  `SESSION_SECRET`, so its database holds nothing an app could sign in with.
+- A token works only at the address the app said it was for, when it asked to connect or when it
+  exchanged its code, so one given for another Ember, or for this one at another address, is
+  refused. An app that never says is bound to none: its tokens are still only this Ember's.
 
 Requests to `/mcp` are answered in a Durable Object of their own, `OutsideAi`, apart from the rooms and
 the workspace, as an app's tools are read in `AppConnector`: reading a request and checking it takes

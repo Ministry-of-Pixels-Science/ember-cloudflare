@@ -79,6 +79,7 @@ import {
   type WorkspaceSettings,
 } from "@ember/protocol";
 import { agentsName } from "@ember/protocol/agents";
+import { OUTSIDE_AUTHORIZE_PATH } from "@ember/protocol/outside";
 import { mentionPromptItem } from "@ember/richtext";
 import { isAccountLogoPath, showAccountLogo, storeLogo } from "./account-logo";
 import {
@@ -113,7 +114,7 @@ import {
   showApp,
   signOutOfApp,
 } from "./apps/api";
-import { answerOutsideAsk, changeOutsideAi, describeOutsideAsk, disconnectOutside, isOutsideRegistration, outsideAction } from "./outside/api";
+import { answerOutsideAsk, changeOutsideAi, describeOutsideAsk, disconnectOutside, isOutsideRegistration, outsideAction, outsideConnectPage } from "./outside/api";
 import { CLIENT_DOCUMENT_PATH } from "./apps/oauth";
 import { agentPage, changeAgent, createAgent, deleteAgent, listAgents, removeAgentAvatar, showAgent, tryAgent } from "./assistant/agents";
 import {
@@ -1318,6 +1319,7 @@ async function route(request: Request, env: Env, pathname: string): Promise<Resp
   if (page?.page === "bot-settings") return botPage(request, env, pathname, page.userId);
   if (page?.page === "agent-settings") return agentPage(request, env, pathname, page.agentId);
   if (page?.page === "app-settings") return appPage(request, env, pathname, page.appId);
+  if (pathname === OUTSIDE_AUTHORIZE_PATH && !write) return outsideConnectPage(request, env, pathname);
   return anyOtherPage(request, env, pathname);
 }
 

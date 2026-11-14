@@ -1478,9 +1478,9 @@ export class Workspace extends DurableObject<Env> {
   /**
    * Gives the AI app that presents the code with the digest `codeDigest` its first tokens, `next`, and
    * answers what its connection allows, or null for a code that's no good: one Ember never gave, that
-   * has expired, that another app was given, or whose app can't prove it began the request (PKCE). A
-   * code that comes a second time has been copied, so the connection it began ends. "off" while
-   * outside AI is.
+   * has expired, that another app was given, whose app can't prove it began the request (PKCE), or
+   * that was asked for to connect somewhere other than the app now says. A code that comes a second
+   * time has been copied, so the connection it began ends. "off" while outside AI is.
    */
   async exchangeOutsideCode(
     codeDigest: string,
@@ -1499,7 +1499,8 @@ export class Workspace extends DurableObject<Env> {
       if (proof.resource !== null && connection.resource !== null && proof.resource !== connection.resource) return null;
       if (!(await provesChallenge(proof.verifier, connection.codeChallenge))) return null;
       const now = Date.now();
-      const exchanged = await this.outside.exchange(connection.id, outsideTokensAt(next, now), new Date(now).toISOString());
+      // An app that says only now where it connects to has its tokens bound to that.
+      const exchanged = await this.outside.exchange(connection.id, outsideTokensAt(next, now), proof.resource, new Date(now).toISOString());
       return exchanged ? { scope: connection.scope } : null;
     });
   }
@@ -1520,7 +1521,7 @@ export class Workspace extends DurableObject<Env> {
         return null;
       }
       if (connection.clientId !== clientId || connection.refreshExpiresAt === null || connection.refreshExpiresAt <= new Date(now).toISOString()) return null;
-      const rotated = await this.outside.rotate(connection.id, refreshDigest, outsideTokensAt(next, now));
+      const rotated = await this.outside.rotate(connection.id, refreshDigest, outsideTokensAt(next, now), new Date(now).toISOString());
       return rotated ? { scope: connection.scope } : null;
     });
   }

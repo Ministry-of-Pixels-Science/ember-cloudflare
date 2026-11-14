@@ -113,7 +113,7 @@ export async function provesChallenge(verifier: string, challenge: string): Prom
 }
 
 /** Whether `resource` could be where an app connects to an Ember: an address ending in `/mcp`. Whether it's this one is checked where its token is used. */
-function isResource(resource: string): boolean {
+export function isResource(resource: string): boolean {
   if (resource.length > MAX_OUTSIDE_ADDRESS_LENGTH) return false;
   const url = URL.parse(resource);
   return url !== null && url.pathname === MCP_PATH && url.search === "" && !resource.includes("#") && (url.protocol === "https:" || isLocal(url));

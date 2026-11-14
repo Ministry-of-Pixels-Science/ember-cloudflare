@@ -4,7 +4,8 @@ import { ACTIVE, setSetting } from "../workspace-store";
 
 // What the Workspace keeps of outside AI (migrations/0062_outside_ai.sql): the AI apps that registered
 // themselves, and each app connected as one person, from the code its person's answer sends it back
-// with to the tokens it then asks with. Every token is kept as its digest alone.
+// with to the tokens it then asks with, and the refresh tokens it has replaced. Every token is kept as
+// its digest alone.
 
 /** An AI app that registered itself: the id Ember gave it, the name it gave, and where it may have a browser sent back. */
 export interface OutsideClient {
@@ -91,6 +92,9 @@ const CONNECTIONS = `SELECT c.id, c.user_id, c.client_id, c.client_name, c.redir
 
 const SET_OUTSIDE_AI = setSetting("outside_ai");
 
+/** Forgets the spent refresh tokens of connections that are gone: it goes in the batch of whatever forgets connections. */
+export const FORGET_SPENT_OF_FORGOTTEN = `DELETE FROM outside_spent_tokens WHERE connection_id NOT IN (SELECT id FROM outside_connections)`;
+
 export class OutsideStore {
   constructor(private readonly db: Db) {}
 
@@ -98,7 +102,7 @@ export class OutsideStore {
   async turn(on: boolean, now: string): Promise<void> {
     await this.db.batch([
       statement(SET_OUTSIDE_AI, JSON.stringify(on), now),
-      ...(on ? [] : [statement(`DELETE FROM outside_connections`), statement(`DELETE FROM outside_clients`)]),
+      ...(on ? [] : [statement(`DELETE FROM outside_connections`), statement(`DELETE FROM outside_spent_tokens`), statement(`DELETE FROM outside_clients`)]),
     ]);
   }
 
@@ -136,15 +140,16 @@ export class OutsideStore {
    * refresh token has.
    */
   async begin(begun: NewOutsideConnection, now: string, max: number): Promise<boolean> {
-    const [, , kept] = (await this.db.batch([
+    const [, , , kept] = (await this.db.batch([
       statement(`DELETE FROM outside_connections WHERE user_id = ? AND access_digest IS NULL AND code_expires_at <= ?`, begun.userId, now),
       statement(`DELETE FROM outside_connections WHERE user_id = ? AND refresh_expires_at <= ?`, begun.userId, now),
+      statement(FORGET_SPENT_OF_FORGOTTEN),
       statement(
         `INSERT INTO outside_connections (id, user_id, client_id, client_name, redirect_uri, scope, resource, code_digest, code_challenge, code_expires_at, created_at)
          SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11 WHERE (SELECT count(*) FROM outside_connections WHERE user_id = ?2) < ?12 RETURNING id`,
         ...[begun.id, begun.userId, begun.clientId, begun.clientName, begun.redirectUri, begun.scope, begun.resource, begun.codeDigest, begun.codeChallenge, begun.codeExpiresAt, now, max],
       ),
-    ])) as [unknown[], unknown[], unknown[]];
+    ])) as [unknown[], unknown[], unknown[], unknown[]];
     return kept.length > 0;
   }
 
@@ -154,13 +159,17 @@ export class OutsideStore {
     return row ? connection(row) : null;
   }
 
-  /** Gives the connection `id` its first `tokens`, while its code is unexchanged and hasn't expired: answers whether it was. */
-  async exchange(id: string, tokens: OutsideTokens, now: string): Promise<boolean> {
+  /**
+   * Gives the connection `id` its first `tokens`, while its code is unexchanged and hasn't expired:
+   * answers whether it was. A connection that began without saying where it connects to is for
+   * `resource` from now on, if that's given.
+   */
+  async exchange(id: string, tokens: OutsideTokens, resource: string | null, now: string): Promise<boolean> {
     const [exchanged] = (await this.db.batch([
       statement(
-        `UPDATE outside_connections SET access_digest = ?, access_expires_at = ?, refresh_digest = ?, refresh_expires_at = ?
+        `UPDATE outside_connections SET access_digest = ?, access_expires_at = ?, refresh_digest = ?, refresh_expires_at = ?, resource = coalesce(resource, ?)
          WHERE id = ? AND access_digest IS NULL AND code_expires_at > ? RETURNING id`,
-        ...[tokens.accessDigest, tokens.accessExpiresAt, tokens.refreshDigest, tokens.refreshExpiresAt, id, now],
+        ...[tokens.accessDigest, tokens.accessExpiresAt, tokens.refreshDigest, tokens.refreshExpiresAt, resource, id, now],
       ),
     ])) as [unknown[]];
     return exchanged.length > 0;
@@ -172,21 +181,35 @@ export class OutsideStore {
     return row ? connection(row) : null;
   }
 
-  /** Gives the connection `id` its next `tokens`, in place of the ones the refresh token with the digest `was` came with, while that's still its refresh token: answers whether it was. */
-  async rotate(id: string, was: string, tokens: OutsideTokens): Promise<boolean> {
-    const [rotated] = (await this.db.batch([
+  /**
+   * Gives the connection `id` its next `tokens`, in place of the ones the refresh token with the digest
+   * `was` came with, while that's still its refresh token: answers whether it was. The one it replaces
+   * is kept as spent, until `now` passes when it would have expired.
+   */
+  async rotate(id: string, was: string, tokens: OutsideTokens, now: string): Promise<boolean> {
+    const [, , rotated] = (await this.db.batch([
+      statement(`DELETE FROM outside_spent_tokens WHERE connection_id = ? AND expires_at <= ?`, id, now),
       statement(
-        `UPDATE outside_connections SET spent_refresh_digest = refresh_digest, access_digest = ?, access_expires_at = ?, refresh_digest = ?, refresh_expires_at = ?
+        `INSERT INTO outside_spent_tokens (digest, connection_id, expires_at)
+         SELECT refresh_digest, id, refresh_expires_at FROM outside_connections WHERE id = ? AND refresh_digest = ?`,
+        id,
+        was,
+      ),
+      statement(
+        `UPDATE outside_connections SET access_digest = ?, access_expires_at = ?, refresh_digest = ?, refresh_expires_at = ?
          WHERE id = ? AND refresh_digest = ? RETURNING id`,
         ...[tokens.accessDigest, tokens.accessExpiresAt, tokens.refreshDigest, tokens.refreshExpiresAt, id, was],
       ),
-    ])) as [unknown[]];
+    ])) as [unknown[], unknown[], unknown[]];
     return rotated.length > 0;
   }
 
-  /** Forgets the connection whose last refresh token, spent since, has the digest `spentDigest`: something has a copy of it. */
+  /** Forgets the connection one of whose refresh tokens, spent since, has the digest `spentDigest`: something has a copy of it. */
   async forgetSpent(spentDigest: string): Promise<void> {
-    await this.db.batch([statement(`DELETE FROM outside_connections WHERE spent_refresh_digest = ?`, spentDigest)]);
+    await this.db.batch([
+      statement(`DELETE FROM outside_connections WHERE id IN (SELECT connection_id FROM outside_spent_tokens WHERE digest = ?)`, spentDigest),
+      statement(FORGET_SPENT_OF_FORGOTTEN),
+    ]);
   }
 
   /** The connection whose access token has the digest `accessDigest`, while that hasn't expired, or null. */
@@ -202,7 +225,7 @@ export class OutsideStore {
 
   /** Forgets the connection `id`. */
   async forget(id: string): Promise<void> {
-    await this.db.batch([statement(`DELETE FROM outside_connections WHERE id = ?`, id)]);
+    await this.db.batch([statement(`DELETE FROM outside_connections WHERE id = ?`, id), statement(`DELETE FROM outside_spent_tokens WHERE connection_id = ?`, id)]);
   }
 
   /** Forgets the connection of the app `clientId` one of whose tokens has the digest `tokenDigest`, if there is one. */
@@ -210,6 +233,7 @@ export class OutsideStore {
     await this.db.batch([
       statement(`DELETE FROM outside_connections WHERE access_digest = ? AND client_id = ?`, tokenDigest, clientId),
       statement(`DELETE FROM outside_connections WHERE refresh_digest = ? AND client_id = ?`, tokenDigest, clientId),
+      statement(FORGET_SPENT_OF_FORGOTTEN),
     ]);
   }
 
@@ -225,7 +249,10 @@ export class OutsideStore {
 
   /** Forgets the connection `id` of `userId`'s: answers whether they had it. */
   async disconnect(userId: UserId, id: string): Promise<boolean> {
-    const [forgotten] = (await this.db.batch([statement(`DELETE FROM outside_connections WHERE id = ? AND user_id = ? RETURNING id`, id, userId)])) as [unknown[]];
+    const [forgotten] = (await this.db.batch([
+      statement(`DELETE FROM outside_connections WHERE id = ? AND user_id = ? RETURNING id`, id, userId),
+      statement(FORGET_SPENT_OF_FORGOTTEN),
+    ])) as [unknown[], unknown[]];
     return forgotten.length > 0;
   }
 }

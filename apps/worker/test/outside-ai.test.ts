@@ -146,6 +146,7 @@ const isOnFor = async (session: Session) => ((await (await api("/api/account", {
 /** The AI apps connected as the person `session` signs in, as their profile lists them: null when none can be. */
 const yours = async (session: Session) => ((await (await api("/api/users/me/profile", { headers: as(session) })).json()) as ProfileAnswer).profile.outsideAi;
 const connections = () => workspaceSql("SELECT count(*) AS n FROM outside_connections") as Promise<Array<{ n: number }>>;
+const spentTokens = async () => ((await workspaceSql("SELECT count(*) AS n FROM outside_spent_tokens")) as [{ n: number }])[0].n;
 
 /** The addresses names resolve to, for the lookups Ember makes before it reads a document about an app. */
 let addresses: Record<string, string[]>;
@@ -175,6 +176,11 @@ describe("Outside AI", () => {
     expect((await asked(null, "tools/list")).status).toBe(404);
     expect((await register({ redirect_uris: [BACK] })).status).toBe(404);
     expect((await exchange("an-app", "a-code")).status).toBe(404);
+    // Not even to say a request is made wrong.
+    expect((await api("/oauth/token", form({ grant_type: "password" }))).status).toBe(404);
+    expect((await api("/oauth/revoke", form({ token: "a-token", client_id: "an-app" }))).status).toBe(404);
+    expect((await api("/oauth/revoke", form({}))).status).toBe(404);
+    expect((await api("/oauth/authorize?client_id=an-app")).status).toBe(404);
     expect(await (await describeAsk(member, askOf("an-app"))).json()).toEqual({ error: OUTSIDE_OFF });
     expect(await yours(member)).toBeNull();
 
@@ -186,6 +192,10 @@ describe("Outside AI", () => {
     expect(await isOnFor(administrator)).toBe(true);
     expect(await isOnFor(member)).toBe(false);
     expect(await yours(member)).toEqual([]);
+    const page = await api("/oauth/authorize?client_id=an-app");
+    expect(page.status).toBe(200);
+    expect(page.headers.get("Content-Type")).toContain("text/html");
+    expect((await api("/oauth/revoke", form({}))).status).toBe(400);
   });
 
   it("says how to sign in to it, to an app from any origin", async () => {
@@ -375,6 +385,77 @@ describe("Outside AI", () => {
     expect((await asked(next.access_token, "tools/list")).status).toBe(401);
     expect((await refresh(clientId, next.refresh_token)).status).toBe(400);
     expect((await connections())[0]!.n).toBe(0);
+    expect(await spentTokens()).toBe(0);
+  });
+
+  it("ends a connection when any refresh token it has replaced comes again, however many it has had since", async () => {
+    const { member } = await setUpOn();
+    const { clientId, tokens: first } = await connected(member);
+    const other = await connected(member);
+    const second = (await (await refresh(clientId, first.refresh_token)).json()) as Tokens;
+    const third = (await (await refresh(clientId, second.refresh_token)).json()) as Tokens;
+    const fourth = (await (await refresh(clientId, third.refresh_token)).json()) as Tokens;
+    expect((await asked(fourth.access_token, "tools/list")).status).toBe(200);
+    expect(await spentTokens()).toBe(3);
+
+    // The first one, three behind the one it has now.
+    expect(await (await refresh(clientId, first.refresh_token)).json()).toMatchObject({ error: "invalid_grant" });
+    expect((await asked(fourth.access_token, "tools/list")).status).toBe(401);
+    expect((await refresh(clientId, fourth.refresh_token)).status).toBe(400);
+    expect(await spentTokens()).toBe(0);
+    // Another connection of hers is left alone.
+    expect((await asked(other.tokens.access_token, "tools/list")).status).toBe(200);
+    expect((await connections())[0]!.n).toBe(1);
+  });
+
+  it("keeps a replaced refresh token only until it would have expired, and none of a connection that's gone", async () => {
+    const { administrator, member } = await setUpOn();
+    const { clientId, tokens: first } = await connected(member);
+    const second = (await (await refresh(clientId, first.refresh_token)).json()) as Tokens;
+    await workspaceSql("UPDATE outside_spent_tokens SET expires_at = '2020-01-01T00:00:00.000Z'");
+    const third = (await (await refresh(clientId, second.refresh_token)).json()) as Tokens;
+    expect(await spentTokens()).toBe(1);
+    // One that expired is refused like any that's no good, and ends nothing.
+    expect((await refresh(clientId, first.refresh_token)).status).toBe(400);
+    expect((await asked(third.access_token, "tools/list")).status).toBe(200);
+
+    const [connection] = (await yours(member))!;
+    expect((await api(`/api/users/me/outside/${connection!.id}`, { method: "DELETE", headers: as(member) })).status).toBe(200);
+    expect(await spentTokens()).toBe(0);
+
+    const again = await connected(member);
+    await refresh(again.clientId, again.tokens.refresh_token);
+    expect(await spentTokens()).toBe(1);
+    expect((await api(`/api/account/users/${member.user.id}`, { method: "DELETE", headers: as(administrator) })).status).toBe(200);
+    expect(await spentTokens()).toBe(0);
+  });
+
+  it("binds an app's tokens to the address it names when it exchanges its code, if it named none before", async () => {
+    const { member } = await setUpOn();
+    const clientId = await registered();
+    const code = async () => (await allowed(member, askOf(clientId, { resource: null }))).searchParams.get("code")!;
+    const resourceKept = async () => ((await workspaceSql("SELECT resource FROM outside_connections ORDER BY rowid DESC LIMIT 1")) as [{ resource: string | null }])[0].resource;
+
+    const here = (await (await exchange(clientId, await code())).json()) as Tokens;
+    expect(await resourceKept()).toBe(MCP);
+    expect((await asked(here.access_token, "tools/list")).status).toBe(200);
+
+    // For another Ember, they're no good at this one.
+    const elsewhere = (await (await exchange(clientId, await code(), { resource: "https://another-ember.example/mcp" })).json()) as Tokens;
+    expect(await resourceKept()).toBe("https://another-ember.example/mcp");
+    expect((await asked(elsewhere.access_token, "tools/list")).status).toBe(401);
+
+    // An address that couldn't be an Ember's is refused, and the code is still good.
+    const kept = await code();
+    const refused = await exchange(clientId, kept, { resource: "https://another-ember.example/elsewhere" });
+    expect(refused.status).toBe(400);
+    expect(await refused.json()).toMatchObject({ error: "invalid_target" });
+    expect((await exchange(clientId, kept)).status).toBe(200);
+
+    // An app that never names one is bound to none.
+    const unnamed = await api("/oauth/token", form({ grant_type: "authorization_code", client_id: clientId, code: await code(), code_verifier: VERIFIER, redirect_uri: BACK }));
+    expect((await asked(((await unnamed.json()) as Tokens).access_token, "tools/list")).status).toBe(200);
+    expect(await resourceKept()).toBeNull();
   });
 
   it("stops answering a token that has expired, or whose app named another address to use it at", async () => {
@@ -447,7 +528,7 @@ describe("Outside AI", () => {
     const { clientId, tokens } = await connected(member);
     expect(await (await turn(administrator, false)).json()).toEqual({ on: false });
     expect((await asked(tokens.access_token, "tools/list")).status).toBe(404);
-    expect(await workspaceSql("SELECT (SELECT count(*) FROM outside_connections) + (SELECT count(*) FROM outside_clients) AS n")).toEqual([{ n: 0 }]);
+    expect(await workspaceSql("SELECT (SELECT count(*) FROM outside_connections) + (SELECT count(*) FROM outside_clients) + (SELECT count(*) FROM outside_spent_tokens) AS n")).toEqual([{ n: 0 }]);
 
     expect((await turn(administrator, true)).status).toBe(200);
     expect((await asked(tokens.access_token, "tools/list")).status).toBe(401);
