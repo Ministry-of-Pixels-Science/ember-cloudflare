@@ -1058,9 +1058,11 @@ could do as them, and says which site the browser goes back to, which is what te
 since the name is only what the app calls itself. **Allow** connects it. **Don't allow** goes back
 with nothing.
 
-- **What a connected app can do** is what the person who connected it can see: it lists the rooms
-  they're in, with their direct messages named after the others in them. It can't post, and it sees
-  nothing they don't.
+- **What a connected app can do** is read what the person who connected it can: list the rooms
+  they're in, read a room's messages 40 at a time and a thread's, and search for words across those
+  rooms, the ones they've hidden and their direct messages too, as their own search does. It can't
+  post, and it sees nothing they don't. Its tools are `list_rooms`, `read_room`, `read_thread` and
+  `search_messages`, each marked as only reading.
 - **Your profile lists the apps connected as you**, under **AI apps**, with when each was connected
   and last asked Ember anything, and **Disconnect**, which ends what that app was given at once. One
   person has at most 20.

@@ -1,51 +1,21 @@
 import { DurableObject } from "cloudflare:workers";
-import { createMcpHandler, fromJsonSchema, McpServer } from "@modelcontextprotocol/server";
-import type { SidebarRoom, UserId } from "@ember/protocol";
+import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import type { Env } from "../env";
 import { VERSION } from "../version";
-import { workspace, type OutsideAccess } from "../workspace";
+import type { OutsideAccess } from "../workspace";
+import { registerTools } from "./tools";
 
-// What an AI app connected to Ember can ask of it, over the Model Context Protocol, as the person who
-// connected it: tools that read what that person can, and nothing else.
+// Where an AI app connected to Ember asks it, over the Model Context Protocol, as the person who
+// connected it: a server with the tools its connection allows (`./tools`), and nothing else.
 
 /** What Ember tells an app of itself, which the app's model reads. */
 const INSTRUCTIONS =
-  "Ember is a team's chat: rooms that are open to everyone or private, and direct messages. This server acts as the person who connected it, and sees only what they can see.";
+  "Ember is a team's chat: rooms that are open to everyone or private, and direct messages. This server acts as the person who connected it, and sees only what they can see. list_rooms gives the ids of their rooms, read_room reads a room's messages from the newest back, read_thread reads a thread's, and search_messages finds messages by their words across them all.";
 
-/** A room as an app is told of it: a direct message goes by the names of the others in it. */
-interface ListedRoom {
-  id: string;
-  kind: SidebarRoom["kind"];
-  name: string;
-  unread: boolean;
-}
-
-function listedRoom(room: SidebarRoom, userId: UserId): ListedRoom {
-  if (room.kind !== "direct") return { id: room.id, kind: room.kind, name: room.name, unread: room.unread };
-  const others = room.members.filter(({ id }) => id !== userId);
-  return { id: room.id, kind: room.kind, name: (others.length > 0 ? others : room.members).map(({ name }) => name).join(", "), unread: room.unread };
-}
-
-const NO_INPUT = { type: "object" as const, properties: {}, additionalProperties: false };
-
-/** The server an app with `access` talks to: its tools, each doing what the connection allows as its person. */
+/** The server an app with `access` talks to, with the tools its connection allows. */
 function serverFor(env: Env, access: OutsideAccess): McpServer {
   const server = new McpServer({ name: "ember", title: "Ember", version: VERSION }, { instructions: INSTRUCTIONS });
-  if (!access.scopes.includes("read")) return server;
-  server.registerTool(
-    "list_rooms",
-    {
-      title: "List rooms",
-      description:
-        "Lists the rooms the connected person is in: each one's id, its name, its kind (open to everyone, closed, which is private, or direct, a direct message named after the others in it), and whether it has messages they haven't read.",
-      inputSchema: fromJsonSchema(NO_INPUT),
-      annotations: { readOnlyHint: true, openWorldHint: false },
-    },
-    async () => {
-      const rooms = (await workspace(env).outsideRooms(access.userId)).map((room) => listedRoom(room, access.userId));
-      return { content: [{ type: "text", text: JSON.stringify({ rooms }) }] };
-    },
-  );
+  registerTools(server, env, access);
   return server;
 }
 

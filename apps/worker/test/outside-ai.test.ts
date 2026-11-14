@@ -1,4 +1,4 @@
-import type { Me, NewWorkspace, ProfileAnswer, WorkspaceSettings } from "@ember/protocol";
+import { HISTORY_PAGE_SIZE, MAX_SEARCH_LENGTH, type Me, type Message, type NewWorkspace, type ProfileAnswer, type RoomId, type WorkspaceSettings } from "@ember/protocol";
 import {
   MAX_OUTSIDE_CONNECTIONS,
   OUTSIDE_ASK_REFUSED,
@@ -14,8 +14,9 @@ import {
 } from "@ember/protocol/outside";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toBase64url } from "../src/encoding";
+import { MAX_SHOWN_LENGTH, MESSAGES_FOUND } from "../src/outside/tools";
 import { MAX_OUTSIDE_CLIENTS } from "../src/workspace";
-import { api, cookieOf, createRoom, direct, freshDeploy, origin, shown, signIn, workspaceSql, type Session } from "./support";
+import { api, connect, cookieOf, createRoom, direct, freshDeploy, origin, post, roomSql, shown, signIn, upload, workspaceSql, type Session, type Socket } from "./support";
 
 // Outside AI: an AI app connects to Ember over the Model Context Protocol, at `/mcp`, and signs in
 // with OAuth, where Ember is the authorization server. The tests are the app: they find out how to sign
@@ -145,6 +146,45 @@ async function roomsFor(token: string): Promise<Array<{ id: string; kind: string
 /** Whether AI apps may connect, as the workspace's settings tell the person `session` signs in, which is only ever so for an administrator. */
 const isOnFor = async (session: Session) => ((await (await api("/api/account", { headers: as(session) })).json()) as WorkspaceSettings).outsideAi;
 /** The AI apps connected as the person `session` signs in, as their profile lists them: null when none can be. */
+/** What Ember's tool `name` answers the app that asks with `token`, called with `given`. */
+async function called(token: string, name: string, given: Record<string, unknown>): Promise<{ text: string; isError?: boolean }> {
+  const { status, result } = await asked(token, "tools/call", { name, arguments: given });
+  expect(status).toBe(200);
+  const { content, isError } = result as { content: [{ text: string }]; isError?: boolean };
+  return { text: content[0].text, isError };
+}
+
+/** What the tool found. */
+async function found<Found = unknown>(token: string, name: string, given: Record<string, unknown>): Promise<Found> {
+  const { text, isError } = await called(token, name, given);
+  expect(isError, text).toBeFalsy();
+  return JSON.parse(text) as Found;
+}
+
+/** Why the tool couldn't do what it was asked, as it tells the app's model. */
+async function refusal(token: string, name: string, given: Record<string, unknown>): Promise<string> {
+  const { text, isError } = await called(token, name, given);
+  expect(isError, text).toBe(true);
+  return text;
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Waits until room `room` has nothing left in its log for the search index, which it forgets once the index has taken it. */
+async function caughtUp(room: RoomId): Promise<void> {
+  while ((await roomSql(room, "SELECT seq FROM unindexed_messages WHERE room_id = ?", room)).length > 0) await sleep(5);
+}
+
+/** Replies in `parent`'s thread as `client`, and waits for the room to confirm it. */
+async function reply(client: Socket, parent: Pick<Message, "id">, body: string): Promise<Message> {
+  const clientMessageId = crypto.randomUUID();
+  client.send({ type: "message.create", clientMessageId, body, parentId: parent.id, alsoSend: false });
+  for (;;) {
+    const { message } = await client.next("message.created");
+    if (message.clientMessageId === clientMessageId) return message;
+  }
+}
+
 const yours = async (session: Session) => ((await (await api("/api/users/me/profile", { headers: as(session) })).json()) as ProfileAnswer).profile.outsideAi;
 const connections = () => workspaceSql("SELECT count(*) AS n FROM outside_connections") as Promise<Array<{ n: number }>>;
 const spentTokens = async () => ((await workspaceSql("SELECT count(*) AS n FROM outside_spent_tokens")) as [{ n: number }])[0].n;
@@ -320,7 +360,7 @@ describe("Outside AI", () => {
     const initialized = await asked(tokens.access_token, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "Claude", version: "1" } });
     expect(initialized.result).toMatchObject({ serverInfo: { name: "ember" }, capabilities: { tools: expect.anything() } });
     const listed = await asked(tokens.access_token, "tools/list");
-    expect((listed.result!.tools as Array<{ name: string }>).map(({ name }) => name)).toEqual(["list_rooms"]);
+    expect((listed.result!.tools as Array<{ name: string }>).map(({ name }) => name)).toContain("list_rooms");
 
     // She sees her rooms, the direct message by the other person's name, and not a private room she isn't in.
     const rooms = await roomsFor(tokens.access_token);
@@ -599,3 +639,122 @@ describe("Outside AI", () => {
     expect((await connections())[0]!.n).toBe(1);
   });
 });
+
+describe("What a connected AI app reads", () => {
+  /** Grace's connection's token, with Ada's and her sessions, and the rooms the app lists by name. */
+  async function reading() {
+    const sessions = await setUpOn();
+    const { tokens } = await connected(sessions.member);
+    const rooms = Object.fromEntries((await roomsFor(tokens.access_token)).map((room) => [room.name, room.id]));
+    return { ...sessions, token: tokens.access_token, general: rooms.general! };
+  }
+
+  it("offers tools that read, each marked as only reading", async () => {
+    const { token } = await reading();
+    const { tools } = (await asked(token, "tools/list")).result as { tools: Array<{ name: string; annotations: unknown; inputSchema: { required?: string[] } }> };
+    expect(tools.map(({ name }) => name)).toEqual(["list_rooms", "read_room", "read_thread", "search_messages"]);
+    for (const { annotations } of tools) expect(annotations).toEqual({ readOnlyHint: true, openWorldHint: false });
+    expect(tools.map(({ inputSchema }) => inputSchema.required ?? [])).toEqual([[], ["room_id"], ["room_id", "message_id"], ["words"]]);
+  });
+
+  it("reads a room's messages a page at a time, oldest first, and a thread's", async () => {
+    const { administrator, member, token, general } = await reading();
+    const [ada, hopper] = [await connect(general, administrator), await connect(general, member)];
+    const written: Message[] = [];
+    for (let n = 1; n <= HISTORY_PAGE_SIZE + 2; n++) written.push(await post(ada, `<p>Message ${n}</p>`));
+    const last = written.at(-1)!;
+    const yes = await reply(hopper, last, "<p>Yes, <strong>ship</strong> it</p>");
+
+    const newest = await found<{ room: unknown; messages: Array<Record<string, unknown>>; older: string | null }>(token, "read_room", { room_id: general });
+    expect(newest.room).toEqual({ id: general, kind: "open", name: "general" });
+    expect(newest.messages.map(({ text }) => text)).toEqual(written.slice(2).map(({ plainText }) => plainText));
+    expect(newest.messages.at(-1)).toEqual({ id: last.id, at: last.createdAt, from: "Ada Lovelace", text: `Message ${HISTORY_PAGE_SIZE + 2}`, replies: 1 });
+    expect(newest.messages[0]).toEqual({ id: written[2]!.id, at: written[2]!.createdAt, from: "Ada Lovelace", text: "Message 3" });
+    expect(newest.older).toBe(written[2]!.id);
+
+    const older = await found<typeof newest>(token, "read_room", { room_id: general, before: newest.older });
+    expect(older.messages.map(({ text }) => text)).toEqual(["Message 1", "Message 2"]);
+    expect(older.older).toBeNull();
+
+    const thread = await found<{ message: unknown; replies: unknown[] }>(token, "read_thread", { room_id: general, message_id: last.id });
+    expect(thread.message).toEqual(newest.messages.at(-1));
+    expect(thread.replies).toEqual([{ id: yes.id, at: yes.createdAt, from: "Grace Hopper", text: "Yes, ship it", reply_to: last.id }]);
+
+    expect(await refusal(token, "read_room", { room_id: general, before: "no-such-message" })).toBe("The room has no message with the id given as `before`.");
+    expect(await refusal(token, "read_thread", { room_id: general, message_id: yes.id })).toMatch(/^The room has no message with that id that a thread could be under\./);
+    ada.close();
+    hopper.close();
+  });
+
+  it("reads only the rooms its person is in, their direct messages too", async () => {
+    const { administrator, member, token } = await reading();
+    const secret = await createRoom("Secret plans", { closedTo: [administrator.user.id], as: administrator });
+    const dm = await direct(member, administrator);
+    const [inSecret, inDm] = [await connect(secret.id, administrator), await connect(dm.id, administrator)];
+    await post(inSecret, "<p>The launch is in March</p>");
+    const hello = await post(inDm, "<p>Hello, Grace</p>");
+
+    const NO_ROOM = "No room of theirs has that id. list_rooms lists the rooms they're in.";
+    expect(await refusal(token, "read_room", { room_id: secret.id })).toBe(NO_ROOM);
+    expect(await refusal(token, "read_thread", { room_id: secret.id, message_id: "any" })).toBe(NO_ROOM);
+    expect(await refusal(token, "read_room", { room_id: "no-such-room" })).toBe(NO_ROOM);
+    expect(await found(token, "read_room", { room_id: dm.id })).toEqual({
+      room: { id: dm.id, kind: "direct", name: "Ada Lovelace" },
+      messages: [{ id: hello.id, at: hello.createdAt, from: "Ada Lovelace", text: "Hello, Grace" }],
+      older: null,
+    });
+    inSecret.close();
+    inDm.close();
+  });
+
+  it("searches the rooms its person is in, newest first, a page at a time, or one of them", async () => {
+    const { administrator, member, token, general } = await reading();
+    const secret = await createRoom("Secret plans", { closedTo: [administrator.user.id], as: administrator });
+    const dm = await direct(member, administrator);
+    const [inGeneral, inSecret, inDm] = [await connect(general, administrator), await connect(secret.id, administrator), await connect(dm.id, member)];
+    const harvest = await post(inGeneral, "<p>The kumquat harvest is in</p>");
+    await post(inSecret, "<p>A secret kumquat</p>");
+    const pie = await post(inDm, "<p>Kumquat pie tonight?</p>");
+    const quinces: Message[] = [];
+    for (let n = 1; n <= MESSAGES_FOUND + 2; n++) quinces.push(await post(inGeneral, `<p>Quince ${n}</p>`));
+    await Promise.all([general, secret.id, dm.id].map(caughtUp));
+
+    type Found = { matches: Array<{ room: { id: string; name: string }; id: string; text: string }>; next: number | null };
+    const kumquats = await found<Found>(token, "search_messages", { words: "kumquat" });
+    expect(kumquats.matches).toEqual([
+      { room: { id: dm.id, kind: "direct", name: "Ada Lovelace" }, id: pie.id, at: pie.createdAt, from: "Grace Hopper", text: "Kumquat pie tonight?" },
+      { room: { id: general, kind: "open", name: "general" }, id: harvest.id, at: harvest.createdAt, from: "Ada Lovelace", text: "The kumquat harvest is in" },
+    ]);
+    expect(kumquats.next).toBeNull();
+    expect((await found<Found>(token, "search_messages", { words: "kumquat harvest", room_id: general })).matches.map(({ id }) => id)).toEqual([harvest.id]);
+    expect((await found<Found>(token, "search_messages", { words: "kumquat", room_id: dm.id })).matches.map(({ id }) => id)).toEqual([pie.id]);
+    expect(await found(token, "search_messages", { words: "persimmon" })).toEqual({ matches: [], next: null });
+
+    const newest = await found<Found>(token, "search_messages", { words: "quince" });
+    expect(newest.matches.map(({ text }) => text)).toEqual(quinces.slice(2).reverse().map(({ plainText }) => plainText));
+    expect(newest.next).toEqual(expect.any(Number));
+    const rest = await found<Found>(token, "search_messages", { words: "quince", after: newest.next });
+    expect(rest.matches.map(({ text }) => text)).toEqual(["Quince 2", "Quince 1"]);
+    expect(rest.next).toBeNull();
+
+    expect(await refusal(token, "search_messages", { words: "kumquat", room_id: secret.id })).toBe("No room of theirs has that id. list_rooms lists the rooms they're in.");
+    expect(await refusal(token, "search_messages", { words: " … " })).toBe("Give the words to find, as `words`.");
+    expect(await refusal(token, "search_messages", { words: "k".repeat(MAX_SEARCH_LENGTH + 1) })).toBe("That's too much to search for. Give one or two words.");
+    for (const socket of [inGeneral, inSecret, inDm]) socket.close();
+  });
+
+  it("cuts a long message, and names a file in place of a file message's text", async () => {
+    const { administrator, token, general } = await reading();
+    const ada = await connect(general, administrator);
+    await post(ada, `<p>${"long ".repeat(MAX_SHOWN_LENGTH / 5 + 100)}</p>`);
+    const file = await upload(administrator, general, "notes.txt", new TextEncoder().encode("Notes"), "text/plain");
+
+    const { messages } = await found<{ messages: Array<{ id: string; text: string; file?: string }> }>(token, "read_room", { room_id: general });
+    const [long, shared] = messages.slice(-2);
+    expect(long!.text).toHaveLength(MAX_SHOWN_LENGTH);
+    expect(long!.text.endsWith("long…")).toBe(true);
+    expect(shared).toMatchObject({ id: file.id, text: "", file: "notes.txt" });
+    ada.close();
+  });
+});
+

@@ -82,13 +82,13 @@ function ask(request: APIRequestContext, address: string, token: string | null, 
 }
 
 /** The rooms Ember lists for the app that asks with `token`. */
-async function roomsFor(request: APIRequestContext, address: string, token: string): Promise<Array<{ kind: string; name: string }>> {
+async function roomsFor(request: APIRequestContext, address: string, token: string): Promise<Array<{ id: string; kind: string; name: string }>> {
   const response = await ask(request, address, token, "tools/call", { name: "list_rooms", arguments: {} });
   expect(response.status(), await response.text()).toBe(200);
   const text = await response.text();
   const sent = response.headers()["content-type"]?.includes("event-stream") ? text.split("\n").find((line) => line.startsWith("data: "))!.slice(6) : text;
   const { result } = JSON.parse(sent) as { result: { content: [{ text: string }] } };
-  return (JSON.parse(result.content[0].text) as { rooms: Array<{ kind: string; name: string }> }).rooms;
+  return (JSON.parse(result.content[0].text) as { rooms: Array<{ id: string; kind: string; name: string }> }).rooms;
 }
 
 test.describe("Outside AI", () => {
@@ -127,6 +127,10 @@ test.describe("Outside AI", () => {
     const listed = rooms.find(({ kind }) => kind !== "direct")!;
     await page.goto("/");
     await expect(page.getByRole("region", { name: "Rooms" }).getByRole("link", { name: listed.name }).first()).toBeVisible();
+    // It reads one of them, as the page that asked said it could.
+    const read = await ask(request, address, token, "tools/call", { name: "read_room", arguments: { room_id: listed.id } });
+    expect(read.status(), await read.text()).toBe(200);
+    expect(await read.text()).toContain(listed.name);
 
     // Their profile lists it, and Disconnect ends what it was given.
     await page.goto(PROFILE_PATH);

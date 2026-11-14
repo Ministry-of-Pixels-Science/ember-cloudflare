@@ -1572,6 +1572,11 @@ export class Workspace extends DurableObject<Env> {
     return (await this.store.roomsFor(userId)).rooms;
   }
 
+  /** The rooms an AI app connected as `userId` may read and search: the ones they're in, those they've hidden and their direct messages too, as their own search has them. */
+  async outsideReadable(userId: UserId): Promise<Room[]> {
+    return (await this.store.searcherOf(userId, null)).rooms;
+  }
+
   /**
    * Turns huddles on as the person `credentials` signs in, through the Realtime SFU app whose keys `app`
    * are, which the Worker has had Cloudflare start a session with, its secret sealed under SESSION_SECRET
