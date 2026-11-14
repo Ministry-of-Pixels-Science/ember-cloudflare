@@ -49,11 +49,12 @@ export interface ToolResult {
   failed: boolean;
 }
 
-/** A call an answer has made: the tool's name, what the model called it with, and what the call came to, as the model read it. */
+/** A call an answer has made: the tool's name, what the model called it with, and what the call came to, as the model read it, and whether that says it failed. */
 export interface CallMade {
   name: string;
   input: unknown;
   text: string;
+  failed: boolean;
 }
 
 /** What a model that's asked again without Ember's tools reads after the conversation, before what the calls its answer made of them came to. */
@@ -62,10 +63,14 @@ export const CALLS_MADE =
 
 /**
  * What a model that's asked again without Ember's tools reads of the calls its answer `made` of them,
- * which stand, so that it doesn't answer as if a call that did something hadn't.
+ * which stand, so that it doesn't answer as if a call that did something hadn't. A call that failed
+ * says so, as Messages' `is_error` did, since an app may fail one with no word of why.
  */
 export function whatCallsCameTo(made: readonly CallMade[]): string {
-  const each = made.map(({ name, input, text }, n) => `Call ${n + 1}: ${name} with ${typeof input === "string" ? input : JSON.stringify(input ?? {})}\n${text}`);
+  const each = made.map(({ name, input, text, failed }, n) => {
+    const called = typeof input === "string" ? input : JSON.stringify(input ?? {});
+    return `Call ${n + 1}: ${name} with ${called}${failed ? ", which failed" : ""}\n${text}`;
+  });
   return [CALLS_MADE, ...each].join("\n\n");
 }
 

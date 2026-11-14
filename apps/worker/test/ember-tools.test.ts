@@ -550,29 +550,41 @@ describe("An answer that waits at a call", () => {
 
   it("tells a model refused going on once a call is allowed what every call of its answer did, as it's asked again without the tools, so that it doesn't answer as if they hadn't", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
+    // An app that fails a call may say nothing of why, as Ember tells a model then.
+    const close: EmberTool = { name: "close", description: "Closes the issue.", takes: { type: "object" }, run: () => Promise.reject(new ToolError("(The tool answered with nothing.)")) };
+    const given = [...tools, close];
     const use = (id: string, name: string, input: unknown) => ({ type: "tool_use", id, name, input });
     const turn = (content: unknown[], stop_reason = "tool_use") => ({ type: "message", role: "assistant", content, stop_reason, usage: { input_tokens: 1_000, output_tokens: 100 } });
     const answers = [
-      () => Response.json(turn([use("call_1", "look", {})])),
-      () => Response.json(turn([use("call_2", "send", { to: "ada" })])),
+      () => Response.json(turn([use("call_1", "look", {}), use("call_2", "close", { issue: 42 })])),
+      () => Response.json(turn([use("call_3", "send", { to: "ada" })])),
       () => Response.json({ type: "error", error: { type: "invalid_request_error", message: "messages.4: unexpected `tool_result`" } }, { status: 400 }),
       () => Response.json(turn([{ type: "text", text: "I've told Ada the launch is Friday." }], "end_turn")),
     ];
     refusing = () => answers.shift()!();
     const gateway = gatewayFor(CLAUDE, "anthropic");
 
-    const waiting = waitingIn(await askWaiting(bindings, gateway, question, 5_000));
-    expect(waiting.asks).toEqual({ id: "call_2", name: "send", input: { to: "ada" } });
-    expect(await goOn(bindings, gateway, tools, kept(waiting.paused), true, 5_000)).toMatchObject({ text: "I've told Ada the launch is Friday." });
+    const waiting = waitingIn(await askWaiting(bindings, gateway, { ...question, tools: given }, 5_000));
+    expect(waiting.asks).toEqual({ id: "call_3", name: "send", input: { to: "ada" } });
+    expect(await goOn(bindings, gateway, given, kept(waiting.paused), true, 5_000)).toMatchObject({ text: "I've told Ada the launch is Friday." });
     expect(sent).toEqual([{ to: "ada" }]);
 
-    // Asked once more, it reads the conversation as it was asked, then what each call came to, the one before the answer waited too.
+    // Asked once more, it reads the conversation as it was asked, then what each call came to, those before the answer waited too, and which failed.
     expect(asked).toHaveLength(4);
     const last = asked.at(-1)!.body;
     expect(last).not.toHaveProperty("tools");
     expect(last).toMatchObject({ max_tokens: 800 });
     expect(last.messages).toEqual([
-      { role: "user", content: `tell ada when the launch is\n\n${CALLS_MADE}\n\nCall 1: look with {}\nLaunch is Friday.\n\nCall 2: send with {"to":"ada"}\nSent 1` },
+      {
+        role: "user",
+        content: [
+          "tell ada when the launch is",
+          CALLS_MADE,
+          "Call 1: look with {}\nLaunch is Friday.",
+          'Call 2: close with {"issue":42}, which failed\n(The tool answered with nothing.)',
+          'Call 3: send with {"to":"ada"}\nSent 1',
+        ].join("\n\n"),
+      },
     ]);
   });
 

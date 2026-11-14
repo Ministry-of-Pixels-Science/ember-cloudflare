@@ -426,7 +426,7 @@ async function answering(env: Env, gateway: Gateway, question: Question, signal:
       return { asks, paused: { model: gateway.model, format, question: asked, request, body, results, called, tokensLeft, saidBefore, made, ...(web && { searches: web.searches() }) } };
     }
     called += calls.length;
-    made.push(...calls.map(({ name, input }, index) => ({ name, input, text: results[index]!.text })));
+    made.push(...calls.map(({ name, input }, index) => ({ name, input, text: results[index]!.text, failed: results[index]!.failed })));
     request = withRoom(format, goingOn(format, sparing(format, request, body), body, results), tokensLeft, called >= TOOL_CALLS_PER_ANSWER);
     saidBefore.push(...listOf(body.content));
     round = undefined;
