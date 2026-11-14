@@ -615,8 +615,18 @@ export class ChatRoom extends DurableObject<Env> {
   }
 
   /**
-   * The thread of the message `parentId` names, for a bot reading the room: the message and its newest
-   * replies, oldest first, or null when the room has no such message or it's a reply, which has no thread.
+   * A page of the room's messages for an AI app that reads it as someone in it (`outside/tools`): the
+   * page `cursor` names, or null when the cursor isn't one of them. The room isn't counted, as it is for
+   * a bot, since on D1 counting reads a row for every message.
+   */
+  async outsidePage(roomId: RoomId, cursor: PageCursor): Promise<Omit<TimelinePage, "around"> | null> {
+    return this.serially(() => this.storeFor(roomId).pageAt(cursor, HISTORY_PAGE_SIZE));
+  }
+
+  /**
+   * The thread of the message `parentId` names, for a bot or an AI app reading the room: the message and
+   * its newest replies, oldest first, or null when the room has no such message or it's a reply, which
+   * has no thread.
    */
   async botThread(roomId: RoomId, parentId: string): Promise<Message[] | null> {
     return this.serially(async () => {
