@@ -66,12 +66,14 @@ import {
   type SentTestEmail,
   type SharedRoom,
   type Sidebar,
+  type SidebarRoom,
   type User,
   type UserId,
   type UserStatus,
   type WorkspaceServerFrame,
   type WorkspaceSettings,
 } from "@ember/protocol";
+import { MAX_OUTSIDE_CONNECTIONS, outsideScopesOf, type OutsideAiSettings, type OutsideConnection, type OutsideScope } from "@ember/protocol/outside";
 import {
   ASSISTANT_MODELS,
   DEFAULT_LEVELS,
@@ -127,6 +129,8 @@ import { FixedWindowLimit } from "./rate-limit";
 import { sessionTag } from "./revocations";
 import type { RoomEvent } from "./room-log";
 import { appConnector } from "./apps/connector";
+import { ACCESS_TTL_SECONDS, CODE_TTL_MS, provesChallenge, REFRESH_TTL_MS } from "./outside/oauth";
+import { OutsideStore, type NewOutsideConnection, type OutsideClient, type OutsideTokens, type StoredOutsideConnection } from "./outside/store";
 import type { Key } from "./apps/mcp";
 import { isDue, type SignIn } from "./apps/oauth";
 import { scopesWith } from "./apps/scopes";
@@ -205,6 +209,45 @@ const KEPT_WORKERS_AI_MODELS = "keptWorkersAiModels";
  * workspace in the last one, counted from the people kept, whatever the Workspace's memory forgets.
  */
 const SIGN_UP_WINDOW_MS = 60 * 60 * 1000;
+
+/** How many times an hour one IP address can register an AI app, which nothing signs in to do. */
+const OUTSIDE_REGISTRATIONS_PER_ADDRESS = 10;
+const OUTSIDE_REGISTRATION_WINDOW_MS = 60 * 60 * 1000;
+/** The most AI apps Ember keeps that registered themselves, and how long one nobody has connected is kept once there are that many. */
+export const MAX_OUTSIDE_CLIENTS = 500;
+const UNCONNECTED_CLIENT_MS = 60 * 60 * 1000;
+/** How often Ember records that a connection's app asked it something. */
+const OUTSIDE_USED_EVERY_MS = 60 * 60 * 1000;
+
+/** What an AI app's access token lets it do, and as whom: the connection it's of. */
+export interface OutsideAccess {
+  connectionId: string;
+  userId: UserId;
+  clientId: string;
+  scopes: OutsideScope[];
+  /** The address the app said it connects to, which is the only one its tokens are good at, or null when it didn't say. */
+  resource: string | null;
+}
+
+/** The digests of the tokens Ember gives an app next. */
+export type NextOutsideTokens = Pick<OutsideTokens, "accessDigest" | "refreshDigest">;
+
+/** `next`, with when each expires, given at `now`. */
+const outsideTokensAt = (next: NextOutsideTokens, now: number): OutsideTokens => ({
+  ...next,
+  accessExpiresAt: new Date(now + ACCESS_TTL_SECONDS * 1000).toISOString(),
+  refreshExpiresAt: new Date(now + REFRESH_TTL_MS).toISOString(),
+});
+
+/** A connection as its person's profile lists it. */
+const shownConnection = ({ id, clientName, redirectUri, scope, createdAt, usedAt }: StoredOutsideConnection): OutsideConnection => ({
+  id,
+  name: clientName,
+  comesBackTo: new URL(redirectUri).host,
+  scopes: outsideScopesOf(scope),
+  connectedAt: createdAt,
+  usedAt,
+});
 /**
  * The hour of the limits on asking Ember to email someone, a link to join at the email domains or a code
  * to reset a password: the asks from an IP address are counted in a fixed one, and the times an address
@@ -895,6 +938,7 @@ const shownApp = (app: StoredApp, everyPicks: readonly AgentToolPicks[]): App =>
 export class Workspace extends DurableObject<Env> {
   private readonly db: Db;
   private readonly store: WorkspaceStore;
+  private readonly outside: OutsideStore;
   private readonly sessions = new SessionCache<StoredSession>(CACHED_SESSIONS);
   /**
    * The account once it exists. Renaming it and regenerating its join code keep this current, and
@@ -916,6 +960,7 @@ export class Workspace extends DurableObject<Env> {
   private readonly emailLinkAsks = new FixedWindowLimit(EMAIL_LINKS_PER_NETWORK, EMAIL_ASK_WINDOW_MS);
   private readonly passwordResetAsks = new FixedWindowLimit(PASSWORD_RESETS_PER_NETWORK, EMAIL_ASK_WINDOW_MS);
   private readonly unfurls = new FixedWindowLimit(UNFURLS, UNFURL_WINDOW_MS);
+  private readonly outsideRegistrations = new FixedWindowLimit(OUTSIDE_REGISTRATIONS_PER_ADDRESS, OUTSIDE_REGISTRATION_WINDOW_MS);
   /** The probes custom domain checks send, each with its answer and when it's no longer waited for (see `expectProbe`). */
   private readonly probes = new Map<string, { answer: string; until: number }>();
   /** The access token of each app's sign-in that's being asked for now (`signInKey`). */
@@ -949,6 +994,7 @@ export class Workspace extends DurableObject<Env> {
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('{"type":"ping"}', '{"type":"pong"}'));
     this.db = openDb(env, ctx.storage, "workspace");
     this.store = new WorkspaceStore(this.db);
+    this.outside = new OutsideStore(this.db);
     // The outbox can hold revocations with no alarm set for them: the Workspace can stop after saving a
     // change but before setting the alarm, and an alarm that keeps failing is given up. So it looks
     // whenever it starts, before answering anything. A failure is only logged; the next change that
@@ -1185,6 +1231,7 @@ export class Workspace extends DurableObject<Env> {
       addresses: canAdminister ? { deployed: account.deployedAddress, others: account.otherAddresses } : { deployed: null, others: [] },
       assistant: canAdminister ? await this.assistantSettings(account) : null,
       huddles: canAdminister ? await this.huddlesSettings(account) : null,
+      outsideAi: canAdminister && account.outsideAi,
     };
   }
 
@@ -1361,6 +1408,168 @@ export class Workspace extends DurableObject<Env> {
     const secretKey = await unseal(this.env.SESSION_SECRET, "turnstile-secret-key", saved.sealedSecretKey);
     if (secretKey === null) console.error("The Turnstile secret key Ember was given doesn't open under SESSION_SECRET, so it isn't used.");
     return secretKey === null ? null : { siteKey: saved.siteKey, secretKey };
+  }
+
+  /** The workspace's name while outside AI is on, or null while it's off, when none of its addresses answers. */
+  async outsideAi(): Promise<{ name: string } | null> {
+    const account = await this.joinableAccount();
+    return account?.outsideAi ? { name: account.name } : null;
+  }
+
+  /**
+   * Lets AI apps connect, or stops them, as the administrator `credentials` signs in, answering which:
+   * "forbidden" for anyone else, or null without a valid session. Stopping them ends every connection
+   * and forgets every app that registered, so turning it on again starts afresh.
+   */
+  async changeOutsideAi(credentials: Credentials, on: boolean): Promise<OutsideAiSettings | "forbidden" | null> {
+    return this.administerAccount(credentials, async (account) => {
+      if (account.outsideAi !== on) await this.saveAccount({ ...account, outsideAi: on }, (now) => this.outside.turn(on, now));
+      return { on };
+    });
+  }
+
+  /**
+   * Keeps `client`, an AI app registering itself from the IP address `ip`, under an id of its own,
+   * which it answers with it: "off" while outside AI is, "limited" once that address has registered as
+   * many as one may in an hour, or "full" when Ember keeps as many as it does.
+   */
+  async registerOutsideClient(client: Omit<OutsideClient, "id">, ip: string | null): Promise<OutsideClient | "off" | "limited" | "full"> {
+    if (!(await this.outsideAi())) return "off";
+    if (!this.outsideRegistrations.attempt(ip ?? "unknown")) return "limited";
+    // One at a time with the switch, as `connectOutside` is, so no app is kept once turning outside AI off has forgotten them all.
+    return this.oneAtATime(async () => {
+      if (!(await this.outsideAi())) return "off";
+      const registered = { id: alphanumeric(32), ...client };
+      const now = Date.now();
+      const kept = await this.outside.register(registered, new Date(now).toISOString(), MAX_OUTSIDE_CLIENTS, new Date(now - UNCONNECTED_CLIENT_MS).toISOString());
+      return kept ? registered : "full";
+    });
+  }
+
+  /** The AI app that registered itself as `id`, or null, or "off" while outside AI is. */
+  async outsideClient(id: string): Promise<OutsideClient | "off" | null> {
+    return (await this.outsideAi()) ? this.outside.client(id) : "off";
+  }
+
+  /** The person `credentials` signs in, who may connect an AI app as themselves, with the workspace's name: "off" while outside AI is, "forbidden" for a guest, or null without a valid session. */
+  private async outsidePerson(credentials: Credentials): Promise<{ user: User; workspace: string } | "off" | "forbidden" | null> {
+    const session = await this.session(credentials);
+    if (!session) return null;
+    const on = await this.outsideAi();
+    if (!on) return "off";
+    return session.guest ? "forbidden" : { user: session.user, workspace: on.name };
+  }
+
+  /** The workspace's name, for the page that asks the person `credentials` signs in whether to connect an AI app, or why they can't, as `outsidePerson` answers. */
+  async outsideAsker(credentials: Credentials): Promise<{ workspace: string } | "off" | "forbidden" | null> {
+    const person = await this.outsidePerson(credentials);
+    return person && typeof person !== "string" ? { workspace: person.workspace } : person;
+  }
+
+  /**
+   * Begins `begun`, a connection of an AI app as the person `credentials` signs in, who has just allowed
+   * it: the app is sent back with the code whose digest it holds, good for a few minutes. "full" when
+   * they have as many connections as one may, or why they can't, as `outsidePerson` answers.
+   */
+  async connectOutside(credentials: Credentials, begun: Omit<NewOutsideConnection, "id" | "userId" | "codeExpiresAt">): Promise<true | "full" | "off" | "forbidden" | null> {
+    // One at a time with the switch, which other requests run beside on D1: a connection that began
+    // after turning outside AI off had ended them all would be there when it's turned on again.
+    return this.oneAtATime(async () => {
+      const person = await this.outsidePerson(credentials);
+      if (!person || typeof person === "string") return person;
+      const now = Date.now();
+      const connection = { ...begun, id: sortableId(), userId: person.user.id, codeExpiresAt: new Date(now + CODE_TTL_MS).toISOString() };
+      return (await this.outside.begin(connection, new Date(now).toISOString(), MAX_OUTSIDE_CONNECTIONS)) || "full";
+    });
+  }
+
+  /**
+   * Gives the AI app that presents the code with the digest `codeDigest` its first tokens, `next`, and
+   * answers what its connection allows, or null for a code that's no good: one Ember never gave, that
+   * has expired, that another app was given, whose app can't prove it began the request (PKCE), or
+   * that was asked for to connect somewhere other than the app now says. A code that comes a second
+   * time has been copied, so the connection it began ends. "off" while outside AI is.
+   */
+  async exchangeOutsideCode(
+    codeDigest: string,
+    proof: { clientId: string; redirectUri: string | null; verifier: string; resource: string | null },
+    next: NextOutsideTokens,
+  ): Promise<{ scope: string } | "off" | null> {
+    if (!(await this.outsideAi())) return "off";
+    return this.oneAtATime(async () => {
+      const connection = await this.outside.byCode(codeDigest);
+      if (!connection || connection.clientId !== proof.clientId) return null;
+      if (connection.exchanged) {
+        await this.outside.forget(connection.id);
+        return null;
+      }
+      if (proof.redirectUri !== null && proof.redirectUri !== connection.redirectUri) return null;
+      if (proof.resource !== null && connection.resource !== null && proof.resource !== connection.resource) return null;
+      if (!(await provesChallenge(proof.verifier, connection.codeChallenge))) return null;
+      const now = Date.now();
+      // An app that says only now where it connects to has its tokens bound to that.
+      const exchanged = await this.outside.exchange(connection.id, outsideTokensAt(next, now), proof.resource, new Date(now).toISOString());
+      return exchanged ? { scope: connection.scope } : null;
+    });
+  }
+
+  /**
+   * Gives the AI app `clientId`, which presents the refresh token with the digest `refreshDigest`, its
+   * next tokens, `next`, in place of the ones it has, and answers what its connection allows, or null
+   * for a refresh token that's no good. One that was used already has been copied, so its connection
+   * ends. "off" while outside AI is.
+   */
+  async refreshOutside(refreshDigest: string, clientId: string, next: NextOutsideTokens): Promise<{ scope: string } | "off" | null> {
+    if (!(await this.outsideAi())) return "off";
+    return this.oneAtATime(async () => {
+      const now = Date.now();
+      const connection = await this.outside.byRefresh(refreshDigest);
+      if (!connection) {
+        await this.outside.forgetSpent(refreshDigest, new Date(now).toISOString());
+        return null;
+      }
+      if (connection.clientId !== clientId || connection.refreshExpiresAt === null || connection.refreshExpiresAt <= new Date(now).toISOString()) return null;
+      const rotated = await this.outside.rotate(connection.id, refreshDigest, outsideTokensAt(next, now), new Date(now).toISOString());
+      return rotated ? { scope: connection.scope } : null;
+    });
+  }
+
+  /** Ends the connection of the AI app `clientId` one of whose tokens has the digest `tokenDigest`, if there is one, as the app asks when it's disconnected there. */
+  async revokeOutside(tokenDigest: string, clientId: string): Promise<void> {
+    await this.outside.forgetByToken(tokenDigest, clientId);
+  }
+
+  /**
+   * What the access token with the digest `accessDigest` lets its AI app do, and as whom, or null for
+   * one that's no good: unknown, expired, or its person's no longer active. "off" while outside AI is.
+   * It records that the app asked, to the hour.
+   */
+  async outsideAccess(accessDigest: string): Promise<OutsideAccess | "off" | null> {
+    if (!(await this.outsideAi())) return "off";
+    const now = Date.now();
+    const connection = await this.outside.byAccess(accessDigest, new Date(now).toISOString());
+    if (!connection) return null;
+    if (connection.usedAt === null || Date.parse(connection.usedAt) <= now - OUTSIDE_USED_EVERY_MS) await this.outside.touch(connection.id, new Date(now).toISOString());
+    return { connectionId: connection.id, userId: connection.userId, clientId: connection.clientId, scopes: outsideScopesOf(connection.scope), resource: connection.resource };
+  }
+
+  /** The AI apps connected as the person `userId`, newest first, as their profile lists them, or null when none can be: while outside AI is off for `account`, or for a `guest`. */
+  private async yourOutsideAi(userId: UserId, guest: boolean, account: JoinableAccount | null): Promise<OutsideConnection[] | null> {
+    if (guest || !account?.outsideAi) return null;
+    return (await this.outside.connectionsOf(userId, new Date().toISOString())).map(shownConnection);
+  }
+
+  /** Ends the connection `id` of the person `credentials` signs in, answering the ones they have left: "not found" when it isn't theirs, or why not, as `outsidePerson` answers. */
+  async disconnectOutside(credentials: Credentials, id: string): Promise<OutsideConnection[] | "not found" | "off" | "forbidden" | null> {
+    const person = await this.outsidePerson(credentials);
+    if (!person || typeof person === "string") return person;
+    if (!(await this.outside.disconnect(person.user.id, id))) return "not found";
+    return (await this.outside.connectionsOf(person.user.id, new Date().toISOString())).map(shownConnection);
+  }
+
+  /** The rooms `userId` is in, as an AI app connected as them lists them. */
+  async outsideRooms(userId: UserId): Promise<SidebarRoom[]> {
+    return (await this.store.roomsFor(userId)).rooms;
   }
 
   /**
@@ -1926,6 +2135,7 @@ export class Workspace extends DurableObject<Env> {
       assistantInstructions: "",
       assistantPromptTemplate: null,
       huddles: null,
+      outsideAi: false,
       deployedAddress: null,
       otherAddresses: [],
     };
@@ -3966,10 +4176,10 @@ export class Workspace extends DurableObject<Env> {
     const { name, emailAddress, bio, avatar, password, membershipNeeded } = person;
     const [{ avatarUrl }, account] = await Promise.all([this.directoryUser(person), this.joinableAccount()]);
     const memberful = session.guest ? null : { membersOnly: account?.memberfulSignIn ?? false, accounts: person.accounts };
-    const apps = await this.yourApps(person.id, session.guest, account);
+    const [apps, outsideAi] = await Promise.all([this.yourApps(person.id, session.guest, account), this.yourOutsideAi(person.id, session.guest, account)]);
     return {
       transfer: { userId: person.id, sessionId: session.id },
-      profile: { name, emailAddress, bio, avatarUrl, avatar: avatar !== null, password, membershipNeeded, assistant: yourAssistantOf(account, person.picks), apps },
+      profile: { name, emailAddress, bio, avatarUrl, avatar: avatar !== null, password, membershipNeeded, assistant: yourAssistantOf(account, person.picks), apps, outsideAi },
       memberful,
     };
   }

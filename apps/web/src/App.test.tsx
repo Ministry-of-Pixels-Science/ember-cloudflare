@@ -166,6 +166,7 @@ function serve({
     }
     if (!signedIn) return Response.json({ error: "Not signed in" }, { status: 401 });
     if (route === "GET /api/me") return Response.json({ user: me });
+    if (route === "POST /api/outside/asks") return Response.json({ name: "Claude", comesBackTo: "claude.example", workspace: account.name, scopes: ["read"] });
     if (route === "GET /api/account")
       return Response.json({
         account,
@@ -176,6 +177,7 @@ function serve({
         turnstile: null,
         assistant: null,
         huddles: null,
+        outsideAi: false,
         cloudflareAccountId: null,
         email: { provider: "cloudflare", resendKey: null, cloudflare: true, from: null },
         invitations: [],
@@ -187,7 +189,7 @@ function serve({
       return Response.json({ huddles: { appId: (JSON.parse(String(init?.body)) as HuddlesSetup).appId } });
     }
     if (route === "GET /api/users") return Response.json({ users: [] });
-    if (route === "GET /api/users/me/profile") return Response.json({ profile: { name: me.name, emailAddress: null, bio: null, apps: [] } });
+    if (route === "GET /api/users/me/profile") return Response.json({ profile: { name: me.name, emailAddress: null, bio: null, apps: [], outsideAi: null } });
     if (route === "PATCH /api/account") {
       const { name = account.name, tagline = account.tagline, settings, customDomain = account.customDomain } = JSON.parse(String(init?.body)) as AccountChanges;
       account = { ...account, name, tagline, hideTranslationButtons: settings?.hideTranslationButtons ?? account.hideTranslationButtons, customDomain };
@@ -1029,6 +1031,30 @@ describe("Reset a forgotten password with an emailed code", () => {
     render(<App />);
     expect(await resetPage()).toBeInTheDocument();
     expect(sessionStorage.getItem("ember:return-to")).toBe("/rooms/general");
+  });
+});
+
+describe("Connecting an AI app", () => {
+  const REQUEST = "/oauth/authorize?response_type=code&client_id=0mgk3x2a9b4c70&state=5f2c01";
+
+  it("asks whether to connect the app whose request the address carries, in place of the workspace", async () => {
+    history.replaceState(null, "", REQUEST);
+    const fetch = serve({ signedIn: true });
+    render(<App />);
+    expect(await screen.findByRole("heading", { level: 1, name: "Connect Claude to Ember?" })).toBeVisible();
+    expect(fetch).toHaveBeenCalledWith("/api/outside/asks", expect.objectContaining({ method: "POST" }));
+    expect(screen.queryAllByRole("link", { name: "Your profile" })).toEqual([]);
+    expect(`${location.pathname}${location.search}`).toBe(REQUEST);
+  });
+
+  it("has someone signed out sign in first, and comes back to the request", async () => {
+    history.replaceState(null, "", REQUEST);
+    serve({ signedIn: false });
+    render(<App />);
+    await signInPage();
+    await signInAsAda();
+    expect(await screen.findByRole("heading", { level: 1, name: "Connect Claude to Ember?" })).toBeVisible();
+    expect(`${location.pathname}${location.search}`).toBe(REQUEST);
   });
 });
 

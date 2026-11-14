@@ -38,8 +38,9 @@
 
   // One ChatRoom object per room, which owns its sockets, presence and (by default) its messages,
   // one Workspace object for what the rooms share, one SearchIndex object for every room's messages'
-  // text, and short-lived PasswordHasher, Unfurler and AppConnector objects, which have the CPU time a
-  // password's hash, a link's preview and reading a connected app's answers take.
+  // text, and short-lived PasswordHasher, Unfurler, AppConnector and OutsideAi objects, which have the
+  // CPU time a password's hash, a link's preview, reading a connected app's answers and answering an AI
+  // app that's connected to Ember take.
   "durable_objects": {
     "bindings": [
       { "name": "CHAT_ROOM", "class_name": "ChatRoom" },
@@ -47,7 +48,8 @@
       { "name": "PASSWORD_HASHER", "class_name": "PasswordHasher" },
       { "name": "UNFURLER", "class_name": "Unfurler" },
       { "name": "SEARCH_INDEX", "class_name": "SearchIndex" },
-      { "name": "APP_CONNECTOR", "class_name": "AppConnector" }
+      { "name": "APP_CONNECTOR", "class_name": "AppConnector" },
+      { "name": "OUTSIDE_AI", "class_name": "OutsideAi" }
     ]
   },
   "migrations": [
@@ -56,7 +58,8 @@
     { "tag": "v3", "new_sqlite_classes": ["PasswordHasher"] },
     { "tag": "v4", "new_sqlite_classes": ["Unfurler"] },
     { "tag": "v5", "new_sqlite_classes": ["SearchIndex"] },
-    { "tag": "v6", "new_sqlite_classes": ["AppConnector"] }
+    { "tag": "v6", "new_sqlite_classes": ["AppConnector"] },
+    { "tag": "v7", "new_sqlite_classes": ["OutsideAi"] }
   ],
 
   // The files people upload to rooms. Deploying binds the account's bucket of this name, and creates

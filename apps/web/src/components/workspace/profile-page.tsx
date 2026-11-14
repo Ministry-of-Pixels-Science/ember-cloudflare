@@ -40,6 +40,7 @@ import { PageHeading, Panel, SettingsPage } from "./settings-page";
 import { SignInLink } from "./sign-in-link";
 import { avatarUrlOf, avatarVersionOf } from "./user-avatar";
 import { YourApps } from "./your-apps";
+import { YourOutsideAi } from "./your-outside-ai";
 
 interface Props {
   me: Me;
@@ -137,6 +138,7 @@ export function ProfilePage({ me, rooms, askForRoom, onSignOut, onFailed }: Prop
   const [assistant, setAssistant] = useState<Profile["assistant"]>(null);
   /** The connected apps you can sign in to yourself, each with your sign-in to it, if you've made one. */
   const [apps, setApps] = useState<Profile["apps"]>([]);
+  const [outsideAi, setOutsideAi] = useState<Profile["outsideAi"]>(null);
   const [saving, setSaving] = useState(false);
   const passwordInput = useRef<HTMLInputElement>(null);
   const currentPasswordInput = useRef<HTMLInputElement>(null);
@@ -163,6 +165,7 @@ export function ProfilePage({ me, rooms, askForRoom, onSignOut, onFailed }: Prop
         setAssistant(answer.profile.assistant);
         // The same goes for the Apps section, which signing out there changes.
         setApps(answer.profile.apps);
+        setOutsideAi(answer.profile.outsideAi);
       },
       (error: unknown) => {
         // A page left before its profile loads only reports a session that's ended, which goes to sign in.
@@ -386,6 +389,7 @@ export function ProfilePage({ me, rooms, askForRoom, onSignOut, onFailed }: Prop
         )}
         {assistant && <AnswerLevels assistant={assistant} onChanged={setAssistant} onFailed={onFailed} />}
         {apps.length > 0 && <YourApps apps={apps} onChanged={setApps} onFailed={onFailed} />}
+        {outsideAi && <YourOutsideAi connections={outsideAi} onChanged={setOutsideAi} onFailed={onFailed} />}
         {rooms && <ConversationNotifications me={me} rooms={rooms} askForRoom={askForRoom} onFailed={onFailed} />}
         {transferId && <SignInLink transferId={transferId} mine />}
       </Panel>

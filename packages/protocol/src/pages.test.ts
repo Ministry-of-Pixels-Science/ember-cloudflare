@@ -4,7 +4,7 @@ import { huddlePath, isAppPage, MAX_ID_LENGTH, threadPath, TRANSFER_PATH, transf
 describe("Error pages", () => {
   it("names the pages the app shows, for the Worker to serve the app at", () => {
     const pages = ["/", "/rooms", "/rooms/general", "/rooms/caf%C3%A9", "/rooms/opens/general", "/rooms/directs/ada-grace", "/rooms/opens/new", "/rooms/closeds/new"];
-    for (const path of [...pages, "/rooms/opens/general/edit", "/account/edit", "/account/custom_styles/edit", "/session/new"]) expect(isAppPage(path), path).toBe(true);
+    for (const path of [...pages, "/rooms/opens/general/edit", "/account/edit", "/account/custom_styles/edit", "/session/new", "/oauth/authorize"]) expect(isAppPage(path), path).toBe(true);
     expect(workspacePageOf("/rooms/caf%C3%A9")).toEqual({ page: "room", roomId: "café" });
   });
 

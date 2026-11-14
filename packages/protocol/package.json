@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/index.ts", "./agents": "./src/agents.ts", "./apps": "./src/apps.ts", "./assistant": "./src/assistant.ts", "./bots": "./src/bots.ts", "./huddles": "./src/huddles.ts", "./prompts": "./src/prompts.ts", "./qr-code": "./src/qr-code.ts" },
+  "exports": { ".": "./src/index.ts", "./agents": "./src/agents.ts", "./apps": "./src/apps.ts", "./assistant": "./src/assistant.ts", "./bots": "./src/bots.ts", "./huddles": "./src/huddles.ts", "./outside": "./src/outside.ts", "./prompts": "./src/prompts.ts", "./qr-code": "./src/qr-code.ts" },
   "scripts": {
     "typecheck": "tsc -p .",
     "test": "vitest run"

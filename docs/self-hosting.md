@@ -23,6 +23,7 @@ account, as [Deploying](#deploying) describes.
   - [Ember AI](#ember-ai)
   - [AI agents](#ai-agents)
   - [Apps](#apps)
+  - [Outside AI](#outside-ai)
   - [Huddles](#huddles)
   - [A preview from GitHub Actions](#a-preview-from-github-actions)
   - [A demo from GitHub Actions](#a-demo-from-github-actions)
@@ -1042,6 +1043,57 @@ the same client, made as them, and kept beside Ember's, sealed for that app and 
   there too, saying it couldn't take everything back when there were more. Removing or banning
   someone forgets theirs, without asking the service.
 
+### Outside AI
+
+An AI app, such as Claude or ChatGPT, can connect to Ember and read it as one of the people in it. Ember
+is an [MCP](https://modelcontextprotocol.io) server for that, at `/mcp` on its own address, the
+other way round from [Apps](#apps), where Ember's agents call other services' servers. It's off
+until an administrator turns on **Outside AI** on the AI assistant tab, which is there whether or not
+Ember AI is on, and until then nothing about it answers: `/mcp`, and the addresses below, answer 404.
+
+To connect an app, someone gives it Ember's address ending in `/mcp`, which the card and their profile
+show, as a custom connector or MCP server. The app sends their browser to a page of Ember's, which
+they sign in to if they aren't, and which asks whether to connect it: it names the app, says what it
+could do as them, and says which site the browser goes back to, which is what tells whose app it is,
+since the name is only what the app calls itself. **Allow** connects it. **Don't allow** goes back
+with nothing.
+
+- **What a connected app can do** is what the person who connected it can see: it lists the rooms
+  they're in, with their direct messages named after the others in them. It can't post, and it sees
+  nothing they don't.
+- **Your profile lists the apps connected as you**, under **AI apps**, with when each was connected
+  and last asked Ember anything, and **Disconnect**, which ends what that app was given at once. One
+  person has at most 20.
+- **Guests can't connect one**, as they have no account of their own to act as. Removing or banning
+  someone ends every connection of theirs.
+- **Turning Outside AI off disconnects every app**, and forgets the apps that registered, after
+  asking the administrator first. Turning it on again starts afresh.
+
+How an app signs in is OAuth 2.1, as MCP's
+[authorization](https://modelcontextprotocol.io/specification/draft/basic/authorization) has it,
+with Ember as the authorization server:
+
+- `/.well-known/oauth-protected-resource/mcp` and `/.well-known/oauth-authorization-server` say
+  where, and a request to `/mcp` without a token answers 401 pointing at the first.
+- An app names itself by the address of a Client ID Metadata Document, which Ember reads from a
+  public address only, or registers itself at `/oauth/register`, 10 times an hour from one address at
+  most. Either way it's a public client, with no secret, and proves itself with PKCE (S256).
+- The browser goes back only to an `https` address the app gave, or to `http` on the person's own
+  computer, at any port, for an app that runs there. An app that's opened by a scheme of its own,
+  such as `cursor://`, can't connect yet.
+- An access token lasts an hour, and a refresh token is replaced each time it's used and lasts 90 days
+  unused. Using a refresh token that was replaced, however long ago, or a code twice, ends that
+  connection, as either means it was copied. Ember keeps only a keyed digest of each, made with
+  `SESSION_SECRET`, so its database holds nothing an app could sign in with.
+- A token works only at the address the app said it was for, when it asked to connect or when it
+  exchanged its code, so one given for another Ember, or for this one at another address, is
+  refused. An app that never says is bound to none: its tokens are still only this Ember's.
+
+Requests to `/mcp` are answered in a Durable Object of their own, `OutsideAi`, apart from the rooms and
+the workspace, as an app's tools are read in `AppConnector`: reading a request and checking it takes
+more CPU time than a Worker's request gets on Workers Free. It keeps nothing, and each request has a
+new one.
+
 ### Huddles
 
 A huddle is a room's voice call, laid out as Slack's is. The headphones at the top of a room start its
@@ -1239,6 +1291,9 @@ What a self-hoster should know, beyond keeping the setup password and link to th
 - Custom CSS runs on every page for everyone, so it's an administrator's to write, like the rest of
   the workspace, and `EMBER_RECOVERY_TOKEN` can take over any account, so keep it set only while
   resetting a password, as above.
+- While [Outside AI](#outside-ai) is on, an AI app someone connects sees what they see, until they
+  disconnect it on their profile, and whoever runs that app can read it too. The page that asks them
+  names the site their browser goes back to, since anyone can register an app under any name.
 - `/api/health` tells strangers only whether Ember is up; administrators and whoever sends the
   recovery token hear the rest. QR codes (`/qr_code/<id>`) are drawn for people signed in.
 

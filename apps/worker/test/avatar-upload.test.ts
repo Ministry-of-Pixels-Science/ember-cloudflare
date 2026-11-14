@@ -111,7 +111,7 @@ describe("Upload an avatar", () => {
 
     const { profile } = await uploadMoon(ada);
     const { avatarUrl } = await listed(ada, ada.user.id);
-    expect(profile).toEqual({ name: "Ada Lovelace", emailAddress: null, bio: null, avatarUrl, avatar: true, password: false, membershipNeeded: true, memberful: null, assistant: null, apps: [] } satisfies Profile);
+    expect(profile).toEqual({ name: "Ada Lovelace", emailAddress: null, bio: null, avatarUrl, avatar: true, password: false, membershipNeeded: true, memberful: null, assistant: null, apps: [], outsideAi: null } satisfies Profile);
     // A new picture has a new address, which browsers haven't kept.
     expect(avatarUrl).not.toMatch(/\?v=20260101000000$/);
 
@@ -247,7 +247,7 @@ describe("Upload an avatar", () => {
     expect(response.status).toBe(200);
     const { profile } = (await response.json()) as ProfileAnswer;
     const now = await listed(ada, ada.user.id);
-    expect(profile).toEqual({ name: "Ada Lovelace", emailAddress: null, bio: null, avatarUrl: now.avatarUrl, avatar: false, password: false, membershipNeeded: true, memberful: null, assistant: null, apps: [] } satisfies Profile);
+    expect(profile).toEqual({ name: "Ada Lovelace", emailAddress: null, bio: null, avatarUrl: now.avatarUrl, avatar: false, password: false, membershipNeeded: true, memberful: null, assistant: null, apps: [], outsideAi: null } satisfies Profile);
     expect(await socket.next()).toEqual({ type: "user.updated", user: now });
     expect(await (await avatar(now.avatarUrl, ada)).text()).toBe(avatarSvg(ada.user.id, "Ada Lovelace"));
     expect(await avatarColumnsOf(ada.user.id)).toMatchObject({ avatar_key: null, avatar_variant: null });

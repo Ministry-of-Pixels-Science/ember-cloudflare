@@ -49,6 +49,7 @@ import {
   HOW_TO_ADD_THE_WORKFLOW,
 } from "./ember-version";
 import { AGENTS_ANSWER, ASSISTANT_EXPLAINED } from "./assistant-settings";
+import { CONFIRM_STOP_OUTSIDE_AI } from "./outside-ai-settings";
 import { CONFIRM_REMOVE } from "./people-list";
 import { workspaceSectionPath, type WorkspaceSection } from "./settings-navigation";
 import { CHANGES_SAVED } from "./settings-page";
@@ -70,6 +71,7 @@ const asAdministrator: WorkspaceSettings = {
   turnstile: null,
   assistant: null,
   huddles: null,
+  outsideAi: false,
   cloudflareAccountId: null,
   email: { provider: "cloudflare", resendKey: null, cloudflare: true, from: null },
   invitations: [],
@@ -148,7 +150,7 @@ const RECAP: Agent = {
 
 /** Answers the page's requests as the server would for `settings`, or as `answers` says. */
 function serve(settings: WorkspaceSettings, { saved, regenerated, roleChanged, removed, ordered, logoSaved }: Answers = {}) {
-  let { account, emailDomains: keptDomains, email, turnstile, assistant, huddles } = settings;
+  let { account, emailDomains: keptDomains, email, turnstile, assistant, huddles, outsideAi } = settings;
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const request = `${init?.method ?? "GET"} ${String(input)}`;
     const person = request.match(/^PATCH \/api\/account\/users\/(.+)$/);
@@ -160,7 +162,7 @@ function serve(settings: WorkspaceSettings, { saved, regenerated, roleChanged, r
     if (removing) return removed ? removed() : Response.json({ user: { ...everyone.find((user) => user.id === removing[1]), status: "deactivated" } });
     switch (request) {
       case "GET /api/account":
-        return Response.json({ ...settings, account, emailDomains: keptDomains, email, turnstile, assistant, huddles });
+        return Response.json({ ...settings, account, emailDomains: keptDomains, email, turnstile, assistant, huddles, outsideAi });
       case "PATCH /api/account": {
         if (saved) return saved();
         const {
@@ -250,6 +252,9 @@ function serve(settings: WorkspaceSettings, { saved, regenerated, roleChanged, r
         return Response.json({ agents: [RECAP] } satisfies Agents);
       case "GET /api/account/apps":
         return Response.json({ apps: [{ id: "0mgk3x2a9b4c70", name: "Linear", url: "https://mcp.linear.example/mcp", toolCount: 23, setAside: 0, signInEnded: false, wantsAccess: false }] });
+      case "PUT /api/account/outside_ai":
+        ({ on: outsideAi } = JSON.parse(String(init?.body)) as { on: boolean });
+        return Response.json({ on: outsideAi });
       case "PUT /api/account/huddles":
         huddles = { appId: (JSON.parse(String(init?.body)) as HuddlesSetup).appId };
         return Response.json({ huddles });
@@ -2033,6 +2038,44 @@ describe("Ember AI", () => {
     expect(await screen.findByText("Community admins manage the AI assistant.")).toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "Ember AI" })).not.toBeInTheDocument();
     expect(agentsCard()).not.toBeInTheDocument();
+  });
+});
+
+describe("Outside AI", () => {
+  showingSection("assistant-settings");
+  const card = () => screen.findByRole("region", { name: "Outside AI" });
+
+  it("gives administrators the Outside AI card, whether or not Ember AI is on, whose switch lets AI apps connect", async () => {
+    const { user } = showPage();
+    const outsideSwitch = within(await card()).getByRole("switch", { name: "Let AI apps connect to Ember" });
+    expect(outsideSwitch).not.toBeChecked();
+
+    await user.click(outsideSwitch);
+
+    await waitFor(() => expect(outsideSwitch).toBeChecked());
+    expect(fetch).toHaveBeenCalledWith("/api/account/outside_ai", expect.objectContaining({ method: "PUT", body: JSON.stringify({ on: true }) }));
+    expect(await card()).toHaveTextContent(`${location.origin}/mcp`);
+  });
+
+  it("shows it on once it's on, and off again once an administrator agrees to disconnect every app", async () => {
+    serve({ ...asAdministrator, outsideAi: true });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const { user } = showPage();
+    const outsideSwitch = within(await card()).getByRole("switch", { name: "Let AI apps connect to Ember" });
+    expect(outsideSwitch).toBeChecked();
+
+    await user.click(outsideSwitch);
+
+    await waitFor(() => expect(outsideSwitch).not.toBeChecked());
+    expect(confirm).toHaveBeenCalledExactlyOnceWith(CONFIRM_STOP_OUTSIDE_AI);
+    expect(await card()).not.toHaveTextContent("/mcp");
+  });
+
+  it("isn't shown to members", async () => {
+    serve(asMember);
+    showPage(asLinus);
+    expect(await screen.findByText("Community admins manage the AI assistant.")).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Outside AI" })).not.toBeInTheDocument();
   });
 });
 

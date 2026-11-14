@@ -46,6 +46,7 @@ import { HuddlesSettings } from "./huddles-settings";
 import { HuddlesSetup } from "./huddles-setup";
 import { InviteByEmail } from "./invite-by-email";
 import { InviteLink } from "./invite-link";
+import { OutsideAiSettings } from "./outside-ai-settings";
 import { PeopleList } from "./people-list";
 import { PicturePicker } from "./picture-picker";
 import { RoomOrder } from "./room-order";
@@ -107,7 +108,8 @@ interface Props {
  * - Domain settings: for administrators, the custom domain Ember answers at.
  * - AI assistant: for administrators, whether Ember's AI agents run on models through Cloudflare AI
  *   Gateway, which Set up Ember AI connects, and while they do, the agents, @ember first, each linking to
- *   its page, and New agent.
+ *   its page, and New agent. Then whether AI apps, such as Claude, may connect to Ember as the people in
+ *   it (Outside AI).
  * - Huddles: for administrators, whether huddles are on, through the Realtime SFU app whose keys Set up
  *   huddles takes.
  */
@@ -310,6 +312,8 @@ export function WorkspaceSettingsPage({
   const showTurnstile = (turnstile: WorkspaceSettings["turnstile"]) => setSettings((settings) => settings && { ...settings, turnstile });
   /** Shows Ember AI as Set up Ember AI, or turning it off, changes it, which only workspace settings shows. */
   const showAssistant = (assistant: WorkspaceSettings["assistant"]) => setSettings((settings) => settings && { ...settings, assistant });
+  /** Shows whether AI apps may connect, as the Outside AI card's switch changes it. */
+  const showOutsideAi = (outsideAi: boolean) => setSettings((settings) => settings && { ...settings, outsideAi });
   /** Shows huddles as Set up huddles, or turning them off, changes them, which only workspace settings shows. */
   const showHuddles = (huddles: WorkspaceSettings["huddles"]) => setSettings((settings) => settings && { ...settings, huddles });
 
@@ -583,6 +587,7 @@ export function WorkspaceSettingsPage({
               />
               {settings.assistant && <AgentList assistant={settings.assistant} onFailed={onFailed} />}
               {settings.assistant && <AppList onFailed={onFailed} />}
+              <OutsideAiSettings on={settings.outsideAi} onChanged={showOutsideAi} onFailed={onFailed} />
               {settingUpAssistant && (
                 <AssistantSetup
                   assistant={settings.assistant}

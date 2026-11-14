@@ -79,6 +79,7 @@ import {
   type WorkspaceSettings,
 } from "@ember/protocol";
 import { agentsName } from "@ember/protocol/agents";
+import { OUTSIDE_AUTHORIZE_PATH } from "@ember/protocol/outside";
 import { mentionPromptItem } from "@ember/richtext";
 import { isAccountLogoPath, showAccountLogo, storeLogo } from "./account-logo";
 import {
@@ -113,6 +114,7 @@ import {
   showApp,
   signOutOfApp,
 } from "./apps/api";
+import { answerOutsideAsk, changeOutsideAi, describeOutsideAsk, disconnectOutside, isOutsideRegistration, outsideAction, outsideConnectPage } from "./outside/api";
 import { CLIENT_DOCUMENT_PATH } from "./apps/oauth";
 import { agentPage, changeAgent, createAgent, deleteAgent, listAgents, removeAgentAvatar, showAgent, tryAgent } from "./assistant/agents";
 import {
@@ -174,6 +176,7 @@ import { versionOf } from "./version";
 import { ACCOUNT_BEFORE_SETUP, CREDENTIALS_HEADER, workspace, type YourProfile } from "./workspace";
 
 export { AppConnector } from "./apps/connector";
+export { OutsideAi } from "./outside/endpoint";
 export { ChatRoom } from "./chat-room";
 export { PasswordHasher } from "./passwords";
 export { SearchIndex } from "./search-index";
@@ -1140,6 +1143,7 @@ function apiAction(request: Request, env: Env, pathname: string): (() => Respons
   if (appSignIn && request.method === "POST") return () => beginAppSignIn(request, env, appSignIn[1]!);
   const appTools = pathname.match(/^\/api\/account\/apps\/([^/]+)\/tools$/);
   if (appTools && request.method === "POST") return () => readAppTools(request, env, appTools[1]!);
+  if (pathname === "/api/account/outside_ai" && request.method === "PUT") return () => changeOutsideAi(request, env);
   if (pathname === "/api/account/huddles" && request.method === "PUT") return () => saveHuddles(request, env);
   if (pathname === "/api/account/huddles" && request.method === "DELETE") return () => forgetHuddles(request, env);
   if (pathname === "/api/account/custom_domain_checks" && request.method === "POST") return () => checkCustomDomain(request, env);
@@ -1175,6 +1179,10 @@ function apiAction(request: Request, env: Env, pathname: string): (() => Respons
   const ownAppSignIn = pathname.match(/^\/api\/users\/me\/apps\/([^/]+)\/sign-in$/);
   if (ownAppSignIn && request.method === "POST") return () => beginOwnAppSignIn(request, env, ownAppSignIn[1]!);
   if (ownAppSignIn && request.method === "DELETE") return () => signOutOfApp(request, env, ownAppSignIn[1]!);
+  const outsideConnection = pathname.match(/^\/api\/users\/me\/outside\/([^/]+)$/);
+  if (outsideConnection && request.method === "DELETE") return () => disconnectOutside(request, env, outsideConnection[1]!);
+  if (pathname === "/api/outside/asks" && request.method === "POST") return () => describeOutsideAsk(request, env);
+  if (pathname === "/api/outside/answers" && request.method === "POST") return () => answerOutsideAsk(request, env);
   if (pathname === MEMBERFUL_CONNECTIONS_PATH && request.method === "POST") return () => connectMemberful(request, env);
   if (pathname === MEMBERFUL_CONNECTIONS_PATH && request.method === "DELETE") return () => disconnectMemberful(request, env);
   if (pathname === AVATAR_PATH && request.method === "PUT") return () => changeAvatar(request, env);
@@ -1274,6 +1282,9 @@ async function route(request: Request, env: Env, pathname: string): Promise<Resp
   // Nor is an app's authorization server, reading who Ember is.
   if (pathname === CLIENT_DOCUMENT_PATH && !write) return clientDocument(request);
   // Nor are a room's files, to whoever has the address, whatever their browser.
+  // Nor are the AI apps that connect to Ember, whose requests carry a token of their own, or nothing.
+  const outside = outsideAction(request, env, pathname);
+  if (outside) return write && isOutsideRegistration(pathname) && (await isFromBannedAddress(request, env)) ? tooManyRequests() : outside();
   const file = fileAddressOf(pathname);
   if (file) return write ? notFound(request) : serveFile(request, env, file);
   const action = apiAction(request, env, pathname) ?? botAction(request, env, pathname);
@@ -1308,6 +1319,7 @@ async function route(request: Request, env: Env, pathname: string): Promise<Resp
   if (page?.page === "bot-settings") return botPage(request, env, pathname, page.userId);
   if (page?.page === "agent-settings") return agentPage(request, env, pathname, page.agentId);
   if (page?.page === "app-settings") return appPage(request, env, pathname, page.appId);
+  if (pathname === OUTSIDE_AUTHORIZE_PATH && !write) return outsideConnectPage(request, env, pathname);
   return anyOtherPage(request, env, pathname);
 }
 

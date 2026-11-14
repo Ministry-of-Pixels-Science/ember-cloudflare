@@ -114,6 +114,7 @@ import type {
   YourAppSignedIn,
   YourAppSignedOut,
 } from "@ember/protocol/apps";
+import type { OutsideAiSettings, OutsideAnswer, OutsideAnswered, OutsideAsk, OutsideAsked, YourOutsideAi } from "@ember/protocol/outside";
 import type { LogoVariants } from "@/lib/previews";
 
 // The session lives in an HttpOnly cookie, which the browser sends with every request and socket,
@@ -754,6 +755,30 @@ export async function beginOwnAppSignIn(appId: AppId): Promise<string> {
 /** Forgets the sign-in you made to the connected app `appId` yourself, answering the apps as your profile then lists them, and whether its service took the sign-in back. Fails as `beginOwnAppSignIn` does. */
 export async function signOutOfApp(appId: AppId): Promise<YourAppSignedOut> {
   return request<YourAppSignedOut>(`/api/users/me/apps/${encodeURIComponent(appId)}/sign-in`, { method: "DELETE" });
+}
+
+/**
+ * What the page says of `ask`, an AI app's request to connect to Ember as you. Fails with a 401 ApiError
+ * once the session has ended, a 403 for someone who signed in with just a name, a 409 while outside AI
+ * is off, and a 422 for a request Ember can't answer.
+ */
+export function describeOutsideAsk(ask: OutsideAsk): Promise<OutsideAsked> {
+  return request<OutsideAsked>("/api/outside/asks", { method: "POST", body: JSON.stringify(ask) });
+}
+
+/** Answers `ask`, whether to connect its app as you, answering where to send the browser: back to the app. Fails as `describeOutsideAsk` does, and with a 409 when you have as many connected as one may. */
+export async function answerOutsideAsk(ask: OutsideAsk, allow: boolean): Promise<string> {
+  return (await request<OutsideAnswered>("/api/outside/answers", { method: "POST", body: JSON.stringify({ ask, allow } satisfies OutsideAnswer) })).redirectTo;
+}
+
+/** Ends the connection `id` of yours, answering the ones you have left. Fails with a 401 ApiError once the session has ended, a 409 while outside AI is off, and a 404 once the connection has ended. */
+export function disconnectOutside(id: string): Promise<YourOutsideAi> {
+  return request<YourOutsideAi>(`/api/users/me/outside/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+/** Lets AI apps connect to Ember, or stops them, which ends every connection, answering which. Fails with a 401 ApiError once the session has ended, and a 403 unless you're an administrator. */
+export function changeOutsideAi(on: boolean): Promise<OutsideAiSettings> {
+  return request<OutsideAiSettings>("/api/account/outside_ai", { method: "PUT", body: JSON.stringify({ on }) });
 }
 
 /** Changes app `appId`, leaving what `changes` leaves out, answering it as its page then shows it. Fails as `fetchApp` and `connectApp` do. */

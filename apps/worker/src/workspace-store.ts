@@ -80,7 +80,7 @@ export interface Client {
 }
 
 /** The user statuses. Only active people can sign in. */
-const ACTIVE = 0;
+export const ACTIVE = 0;
 const DEACTIVATED = 1;
 const BANNED = 2;
 /** For a member whose Memberful membership has lapsed, until it's renewed. */
@@ -145,6 +145,8 @@ export interface JoinableAccount extends Omit<Account, "logo" | "huddles"> {
   assistantPromptTemplate: string | null;
   /** The SFU app huddles run through, while an administrator has them on, or else null. */
   huddles: SavedHuddles | null;
+  /** Whether AI apps may connect to Ember as the people in it, which an administrator turns on. Off until one does. */
+  outsideAi: boolean;
   /** Where a deploy puts Ember, as the latest page opened there told it, or null until one has (`EmberAddresses.deployed`). */
   deployedAddress: string | null;
   /** The custom domains Ember has moved away from, newest first, which may still reach it (`EmberAddresses.others`). */
@@ -1776,7 +1778,7 @@ const RENAME_ACCOUNT = `UPDATE accounts SET name = ?1, updated_at = ?2 WHERE nam
  * Sets the account's setting `key` to the JSON value ?1, and records when. The other settings stay, and
  * settings that aren't a JSON object start afresh.
  */
-const setSetting = (key: string) => `UPDATE accounts SET settings = json_set(
+export const setSetting = (key: string) => `UPDATE accounts SET settings = json_set(
     CASE WHEN json_valid(settings) AND json_type(settings) = 'object' THEN settings ELSE '{}' END,
     '$.${key}', json(?1)
   ), updated_at = ?2`;
@@ -2626,6 +2628,7 @@ export class WorkspaceStore {
       assistantInstructions: assistantInstructionsIn(settings),
       assistantPromptTemplate: assistantPromptTemplateIn(settings),
       huddles: huddlesIn(settings),
+      outsideAi: isPresent(settings?.outside_ai),
       deployedAddress: deployedAddressIn(settings),
       otherAddresses: otherAddressesIn(settings),
     };
@@ -3163,7 +3166,7 @@ export class WorkspaceStore {
    * Removes someone from the workspace, in one transaction: queues closing each of their sessions'
    * sockets with `code` in every room they're in, DMs included, due at `dueAt`, takes them out of every
    * room but their DMs, ends their sessions, forgets their recent searches, their push subscriptions
-   * and the sign-ins they made to apps, and marks them removed, recording when, with
+   * the sign-ins they made to apps and the AI apps connected as them, and marks them removed, recording when, with
    * `-deactivated-<uuid>` before each "@" of their email address. Their messages, boosts, DMs, role and
    * avatar stay. Answers whether it queued any.
    */
@@ -3176,6 +3179,8 @@ export class WorkspaceStore {
       ...forgettingSearches(userId),
       statement(`DELETE FROM push_subscriptions WHERE user_id = ?`, userId),
       statement(`DELETE FROM own_app_sign_ins WHERE user_id = ?`, userId),
+      statement(`DELETE FROM outside_spent_tokens WHERE connection_id IN (SELECT id FROM outside_connections WHERE user_id = ?)`, userId),
+      statement(`DELETE FROM outside_connections WHERE user_id = ?`, userId),
       statement(DEACTIVATE, `-deactivated-${uuid}@`, now, userId),
     ]);
     return queued!.length > 0;
@@ -3187,7 +3192,8 @@ export class WorkspaceStore {
    * banned, recording when, unless they were already, and queues deleting their messages in every room
    * they can have written in, due then too. It queues having every room tell the sockets from those
    * addresses to reconnect, due then as well, so they come back able only to read, and forgets the
-   * sign-ins they made to apps. Their memberships, role and avatar stay. Answers whether it queued anything.
+   * sign-ins they made to apps and the AI apps connected as them. Their memberships, role and avatar
+   * stay. Answers whether it queued anything.
    */
   async banPerson(userId: UserId, ipAddresses: string[], code: CloseCode, reconnect: CloseCode, dueAt: number, now: string): Promise<boolean> {
     const [revocations, , reconnections, , , purges] = (await this.db.batch([
@@ -3199,6 +3205,8 @@ export class WorkspaceStore {
       statement(`UPDATE users SET status = ${BANNED}, updated_at = ? WHERE id = ? AND status <> ${BANNED}`, now, userId),
       statement(QUEUE_PURGES, userId, dueAt),
       statement(`DELETE FROM own_app_sign_ins WHERE user_id = ?`, userId),
+      statement(`DELETE FROM outside_spent_tokens WHERE connection_id IN (SELECT id FROM outside_connections WHERE user_id = ?)`, userId),
+      statement(`DELETE FROM outside_connections WHERE user_id = ?`, userId),
     ])) as unknown[][];
     return revocations!.length > 0 || reconnections!.length > 0 || purges!.length > 0;
   }

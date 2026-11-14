@@ -8,6 +8,7 @@ import type { AssistantSettings, YourAssistant } from "./assistant.ts";
 import { isActionId, isActionValue, type Card } from "./cards.ts";
 import type { StoredFile } from "./files.ts";
 import type { HuddlesSettings, LiveHuddle } from "./huddles.ts";
+import type { OutsideConnection } from "./outside.ts";
 import { MAX_ID_LENGTH } from "./pages.ts";
 import { MAX_PUSH_ENDPOINT_LENGTH } from "./push.ts";
 import { ROOM_ICON_NAMES } from "./room-icons.ts";
@@ -527,6 +528,8 @@ export interface WorkspaceSettings {
   assistant: AssistantSettings | null;
   /** Huddles as the Huddles tab's card shows them, for administrators while they're on, and null otherwise. */
   huddles: HuddlesSettings | null;
+  /** Whether AI apps, such as Claude, may connect to Ember, as the AI assistant tab's Outside AI card shows administrators, and false for anyone else. */
+  outsideAi: boolean;
   /**
    * The ID of the Cloudflare account Ember is deployed to, which Set up Ember AI fills in, for
    * administrators once the deploy has given it to the Worker, and null otherwise.
@@ -927,6 +930,8 @@ export interface Profile {
   assistant: YourAssistant | null;
   /** The connected apps you can sign in to yourself, by name, each with your sign-in to it, if you've made one: none while Ember AI is off, or for a guest. */
   apps: YourApp[];
+  /** The AI apps connected to Ember as you, newest first, or null when none can be: while an administrator hasn't let AI apps connect, or for a guest. */
+  outsideAi: OutsideConnection[] | null;
 }
 
 /** What `GET /api/users/me/profile` answers, and `PATCH` once it has saved. */

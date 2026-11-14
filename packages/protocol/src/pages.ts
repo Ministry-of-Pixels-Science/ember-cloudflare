@@ -1,4 +1,5 @@
 import type { RoomId, RoomKind, UserId } from "./index.ts";
+import { OUTSIDE_AUTHORIZE_PATH } from "./outside.ts";
 
 // The app's pages, at Campfire's addresses where it has the page. The app's router reads a path with
 // `workspacePageOf`, and the Worker serves the app only where `isAppPage` says it shows a page, so any
@@ -182,10 +183,11 @@ function huddlePageOf(roomSegment: string): WorkspacePage | null {
 }
 
 /**
- * Whether the app shows a page at `pathname`: sign-in, or one of the workspace's. The Worker answers
- * setup's, the join link's and open sign-up's addresses itself.
+ * Whether the app shows a page at `pathname`: sign-in, the page that asks whether to connect an AI
+ * app, or one of the workspace's. The Worker answers setup's, the join link's and open sign-up's
+ * addresses itself.
  */
-export const isAppPage = (pathname: string) => pathname === SIGN_IN_PATH || workspacePageOf(pathname) !== null;
+export const isAppPage = (pathname: string) => pathname === SIGN_IN_PATH || pathname === OUTSIDE_AUTHORIZE_PATH || workspacePageOf(pathname) !== null;
 
 /**
  * What the Worker has the browser fetch with a workspace page, for a browser with a session cookie,

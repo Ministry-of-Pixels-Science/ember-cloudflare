@@ -59,6 +59,7 @@ import appSignIns from "../migrations/0058_app_sign_ins.sql";
 import appSignInClients from "../migrations/0059_app_sign_in_clients.sql";
 import appScopeWanted from "../migrations/0060_app_scope_wanted.sql";
 import ownAppSignIns from "../migrations/0061_own_app_sign_ins.sql";
+import outsideAi from "../migrations/0062_outside_ai.sql";
 import searchIndex from "../search-migrations/0001_search_index.sql";
 import searchResults from "../search-migrations/0002_search_results.sql";
 import searchFilters from "../search-migrations/0003_search_filters.sql";
@@ -144,6 +145,7 @@ export const MIGRATIONS: Migration[] = [
   { name: "0059_app_sign_in_clients.sql", scope: "workspace", sql: appSignInClients },
   { name: "0060_app_scope_wanted.sql", scope: "workspace", sql: appScopeWanted },
   { name: "0061_own_app_sign_ins.sql", scope: "workspace", sql: ownAppSignIns },
+  { name: "0062_outside_ai.sql", scope: "workspace", sql: outsideAi },
 ];
 
 /**
