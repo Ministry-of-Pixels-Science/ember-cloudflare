@@ -1,4 +1,4 @@
-import { HISTORY_PAGE_SIZE, MAX_SEARCH_LENGTH, type Me, type Message, type NewWorkspace, type ProfileAnswer, type RoomId, type WorkspaceSettings } from "@ember/protocol";
+import { HISTORY_PAGE_SIZE, MAX_SEARCH_LENGTH, type BotAnswer, type Me, type Message, type NewWorkspace, type ProfileAnswer, type RoomId, type WorkspaceSettings } from "@ember/protocol";
 import {
   MAX_OUTSIDE_CONNECTIONS,
   OUTSIDE_ASK_REFUSED,
@@ -755,6 +755,23 @@ describe("What a connected AI app reads", () => {
     expect(long!.text.endsWith("long…")).toBe(true);
     expect(shared).toMatchObject({ id: file.id, text: "", file: "notes.txt" });
     ada.close();
+  });
+
+  it("keeps the text of a bot's message that was given a file, cut as any other, beside the file's name", async () => {
+    const { administrator, token, general } = await reading();
+    const added = await api("/api/account/bots", { method: "POST", headers: { Cookie: administrator.cookie }, body: JSON.stringify({ name: "Build Bot" }) });
+    const messages = `/rooms/${general}/${((await added.json()) as BotAnswer).bot.key}/messages`;
+    const posted = await api(messages, { method: "POST", body: "long ".repeat(MAX_SHOWN_LENGTH / 5 + 100), headers: { "Content-Type": "application/x-www-form-urlencoded" } });
+    const id = posted.headers.get("Location")!.split("/@")[1]!;
+    const form = new FormData();
+    form.set("attachment", new File(["Build passed"], "build.log"));
+    expect((await api(`${messages}/${id}`, { method: "PATCH", body: form })).status).toBe(200);
+
+    const read = await found<{ messages: Array<{ id: string; text: string; file?: string }> }>(token, "read_room", { room_id: general });
+    const attached = read.messages.at(-1)!;
+    expect(attached).toMatchObject({ id, from: "Build Bot", file: "build.log" });
+    expect(attached.text).toHaveLength(MAX_SHOWN_LENGTH);
+    expect(attached.text.endsWith("long…")).toBe(true);
   });
 });
 

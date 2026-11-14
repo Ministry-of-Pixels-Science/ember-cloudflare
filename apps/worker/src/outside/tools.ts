@@ -45,7 +45,7 @@ interface ShownMessage {
   at: string;
   from: string;
   text: string;
-  /** The name of the file it shares, for a file message, whose text is empty. */
+  /** The name of the file it shares. A file message's text is empty, unless it's a bot's, given a file after its text or cards. */
   file?: string;
   edited?: true;
   /** For a reply, the id of the message whose thread it's in, which read_thread reads. */
@@ -58,13 +58,15 @@ interface ShownMessage {
 
 const cut = (text: string) => (text.length > MAX_SHOWN_LENGTH ? `${text.slice(0, MAX_SHOWN_LENGTH - 1).trimEnd()}…` : text);
 
-function shownMessage({ id, createdAt, creator, plainText, attachment, editedAt, parentId, thread, deleted }: Message): ShownMessage {
+function shownMessage({ id, createdAt, creator, body, plainText, cards, attachment, editedAt, parentId, thread, deleted }: Message): ShownMessage {
+  // A file message's plain text is only its file's name, which `file` says.
+  const onlyFile = attachment !== undefined && body === "" && !cards;
   return {
     id,
     at: createdAt,
     from: creator.name,
-    text: attachment ? "" : cut(plainText.trim()),
-    ...(attachment && { file: plainText }),
+    text: onlyFile ? "" : cut(plainText.trim()),
+    ...(attachment && { file: attachment.name }),
     ...(editedAt !== null && { edited: true as const }),
     ...(parentId !== undefined && { reply_to: parentId }),
     ...(thread && { replies: thread.count }),
