@@ -447,9 +447,9 @@ export interface Account {
    */
   openSignUp: boolean;
   /**
-   * Whether the members of the deployment's Memberful site join, and sign in, with their Memberful
-   * account, which an administrator turns on in Membership as Memberful. Off until one does. Members who
-   * joined with it keep signing in with it once it's off, while the deployment has its keys.
+   * Whether the members of Ember's Memberful site join, and sign in, with their Memberful account, which
+   * an administrator turns on in Membership as Memberful. Off until one does. Members who joined with it
+   * keep signing in with it once it's off, while Ember has the site's keys.
    */
   memberfulJoin: boolean;
   /**
@@ -498,16 +498,29 @@ export interface WorkspaceSettings {
   canAdminister: boolean;
   /**
    * The address of the Memberful site whose members can sign in, such as https://example.memberful.com,
-   * once the deployment has the keys of its custom app (`MEMBERFUL_URL` and the rest), or null while it
+   * once Ember has the keys of its custom app, as `memberfulKeys` says where from, or null while it
    * hasn't, when Memberful can't be turned on.
    */
   memberfulSite: string | null;
   /**
-   * Whether the deployment also has what Memberful's webhooks take, their signing secret and the custom
-   * app's API key (`MEMBERFUL_WEBHOOK_SECRET` and `MEMBERFUL_API_KEY`), so that Ember hears when a
-   * membership lapses or is renewed, and checks what it hears with Memberful.
+   * Whether Ember also has what Memberful's webhooks take, their signing secret and the custom app's API
+   * key, so that it hears when a membership lapses or is renewed, and checks what it hears with Memberful:
+   * always with the keys an administrator gave, and with the deployment's while it has
+   * `MEMBERFUL_WEBHOOK_SECRET` and `MEMBERFUL_API_KEY`.
    */
   memberfulWebhooks: boolean;
+  /**
+   * Where Memberful's keys come from, as Membership's Memberful card says: the deployment's secrets
+   * (`MEMBERFUL_URL` and the rest), which take the place of any others, the ones an administrator gave
+   * Ember in Set up Memberful, or null while it has neither.
+   */
+  memberfulKeys: "secret" | "saved" | null;
+  /**
+   * The Memberful site Set up Memberful keeps, for administrators, since people here sign in with their
+   * accounts at it, which are linked to them by that site and their member id there, or null while nobody
+   * does, or for anyone else, or while the deployment's secrets give Memberful's keys.
+   */
+  memberfulSiteKept: string | null;
   /**
    * Where the keys of the Cloudflare Turnstile widget come from that checks whoever signs up, or asks
    * Ember to email them, is a person, as Membership's Turnstile card says: the deployment's secrets
@@ -728,8 +741,8 @@ export interface AccountChanges {
 
 /**
  * The workspace's settings that workspace settings' switches change, the ways to join among them: the
- * join link's switch, Open, Memberful, its Members only, which the Worker turns on only with the
- * deployment's Memberful keys, and Email domain, which it turns on only with a domain to let in, while
+ * join link's switch, Open, Memberful, its Members only, which the Worker turns on only once Ember has
+ * Memberful's keys, and Email domain, which it turns on only with a domain to let in, while
  * Ember can send email. Members only turns Memberful on with it, turning Memberful off turns it off, and
  * it's never on together with Open.
  */
@@ -922,7 +935,7 @@ export interface Profile {
   /**
    * Where you stand with Memberful (`MemberfulStatus`): the account at the Memberful site you've connected
    * your account to, which you can sign in with then, or none yet while Memberful is members only. Null
-   * when there's nothing to show: while the deployment lacks Memberful's keys, for a guest, who has
+   * when there's nothing to show: while Ember lacks Memberful's keys, for a guest, who has
    * nothing to connect, or while Memberful isn't members only and you haven't connected one.
    */
   memberful: MemberfulStatus | null;
@@ -990,8 +1003,8 @@ export interface Bootstrap {
   /** Whether people may sign in with just a name (`EMBER_GUEST_SIGN_IN`). */
   guestSignIn: boolean;
   /**
-   * Whether the sign-in page offers Sign in with Memberful, once the deployment has the keys of its
-   * Memberful site's custom app: while Memberful lets that site's members join, or while anyone here signs
+   * Whether the sign-in page offers Sign in with Memberful, once Ember has the keys of its Memberful
+   * site's custom app: while Memberful lets that site's members join, or while anyone here signs
    * in with an account there, as members who joined with it keep doing once it's off.
    */
   signInWithMemberful: boolean;
@@ -1336,7 +1349,10 @@ export interface MemberfulConnection {
  * what that page then says.
  */
 export const MEMBERFUL_SIGN_IN_PROBLEMS = {
-  /** Memberful sent the browser back without a sign-in, or with one this browser didn't start, or didn't answer as it should. */
+  /**
+   * Memberful sent the browser back without a sign-in, or with one this browser didn't start, or didn't
+   * answer as it should, or an administrator gave Ember another site's keys while it signed in.
+   */
   failed: "Signing in with Memberful didn't work. Try again.",
   /** The Memberful account has no active subscription, nor the all access pass. */
   membership: "Your Memberful account has no active membership.",
@@ -1353,7 +1369,7 @@ export const MEMBERFUL_SIGN_IN_PROBLEMS = {
   off: "Joining with Memberful is off.",
   /** Someone connected their account to one at Memberful once Memberful stopped being members only, when their password signs them in. */
   unneeded: "Memberful isn't members only anymore, so there's nothing to connect. Your password signs you in.",
-  /** It's on, but the deployment has no Memberful keys. */
+  /** It's on, but Ember has no Memberful keys, neither the deployment's nor any an administrator gave. */
   unavailable: "Memberful sign-in isn't set up. Ask an administrator for help.",
   /** Too many sign-ins from the address, or the account was removed or banned, which this doesn't tell apart. */
   refused: SIGN_IN_REFUSED,

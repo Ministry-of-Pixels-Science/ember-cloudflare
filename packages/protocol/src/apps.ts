@@ -308,7 +308,8 @@ declare const URL: { new (url: string): { readonly protocol: string; readonly ho
 /** localhost, its subdomains and the loopback addresses, where `wrangler dev` and the tests' stand-ins serve. */
 const LOOPBACK_HOST = /^(?:(?:.+\.)?localhost|127(?:\.\d{1,3}){3}|\[::1\])$/;
 
-const isLoopback = (hostname: string) => LOOPBACK_HOST.test(hostname);
+/** Whether `hostname` is this computer's, as a Memberful site the browser tests fake is too. */
+export const isLoopback = (hostname: string) => LOOPBACK_HOST.test(hostname);
 
 // The tools an agent may use. An administrator picks them, for @ember and for each agent, from the
 // tools Ember read from the connected apps. Each one an agent has rides with every question it's asked,

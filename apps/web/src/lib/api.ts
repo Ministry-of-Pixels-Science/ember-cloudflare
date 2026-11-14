@@ -114,6 +114,7 @@ import type {
   YourAppSignedIn,
   YourAppSignedOut,
 } from "@ember/protocol/apps";
+import type { MemberfulKeysChange, MemberfulSaved } from "@ember/protocol/memberful";
 import type { OutsideAiSettings, OutsideAnswer, OutsideAnswered, OutsideAsk, OutsideAsked, OutsideScope, YourOutsideAi } from "@ember/protocol/outside";
 import type { LogoVariants } from "@/lib/previews";
 
@@ -563,6 +564,15 @@ export async function saveTurnstileKeys(keys: TurnstileKeysChange): Promise<Turn
 /** Takes away the Turnstile widget's keys Ember was given, answering where its keys come from then. Fails with a 403 ApiError for anyone but an administrator. */
 export async function forgetTurnstileKeys(): Promise<TurnstileSettings["turnstile"]> {
   return (await request<TurnstileSettings>("/api/account/turnstile_keys", { method: "DELETE" })).turnstile;
+}
+
+/**
+ * Gives Ember a Memberful site's address and keys, as Set up Memberful does, answering Memberful as
+ * Membership's card shows it then. Fails with a 422 ApiError on the field Ember or Memberful refuses, a
+ * 502 one when Ember couldn't ask Memberful, and a 403 one for anyone but an administrator.
+ */
+export async function saveMemberfulKeys(keys: MemberfulKeysChange): Promise<MemberfulSaved> {
+  return request<MemberfulSaved>("/api/account/memberful_keys", { method: "PUT", body: JSON.stringify(keys) });
 }
 
 /**

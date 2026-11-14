@@ -387,35 +387,43 @@ Preview workflow passes repository secrets of the same names through.
 
 The members of a [Memberful](https://memberful.com) site can join and sign in with their Memberful
 accounts instead of passwords. It's off until an administrator turns it on under Memberful in
-Workspace settings, which walks them through it:
+Membership, which the first time opens Set up Memberful, with three steps:
 
-1. In Memberful, under Settings, Custom applications, add an app with Include OAuth tokens with
-   this application checked, choose Server-side, and give it the OAuth redirect URL
-   `https://<Ember's address>/auth/memberful/callback`. Leave Memberful's automatic sign-in off,
-   since it skips the check that ties a sign-in to the browser that started it.
-2. Give the Worker the app's keys as secrets: `MEMBERFUL_URL`, the site's address, such as
-   `https://example.memberful.com`, and the app's OAuth identifier and client secret as
-   `MEMBERFUL_CLIENT_ID` and `MEMBERFUL_CLIENT_SECRET`. Each command asks for its value:
+1. The site's address, such as `https://example.memberful.com`.
+2. A custom app: in Memberful, under Settings, Custom applications, add one with Include OAuth tokens
+   with this application checked, choose Server-side, and give it the OAuth Redirect URL the step
+   shows, `https://<Ember's address>/auth/memberful/callback`, with a button that copies it. Then
+   copy the app's OAuth identifier, OAuth secret and API key into the step. Leave Memberful's
+   automatic sign-in off, since it skips the check that ties a sign-in to the browser that started
+   it.
+3. A webhook: under Settings, Webhooks, add one that sends the member, subscription and order events
+   to `https://<Ember's address>/webhooks/memberful`, which the step copies too, and copy its secret
+   key into the step. With it, a member whose membership lapses is signed out, not only kept from
+   signing in again.
 
-   ```sh
-   pnpm exec wrangler secret put MEMBERFUL_URL      # add --name <worker> for a Worker not named in wrangler.jsonc
-   pnpm exec wrangler secret put MEMBERFUL_CLIENT_ID
-   pnpm exec wrangler secret put MEMBERFUL_CLIENT_SECRET
-   ```
+Ember tries the API key on Memberful's admin API, and asks its token endpoint whether it knows the app
+by its OAuth identifier and secret, before it keeps them, saying on the field what Memberful didn't
+take, then turns Memberful on. It keeps the three secrets in the workspace's settings, encrypted as a
+Resend API key is, never shows them again, and can't read them once `SESSION_SECRET` changes, until
+an administrator gives them again. Change keys, under Memberful while it's on, asks for them all again.
+Nothing needs a Worker secret or a deploy.
 
-   Or add them under the Worker's Settings, Variables and Secrets in the Cloudflare dashboard, as the
-   type Secret, since a deploy takes away plain text ones. `pnpm run deploy` uploads them too when its
-   environment has them, so the Preview workflow passes repository secrets of the same names through.
-3. So that a member whose membership lapses is signed out, not only kept from signing in again, add
-   a webhook in Memberful under Settings, Webhooks that sends the member, subscription and order
-   events to `https://<Ember's address>/webhooks/memberful`, and give the Worker the webhook's secret
-   key and the app's API key, as the step above does the others:
+A Worker can have the keys as secrets instead, which take the place of any given in Set up Memberful,
+all of them together, and Membership's card then says so: `MEMBERFUL_URL`, the site's address,
+`MEMBERFUL_CLIENT_ID` and `MEMBERFUL_CLIENT_SECRET`, the app's OAuth identifier and secret, and for
+the webhook, `MEMBERFUL_WEBHOOK_SECRET` and `MEMBERFUL_API_KEY`. Each command asks for its value:
 
-   ```sh
-   pnpm exec wrangler secret put MEMBERFUL_WEBHOOK_SECRET
-   pnpm exec wrangler secret put MEMBERFUL_API_KEY
-   ```
-4. Turn on Memberful in Workspace settings.
+```sh
+pnpm exec wrangler secret put MEMBERFUL_URL      # add --name <worker> for a Worker not named in wrangler.jsonc
+pnpm exec wrangler secret put MEMBERFUL_CLIENT_ID
+pnpm exec wrangler secret put MEMBERFUL_CLIENT_SECRET
+pnpm exec wrangler secret put MEMBERFUL_WEBHOOK_SECRET
+pnpm exec wrangler secret put MEMBERFUL_API_KEY
+```
+
+Or add them under the Worker's Settings, Variables and Secrets in the Cloudflare dashboard, as the type
+Secret, since a deploy takes away plain text ones. `pnpm run deploy` uploads them too when its
+environment has them, so the Preview workflow passes repository secrets of the same names through.
 
 While it's on, the sign-in page offers Member? Sign in with Memberful under its form. Someone with an
 active subscription, or the all access pass, signs in as the person their Memberful account is
@@ -423,10 +431,11 @@ linked to, or else joins as a new member, in every open room, and everyone else 
 as before. Accounts are linked by the Memberful site and the member's id there, never by email
 address, since Memberful lets anyone register an address without proving it's theirs: someone new
 whose Memberful email address someone here has already is turned away, and asked to sign in with
-their password. The site is `MEMBERFUL_URL`'s address, so keep it once people have signed in: at
-another address, even the same site's, every member would be someone new. Turning Memberful off
-stops anyone new joining with it, but whoever signed in with it has no password, so they keep
-signing in with it, and the sign-in page keeps offering it, while the Worker has the keys.
+their password. At another address, even the same site's, every member would be someone new, so
+once anyone has signed in with Memberful, Set up Memberful keeps the site, asking only for its keys,
+and a `MEMBERFUL_URL` should keep it too. Turning Memberful off stops anyone new joining with it, but
+whoever signed in with it has no password, so they keep signing in with it, and the sign-in page
+keeps offering it, while Ember has the keys.
 
 Members only, under Memberful, keeps Ember to the site's members: the sign-in page offers Sign in
 with Memberful in place of its form, Open, the join link and signing in with just a name are off,
@@ -450,11 +459,11 @@ add one first. Once disconnected, a member signing in with their password is ask
 again.
 
 Someone who joined with Memberful has no password, and while Memberful signs them in, as it does
-while the Worker has the keys to the site they're linked at, they aren't given one: their profile
+while Ember has the keys to the site they're linked at, they aren't given one: their profile
 offers none, and the Worker refuses one. Memberful is their way in, and a password would be another
 that holding their session was enough to make. Their Memberful account stays connected, since
-they'd have no other way in. Should the Worker lose the keys, or `MEMBERFUL_URL` change, Memberful
-no longer signs them in: an administrator's sign-in link lets them in, and their profile offers a
+they'd have no other way in. Should Ember lose the keys, or `MEMBERFUL_URL` change, Memberful no
+longer signs them in: an administrator's sign-in link lets them in, and their profile offers a
 first password then, which keeps their Memberful account connected for when it signs them in again.
 
 A member whose membership lapses can't sign in with Memberful again. With the webhook, they're suspended too: their
@@ -1280,8 +1289,9 @@ What a self-hoster should know, beyond keeping the setup password and link to th
 - A Resend API key pasted into Set up email is kept encrypted, and never shown again, even to
   administrators: Membership says only that Ember has one. Make it a key with Sending access, as Resend
   suggests, so that one that got out could do no more than send email. A Turnstile secret key given in
-  Set up Turnstile, an API token given in Set up Ember AI, and an SFU app's secret given in Set up
-  huddles, are kept the same way.
+  Set up Turnstile, an API token given in Set up Ember AI, an SFU app's secret given in Set up
+  huddles, and a Memberful app's secret and API key and its webhook's secret key given in Set up
+  Memberful, are kept the same way.
 - A code to reset a password goes to the account's email address, so whoever reads mail there can
   take the account over, as on most sites. Nobody checks an address is its owner's when someone
   joins, unless they join with an invitation or Email domain, so someone could join with another
@@ -1295,7 +1305,7 @@ What a self-hoster should know, beyond keeping the setup password and link to th
 - The Memberful site vouches for its members, so whoever runs it can sign in here as any of them who
   have, and while Memberful is on, add new ones. Administrators keep their passwords, so the site
   being down never locks them out, though one who joined with Memberful has none, as no member does,
-  and signs in with it alone. A webhook whose signature `MEMBERFUL_WEBHOOK_SECRET` doesn't check is
+  and signs in with it alone. A webhook whose signature the webhook's secret key doesn't check is
   refused, and even a signed one only has Ember ask Memberful's API about a member, so one forged or
   sent again changes nothing.
 - Custom CSS runs on every page for everyone, so it's an administrator's to write, like the rest of

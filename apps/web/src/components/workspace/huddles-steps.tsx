@@ -27,7 +27,7 @@ const KEYS_KEPT = "Ember has an app's keys already. Give another app's to run hu
 const CHECKING = "Asking Cloudflare to start a session with the app's keys…";
 
 /** Dots in place of what's typed, in a field that's no password, so no password manager offers to keep or fill it. */
-const HIDDEN = "[-webkit-text-security:disc]";
+export const HIDDEN = "[-webkit-text-security:disc]";
 
 /** Why the keys weren't kept, said on the field it's about, or else, with no field, under them. */
 interface Refusal {
@@ -195,8 +195,8 @@ export function HuddlesSteps({ keys, deployedAccountId, changing = false, roomy 
   );
 }
 
-/** One of the steps: its number in a ring, its title, and what to do. */
-function Step({ number, title, roomy, children }: { number: number; title: string; roomy: boolean; children: ReactNode }) {
+/** One of the steps, as Set up Memberful's are too: its number in a ring, its title, and what to do. */
+export function Step({ number, title, roomy, children }: { number: number; title: string; roomy: boolean; children: ReactNode }) {
   const Title = roomy ? "h2" : "h3";
   return (
     <li className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3">

@@ -79,8 +79,9 @@ Objects, D1 or speed call for something else.
   styles. Ember's custom domain and tagline are more of those settings (`custom_domain` and
   `tagline`), so they took no migration and are read with the rest of the account, and so are the
   address its email comes from (`email_from`), the keys of the Turnstile widget an administrator
-  gave it (`turnstile_keys`, the secret key sealed) and those of the Realtime SFU app huddles run
-  through (`huddles`, the app's secret sealed).
+  gave it (`turnstile_keys`, the secret key sealed), those of the Realtime SFU app huddles run
+  through (`huddles`, the app's secret sealed) and those of the Memberful site whose members sign in
+  (`memberful_keys`, its custom app's secret and API key and its webhook's secret sealed together).
 - **Unread marks are a column of the membership.** `memberships.unread_at` is when a room was marked
   unread for someone, null while it isn't, and one `UPDATE` marks every member a message should. We
   skip Campfire's `connections` and `connected_at` columns: each room's object knows from its
@@ -475,8 +476,9 @@ Objects, D1 or speed call for something else.
   identity, session and open rooms are one batch, so nothing is left behind. Whether Memberful's
   members join with it, and whether only they sign in, are two more of the account's settings
   (`memberful_join` and `memberful_sign_in`, the first read as the second while it's absent, as in a
-  workspace saved before it), and the site's keys are Worker secrets, so the client secret is never
-  stored. The table names no provider but by its issuer, so another provider would need no
+  workspace saved before it), and so are the site's keys an administrator gave in Set up Memberful
+  (`memberful_keys`, above), whose secrets are sealed, unless Worker secrets take their place. The
+  table names no provider but by its issuer, so another provider would need no
   migration. People who sign in this way have no `password_digest`. Someone with an account from
   before connects one once their password checks out: `pending_identities` (workspace migration
   0039) keeps the connection's OAuth state, as its HMAC under SESSION_SECRET, whose account it's

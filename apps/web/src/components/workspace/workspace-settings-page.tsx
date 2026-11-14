@@ -16,6 +16,7 @@ import {
   type SidebarRoom,
   type WorkspaceSettings,
 } from "@ember/protocol";
+import type { MemberfulSaved } from "@ember/protocol/memberful";
 import { AccountLogo, STOCK_LOGO } from "@/components/account-logo";
 import { FIELD_INPUT, Field, SubmitButton } from "@/components/field";
 import { useFlash } from "@/components/flash";
@@ -46,6 +47,7 @@ import { HuddlesSettings } from "./huddles-settings";
 import { HuddlesSetup } from "./huddles-setup";
 import { InviteByEmail } from "./invite-by-email";
 import { InviteLink } from "./invite-link";
+import { MemberfulSetup } from "./memberful-setup";
 import { OutsideAiSettings } from "./outside-ai-settings";
 import { PeopleList } from "./people-list";
 import { PicturePicker } from "./picture-picker";
@@ -146,6 +148,8 @@ export function WorkspaceSettingsPage({
   // Set up email, while it's open, with what to go on to once it closes with Ember able to send email.
   const [emailSetup, setEmailSetup] = useState<{ then?: () => void } | null>(null);
   const [settingUpTurnstile, setSettingUpTurnstile] = useState(false);
+  // Set up Memberful, while it's open, with what to go on to once it has kept the keys.
+  const [memberfulSetup, setMemberfulSetup] = useState<{ then?: () => void } | null>(null);
   const [settingUpAssistant, setSettingUpAssistant] = useState(false);
   const [settingUpHuddles, setSettingUpHuddles] = useState(false);
   const account = useAccount();
@@ -196,6 +200,23 @@ export function WorkspaceSettingsPage({
     );
     return () => void (stopped = true);
   }, [administrator, askForAccount, onJoinCodeChanged, onFailed]);
+
+  // Memberful turned on elsewhere, by an administrator who gave Set up Memberful the keys there, which
+  // this page hasn't heard of: Memberful's settings are loaded again, rather than the card saying Ember
+  // has no keys.
+  const memberfulOn = account.memberfulJoin;
+  const memberfulWasOn = useRef(memberfulOn);
+  const memberfulUnknown = settings?.memberfulSite === null;
+  useEffect(() => {
+    const turnedOn = memberfulOn && !memberfulWasOn.current;
+    memberfulWasOn.current = memberfulOn;
+    if (!turnedOn || !memberfulUnknown) return;
+    fetchWorkspaceSettings().then(
+      ({ memberfulSite, memberfulWebhooks, memberfulKeys, memberfulSiteKept }) =>
+        mounted.current && setSettings((settings) => settings && { ...settings, memberfulSite, memberfulWebhooks, memberfulKeys, memberfulSiteKept }),
+      (error: unknown) => (mounted.current || isSignedOut(error)) && onFailed(error),
+    );
+  }, [memberfulOn, memberfulUnknown, mounted, onFailed]);
 
   // The name, the tagline and, if it was moved, the translation buttons' switch, sent together.
   const save = (event: FormEvent) => {
@@ -310,6 +331,8 @@ export function WorkspaceSettingsPage({
   const setUpEmail = (then?: () => void) => setEmailSetup({ then });
   /** Shows where Ember's Turnstile keys come from as Set up Turnstile, or turning Turnstile off, changes it, which only workspace settings shows. */
   const showTurnstile = (turnstile: WorkspaceSettings["turnstile"]) => setSettings((settings) => settings && { ...settings, turnstile });
+  /** Shows Memberful as Set up Memberful keeps its keys, which only workspace settings shows. */
+  const showMemberful = (memberful: MemberfulSaved) => setSettings((settings) => settings && { ...settings, ...memberful });
   /** Shows Ember AI as Set up Ember AI, or turning it off, changes it, which only workspace settings shows. */
   const showAssistant = (assistant: WorkspaceSettings["assistant"]) => setSettings((settings) => settings && { ...settings, assistant });
   /** Shows whether AI apps may connect, as the Outside AI card's switch changes it. */
@@ -503,8 +526,20 @@ export function WorkspaceSettingsPage({
                   saveEmailDomains={saveEmailDomains}
                   onSetUpEmail={setUpEmail}
                   onSetUpTurnstile={() => setSettingUpTurnstile(true)}
+                  onSetUpMemberful={(then) => setMemberfulSetup({ then })}
                   joinLink={settings.joinCode !== null && <InviteLink joinCode={settings.joinCode} onRegenerate={regenerate} regenerating={regenerating} />}
                 />
+                {memberfulSetup && (
+                  <MemberfulSetup
+                    memberful={settings}
+                    onSaved={(memberful) => {
+                      showMemberful(memberful);
+                      memberfulSetup.then?.();
+                    }}
+                    onClose={() => setMemberfulSetup(null)}
+                    onFailed={onFailed}
+                  />
+                )}
                 <InviteByEmail
                   invitations={settings.invitations}
                   emails={sendsEmail(settings.email)}

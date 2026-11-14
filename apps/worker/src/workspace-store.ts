@@ -135,6 +135,8 @@ export interface JoinableAccount extends Omit<Account, "logo" | "huddles"> {
   resendApiKey: string | null;
   /** The keys of the Turnstile widget an administrator gave Ember to check people with, or null while they haven't given one's. */
   turnstileKeys: SavedTurnstileKeys | null;
+  /** The Memberful site and keys an administrator gave Ember in Set up Memberful, or null while they haven't. */
+  memberfulKeys: SavedMemberfulKeys | null;
   /** How Ember AI asks AI Gateway, while an administrator has it on, or else null. */
   assistant: SavedAssistant | null;
   /** The most each of @ember's dials goes to for anyone's questions, as administrators set it, whether Ember AI is on or not. */
@@ -157,6 +159,17 @@ export interface JoinableAccount extends Omit<Account, "logo" | "huddles"> {
 export interface SavedTurnstileKeys {
   siteKey: string;
   sealedSecretKey: string;
+}
+
+/**
+ * A Memberful site's keys as the account keeps them: the site's origin, its custom app's OAuth
+ * identifier, and sealed together (`seal`), as `MemberfulSecrets` has them, the app's OAuth secret and
+ * API key and its webhook's secret key.
+ */
+export interface SavedMemberfulKeys {
+  site: string;
+  clientId: string;
+  sealedSecrets: string;
 }
 
 /** A Realtime SFU app's keys as the account keeps them: its ID, and its secret sealed (`seal`). */
@@ -214,9 +227,9 @@ export interface NewAccount {
 /**
  * What `WorkspaceStore.changeAccount` changes: the name, the tagline, the settings workspace settings'
  * switches change, the custom domain and the ones it moved away from, the navigation icons whose slots
- * change, the From address, the sealed Resend API key, Turnstile's keys, the SFU app huddles run through,
- * and the domains Email domain lets in. Memberful's two settings change together, or not at all, as
- * `memberful`.
+ * change, the From address, the sealed Resend API key, Turnstile's keys, Memberful's, the SFU app
+ * huddles run through, and the domains Email domain lets in. Memberful's two settings change together,
+ * or not at all, as `memberful`.
  */
 export type AccountChange = Partial<
   Pick<
@@ -234,6 +247,7 @@ export type AccountChange = Partial<
     | "emailFrom"
     | "resendApiKey"
     | "turnstileKeys"
+    | "memberfulKeys"
     | "huddles"
   >
 > & {
@@ -1120,6 +1134,18 @@ function turnstileKeysIn(settings: Record<string, unknown> | null): SavedTurnsti
 }
 
 /**
+ * The Memberful site and keys an administrator gave Ember, which the account's settings keep as
+ * `memberful_keys`, `{ site, client_id, secrets }`, the secrets sealed together, or null while it has
+ * none.
+ */
+function memberfulKeysIn(settings: Record<string, unknown> | null): SavedMemberfulKeys | null {
+  const kept = settings?.memberful_keys;
+  if (typeof kept !== "object" || kept === null) return null;
+  const { site, client_id: clientId, secrets: sealedSecrets } = kept as Record<string, unknown>;
+  return typeof site === "string" && typeof clientId === "string" && typeof sealedSecrets === "string" ? { site, clientId, sealedSecrets } : null;
+}
+
+/**
  * The Realtime SFU app huddles run through, which the account's settings keep as `huddles`,
  * `{ app_id, app_secret }`, the secret sealed, or null while huddles are off.
  */
@@ -1795,6 +1821,7 @@ const SET_EMAIL_DOMAINS = setSetting("email_domains");
 const SET_EMAIL_FROM = setSetting("email_from");
 const SET_RESEND_API_KEY = setSetting("resend_api_key");
 const SET_TURNSTILE_KEYS = setSetting("turnstile_keys");
+const SET_MEMBERFUL_KEYS = setSetting("memberful_keys");
 const SET_HUDDLES = setSetting("huddles");
 const SET_ASSISTANT = setSetting("assistant");
 
@@ -2623,6 +2650,7 @@ export class WorkspaceStore {
       emailFrom: emailFromIn(settings),
       resendApiKey: resendApiKeyIn(settings),
       turnstileKeys: turnstileKeysIn(settings),
+      memberfulKeys: memberfulKeysIn(settings),
       assistant: assistantIn(settings),
       assistantMost: assistantMostIn(settings),
       assistantInstructions: assistantInstructionsIn(settings),
@@ -2636,8 +2664,8 @@ export class WorkspaceStore {
 
   /**
    * Changes the workspace's name, tagline, settings, custom domain and the ones it moved away from,
-   * navigation icons, From address, Resend API key, Turnstile's keys, huddles' SFU app and email domains,
-   * as `change` has them, in one batch. Memberful's settings are stored both at once, so that an account
+   * navigation icons, From address, Resend API key, Turnstile's keys, Memberful's, huddles' SFU app and
+   * email domains, as `change` has them, in one batch. Memberful's settings are stored both at once, so that an account
    * from before `memberful_join` reads as they're saved.
    */
   async changeAccount(
@@ -2657,6 +2685,7 @@ export class WorkspaceStore {
       emailFrom,
       resendApiKey,
       turnstileKeys,
+      memberfulKeys,
       huddles,
     }: AccountChange,
     now: string,
@@ -2679,6 +2708,9 @@ export class WorkspaceStore {
       ...(emailFrom === undefined ? [] : [statement(SET_EMAIL_FROM, JSON.stringify(emailFrom), now)]),
       ...(resendApiKey === undefined ? [] : [statement(SET_RESEND_API_KEY, JSON.stringify(resendApiKey), now)]),
       ...(turnstileKeys === undefined ? [] : [statement(SET_TURNSTILE_KEYS, JSON.stringify(turnstileKeys && { site_key: turnstileKeys.siteKey, secret_key: turnstileKeys.sealedSecretKey }), now)]),
+      ...(memberfulKeys === undefined
+        ? []
+        : [statement(SET_MEMBERFUL_KEYS, JSON.stringify(memberfulKeys && { site: memberfulKeys.site, client_id: memberfulKeys.clientId, secrets: memberfulKeys.sealedSecrets }), now)]),
       ...(huddles === undefined ? [] : [statement(SET_HUDDLES, JSON.stringify(huddles && { app_id: huddles.appId, app_secret: huddles.sealedAppSecret }), now)]),
     ]);
   }
@@ -2899,6 +2931,12 @@ export class WorkspaceStore {
   /** Whether anyone, whatever their status, has an account at `issuer` linked to them. */
   async anyoneLinked(issuer: string): Promise<boolean> {
     return (await this.db.all(`SELECT 1 FROM identities WHERE issuer = ? LIMIT 1`, issuer)).length > 0;
+  }
+
+  /** A Memberful site anyone here, whatever their status, has an account at linked to them, the first if there are several, or null while nobody has. */
+  async linkedSite(): Promise<string | null> {
+    const [linked] = await this.db.all<{ issuer: string }>(`SELECT issuer FROM identities LIMIT 1`);
+    return linked?.issuer ?? null;
   }
 
   /** Whether anyone has exactly this email address, whatever their status. */

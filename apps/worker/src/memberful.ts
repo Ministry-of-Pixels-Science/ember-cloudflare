@@ -7,14 +7,23 @@ import {
   type MemberfulSignInProblem,
   type UserId,
 } from "@ember/protocol";
-import { authenticate, clientOf, cookieValues, hostCookie, hostCookieName, newSessionToken, sessionCookie, tokenDigest } from "./auth";
-import { bytesUpTo, MAX_JSON_BODY_BYTES } from "./bodies";
+import { memberfulSiteKept, parseMemberfulKeysChange, type MemberfulSaved } from "@ember/protocol/memberful";
+import { authenticate, clientOf, cookieValues, credentialsOf, hostCookie, hostCookieName, newSessionToken, sessionCookie, tokenDigest } from "./auth";
+import { bytesUpTo, jsonBodyOf, MAX_JSON_BODY_BYTES } from "./bodies";
 import { originFor } from "./custom-domain";
 import { fromHex, toBase64url, urlsafeDecode64 } from "./encoding";
 import type { Env } from "./env";
 import { notFound } from "./error-pages";
-import { isSubject, memberfulApiOf, memberfulKeysOf, memberWhoSignedIn, type MemberfulApi, type MemberfulKeys } from "./memberful-api";
-import { home, withCookies } from "./pages";
+import {
+  deployedMemberfulOf,
+  isSubject,
+  memberfulWebhooksOf,
+  memberWhoSignedIn,
+  refusalOfMemberfulKeys,
+  type MemberfulKeys,
+  type MemberfulSetup,
+} from "./memberful-api";
+import { formAnswer, home, withCookies } from "./pages";
 import { urlOf } from "./request-url";
 import { isToken } from "./secrets";
 import { MEMBERFUL_ROUND_TRIP_MS, workspace } from "./workspace";
@@ -29,6 +38,10 @@ import { MEMBERFUL_ROUND_TRIP_MS, workspace } from "./workspace";
 // password. While it's members only, someone who has an account here already connects their Memberful
 // account to it the same way, once their password has checked out, from their profile, or as they sign
 // in: the Workspace keeps the state's digest for the callback, which connects the account to theirs.
+//
+// The keys are the deployment's secrets, `MEMBERFUL_URL` and the rest, which take the place of any
+// others, or else the ones an administrator gives Ember in Set up Memberful, which the Workspace keeps
+// sealed, once Memberful has taken them.
 
 /** The cookie that keeps a sign-in's state, and the page to come back to, until Memberful sends the browser back. */
 const STATE_COOKIE = "memberful_state";
@@ -42,12 +55,22 @@ const SIGNATURE_HEADER = "X-Memberful-Webhook-Signature";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
 
-/** Why Memberful can't be turned on: the deployment lacks the keys of a Memberful site's custom app. */
-export const MEMBERFUL_KEYS_NEEDED = "Memberful needs MEMBERFUL_URL, MEMBERFUL_CLIENT_ID and MEMBERFUL_CLIENT_SECRET set first";
+/** Why Memberful can't be turned on: Ember lacks the keys of a Memberful site's custom app. */
+export const MEMBERFUL_KEYS_NEEDED = "Set up Memberful first, which gives Ember your Memberful site's keys.";
 
-/** Why `settings` can't be saved with the keys the deployment has: turning Memberful, or its Members only, on takes them all. Null when they can. */
-export const memberfulRefusal = (settings: AccountSettings | undefined, env: Env) =>
-  (settings?.memberfulJoin || settings?.memberfulSignIn) && !memberfulKeysOf(env) ? MEMBERFUL_KEYS_NEEDED : null;
+/** Why `settings` can't be saved without Memberful's keys: turning Memberful, or its Members only, on takes them. Null when they can. */
+export async function memberfulRefusal(settings: AccountSettings | undefined, env: Env): Promise<string | null> {
+  if (!settings?.memberfulJoin && !settings?.memberfulSignIn) return null;
+  return (await memberfulFor(env)) ? null : MEMBERFUL_KEYS_NEEDED;
+}
+
+/** Ember's Memberful site and keys: the deployment's, which take the place of any others, or else those an administrator gave Ember, or null without either. */
+export async function memberfulFor(env: Env): Promise<MemberfulSetup | null> {
+  return deployedMemberfulOf(env) ?? (await workspace(env).savedMemberful());
+}
+
+/** The Memberful site whose members sign in, as `memberfulFor` has it, or null without its keys. */
+export const memberfulSiteFor = async (env: Env) => (await memberfulFor(env))?.site ?? null;
 
 /** A redirect to `location`, which no cache keeps, since it signs someone in, or starts to. */
 const redirect = (location: string, ...cookies: string[]) =>
@@ -114,13 +137,12 @@ function keptStateOf(request: Request): { state: string; returnPath: string; con
  * keeping a new state and the page `return_to` names in a cookie, to come back to Ember's address, its
  * custom domain if it has one, where Memberful sends the browser back. Before first run it goes home,
  * and while it isn't offered (`Workspace.offersMemberfulSignIn`), back to sign in, which says Memberful
- * is off, or isn't set up while it's on without the deployment's keys.
+ * is off, or isn't set up while it's on without Memberful's keys.
  */
 export async function startMemberfulSignIn(request: Request, env: Env): Promise<Response> {
   if (request.method !== "GET") return notFound(request);
-  const account = await workspace(env).account();
+  const [account, keys] = await Promise.all([workspace(env).account(), memberfulFor(env)]);
   if (!account) return home(request);
-  const keys = memberfulKeysOf(env);
   if (!keys) return backToSignIn(request, account.memberfulJoin ? "unavailable" : "off");
   if (!(await workspace(env).offersMemberfulSignIn(keys.site))) return backToSignIn(request, "off");
   const url = urlOf(request);
@@ -135,10 +157,10 @@ export async function startMemberfulSignIn(request: Request, env: Env): Promise<
  * Starts connecting the account of `userId`, whose password's digest `passwordDigest` the Worker checked
  * the password they gave against, or "" without one, to an account at the Memberful site, to come back
  * to the page `returnTo` names: where to sign in there, and the `Set-Cookie` that keeps the state it
- * goes with, whose digest the Workspace keeps for the callback. Null unless the deployment has
- * Memberful's keys and the Workspace kept it (`startMemberfulConnection`). Asked at an address Ember has
- * moved from to its custom domain, as a tab left open there is, it starts nothing, and answers that page
- * at the custom domain instead, to sign in and connect there.
+ * goes with, whose digest the Workspace keeps for the callback. Null unless Ember has Memberful's keys
+ * and the Workspace kept it (`startMemberfulConnection`). Asked at an address Ember has moved from to its
+ * custom domain, as a tab left open there is, it starts nothing, and answers that page at the custom
+ * domain instead, to sign in and connect there.
  */
 export async function memberfulConnectionFor(
   request: Request,
@@ -147,7 +169,7 @@ export async function memberfulConnectionFor(
   passwordDigest: string,
   returnTo: unknown,
 ): Promise<{ connection: MemberfulConnection; cookie: string | null } | null> {
-  const keys = memberfulKeysOf(env);
+  const keys = await memberfulFor(env);
   if (!keys) return null;
   const url = urlOf(request);
   const returnPath = returnPathOf(typeof returnTo === "string" ? returnTo : null, url.origin);
@@ -174,7 +196,7 @@ export async function finishMemberfulSignIn(request: Request, env: Env): Promise
 }
 
 async function signedInWithMemberful(request: Request, env: Env): Promise<Response> {
-  const keys = memberfulKeysOf(env);
+  const keys = await memberfulFor(env);
   if (!keys) return backToSignIn(request, "unavailable");
   const params = urlOf(request).searchParams;
   const [kept, state, code] = [keptStateOf(request), params.get("state"), params.get("code")];
@@ -214,9 +236,9 @@ async function signedInWithMemberful(request: Request, env: Env): Promise<Respon
  */
 export async function memberfulWebhook(request: Request, env: Env): Promise<Response> {
   if (request.method !== "POST") return notFound(request);
-  const webhooks = memberfulWebhooksOf(env);
+  const webhooks = memberfulWebhooksOf(await memberfulFor(env));
   if (!webhooks) {
-    console.error("A Memberful webhook came, but the deployment lacks MEMBERFUL_WEBHOOK_SECRET or MEMBERFUL_API_KEY, so it's refused");
+    console.error("A Memberful webhook came, but Ember lacks the webhook's secret or the custom app's API key, so it's refused");
     return new Response(null, { status: 404 });
   }
   const body = await bytesUpTo(request, MAX_JSON_BODY_BYTES);
@@ -225,16 +247,6 @@ export async function memberfulWebhook(request: Request, env: Env): Promise<Resp
   const subject = subjectOf(parsed(body));
   if (subject !== null) await workspace(env).queueMembershipCheck(webhooks.api.site, subject);
   return new Response(null, { status: 204 });
-}
-
-/**
- * What hearing Memberful's webhooks takes, or null without it all: the deployment's Memberful site and
- * its custom app's API key, to check what one says with, and the secret Memberful signs them with.
- */
-export function memberfulWebhooksOf(env: Env): { api: MemberfulApi; secret: string } | null {
-  const api = memberfulApiOf(env);
-  const secret = env.MEMBERFUL_WEBHOOK_SECRET?.trim();
-  return api && secret ? { api, secret } : null;
 }
 
 /** Whether `signature` is the hex HMAC-SHA256 of `body` under `secret`, compared in constant time. */
@@ -266,4 +278,38 @@ function subjectOf(payload: unknown): string | null {
   // Memberful's ids are numbers in a webhook's JSON, and strings in its GraphQL API, as accounts are linked by them.
   const subject = typeof id === "number" && Number.isSafeInteger(id) ? String(id) : id;
   return isSubject(subject) ? subject : null;
+}
+
+/**
+ * `PUT /api/account/memberful_keys`, as Set up Memberful sends a Memberful site's address and keys, after
+ * who's asking, as changing the workspace does: once Memberful takes them (`refusalOfMemberfulKeys`), the
+ * Workspace keeps them, answering Memberful as Membership's card shows it then, the deployment's keys
+ * taking the place of them while it has its own. Keys that can't be one, or that Memberful refuses, are
+ * refused on the field they're about, as another site is than the one people here sign in at.
+ */
+export async function saveMemberfulKeys(request: Request, env: Env): Promise<Response> {
+  const credentials = await credentialsOf(request, env);
+  const administrator = credentials && (await workspace(env).canAdminister(credentials));
+  if (!credentials || administrator === null) return formAnswer({ error: "Not signed in" }, 401);
+  if (!administrator) return formAnswer({ error: "Only administrators can change the workspace" }, 403);
+  const keys = parseMemberfulKeysChange(await jsonBodyOf(request));
+  if ("error" in keys) return formAnswer(keys, 422);
+  const refusal = await refusalOfMemberfulKeys(keys);
+  if (refusal) return formAnswer({ error: refusal.error, ...(refusal.field && { field: refusal.field }) }, refusal.status);
+  const saved = await workspace(env).changeMemberfulKeys(credentials, keys);
+  if (!saved) return formAnswer({ error: "Not signed in" }, 401);
+  if (saved === "forbidden") return formAnswer({ error: "Only administrators can change the workspace" }, 403);
+  if ("kept" in saved) return formAnswer({ error: memberfulSiteKept(saved.kept), field: "site" }, 422);
+  return formAnswer(withDeployedMemberful(env, saved) satisfies MemberfulSaved, 200);
+}
+
+/**
+ * Memberful as workspace settings show it, `settings` having it as an administrator set it up: with the
+ * deployment's site and keys in place of theirs, while it has its own, which Set up Memberful doesn't
+ * change, so it keeps no site then.
+ */
+export function withDeployedMemberful<T extends MemberfulSaved>(env: Env, settings: T): T {
+  const deployed = deployedMemberfulOf(env);
+  if (!deployed) return settings;
+  return { ...settings, memberfulSite: deployed.site, memberfulWebhooks: memberfulWebhooksOf(deployed) !== null, memberfulKeys: "secret", memberfulSiteKept: null };
 }
