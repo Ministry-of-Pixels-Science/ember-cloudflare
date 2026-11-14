@@ -18,6 +18,8 @@ const huddleOf = (...userIds: string[]): LiveHuddle => ({ startedAt: "2026-11-10
 /** A microphone's track, as much of one as the preview and the tests read. */
 class FakeTrack extends EventTarget {
   stopped = false;
+  /** Whether anything listens to it yet, as the preview does for its end, from an effect. */
+  listenedTo = false;
   constructor(
     readonly deviceId: string,
     readonly label: string,
@@ -29,6 +31,10 @@ class FakeTrack extends EventTarget {
   }
   getSettings() {
     return { deviceId: this.deviceId };
+  }
+  addEventListener(...listener: Parameters<EventTarget["addEventListener"]>) {
+    this.listenedTo = true;
+    super.addEventListener(...listener);
   }
 }
 
@@ -223,6 +229,8 @@ describe("A huddle's microphone and speaker", () => {
   it("takes the browser's own choice when the microphone it has open is unplugged", async () => {
     localStorage.setItem("ember:huddle-microphone", "mic-2");
     await openedPreview();
+    // The preview listens for its end in an effect, which can run after its microphone shows.
+    await waitFor(() => expect(media.opened[0]!.track.listenedTo).toBe(true));
     media.devices = [BUILT_IN];
     act(() => void media.opened[0]!.track.dispatchEvent(new Event("ended")));
     await waitFor(() => expect(microphoneSelect()).toHaveValue("mic-1"));
