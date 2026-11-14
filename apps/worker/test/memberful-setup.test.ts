@@ -1,10 +1,12 @@
 import {
   MEMBERFUL_CALLBACK_PATH,
+  MEMBERFUL_CONNECTIONS_PATH,
   MEMBERFUL_WEBHOOK_PATH,
   memberfulSignInPath,
   type Bootstrap,
   type Directory,
   type Me,
+  type MemberfulConnection,
   type NewWorkspace,
   type UserId,
   type UserStatus,
@@ -28,7 +30,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toHex } from "../src/encoding";
 import type { Env } from "../src/env";
-import { api, apiWith, cookieOf, freshDeploy, shown, withWorkspaceEnv, workspaceSql, type Session } from "./support";
+import { api, apiWith, cookieOf, freshDeploy, origin, shown, withWorkspaceEnv, workspaceSql, type Session } from "./support";
 
 // Set up Memberful, in which an administrator gives Ember a Memberful site's keys, rather than the
 // deployment having them as secrets, as memberful.test.ts's does.
@@ -76,14 +78,16 @@ interface SentToMemberful {
  * test changes them: its admin API answers what it's asked to the API key, and a wrong key with errors,
  * as Memberful does. Its token endpoint answers a code nobody was given `invalid_grant`, or
  * `invalid_client` to keys that aren't the app's, and gives an access token for `CODE`, which its member
- * API describes Katherine to, as `site.member` has her. `site.answer`, if a test sets it, answers in
- * place of all that. What it's sent goes in `site.requests`.
+ * API describes Katherine to, as `site.member` has her, once `site.meanwhile` has happened, if a test
+ * sets it, which the next answer of the member API waits for. `site.answer`, if a test sets it, answers
+ * in place of all that. What it's sent goes in `site.requests`.
  */
 function fakeMemberful() {
   const site = {
     app: { clientId: KEYS.clientId, clientSecret: KEYS.clientSecret, apiKey: KEYS.apiKey },
     member: { ...katherine },
     answer: null as ((url: URL) => Response | Promise<Response>) | null,
+    meanwhile: null as (() => Promise<unknown>) | null,
     requests: [] as SentToMemberful[],
   };
   const fetched = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
@@ -102,6 +106,9 @@ function fakeMemberful() {
       return Response.json({ access_token: ACCESS_TOKEN, token_type: "bearer", expires_in: 900 });
     }
     if (url.pathname === "/api/graphql/member" && request.headers.get("Authorization") === `Bearer ${ACCESS_TOKEN}`) {
+      const meanwhile = site.meanwhile;
+      site.meanwhile = null;
+      await meanwhile?.();
       return Response.json({ data: { currentMember: site.member } });
     }
     if (request.method === "POST" && url.pathname === "/api/graphql") {
@@ -440,8 +447,11 @@ describe("Set up Memberful", () => {
     const site = fakeMemberful();
     await saveKeys(administrator, { ...KEYS, site: OTHER_SITE });
     site.app = { clientId: DEPLOYMENT_KEYS.MEMBERFUL_CLIENT_ID, clientSecret: DEPLOYMENT_KEYS.MEMBERFUL_CLIENT_SECRET, apiKey: DEPLOYMENT_KEYS.MEMBERFUL_API_KEY };
-    expect((await turnMemberfulOn(administrator, { changes: DEPLOYMENT_KEYS })).status).toBe(200);
-    await signedInAs((await signInWithMemberful(DEPLOYMENT_KEYS)).signedIn);
+    // The Workspace has the deployment's secrets too, as it does deployed.
+    await withWorkspaceEnv(DEPLOYMENT_KEYS, async () => {
+      expect((await turnMemberfulOn(administrator, { changes: DEPLOYMENT_KEYS })).status).toBe(200);
+      await signedInAs((await signInWithMemberful(DEPLOYMENT_KEYS)).signedIn);
+    });
 
     site.app = { clientId: KEYS.clientId, clientSecret: KEYS.clientSecret, apiKey: KEYS.apiKey };
     expect(await memberfulOf(administrator)).toEqual({ ...savedFor(OTHER_SITE), memberfulSiteKept: SITE });
@@ -449,6 +459,39 @@ describe("Set up Memberful", () => {
     expect(await kept.json()).toEqual({ error: memberfulSiteKept(SITE), field: "site" });
     expect(await saveKeys(administrator)).toEqual({ ...savedFor(SITE), memberfulSiteKept: SITE });
     expect((await signedInAs((await signInWithMemberful()).signedIn)).name).toBe(katherine.fullName);
+  });
+
+  it("links nobody at a site whose keys another site's took the place of while Memberful said who signed in there", async () => {
+    const administrator = await setUp();
+    const member = await joinAsGrace();
+    const site = fakeMemberful();
+    await saveKeys(administrator);
+    expect((await turnMemberfulOn(administrator)).status).toBe(200);
+    const elsewhere = () => saveKeys(administrator, { ...KEYS, site: OTHER_SITE });
+
+    // Someone new signing in.
+    site.meanwhile = elsewhere;
+    const { signedIn } = await signInWithMemberful();
+    expect(signedIn.headers.get("Location")).toBe(`${origin}/session/new?memberful=failed`);
+    expect(await workspaceSql("SELECT issuer FROM identities")).toEqual([]);
+    expect(await memberfulOf(administrator)).toEqual(savedFor(OTHER_SITE));
+    // Trying again signs in at the site given.
+    const again = await api(memberfulSignInPath(null), { redirect: "manual" });
+    expect(new URL(again.headers.get("Location")!).origin).toBe(OTHER_SITE);
+
+    // Someone connecting their account, while Memberful is members only.
+    await saveKeys(administrator);
+    expect((await turnMemberfulOn(administrator, { membersOnly: true })).status).toBe(200);
+    const body = JSON.stringify({ currentPassword: grace.password });
+    const started = await api(MEMBERFUL_CONNECTIONS_PATH, { method: "POST", headers: { ...as(member), "CF-Connecting-IP": IP }, body });
+    expect(started.status, await started.clone().text()).toBe(202);
+    const state = new URL(((await started.json()) as MemberfulConnection).memberfulConnection).searchParams.get("state")!;
+    site.meanwhile = elsewhere;
+    const callback = `${MEMBERFUL_CALLBACK_PATH}?${new URLSearchParams({ code: CODE, state })}`;
+    const connected = await api(callback, { headers: { Cookie: `${cookieOf(started)}; ${member.cookie}`, "CF-Connecting-IP": IP }, redirect: "manual" });
+    expect(connected.headers.get("Location")).toBe(`${origin}/users/me/profile?memberful=failed`);
+    expect(await workspaceSql("SELECT issuer FROM identities")).toEqual([]);
+    expect(await memberfulOf(administrator)).toEqual(savedFor(OTHER_SITE));
   });
 
   it("uses no keys sealed under another SESSION_SECRET, which it logs", async () => {

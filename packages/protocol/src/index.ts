@@ -1349,7 +1349,10 @@ export interface MemberfulConnection {
  * what that page then says.
  */
 export const MEMBERFUL_SIGN_IN_PROBLEMS = {
-  /** Memberful sent the browser back without a sign-in, or with one this browser didn't start, or didn't answer as it should. */
+  /**
+   * Memberful sent the browser back without a sign-in, or with one this browser didn't start, or didn't
+   * answer as it should, or an administrator gave Ember another site's keys while it signed in.
+   */
   failed: "Signing in with Memberful didn't work. Try again.",
   /** The Memberful account has no active subscription, nor the all access pass. */
   membership: "Your Memberful account has no active membership.",

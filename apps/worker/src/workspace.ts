@@ -682,10 +682,11 @@ export interface ClickAccess extends WebhookAccess {
 /**
  * Why signing in with Memberful signed nobody in, or connected no account: Memberful is off for someone
  * new, the person the account is linked to was removed or banned, it has no active membership, someone
- * new would have someone's email address, or, connecting one, Memberful isn't members only, the account
- * is connected to someone else, or they're connected to another.
+ * new would have someone's email address, keys for another site took the place of the ones it signed
+ * in with meanwhile, or, connecting one, Memberful isn't members only, the account is connected to
+ * someone else, or they're connected to another.
  */
-export type MemberfulRefusal = "off" | "unneeded" | "refused" | "membership" | "taken" | "claimed" | "another";
+export type MemberfulRefusal = "off" | "unneeded" | "refused" | "membership" | "taken" | "claimed" | "another" | "failed";
 
 /** What a join link does: joins, is off while an administrator has turned it off or Memberful is members only, or isn't the join link. */
 export type JoinLink = "joins" | "off" | "memberful" | "not found";
@@ -1701,6 +1702,17 @@ export class Workspace extends DurableObject<Env> {
   }
 
   /**
+   * Whether an administrator has given keys for another Memberful site in place of those the Worker
+   * signed someone in at `issuer` with, while it asked Memberful who they were, the deployment having
+   * none of its own: linked then, they'd have an account nobody signs in with, at a site Set up Memberful
+   * would keep (`memberfulSiteKept`). Asked one change at a time with giving keys, so one goes first.
+   */
+  private async memberfulSiteReplaced(issuer: string): Promise<boolean> {
+    const site = deployedMemberfulOf(this.env)?.site ?? (await this.joinableAccount())?.memberfulKeys?.site;
+    return site !== undefined && site !== issuer;
+  }
+
+  /**
    * Turns huddles on as the person `credentials` signs in, through the Realtime SFU app whose keys `app`
    * are, which the Worker has had Cloudflare start a session with, its secret sealed under SESSION_SECRET
    * (`seal`), or changes the app while they're on, or turns them off with null, which forgets the app's
@@ -2535,14 +2547,16 @@ export class Workspace extends DurableObject<Env> {
    * lapsed is suspended, their sessions elsewhere ending, and one whose membership is renewed is let back.
    * Answers "off" for someone new while Memberful is off, "refused" for someone linked who has been
    * removed or banned, "membership" for anyone but an administrator, or someone they invited, without an
-   * active membership, and "taken" when someone here has the email address someone new would have, which
-   * creates nothing. Everyone's workspace sockets hear of someone new.
+   * active membership, "taken" when someone here has the email address someone new would have, which
+   * creates nothing, and "failed" once keys for another site have taken the place of the ones they signed
+   * in with (`memberfulSiteReplaced`). Everyone's workspace sockets hear of someone new.
    */
   async signInWithMemberful(issuer: string, member: MemberfulMember, readAt: number, tokenDigest: string, client: Client): Promise<Me | MemberfulRefusal> {
     // One at a time, so that two sign-ins of someone new can't both add them, none can overlap turning
-    // Memberful off, or a check of the same membership, and a suspension closes the sockets it ends
-    // before answering.
+    // Memberful off, giving it another site's keys, or a check of the same membership, and a suspension
+    // closes the sockets it ends before answering.
     return this.closingSockets(async () => {
+      if (await this.memberfulSiteReplaced(issuer)) return "failed";
       const linked = await this.store.linkedPerson(issuer, member.id);
       if (linked) {
         await this.keepCatchingUp(Date.now() + MEMBERSHIP_CATCH_UP_MS);
@@ -2624,10 +2638,11 @@ export class Workspace extends DurableObject<Env> {
    * their sessions. A member needs an active membership to connect one, as to sign in with it, which an
    * administrator, or someone they invited, doesn't, and an account connected to them already signs them
    * in as signing in with it does, going by what Memberful said of its membership as of `readAt`
-   * (`settleMembership`). Answers "unneeded" unless Memberful is members only, "claimed" for an account
-   * connected to someone else, "another" when they're connected to another account at the site,
-   * "membership" for a member without an active membership, and "refused" when they've been removed or
-   * banned, or their password has changed.
+   * (`settleMembership`). Answers "unneeded" unless Memberful is members only, "failed" once keys for
+   * another site have taken the place of the ones it signed in with (`memberfulSiteReplaced`), "claimed"
+   * for an account connected to someone else, "another" when they're connected to another account at the
+   * site, "membership" for a member without an active membership, and "refused" when they've been
+   * removed or banned, or their password has changed.
    */
   async connectMemberful(
     issuer: string,
@@ -2641,6 +2656,7 @@ export class Workspace extends DurableObject<Env> {
     // One at a time, as signing in with Memberful is, so that two can't connect the same account.
     return this.closingSockets(async () => {
       if (!(await this.joinableAccount())?.memberfulSignIn) return "unneeded";
+      if (await this.memberfulSiteReplaced(issuer)) return "failed";
       const linked = await this.store.linkedPerson(issuer, member.id);
       if (linked && linked.userId !== userId) return "claimed";
       if (linked) {
