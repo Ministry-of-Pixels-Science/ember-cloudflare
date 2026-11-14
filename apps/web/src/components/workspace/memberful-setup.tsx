@@ -153,7 +153,8 @@ export function MemberfulSetup({ memberful, onSaved, onClose, onFailed }: Props)
         }}
         // The keys typed aren't lost to a click beside it.
         onInteractOutside={(event) => event.preventDefault()}
-        className={cn(DIALOG, "w-[480px]")}
+        // Wider than the other setup dialogs, for its three steps and the addresses to copy.
+        className={cn(DIALOG, "w-[640px]")}
       >
         <button type="button" aria-label="Close" disabled={saving} onClick={onClose} className={DIALOG_CLOSE}>
           <Xmark className="size-[18px]" />
