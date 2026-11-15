@@ -10,7 +10,7 @@ import { SHIPPED_MODELS } from "@/hooks/use-offered-models";
 import { PushContext } from "@/hooks/use-push";
 import { navigate } from "@/hooks/use-route";
 import { joinHuddle } from "@/lib/huddle";
-import { endHuddle, joinedHuddle, showHuddle, type HuddleControls } from "@/lib/huddle-store";
+import { endHuddle, joinedHuddle, showHuddle, tellOfHuddle, type HuddleControls } from "@/lib/huddle-store";
 import { loadPage } from "@/lib/page";
 import { badgeTheApp } from "@/test-badge";
 import { PUSH_ON } from "@/test-push";
@@ -2274,9 +2274,19 @@ describe("Conversations drawer on phones", () => {
 describe("Huddles", () => {
   const HUDDLES_ON: Account = { ...workspaceSettings.account, huddles: true };
   const preview = () => screen.queryByRole("dialog", { name: /huddle in/ });
-  const bar = () => screen.queryByRole("region", { name: /^Huddle/ });
-  /** What the tab's huddle is asked to do. */
-  const controls = { leave: vi.fn(() => showHuddle(null)), setMuted: vi.fn() } satisfies HuddleControls;
+  /** The tab's huddle where it shows, opened over the page or minimized to its bar. */
+  const shown = () => screen.queryByRole("region", { name: /^Huddle/ });
+  const opened = () => (shown()?.id === "huddle" ? shown() : null);
+  const bar = () => (shown()?.id === "huddle" ? null : shown());
+  /** What the tab's huddle is asked to do: opening and minimizing it show it so. */
+  const controls = {
+    leave: vi.fn(() => showHuddle(null)),
+    setMuted: vi.fn(),
+    setCamera: vi.fn(),
+    setOpen: vi.fn((open: boolean) => showHuddle({ ...joinedHuddle()!, open })),
+  } satisfies HuddleControls;
+  /** Joins `roomId`'s huddle as the preview would, without a microphone or a camera. */
+  const join = (roomId: string) => act(() => joinHuddle({ roomId, muted: false, microphone: null, camera: null, speakerId: "" }));
   /** Serves `sidebar` as this person's rooms, and a search that finds nothing, as the search box and its page ask. */
   const serveRooms = (sidebar: object = roomList(rooms)) =>
     serve({
@@ -2287,11 +2297,13 @@ describe("Huddles", () => {
   beforeEach(() => {
     vi.stubGlobal("WebSocket", WorkspaceSocket);
     serveRooms();
-    controls.leave.mockClear();
-    controls.setMuted.mockClear();
-    // Joining lets the tab into the huddle at once, alone.
+    for (const control of Object.values(controls)) control.mockClear();
+    // Joining lets the tab into the huddle at once, alone, and shows it opened.
     vi.mocked(joinHuddle).mockImplementation(({ roomId, muted }) =>
-      showHuddle({ roomId, connected: true, you: ada, people: [{ user: ada, muted, audio: false }], muted, microphone: true }, controls),
+      showHuddle(
+        { roomId, connected: true, you: ada, people: [{ user: ada, muted, audio: false, video: false }], muted, microphone: true, camera: null, watched: new Map(), open: true },
+        controls,
+      ),
     );
   });
 
@@ -2318,7 +2330,7 @@ describe("Huddles", () => {
     expect(screen.queryByRole("button", { name: /huddle/i })).not.toBeInTheDocument();
   });
 
-  it("starts a room's huddle from its header by the preview, then shows its bar under every page until it's left", async () => {
+  it("starts a room's huddle from its header by the preview, and opens it over the page, which leaves nothing of itself to reach", async () => {
     const { user } = showWorkspace("/rooms/general", ada, HUDDLES_ON);
     await roomHeading();
     // First of the room's actions, where Slack's is.
@@ -2326,13 +2338,37 @@ describe("Huddles", () => {
     expect(start.compareDocumentPosition(screen.getByRole("link", { name: "Search messages" })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     await user.click(start);
     expect(await screen.findByRole("dialog", { name: "Start a huddle in general" })).toBeVisible();
-    expect(bar()).not.toBeInTheDocument();
+    expect(shown()).not.toBeInTheDocument();
+    expect(screen.getByRole("main").closest("[inert]")).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "Start Huddle" }));
-    expect(joinHuddle).toHaveBeenCalledExactlyOnceWith({ roomId: "general", muted: false, microphone: null, speakerId: "" });
+    expect(joinHuddle).toHaveBeenCalledExactlyOnceWith({ roomId: "general", muted: false, microphone: null, camera: null, speakerId: "" });
     expect(preview()).not.toBeInTheDocument();
+    expect(opened()).toHaveAccessibleName("Huddle in general");
+    expect(within(opened()!).getByRole("list", { name: "In the huddle" })).toHaveTextContent("Ada (you)");
+    expect(screen.getByRole("main").closest("[inert]")).not.toBeNull();
+    // The conversations stay beside it.
+    expect(screen.getByRole("complementary", { name: "Conversations" }).closest("[inert]")).toBeNull();
+
+    await user.click(within(opened()!).getByRole("button", { name: "Leave" }));
+    expect(controls.leave).toHaveBeenCalledTimes(1);
+    expect(shown()).not.toBeInTheDocument();
+    expect(screen.getByRole("main").closest("[inert]")).toBeNull();
+    expect(screen.getByRole("button", { name: "Start huddle" })).toBeInTheDocument();
+  });
+
+  it("minimizes the huddle to a bar under every page, and opens it again from the bar", async () => {
+    const { user } = showWorkspace("/rooms/general", ada, HUDDLES_ON);
+    await roomHeading();
+    join("general");
+    await user.click(within(opened()!).getAllByRole("button", { name: "Minimize huddle" })[0]!);
+    expect(opened()).not.toBeInTheDocument();
     expect(bar()).toHaveAccessibleName("Huddle in general");
+    expect(screen.getByRole("main").closest("[inert]")).toBeNull();
     expect(screen.getByRole("button", { name: "Leave huddle" })).toBeInTheDocument();
+    // The button that minimized it went with it, so the one that opens it again has the focus.
+    const open = within(bar()!).getByRole("button", { name: /^Huddle in general/ });
+    expect(open).toHaveFocus();
 
     // On another room's page, and a page that isn't a room's.
     act(() => navigate("/rooms/random"));
@@ -2341,20 +2377,55 @@ describe("Huddles", () => {
     expect(screen.getByRole("button", { name: "Start huddle" })).toBeInTheDocument();
     act(() => navigate("/searches"));
     expect(await screen.findByRole("heading", { name: "Find a conversation" })).toBeInTheDocument();
-    expect(bar()).toHaveAccessibleName("Huddle in general");
-    await user.click(within(bar()!).getByRole("link"));
-    expect(await roomHeading()).toHaveTextContent("general");
-
-    await user.click(within(bar()!).getByRole("button", { name: "Leave" }));
-    expect(controls.leave).toHaveBeenCalledTimes(1);
+    await user.click(within(bar()!).getByRole("button", { name: "Open huddle" }));
+    expect(opened()).toHaveAccessibleName("Huddle in general");
+    expect(opened()).toHaveFocus();
     expect(bar()).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Start huddle" })).toBeInTheDocument();
+    expect(location.pathname).toBe("/searches");
+
+    await user.click(within(opened()!).getByRole("button", { name: "Leave" }));
+    expect(controls.leave).toHaveBeenCalledTimes(1);
+    expect(shown()).not.toBeInTheDocument();
+  });
+
+  it("minimizes the huddle on going to a page, the one shown included", async () => {
+    showWorkspace("/rooms/general", ada, HUDDLES_ON);
+    await roomHeading();
+    join("general");
+    expect(opened()).toBeInTheDocument();
+    act(() => navigate("/rooms/random"));
+    expect(await roomHeading()).toHaveTextContent("random");
+    expect(bar()).toHaveAccessibleName("Huddle in general");
+
+    act(() => controls.setOpen(true));
+    expect(opened()).toBeInTheDocument();
+    act(() => navigate("/rooms/random"));
+    expect(bar()).toBeInTheDocument();
+    expect(screen.getByRole("main").closest("[inert]")).toBeNull();
+  });
+
+  it("skips to the huddle opened, which covers the main content", async () => {
+    const { user } = showWorkspace("/rooms/general", ada, HUDDLES_ON);
+    await roomHeading();
+    join("general");
+    act(() => (document.activeElement as HTMLElement).blur());
+    await user.tab();
+    const skip = screen.getByRole("link", { name: "Skip to main content" });
+    expect(skip).toHaveFocus();
+    expect(skip).toHaveAttribute("href", "#huddle");
+    await user.keyboard("{Enter}");
+    expect(opened()).toHaveFocus();
+    expect(location.pathname + location.hash).toBe("/rooms/general");
+
+    act(() => controls.setOpen(false));
+    expect(skip).toHaveAttribute("href", "#main-content");
   });
 
   it("leaves from the header's button while the tab is in the room's huddle", async () => {
     const { user } = showWorkspace("/rooms/general", ada, HUDDLES_ON);
     await roomHeading();
-    act(() => joinHuddle({ roomId: "general", muted: false, microphone: null, speakerId: "" }));
+    join("general");
+    act(() => controls.setOpen(false));
     await user.click(screen.getByRole("button", { name: "Leave huddle" }));
     expect(controls.leave).toHaveBeenCalledTimes(1);
     expect(preview()).not.toBeInTheDocument();
@@ -2405,15 +2476,22 @@ describe("Huddles", () => {
     expect(preview()).not.toBeInTheDocument();
   });
 
-  it("only shows the room at the link of a huddle the tab is in, or of a DM", async () => {
+  it("opens the huddle the tab is in at its link, over its room, and only shows the room at a DM's", async () => {
     serveRooms(roomList([...rooms, withGrace]));
-    act(() => joinHuddle({ roomId: "random", muted: false, microphone: null, speakerId: "" }));
-    showWorkspace("/rooms/random/huddle", ada, HUDDLES_ON);
+    showWorkspace("/rooms/general", ada, HUDDLES_ON);
+    await roomHeading();
+    join("random");
+    act(() => controls.setOpen(false));
+    act(() => navigate("/rooms/random/huddle"));
     expect(await roomHeading()).toHaveTextContent("random");
     await waitFor(() => expect(location.pathname).toBe("/rooms/random"));
+    await waitFor(() => expect(opened()).toHaveAccessibleName("Huddle in random"));
+    expect(preview()).not.toBeInTheDocument();
+
     act(() => navigate("/rooms/d1/huddle"));
     expect(await roomHeading()).toHaveTextContent("Grace");
     await waitFor(() => expect(location.pathname).toBe("/rooms/d1"));
+    expect(bar()).toHaveAccessibleName("Huddle in random");
     expect(preview()).not.toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
@@ -2434,14 +2512,14 @@ describe("Huddles", () => {
     expect(toggle(within(dialog).getByRole("button", { name: "Start Huddle" }))).toBe(true);
     expect(joinHuddle).not.toHaveBeenCalled();
     await user.click(within(dialog).getByRole("button", { name: "Start Huddle" }));
-    expect(bar()).toHaveAccessibleName("Huddle in random");
+    expect(opened()).toHaveAccessibleName("Huddle in random");
 
     // Wherever the tab is, they leave the huddle it's in.
     act(() => navigate("/rooms/general"));
     expect(await roomHeading()).toHaveTextContent("general");
     expect(toggle()).toBe(false);
     expect(controls.leave).toHaveBeenCalledTimes(1);
-    expect(bar()).not.toBeInTheDocument();
+    expect(shown()).not.toBeInTheDocument();
     expect(preview()).not.toBeInTheDocument();
   });
 
@@ -2468,7 +2546,7 @@ describe("Huddles", () => {
     expect(mute()).toBe(true);
     expect(controls.setMuted).not.toHaveBeenCalled();
 
-    act(() => joinHuddle({ roomId: "general", muted: false, microphone: null, speakerId: "" }));
+    join("general");
     expect(mute()).toBe(false);
     expect(controls.setMuted).toHaveBeenLastCalledWith(true);
     act(() => showHuddle({ ...joinedHuddle()!, muted: true }));
@@ -2485,24 +2563,33 @@ describe("Huddles", () => {
     /** The keys pressed and held, as the browser repeats them: whether it was left any of them to act on. */
     const held = (keys: KeyboardEventInit) => [fireEvent.keyDown(document.body, keys), fireEvent.keyDown(document.body, { ...keys, repeat: true }), fireEvent.keyDown(document.body, { ...keys, repeat: true })].some(Boolean);
 
-    act(() => joinHuddle({ roomId: "general", muted: false, microphone: null, speakerId: "" }));
+    join("general");
     expect(held(mute)).toBe(false);
     expect(controls.setMuted).toHaveBeenCalledExactlyOnceWith(true);
 
     expect(held(toggle)).toBe(false);
     expect(controls.leave).toHaveBeenCalledTimes(1);
-    expect(bar()).not.toBeInTheDocument();
+    expect(shown()).not.toBeInTheDocument();
     expect(preview()).not.toBeInTheDocument();
   });
 
   it("says why the room ended the tab's huddle", async () => {
     showWorkspace("/rooms/general", ada, HUDDLES_ON);
     await roomHeading();
-    act(() => joinHuddle({ roomId: "general", muted: false, microphone: null, speakerId: "" }));
-    expect(bar()).toBeInTheDocument();
+    join("general");
+    expect(opened()).toBeInTheDocument();
     act(() => endHuddle("Huddles have been turned off."));
     expect(await screen.findByRole("alert")).toHaveTextContent("Huddles have been turned off.");
-    expect(bar()).not.toBeInTheDocument();
+    expect(shown()).not.toBeInTheDocument();
+  });
+
+  it("says why the tab's camera stays off, and stays in the huddle", async () => {
+    showWorkspace("/rooms/general", ada, HUDDLES_ON);
+    await roomHeading();
+    join("general");
+    act(() => tellOfHuddle("Ember has no camera to use."));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Ember has no camera to use.");
+    expect(opened()).toBeInTheDocument();
   });
 
   it("closes the preview of a room that stops being this person's, for good", async () => {
@@ -2520,7 +2607,7 @@ describe("Huddles", () => {
   it("leaves the huddle as the workspace goes, as when someone else signs in", async () => {
     const { unmount } = showWorkspace("/rooms/general", ada, HUDDLES_ON);
     await roomHeading();
-    act(() => joinHuddle({ roomId: "general", muted: false, microphone: null, speakerId: "" }));
+    join("general");
     unmount();
     expect(controls.leave).toHaveBeenCalledTimes(1);
   });

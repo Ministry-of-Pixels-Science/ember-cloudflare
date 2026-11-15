@@ -7,8 +7,8 @@ import { startFakeSfu, type FakeSfu } from "./fake-sfu";
 
 // The Huddles tab's card and Set up huddles, and a huddle itself, on the second test server, which asks
 // the Realtime SFU this spec fakes: to start a session with the keys it's given, and to carry what the
-// people in a huddle say, which the fake does through a page of its own. Each test leaves the workspace
-// as a new one is: huddles off.
+// people in a huddle say and what their cameras show, which the fake does through a page of its own.
+// Each test leaves the workspace as a new one is: huddles off.
 
 let sfu: FakeSfu;
 let relay: Page;
@@ -107,8 +107,19 @@ test.describe("Set up huddles", () => {
   });
 });
 
-/** The bar of the huddle `page` is in, along the window's base. */
-const huddleBar = (page: Page, room: TestRoom) => page.getByRole("region", { name: `Huddle in ${room.name}` });
+/** The huddle `page` is in, opened over the page, which is how it starts. */
+const huddleOpened = (page: Page, room: TestRoom) => page.getByRole("region", { name: `Huddle in ${room.name}` }).and(page.locator("#huddle"));
+
+/** The bar of the huddle `page` is in, along the window's base, once it's minimized. */
+const huddleBar = (page: Page, room: TestRoom) => page.getByRole("region", { name: `Huddle in ${room.name}` }).and(page.locator(":not(#huddle)"));
+
+/** Whether `page` shows the camera its huddle labels `label`: its track is live, and its picture plays and has a size, which a frame gives it. */
+const sees = (page: Page, label: string) =>
+  page.evaluate((label) => {
+    const video = [...document.querySelectorAll<HTMLVideoElement>("#huddle video")].find((video) => video.ariaLabel === label);
+    const [track] = video?.srcObject instanceof MediaStream ? video.srcObject.getVideoTracks() : [];
+    return track !== undefined && track.readyState === "live" && !video!.paused && video!.videoWidth > 0 && video!.currentTime > 0;
+  }, label);
 
 /** Whether `page` plays the voice of `userId`: their track brings sound, and its audio runs. */
 const hears = (page: Page, userId: string) =>
@@ -148,7 +159,9 @@ const musicIn = (page: Page) =>
 const sidebarMark = (page: Page, room: TestRoom) => page.getByRole("region", { name: "Rooms" }).getByRole("link", { name: room.name, exact: true }).locator("[title]");
 
 test.describe("A huddle", () => {
-  test("two people start and join a room's huddle, which their sidebars show, hear each other and its sounds, and leave it", async ({ page, browser, baseURL, request }) => {
+  test("two people start and join a room's huddle, which their sidebars show, hear and see each other and hear its sounds, and leave it", async ({ page, browser, baseURL, request }) => {
+    // Their voices and their cameras, and the huddle's music twice, which waits five seconds each time.
+    test.slow();
     const administrator = await administratorSession(request);
     const headers = { Cookie: cookieHeader(administrator), ...SAME_ORIGIN };
     // In a room of the test's own, which everyone is in.
@@ -171,9 +184,13 @@ test.describe("A huddle", () => {
     const starting = page.getByRole("dialog", { name: `Start a huddle in ${room.name}` });
     await expect(starting.getByRole("combobox", { name: "Microphone" })).toBeVisible();
     await starting.getByRole("button", { name: "Start Huddle" }).click();
+    // The huddle opens over the room, with a tile for her, and takes the focus.
+    const adasHuddle = huddleOpened(page, room);
+    await expect(adasHuddle).toContainText("1 person");
+    await expect(adasHuddle.getByRole("listitem")).toHaveText([`${administrator.user.name} (you)`]);
+    await expect(adasHuddle).toBeFocused();
     const adasBar = huddleBar(page, room);
-    await expect(adasBar).toContainText("Just you in the huddle");
-    await expect(page.getByRole("button", { name: "Leave huddle", exact: true })).toBeVisible();
+    await expect(adasBar).toHaveCount(0);
     // The room's row in her sidebar ends with the headphones, her face and how many are in it.
     await expect(sidebarMark(page, room)).toHaveAttribute("title", "Just you in the huddle");
     await expect(sidebarMark(page, room).getByText("1", { exact: true })).toBeVisible();
@@ -201,10 +218,16 @@ test.describe("A huddle", () => {
     const joining = grace.getByRole("dialog", { name: `Join the huddle in ${room.name}` });
     await expect(joining).toContainText("Ada is in it now.");
     await expect(grace).toHaveURL(`${baseURL}/rooms/${room.id}`);
+    // She turns her camera on in the preview, which shows her its picture and lets her choose it, and joins with it on.
+    await expect(joining.getByRole("combobox", { name: "Camera" })).toHaveCount(0);
+    await joining.getByRole("button", { name: "Turn on camera" }).click();
+    await expect(joining.getByLabel("Your camera")).toBeVisible();
+    await expect(joining.getByRole("combobox", { name: "Camera" })).toBeVisible();
     await joining.getByRole("button", { name: "Join Huddle" }).click();
-    const gracesBar = huddleBar(grace, room);
-    await expect(gracesBar).toContainText("Ada and you are in the huddle");
-    await expect(adasBar).toContainText("Grace and you are in the huddle");
+    const gracesHuddle = huddleOpened(grace, room);
+    await expect(gracesHuddle).toContainText("2 people");
+    await expect(adasHuddle).toContainText("2 people");
+    await expect(adasHuddle.getByRole("listitem")).toHaveText([`${administrator.user.name} (you)`, her.name]);
     await expect(sidebarMark(grace, room)).toHaveAttribute("title", "Ada and you are in the huddle");
     await expect(sidebarMark(page, room)).toHaveAttribute("title", "Grace and you are in the huddle");
     await expect(sidebarMark(page, room).getByText("2", { exact: true })).toBeVisible();
@@ -218,26 +241,57 @@ test.describe("A huddle", () => {
     expect(stopped.playing).toBe(false);
     expect(stopped.at).toBeGreaterThan(0);
 
-    // Ada mutes from the bar, and unmutes with the keys, which the button she pressed doesn't take as a press.
+    // Each sees her own camera, and Ada sees Grace's, through the SFU. Ada turns hers on from the huddle, and Grace sees it.
+    const [adasCamera, gracesCamera] = [`${administrator.user.name}'s camera`, `${her.name}'s camera`];
+    await expect.poll(() => sees(grace, "Your camera"), { timeout: 15_000 }).toBe(true);
+    await expect.poll(() => sees(page, gracesCamera), { timeout: 15_000 }).toBe(true);
+    await adasHuddle.getByRole("button", { name: "Turn on camera" }).click();
+    await expect.poll(() => sees(page, "Your camera"), { timeout: 15_000 }).toBe(true);
+    await expect.poll(() => sees(grace, adasCamera), { timeout: 15_000 }).toBe(true);
+    // The tiles show all of both without scrolling.
+    expect(await adasHuddle.getByRole("list").evaluate((tiles) => tiles.parentElement!.scrollHeight <= tiles.parentElement!.clientHeight)).toBe(true);
+
+    // Ada minimizes the huddle to its bar, which gets the focus, and shows the room again. Her camera stays on for Grace.
+    await adasHuddle.getByRole("button", { name: "Minimize huddle" }).filter({ visible: true }).click();
+    await expect(adasBar).toContainText("Grace and you are in the huddle");
+    await expect(adasBar.getByRole("button", { name: /^Huddle in/ })).toBeFocused();
+    await expect(adasHuddle).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Leave huddle", exact: true })).toBeVisible();
+    await expect(adasBar.getByRole("button", { name: "Turn off camera" })).toBeVisible();
+    expect(await sees(grace, adasCamera)).toBe(true);
+
+    // She mutes from the bar, and unmutes with the keys, which the button she pressed doesn't take as a press.
     await adasBar.getByRole("button", { name: "Mute microphone" }).click();
     await expect(adasBar.getByRole("button", { name: "Unmute microphone" })).toBeFocused();
     await page.keyboard.press("Control+Shift+Space");
     await expect(adasBar.getByRole("button", { name: "Mute microphone" })).toBeVisible();
 
-    // Grace leaves from her bar. The huddle goes on for Ada, who no longer hears her.
-    await gracesBar.getByRole("button", { name: "Leave", exact: true }).click();
-    await expect(gracesBar).toHaveCount(0);
+    // She opens it again from the bar, and sees Grace again. Then she turns her camera off, and Grace sees her avatar.
+    await adasBar.getByRole("button", { name: "Open huddle", exact: true }).click();
+    await expect(adasHuddle).toBeFocused();
+    await expect.poll(() => sees(page, gracesCamera), { timeout: 15_000 }).toBe(true);
+    await adasHuddle.getByRole("button", { name: "Turn off camera" }).click();
+    await expect(adasHuddle.getByLabel("Your camera")).toHaveCount(0);
+    await expect(gracesHuddle.getByLabel(adasCamera)).toHaveCount(0);
+    await expect(gracesHuddle.getByRole("listitem").first().locator("img")).toBeVisible();
+
+    // Grace leaves from her huddle. It goes on for Ada, who no longer hears her, or sees her.
+    await gracesHuddle.getByRole("button", { name: "Leave", exact: true }).click();
+    await expect(gracesHuddle).toHaveCount(0);
     await expect(grace.getByRole("button", { name: "Join huddle, 1 in it" })).toBeVisible();
     await expect(sidebarMark(grace, room)).toHaveAttribute("title", "Ada is in the huddle");
-    await expect(adasBar).toContainText("Just you in the huddle");
+    await expect(adasHuddle).toContainText("1 person");
     await expect(page.locator("[data-huddle-voices] audio[data-user-id]")).toHaveCount(0);
+    await expect(adasHuddle.locator("video")).toHaveCount(0);
     // Each heard Grace leave. Ada, alone again, hears the music go on from where it stopped.
     await expect.poll(() => soundsHeard(grace)).toEqual(["joined", "left"]);
     await expect.poll(() => soundsHeard(page), { timeout: 15_000 }).toEqual(["joined", "music", "joined", "left", "music"]);
     await expect.poll(async () => (await musicIn(page)).playing).toBe(true);
     expect((await musicIn(page)).at).toBeGreaterThanOrEqual(stopped.at);
 
-    // Ada leaves from the room's header, which ends the huddle, and its keys offer to start another.
+    // Ada minimizes the huddle and leaves from the room's header, which ends it, and its keys offer to start another.
+    await adasHuddle.getByRole("button", { name: "Minimize huddle" }).filter({ visible: true }).click();
+    await expect(adasBar).toContainText("Just you in the huddle");
     await page.getByRole("button", { name: "Leave huddle", exact: true }).click();
     await expect(adasBar).toHaveCount(0);
     await expect.poll(() => soundsHeard(page)).toEqual(["joined", "music", "joined", "left", "music", "left"]);
@@ -250,9 +304,9 @@ test.describe("A huddle", () => {
     await starting.getByRole("button", { name: "Cancel", exact: true }).last().click();
     await expect(starting).toBeHidden();
 
-    // The room had the SFU close what each of them published, and what each heard.
+    // The room had the SFU close what each of them published, a microphone and a camera, and what each heard and saw.
     const carried = new Set(sfu.asked.flatMap(({ method, path }) => (method === "POST" ? (/\/sessions\/([^/]+)\/tracks\/new$/.exec(path)?.[1] ?? []) : [])));
-    expect(carried.size).toBeGreaterThanOrEqual(4);
+    expect(carried.size).toBeGreaterThanOrEqual(8);
     const closed = (sessionId: string) => sfu.asked.some(({ method, path }) => method === "PUT" && path.endsWith(`/sessions/${sessionId}/tracks/close`));
     await expect.poll(() => [...carried].filter((sessionId) => !closed(sessionId))).toEqual([]);
 

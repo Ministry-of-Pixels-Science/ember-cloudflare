@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { closeMicrophone, listDevices, listsSpeaker, microphoneOf, NO_DEVICES, openMicrophone, rememberDevice, rememberedDevice, watchDevices } from "./huddle-devices";
+import { cameraOf, closeDevice, listDevices, listsSpeaker, microphoneOf, NO_DEVICES, openCamera, openMicrophone, rememberDevice, rememberedDevice, watchDevices } from "./huddle-devices";
 
-/** A stream from the microphone `deviceId`, as much of one as the code reads. */
-function streamFrom(deviceId: string) {
+/** A stream from the microphone `deviceId`, or with `kind` said, the camera, as much of one as the code reads. */
+function streamFrom(deviceId: string, kind: "audio" | "video" = "audio") {
   const track = { stop: vi.fn(), getSettings: () => ({ deviceId }) };
-  return { stream: { getAudioTracks: () => [track], getTracks: () => [track] } as unknown as MediaStream, track };
+  const of = (asked: string) => () => (asked === kind ? [track] : []);
+  return { stream: { getAudioTracks: of("audio"), getVideoTracks: of("video"), getTracks: () => [track] } as unknown as MediaStream, track };
 }
 
 /** What the browser throws for a request it turns down, by its name. */
@@ -24,12 +25,14 @@ afterEach(() => {
 });
 
 describe("The devices a huddle remembers", () => {
-  it("remembers a microphone and a speaker apart", () => {
+  it("remembers a microphone, a speaker and a camera apart", () => {
     expect(rememberedDevice("microphone")).toBeNull();
     rememberDevice("microphone", "mic-2");
     rememberDevice("speaker", "speaker-1");
+    rememberDevice("camera", "camera-1");
     expect(rememberedDevice("microphone")).toBe("mic-2");
     expect(rememberedDevice("speaker")).toBe("speaker-1");
+    expect(rememberedDevice("camera")).toBe("camera-1");
   });
 
   it("forgets one once the browser's own choice is taken", () => {
@@ -107,9 +110,50 @@ describe("Opening a microphone", () => {
     const { stream, track } = streamFrom("mic-2");
     expect(microphoneOf(stream)).toBe("mic-2");
     expect(microphoneOf(null)).toBe("");
-    closeMicrophone(stream);
+    closeDevice(stream);
     expect(track.stop).toHaveBeenCalledTimes(1);
-    expect(() => closeMicrophone(null)).not.toThrow();
+    expect(() => closeDevice(null)).not.toThrow();
+  });
+});
+
+describe("Opening a camera", () => {
+  /** A picture the size of a tile, which is all a huddle asks of a camera. */
+  const TILE = { width: { ideal: 640 }, height: { ideal: 360 } };
+
+  it("opens the browser's own choice when none is asked for, and the one asked for when one is", async () => {
+    const { stream } = streamFrom("camera-1", "video");
+    const getUserMedia = vi.fn().mockResolvedValue(stream);
+    withMedia({ getUserMedia });
+    expect(await openCamera(null)).toBe(stream);
+    expect(await openCamera("camera-2")).toBe(stream);
+    expect(getUserMedia.mock.calls).toEqual([[{ video: TILE }], [{ video: { ...TILE, deviceId: { exact: "camera-2" } } }]]);
+  });
+
+  it("opens the browser's own choice when the one asked for is gone", async () => {
+    const { stream } = streamFrom("camera-1", "video");
+    const getUserMedia = vi.fn().mockRejectedValueOnce(refusal("OverconstrainedError")).mockResolvedValue(stream);
+    withMedia({ getUserMedia });
+    expect(await openCamera("camera-2")).toBe(stream);
+    expect(getUserMedia.mock.calls).toEqual([[{ video: { ...TILE, deviceId: { exact: "camera-2" } } }], [{ video: TILE }]]);
+  });
+
+  it("has none when its person refuses, without asking twice, nor on a page the browser gives no camera", async () => {
+    const getUserMedia = vi.fn().mockRejectedValue(refusal("NotAllowedError"));
+    withMedia({ getUserMedia });
+    expect(await openCamera("camera-2")).toBeNull();
+    expect(getUserMedia).toHaveBeenCalledTimes(1);
+    vi.stubGlobal("navigator", {});
+    expect(await openCamera(null)).toBeNull();
+  });
+
+  it("says which device a stream is from, and stops it, which puts its light out", () => {
+    const { stream, track } = streamFrom("camera-2", "video");
+    expect(cameraOf(stream)).toBe("camera-2");
+    expect(cameraOf(null)).toBe("");
+    // A microphone's stream is from no camera.
+    expect(cameraOf(streamFrom("mic-1").stream)).toBe("");
+    closeDevice(stream);
+    expect(track.stop).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -121,10 +165,11 @@ describe("Listing a huddle's devices", () => {
     device("videoinput", "camera-1", "FaceTime HD Camera"),
   ];
 
-  it("lists the microphones, and no speakers where the browser can't play through one it's told", async () => {
+  it("lists the microphones and the cameras, and no speakers where the browser can't play through one it's told", async () => {
     withMedia({ enumerateDevices: vi.fn().mockResolvedValue(DEVICES) });
-    const { microphones, speakers } = await listDevices();
+    const { microphones, speakers, cameras } = await listDevices();
     expect(microphones.map(({ label }) => label)).toEqual(["Built-in Microphone", "USB Microphone"]);
+    expect(cameras.map(({ label }) => label)).toEqual(["FaceTime HD Camera"]);
     expect(speakers).toEqual([]);
   });
 
@@ -135,7 +180,7 @@ describe("Listing a huddle's devices", () => {
   });
 
   it("leaves out the devices a browser lists without an id, as it does before a microphone is allowed", async () => {
-    withMedia({ enumerateDevices: vi.fn().mockResolvedValue([device("audioinput", "", ""), device("audiooutput", "", "")]) });
+    withMedia({ enumerateDevices: vi.fn().mockResolvedValue([device("audioinput", "", ""), device("audiooutput", "", ""), device("videoinput", "", "")]) });
     expect(await listDevices()).toEqual(NO_DEVICES);
   });
 
