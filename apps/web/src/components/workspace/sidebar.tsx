@@ -30,7 +30,7 @@ interface Props {
   workspaceName: string;
   /** Who the sidebar is for, whose DMs name the others in them. */
   meId: UserId;
-  /** Someone's rooms and DMs, in any order. */
+  /** Someone's rooms and DMs, in the order they were put in them, which the rooms neither starred nor ranked keep. */
   rooms: SidebarRoom[];
   /** Whether their list has come, before which nothing says there's nothing in it. */
   loaded: boolean;
@@ -59,13 +59,14 @@ interface Props {
 /**
  * The conversation list: rooms, then DMs, under the workspace name, and under that in small type the
  * tagline an administrator gave it, if it has one. The starred rooms come first, then the ones the
- * shared order ranks, in its order, then the rest by name, and a starred room's row ends with a star,
- * with no grip, as the project's owner chose: held, the row can be dragged among the other starred rows,
- * or moved with Alt and an arrow (`useStarOrder`). The DMs come latest active first, and a DM's row shows
- * who else is in it. People suggested for DMs follow. A room or DM marked unread is bold with a dot at
- * the end of its row, and a room with a huddle going on ends its row with who's in it. With Activity on,
- * only the unread rows show, and with none it says everything's read; with it off and nothing to list,
- * it says it found nothing.
+ * shared order ranks, in its order, then the rest in the order they were put in them, so a new room
+ * comes last, and a starred room's row ends with a star, with no grip, both as the project's owner
+ * chose: held, the row can be dragged among the other starred rows, or moved with Alt and an arrow
+ * (`useStarOrder`). The DMs come latest active first, and a DM's row shows who else is in it. People
+ * suggested for DMs follow. A room or DM marked unread is bold with a dot at the end of its row, and a
+ * room with a huddle going on ends its row with who's in it. With Activity on, only the unread rows
+ * show, and with none it says everything's read; with it off and nothing to list, it says it found
+ * nothing.
  */
 export function Sidebar({
   workspaceName,

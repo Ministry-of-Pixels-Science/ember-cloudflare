@@ -159,13 +159,13 @@ describe("Activity filter", () => {
 
   it("shows only the rows marked unread, without the people suggested for DMs", () => {
     const { rerender } = renderSidebar({ rooms: marked, suggestions: [grace!], unreadOnly: true });
-    expect(listed()).toEqual(["#design", "#general"]);
+    expect(listed()).toEqual(["#general", "#design"]);
     expect(suggestionRows()).toEqual([]);
     expect(screen.getByRole("heading", { name: "DMs" })).toBeInTheDocument();
     expect(screen.queryByText("You’re all caught up. No unread conversations.")).not.toBeInTheDocument();
 
     rerender({ unreadOnly: false });
-    expect(listed()).toEqual(["#design", "#general", "#random"]);
+    expect(listed()).toEqual(["#general", "#random", "#design"]);
     expect(suggestionRows()).toHaveLength(1);
   });
 
@@ -182,15 +182,21 @@ describe("Activity filter", () => {
 });
 
 describe("Room order", () => {
-  it("lists your starred rooms first, in the order you starred them, then the rest by name", () => {
+  it("lists your starred rooms first, in the order you starred them, then the rest in the order you were put in them", () => {
     const more = [...rooms, { id: "design", name: "Design", kind: "open" as const, icon: null, unread: false, involvement: "mentions" as const }, { id: "ops", name: "ops", kind: "open" as const, icon: null, unread: false, involvement: "mentions" as const }];
     renderSidebar({ rooms: more, favorites: { rooms: ["random", "ops"], version: 2 } });
-    expect(listed()).toEqual(["#random", "#ops", "#Design", "#general"]);
+    expect(listed()).toEqual(["#random", "#ops", "#general", "#Design"]);
+  });
+
+  it("lists a room you've just been put in below every other room, whatever its name", () => {
+    const { rerender } = renderSidebar();
+    rerender({ rooms: [...rooms, { id: "annex", name: "Annex", kind: "open", icon: null, unread: false, involvement: "mentions" }] });
+    expect(listed()).toEqual(["#general", "#random", "#Annex"]);
   });
 });
 
 describe("Shared room order", () => {
-  it("lists the rooms the shared order ranks after your stars, in its order, then the rest by name", () => {
+  it("lists the rooms the shared order ranks after your stars, in its order, then the rest in the order you were put in them", () => {
     const more = [...rooms, { id: "design", name: "Design", kind: "open" as const, icon: null, unread: false, involvement: "mentions" as const }, { id: "ops", name: "ops", kind: "open" as const, icon: null, unread: false, involvement: "mentions" as const }];
     renderSidebar({ rooms: more, favorites: { rooms: ["ops"], version: 1 }, sharedOrder: ["random", "ops", "gone", "general"] });
     expect(listed()).toEqual(["#ops", "#random", "#general", "#Design"]);

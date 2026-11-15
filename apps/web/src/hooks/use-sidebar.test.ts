@@ -300,6 +300,21 @@ describe("Live sidebar updates", () => {
     await settle();
     expect(result.current.list?.rooms).toEqual([]);
   });
+
+  it("asks again at once after a list that may have a room in the wrong place, one Ada was taken out of and put back in while it was on its way", async () => {
+    const { result } = await showSidebar();
+    const release = holdAnswers();
+    socket().connect();
+    // She's taken out of Design and put back in it, then put in general, all before the server reads her list.
+    socket().receive({ type: "room.gone", roomId: design.id });
+    socket().receive({ type: "room.saved", room: { id: design.id, name: "Design", kind: "open", icon: null } });
+    socket().receive({ type: "room.saved", room: { id: general.id, name: "general", kind: "open", icon: null } });
+    server.change(unstarred([design, general]));
+    await release();
+    await settle();
+    expect(sidebarRequests()).toEqual([null, 'W/"1"', 'W/"2"']);
+    expect(result.current.list?.rooms).toEqual([design, general]);
+  });
 });
 
 describe("Unread rooms", () => {

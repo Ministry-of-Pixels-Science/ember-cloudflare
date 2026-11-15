@@ -210,7 +210,7 @@ describe("Open a room", () => {
     serve({ "GET /api/sidebar": () => Response.json(lists.shift()) });
     showWorkspace("/rooms/design");
     expect(await roomHeading()).toHaveTextContent("Design");
-    expect(sidebarRooms()).toEqual(["Design", "general", "random"]);
+    expect(sidebarRooms()).toEqual(["general", "random", "Design"]);
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
@@ -277,13 +277,13 @@ describe("Go back to the last room", () => {
     expect(location.pathname).toBe("/rooms/random");
   });
 
-  it("goes from / to your oldest room when you haven't visited one, which isn't the first by name", async () => {
+  it("goes from / to the room you were put in first when you haven't visited one, which the sidebar lists first, whatever its name", async () => {
     const zebra: Room = { id: "zebra", name: "Zebra", kind: "closed", icon: null };
     serve({ "GET /api/sidebar": () => Response.json(roomList([zebra, ...rooms])) });
     showWorkspace("/");
     expect(await roomHeading()).toHaveTextContent("Zebra");
     expect(location.pathname).toBe("/rooms/zebra");
-    expect(sidebarRooms()).toEqual(["general", "random", "Zebra"]);
+    expect(sidebarRooms()).toEqual(["Zebra", "general", "random"]);
   });
 
   it("says there are no rooms yet, with your name for screen readers, under Home", async () => {
@@ -359,7 +359,7 @@ describe("Room addresses", () => {
 });
 
 describe("Create an open room", () => {
-  it("makes a room from workspace settings, lists it in its place by name, and opens it", async () => {
+  it("makes a room from workspace settings, lists it below every other room, whatever its name, and opens it", async () => {
     const design: Room = { id: "design", name: "Design", kind: "open", icon: null };
     serve({
       "GET /api/rooms/new": () => Response.json({ people: [ada] }),
@@ -377,7 +377,7 @@ describe("Create an open room", () => {
 
     await waitFor(() => expect(location.pathname).toBe("/rooms/design"));
     expect(await roomHeading()).toHaveTextContent("Design");
-    expect(sidebarRooms()).toEqual(["Design", "general", "random"]);
+    expect(sidebarRooms()).toEqual(["general", "random", "Design"]);
   });
 
   it("lists a room made before the room list arrived, which the list may not have yet", async () => {
@@ -394,7 +394,7 @@ describe("Create an open room", () => {
     // The list answers as it was before the room was made.
     await act(async () => answer(Response.json(roomList(rooms))));
     expect(await roomHeading()).toHaveTextContent("Design");
-    expect(sidebarRooms()).toEqual(["Design", "general", "random"]);
+    expect(sidebarRooms()).toEqual(["general", "random", "Design"]);
   });
 });
 
@@ -1319,7 +1319,7 @@ describe("Activity filter", () => {
 
     await user.click(activity());
     expect(activity()).toHaveAttribute("aria-pressed", "false");
-    expect(sidebarRooms()).toEqual(["Design", "general", "random"]);
+    expect(sidebarRooms()).toEqual(["general", "random", "Design"]);
     expect(railCurrent()).toEqual(["Home"]);
   });
 
@@ -1459,10 +1459,10 @@ describe("Live sidebar updates", () => {
     showWorkspace("/rooms/general");
     await roomHeading();
     await workspaceSends({ type: "room.saved", room: { id: "design", name: "Design", kind: "open", icon: null } });
-    expect(sidebarRooms()).toEqual(["Design", "general", "random"]);
+    expect(sidebarRooms()).toEqual(["general", "random", "Design"]);
 
     await workspaceSends({ type: "room.saved", room: { ...rooms[0]!, name: "plans" } });
-    expect(sidebarRooms()).toEqual(["Design", "plans", "random"]);
+    expect(sidebarRooms()).toEqual(["plans", "random", "Design"]);
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("plans");
     expect(await screen.findByRole("textbox", { name: "Write a message" })).toHaveAttribute("placeholder", "Message #plans");
   });
@@ -1542,7 +1542,7 @@ describe("Star rooms", () => {
     });
     const { user } = showWorkspace("/rooms/design");
     expect(await roomHeading()).toHaveTextContent("Design");
-    expect(sidebarRooms()).toEqual(["random★", "Design", "general"]);
+    expect(sidebarRooms()).toEqual(["random★", "general", "Design"]);
     expect(star()).toHaveAttribute("aria-pressed", "false");
 
     await user.click(star());
@@ -1694,9 +1694,12 @@ describe("Shared room order", () => {
     expect(sidebarRooms()).toEqual(["random★", "general", "Design"]);
     act(() => navigate("/account/edit#channel-settings"));
     const order = await screen.findByRole("list", { name: "Room order" });
-    expect(roomsIn(order)).toEqual(["general", "Design", "random"]);
+    expect(roomsIn(order)).toEqual(["general", "random", "Design"]);
 
-    fireEvent.keyDown(within(order).getAllByRole("listitem")[1]!, { key: "ArrowUp", altKey: true });
+    // Design up to the top.
+    const designRow = within(order).getAllByRole("listitem")[2]!;
+    for (let moves = 0; moves < 2; moves++) fireEvent.keyDown(designRow, { key: "ArrowUp", altKey: true });
+    expect(roomsIn(order)).toEqual(["Design", "general", "random"]);
     await user.click(screen.getByRole("button", { name: "Save order" }));
     expect(await screen.findByText("Room order saved for everyone.")).toBeInTheDocument();
     expect(roomsIn(order)).toEqual(["Design", "general", "random"]);
