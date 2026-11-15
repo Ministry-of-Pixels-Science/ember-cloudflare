@@ -392,20 +392,27 @@ The members of a [Memberful](https://memberful.com) site can join and sign in wi
 accounts instead of passwords. It's off until an administrator turns it on under Memberful in
 Membership, which the first time opens Set up Memberful, with three steps:
 
-1. The site's address, such as `https://example.memberful.com`.
-2. A custom app: in Memberful, under Settings, Custom applications, add one with Include OAuth tokens
-   with this application checked, choose Server-side, and give it the OAuth Redirect URL the step
-   shows, `https://<Ember's address>/auth/memberful/callback`, with a button that copies it. Then
-   copy the app's OAuth identifier, OAuth secret and API key into the step. Leave Memberful's
-   automatic sign-in off, since it skips the check that ties a sign-in to the browser that started
-   it.
-3. A webhook: under Settings, Webhooks, add one that sends the member, subscription and order events
-   to `https://<Ember's address>/webhooks/memberful`, which the step copies too, and copy its secret
-   key into the step. With it, a member whose membership lapses is signed out, not only kept from
-   signing in again.
+1. The site's address, the one in the browser while you're signed in to Memberful's admin, such as
+   `yoursite.memberful.com`, or the site's name alone, `yoursite`. Either way Ember keeps it as
+   `https://yoursite.memberful.com`, the site a `MEMBERFUL_URL` of that address names, so members
+   linked at one are linked at the other.
+2. A custom app, a new one for Ember, since its redirect URL must point at Ember. Once an address at
+   memberful.com is given, the step links to Memberful's form for one, since Settings in Memberful's
+   sidebar opens the account's profile. Name it Ember, check Include OAuth tokens with this
+   application, choose Server-side Application, even for a site with a mobile app, since Ember's
+   server handles the sign-in, and give it the OAuth Redirect URL the step shows,
+   `https://<Ember's address>/auth/memberful/callback`, with a button that copies it. Saving it opens
+   the app's page, whose API Key, OAuth Identifier and OAuth Secret go into the step in that order.
+   Leave Memberful's automatic sign-in off, since it skips the check that ties a sign-in to the
+   browser that started it.
+3. A webhook, which is separate from the app: under Settings → Webhooks → Create webhook, which the
+   step links to as well, name it Ember, give it `https://<Ember's address>/webhooks/memberful` as the
+   Endpoint URL, which the step copies too, and select every event under Member, Order, Subscription
+   and Plan. Download isn't needed. Then copy the secret key Memberful gives it into the step. With
+   it, a member whose membership ends is signed out at once, rather than at Ember's daily check.
 
-Ember tries the API key on Memberful's admin API, and asks its token endpoint whether it knows the app
-by its OAuth identifier and secret, before it keeps them, saying on the field what Memberful didn't
+Ember tries the API Key on Memberful's admin API, and asks its token endpoint whether it knows the app
+by its OAuth Identifier and Secret, before it keeps them, saying on the field what Memberful didn't
 take, then turns Memberful on. It keeps the three secrets in the workspace's settings, encrypted as a
 Resend API key is, never shows them again, and can't read them once `SESSION_SECRET` changes, until
 an administrator gives them again. Change keys, under Memberful while it's on, asks for them all again.
@@ -475,10 +482,13 @@ rooms, private ones too, messages and role stay, and they're back as they were o
 they sign in. Making an open room private leaves them out of it, as it does anyone not chosen. A
 webhook only tells Ember whom to ask about: Memberful sends them in no particular order, so the
 Workspace asks Memberful's API what that member's membership is now, and asks about everyone linked
-once a day too, in case one never came. Administrators, and the people they invite, who need no
-membership, are never suspended. Administrators see suspended members dimmed in Workspace settings,
-where they can remove them, and everyone else sees them as removed. All of this goes on whether
-Memberful is on or not, since its members keep signing in with it once it's off.
+once a day too, in case one never came. Ember answers every event it's sent with 200 once its
+signature checks out, one about a plan, a download or nothing it knows of too, since Memberful tries
+again for a day whatever fails, then deletes the webhook if it's still failing three days later.
+Administrators, and the people they invite, who need no membership, are never suspended.
+Administrators see suspended members dimmed in Workspace settings, where they can remove them, and
+everyone else sees them as removed. All of this goes on whether Memberful is on or not, since its
+members keep signing in with it once it's off.
 
 ### Sending email
 

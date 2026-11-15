@@ -3,7 +3,7 @@ import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { WORKERS_DASHBOARD } from "./custom-domain-settings";
 import { BUTTON } from "./email-settings";
-import { useMemberfulAddresses } from "./memberful-setup";
+import { MemberfulLink, memberfulNewWebhook, useMemberfulAddresses } from "./memberful-setup";
 
 // The Memberful card in Membership's ways to join: an administrator lets the members of a Memberful site
 // join and sign in with their accounts there, with the keys of a custom app there that Set up Memberful
@@ -117,7 +117,7 @@ export function MemberfulSettings({
         <SetUpButton onSetUp={onSetUp} label="Set up Memberful" />
       ) : (
         <>
-          {keys === "secret" && !webhooks && <WebhookSteps webhookUrl={webhookUrl} />}
+          {keys === "secret" && !webhooks && <WebhookSteps site={site} webhookUrl={webhookUrl} />}
           <p className={NOTE}>
             {webhooks ? (
               <>
@@ -152,20 +152,25 @@ function SetUpButton({ onSetUp, label }: { onSetUp: () => void; label: string })
 
 /**
  * The steps to hear Memberful's webhooks while the deployment's secrets give Ember the custom app's keys
- * without what hearing them takes: a webhook in Memberful, then two more secrets, its own, to check it
- * came from Memberful, and the custom app's API key, to check what it says.
+ * without what hearing them takes: a webhook at the Memberful site `site`, as Set up Memberful's last step
+ * says, then two more secrets, its own, to check it came from Memberful, and the custom app's API key, to
+ * check what it says.
  */
-function WebhookSteps({ webhookUrl }: { webhookUrl: string }) {
+function WebhookSteps({ site, webhookUrl }: { site: string | null; webhookUrl: string }) {
   return (
     <>
       <p>A member whose membership lapses can't sign in again, but stays signed in where they are until Ember hears Memberful's webhooks.</p>
       <ol aria-label="Steps to sign out members whose membership lapses" className="flex list-decimal flex-col gap-2 ps-5">
         <li>
-          In Memberful, open <em>Settings</em>, <em>Webhooks</em>, and add one that sends the member, subscription and order events to{" "}
-          <strong className="wrap-anywhere">{webhookUrl}</strong>.
+          In Memberful, go to{" "}
+          <MemberfulLink href={memberfulNewWebhook(site)}>
+            <em>Settings</em> → <em>Webhooks</em> → <em>Create webhook</em>
+          </MemberfulLink>
+          . Name it <strong>Ember</strong>, paste <strong className="wrap-anywhere">{webhookUrl}</strong> as the <em>Endpoint URL</em>, and select every
+          event under <em>Member</em>, <em>Order</em>, <em>Subscription</em>, and <em>Plan</em>. <em>Download</em> isn't needed.
         </li>
         <li>
-          Give this Worker two more secrets: the webhook's secret key as <code>MEMBERFUL_WEBHOOK_SECRET</code>, and the custom app's API key as{" "}
+          Give this Worker two more secrets: the webhook's secret key as <code>MEMBERFUL_WEBHOOK_SECRET</code>, and the custom app's API Key as{" "}
           <code>MEMBERFUL_API_KEY</code>.{" "}
           <a href={WORKERS_DASHBOARD} target="_blank" rel="noopener" className="underline">
             Open the Cloudflare dashboard

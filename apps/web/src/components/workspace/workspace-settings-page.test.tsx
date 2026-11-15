@@ -1171,9 +1171,9 @@ describe("Sign in with Memberful", () => {
     await user.clear(site);
     await user.type(site, KEYS.site);
     for (const [name, key] of [
-      ["OAuth identifier", KEYS.clientId],
-      ["OAuth secret", KEYS.clientSecret],
-      ["API key", KEYS.apiKey],
+      ["API Key", KEYS.apiKey],
+      ["OAuth Identifier", KEYS.clientId],
+      ["OAuth Secret", KEYS.clientSecret],
       ["Secret key", KEYS.webhookSecret],
     ] as const)
       await user.type(within(setup).getByRole("textbox", { name }), key);
@@ -1278,7 +1278,7 @@ describe("Sign in with Memberful", () => {
     await user.click(within(memberfulCard()).getByRole("button", { name: "Change keys" }));
     const setup = await screen.findByRole("dialog", { name: "Set up Memberful" });
     expect(within(setup).getByRole("textbox", { name: "Address" })).toHaveValue(SITE);
-    expect(within(setup).getByRole("textbox", { name: "OAuth identifier" })).toHaveValue("");
+    expect(within(setup).getByRole("textbox", { name: "OAuth Identifier" })).toHaveValue("");
 
     await user.click(within(await setUp(user)).getByRole("button", { name: "Done" }));
     expect(keysGiven()).toEqual([KEYS]);
@@ -1413,10 +1413,25 @@ describe("Sign in with Memberful", () => {
     const card = memberfulCard();
     expect(card).toHaveTextContent("The site and its keys are this Worker's secrets, MEMBERFUL_URL and the rest.");
     const steps = within(card).getByRole("list", { name: "Steps to sign out members whose membership lapses" });
-    expect(steps).toHaveTextContent(`sends the member, subscription and order events to ${location.origin}/webhooks/memberful`);
+    expect(steps).toHaveTextContent(
+      `In Memberful, go to Settings → Webhooks → Create webhook. Name it Ember, paste ${location.origin}/webhooks/memberful as the Endpoint URL, and select every event under Member, Order, Subscription, and Plan. Download isn't needed.`,
+    );
+    // Straight to Memberful's form for a new webhook, at the deployment's site.
+    const form = within(steps).getByRole("link", { name: "Settings → Webhooks → Create webhook" });
+    expect(form).toHaveAttribute("href", `${SITE}/admin/settings/webhooks/new`);
+    expect(form).toHaveAttribute("target", "_blank");
     expect(steps).toHaveTextContent("MEMBERFUL_WEBHOOK_SECRET");
     expect(within(steps).getByRole("link", { name: "Open the Cloudflare dashboard" })).toHaveAttribute("target", "_blank");
     expect(within(card).queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("names the webhook's form without linking to it while the deployment's site is at a domain of its own, where Memberful may not serve its admin", async () => {
+    serve(withMemberful({ ...withKeys, memberfulSite: "https://members.example.com", memberfulKeys: "secret", memberfulWebhooks: false }));
+    showPage();
+    expect(await memberfulSwitch()).toBeChecked();
+    const steps = within(memberfulCard()).getByRole("list", { name: "Steps to sign out members whose membership lapses" });
+    expect(steps).toHaveTextContent("In Memberful, go to Settings → Webhooks → Create webhook.");
+    expect(within(steps).getAllByRole("link")).toEqual([within(steps).getByRole("link", { name: "Open the Cloudflare dashboard" })]);
   });
 
   it("follows the workspace socket, for a switch moved in another tab", async () => {
@@ -3120,9 +3135,10 @@ describe("Memberful memberships", () => {
     const { user } = showPage();
     await user.click(await screen.findByRole("switch", { name: "Memberful" }));
     const [, , webhook] = within(await screen.findByRole("list", { name: "Steps to set up Memberful" })).getAllByRole("listitem");
-    expect(webhook).toHaveTextContent(`order events to this URL:${location.origin}/webhooks/memberful`);
+    expect(webhook).toHaveTextContent(`paste this as the Endpoint URL:${location.origin}/webhooks/memberful`);
+    expect(webhook).toHaveTextContent("Select every event under Member, Order, Subscription, and Plan.");
     expect(within(webhook!).getByRole("textbox", { name: "Secret key" })).toBeInTheDocument();
-    expect(within(webhook!).getByRole("button", { name: "Copy the webhook URL" })).toBeInTheDocument();
+    expect(within(webhook!).getByRole("button", { name: "Copy the Endpoint URL" })).toBeInTheDocument();
     expect(webhookSteps()).not.toBeInTheDocument();
   });
 
@@ -3135,8 +3151,8 @@ describe("Memberful memberships", () => {
     await user.click(on);
     const steps = webhookSteps()!;
     expect(within(steps).getAllByRole("listitem")).toHaveLength(2);
-    expect(steps).toHaveTextContent(`order events to ${location.origin}/webhooks/memberful.`);
-    expect(steps).toHaveTextContent("Give this Worker two more secrets: the webhook's secret key as MEMBERFUL_WEBHOOK_SECRET, and the custom app's API key as MEMBERFUL_API_KEY.");
+    expect(steps).toHaveTextContent(`paste ${location.origin}/webhooks/memberful as the Endpoint URL`);
+    expect(steps).toHaveTextContent("Give this Worker two more secrets: the webhook's secret key as MEMBERFUL_WEBHOOK_SECRET, and the custom app's API Key as MEMBERFUL_API_KEY.");
     expect(within(steps).getByRole("link", { name: "Open the Cloudflare dashboard" })).toHaveAttribute("target", "_blank");
     expect(screen.getByText(/stays signed in where they are/)).toBeInTheDocument();
   });

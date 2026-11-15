@@ -101,19 +101,29 @@ test.describe("Set up Memberful", () => {
     // Ember's addresses, to give Memberful's custom app and webhook.
     await expect(setup.getByRole("listitem").nth(1)).toContainText(`${baseURL}${MEMBERFUL_CALLBACK_PATH}`);
     await expect(setup.getByRole("listitem").nth(2)).toContainText(`${baseURL}${MEMBERFUL_WEBHOOK_PATH}`);
-    await setup.getByLabel("Address", { exact: true }).fill(MEMBERFUL_SITE);
-    await setup.getByLabel("OAuth identifier", { exact: true }).fill(MEMBERFUL_KEYS.clientId);
-    await setup.getByLabel("OAuth secret", { exact: true }).fill("not-the-apps-secret");
-    await setup.getByLabel("API key", { exact: true }).fill("not-the-apps-api-key");
+    // A site's name alone is its address at memberful.com, where the steps link to its admin's forms for the app and the webhook.
+    const address = setup.getByLabel("Address", { exact: true });
+    await address.fill("fernwood");
+    await expect(setup.getByRole("link", { name: "create a new app for Ember" })).toHaveAttribute("href", "https://fernwood.memberful.com/admin/settings/custom_applications/new");
+    await expect(setup.getByRole("link", { name: "Settings → Webhooks → Create webhook" })).toHaveAttribute("href", "https://fernwood.memberful.com/admin/settings/webhooks/new");
+    // Nothing links while what's typed can't be a site's address, though Chrome reads one with a space as a host, nor at
+    // a site that isn't at memberful.com, as the specs' own isn't.
+    await address.fill("fern wood");
+    await expect(setup.getByRole("link")).toHaveCount(0);
+    await address.fill(MEMBERFUL_SITE);
+    await expect(setup.getByRole("link")).toHaveCount(0);
+    await setup.getByLabel("API Key", { exact: true }).fill("not-the-apps-api-key");
+    await setup.getByLabel("OAuth Identifier", { exact: true }).fill(MEMBERFUL_KEYS.clientId);
+    await setup.getByLabel("OAuth Secret", { exact: true }).fill("not-the-apps-secret");
     await setup.getByLabel("Secret key", { exact: true }).fill(MEMBERFUL_KEYS.webhookSecret);
     const save = setup.getByRole("button", { name: "Save" });
     await save.click();
     // Memberful's admin API doesn't take the API key, and then its token endpoint doesn't know the app with that secret.
     await expect(setup.getByRole("alert")).toHaveText(MEMBERFUL_API_KEY_UNKNOWN);
-    await setup.getByLabel("API key", { exact: true }).fill(MEMBERFUL_KEYS.apiKey);
+    await setup.getByLabel("API Key", { exact: true }).fill(MEMBERFUL_KEYS.apiKey);
     await save.click();
     await expect(setup.getByRole("alert")).toHaveText(MEMBERFUL_CLIENT_UNKNOWN);
-    await setup.getByLabel("OAuth secret", { exact: true }).fill(MEMBERFUL_KEYS.clientSecret);
+    await setup.getByLabel("OAuth Secret", { exact: true }).fill(MEMBERFUL_KEYS.clientSecret);
     await save.click();
 
     const done = page.getByRole("dialog", { name: "Memberful is set up" });

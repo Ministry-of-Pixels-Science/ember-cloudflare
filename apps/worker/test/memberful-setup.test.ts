@@ -247,6 +247,17 @@ describe("Set up Memberful", () => {
     expect(((await storedSettings()).memberful_keys as typeof stored).secrets).not.toBe(stored.secrets);
   });
 
+  it("takes a site's name alone as its address at memberful.com, which Memberful is asked at and Ember keeps", async () => {
+    const administrator = await setUp();
+    const site = fakeMemberful();
+    expect(await saveKeys(administrator, { ...KEYS, site: " Example " })).toEqual(savedFor(SITE));
+    expect(site.requests.map(({ url }) => url)).toEqual([`${SITE}/api/graphql`, `${SITE}/oauth/token`]);
+    expect(((await storedSettings()).memberful_keys as { site: string }).site).toBe(SITE);
+    // Nothing else is taken as a site's name.
+    const refused = await giveKeys(administrator, { ...KEYS, site: "my site" });
+    expect(await refused.json()).toEqual({ error: MEMBERFUL_SITE_REFUSED, field: "site" });
+  });
+
   it("lets Memberful be turned on once it has the keys, without the deployment's secrets", async () => {
     const administrator = await setUp();
     fakeMemberful();
@@ -375,7 +386,7 @@ describe("Set up Memberful", () => {
 
     expect((await webhook(DEPLOYMENT_KEYS.MEMBERFUL_WEBHOOK_SECRET)).status).toBe(401);
     site.member = { ...katherine, subscriptions: [{ active: false }] };
-    expect((await webhook(KEYS.webhookSecret)).status).toBe(204);
+    expect((await webhook(KEYS.webhookSecret)).status).toBe(200);
     await vi.waitFor(async () => expect(await queuedChecks()).toEqual([]), { timeout: 5_000 });
     expect(await statusOf(administrator, katherineId)).toBe("suspended");
     expect(site.requests.filter(({ url, body }) => url === `${SITE}/api/graphql` && body.includes("member(id:")).map(({ authorization }) => authorization)).toEqual([
@@ -420,8 +431,11 @@ describe("Set up Memberful", () => {
     expect(moved.status).toBe(422);
     expect(await moved.json()).toEqual({ error: memberfulSiteKept(SITE), field: "site" });
     expect(((await storedSettings()).memberful_keys as { site: string }).site).toBe(SITE);
-    // Its keys still change.
+    // Its keys still change, however its address is given.
     expect(await saveKeys(administrator, { ...KEYS, webhookSecret: "a-new-secret-key" })).toEqual({ ...savedFor(SITE), memberfulSiteKept: SITE });
+    for (const given of ["example", "example.memberful.com/", "HTTPS://EXAMPLE.memberful.com/admin"]) {
+      expect(await saveKeys(administrator, { ...KEYS, site: given }), given).toEqual({ ...savedFor(SITE), memberfulSiteKept: SITE });
+    }
   });
 
   it("keeps the site the deployment's keys had people sign in at, once it has none of its own", async () => {
@@ -435,7 +449,8 @@ describe("Set up Memberful", () => {
     expect(await memberfulOf(administrator)).toEqual({ memberfulSite: null, memberfulWebhooks: false, memberfulKeys: null, memberfulSiteKept: SITE });
     const moved = await giveKeys(administrator, { ...KEYS, site: OTHER_SITE });
     expect(await moved.json()).toEqual({ error: memberfulSiteKept(SITE), field: "site" });
-    expect(await saveKeys(administrator)).toEqual({ ...savedFor(SITE), memberfulSiteKept: SITE });
+    // The site's name alone is the address MEMBERFUL_URL gave, so its members stay linked.
+    expect(await saveKeys(administrator, { ...KEYS, site: "example" })).toEqual({ ...savedFor(SITE), memberfulSiteKept: SITE });
     // Who signed in with the deployment's keys signs in with the ones given.
     expect((await signedInAs((await signInWithMemberful()).signedIn)).name).toBe(katherine.fullName);
     expect(await workspaceSql("SELECT count(*) AS n FROM users")).toEqual([{ n: 2 }]);

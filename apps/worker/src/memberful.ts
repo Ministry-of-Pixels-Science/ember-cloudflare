@@ -230,9 +230,14 @@ async function signedInWithMemberful(request: Request, env: Env): Promise<Respon
  * `POST /webhooks/memberful`, where the Memberful site says a member's account, subscription or order
  * changed: once its signature checks out, the Workspace queues checking that member's membership with
  * the admin API, if they're linked to someone here, rather than trusting what it says, as Memberful
- * advises, since its webhooks can come in any order (memberful.com/docs/api-reference/webhooks). Answers
- * 404 without the webhook's secret and the API key to check with, 401 to a signature that doesn't check
- * out, 413 to a body over the limit, and 204 to anything else, which Memberful takes as delivered.
+ * advises, since its webhooks can come in any order (memberful.com/docs/api-reference/webhooks). So any
+ * event about a member has their membership checked, whatever it's called: one that ends it, as a
+ * subscription deactivated or deleted, an order refunded or suspended, or the member deleted, suspends
+ * them once the check finds it ended, and one that renews it lets them back. Answers 404 without the
+ * webhook's secret and the API key to check with, 401 to a signature that doesn't check out, 413 to a
+ * body over the limit, and 200 to anything else, an event about nobody's membership, such as a plan's
+ * or a download's, or one Ember has never heard of, too: Memberful tries again for a day whatever isn't
+ * answered with a success, then deletes the webhook if it's still failing three days later.
  */
 export async function memberfulWebhook(request: Request, env: Env): Promise<Response> {
   if (request.method !== "POST") return notFound(request);
@@ -246,7 +251,7 @@ export async function memberfulWebhook(request: Request, env: Env): Promise<Resp
   if (!(await isSignedWith(webhooks.secret, body, request.headers.get(SIGNATURE_HEADER)))) return new Response(null, { status: 401 });
   const subject = subjectOf(parsed(body));
   if (subject !== null) await workspace(env).queueMembershipCheck(webhooks.api.site, subject);
-  return new Response(null, { status: 204 });
+  return new Response(null, { status: 200 });
 }
 
 /** Whether `signature` is the hex HMAC-SHA256 of `body` under `secret`, compared in constant time. */
@@ -269,7 +274,8 @@ function parsed(body: ArrayBuffer): unknown {
 /**
  * The member a webhook's payload is about, by their member id, where Memberful's WordPress plugin finds
  * it: `member.id` for a member's event, and the `member` of the subscription or order an event of theirs
- * is about. Null for anything else, such as a plan's event, which says nothing about anyone's membership.
+ * is about. Null for anything else, such as a plan's event, whose `subscription` is the plan's price,
+ * with no member, or a download's, which say nothing about anyone's membership.
  */
 function subjectOf(payload: unknown): string | null {
   const { member, subscription, order } = (typeof payload === "object" && payload !== null ? payload : {}) as Record<string, unknown>;

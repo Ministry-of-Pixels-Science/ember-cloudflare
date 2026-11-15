@@ -52,7 +52,7 @@ export async function sendWebhook(request: APIRequestContext, member: FakeMember
   const body = JSON.stringify({ event: "subscription.updated", subscription: { member: { id: Number(member.id) } } });
   const signature = createHmac("sha256", MEMBERFUL_KEYS.webhookSecret).update(body).digest("hex");
   const response = await request.post(MEMBERFUL_WEBHOOK_PATH, { data: body, headers: { "Content-Type": "application/json", "X-Memberful-Webhook-Signature": signature } });
-  expect(response.status(), await response.text()).toBe(204);
+  expect(response.status(), await response.text()).toBe(200);
 }
 
 async function answer(request: IncomingMessage, response: ServerResponse, members: Map<string, FakeMember>, ember: string): Promise<void> {
