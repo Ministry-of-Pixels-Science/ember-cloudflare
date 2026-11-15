@@ -28,12 +28,14 @@
   // included, so each answer carries Campfire's headers and old browsers get the upgrade page;
   // the Worker answers /api/*, /up, the setup and join pages, the web app manifest
   // (/webmanifest.json) and QR codes (/qr_code/<id>) itself, and fetches the app's page for the
-  // addresses the app shows a page at. Anything else is a static file or Campfire's 404 page.
+  // addresses the app shows a page at. Anything else is a static file or Campfire's 404 page. One is
+  // /app-version.json, which every open page asks for each minute to tell whether Ember has been
+  // updated, so it goes without the Worker, as the static files do.
   "assets": {
     "directory": "apps/web/dist",
     "binding": "ASSETS",
     "not_found_handling": "404-page",
-    "run_worker_first": ["/*", "!/assets/*", "!/browsers/*", "!/globe.svg", "!/logos/*", "!/lucide/*", "!/iconoir/*", "!/screenshots/*", "!/shortcuts/*", "!/ember-icon.png", "!/assistant-avatar.svg", "!/robots.txt"]
+    "run_worker_first": ["/*", "!/assets/*", "!/app-version.json", "!/browsers/*", "!/globe.svg", "!/logos/*", "!/lucide/*", "!/iconoir/*", "!/screenshots/*", "!/shortcuts/*", "!/ember-icon.png", "!/assistant-avatar.svg", "!/robots.txt"]
   },
 
   // One ChatRoom object per room, which owns its sockets, presence and (by default) its messages,
