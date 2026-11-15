@@ -74,6 +74,12 @@ function usePreviewMicrophone() {
   return { stream, devices, ask, list, take };
 }
 
+/** A camera the browser has been asked for and has yet to answer with, and whether the huddle took it meanwhile. */
+interface OpeningCamera {
+  answer: Promise<MediaStream | null>;
+  taken: boolean;
+}
+
 /**
  * The camera the preview has open, which it asks the browser for only once its switch turns it on: null
  * while it's off, and `refused` once there's none to use. It closes with the preview, unless the huddle
@@ -83,11 +89,11 @@ function usePreviewCamera(opened: () => void) {
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [refused, setRefused] = useState(false);
   const open = useRef<MediaStream | null>(null);
-  // Counts what the browser has been asked, so an answer to anything but the last is closed again.
-  const asked = useRef(0);
+  // What the browser was asked last, until it answers: its answer to anything else is closed again.
+  const opening = useRef<OpeningCamera | null>(null);
 
   const turnOff = useCallback(() => {
-    asked.current++;
+    opening.current = null;
     closeDevice(open.current);
     open.current = null;
     setStream(null);
@@ -95,10 +101,13 @@ function usePreviewCamera(opened: () => void) {
   const turnOn = useCallback(
     async (deviceId: string | null) => {
       turnOff();
-      const asking = asked.current;
       setRefused(false);
-      const camera = await openCamera(deviceId);
-      if (asked.current !== asking) return closeDevice(camera);
+      const asking = (opening.current = { answer: openCamera(deviceId), taken: false });
+      const camera = await asking.answer;
+      // The huddle's now, to show once it's open.
+      if (asking.taken) return;
+      if (opening.current !== asking) return closeDevice(camera);
+      opening.current = null;
       open.current = camera;
       setStream(camera);
       setRefused(!camera);
@@ -109,7 +118,7 @@ function usePreviewCamera(opened: () => void) {
 
   useEffect(
     () => () => {
-      asked.current++;
+      opening.current = null;
       closeDevice(open.current);
       open.current = null;
     },
@@ -124,9 +133,13 @@ function usePreviewCamera(opened: () => void) {
     return () => track.removeEventListener("ended", turnOff);
   }, [stream, turnOff]);
 
-  /** Hands the camera to the huddle, which closes it from then on. */
+  /**
+   * Hands the camera to the huddle, which closes it from then on: the one that's open, or the one the
+   * browser is still opening, as when Join follows the camera's switch at once.
+   */
   const take = () => {
-    const taken = open.current;
+    const taken = open.current ?? opening.current?.answer ?? null;
+    if (opening.current) opening.current.taken = true;
     open.current = null;
     return taken;
   };

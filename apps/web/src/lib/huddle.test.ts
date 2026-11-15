@@ -1049,6 +1049,45 @@ describe("A huddle's camera", () => {
     expect(cameraTrack().readyState).toBe("ended");
     expect(joinedHuddle()).toBeNull();
   });
+
+  it("is shown once the browser has opened it, by a tab that joins while it's opening, and published then", async () => {
+    let give!: (stream: MediaStream | null) => void;
+    const asked = browserCamera();
+    const room = await joined([], { camera: new Promise((resolve) => (give = resolve)) });
+    expect(joinedHuddle()).toMatchObject({ camera: null, connected: true });
+    expect(room.take()).toEqual([expect.objectContaining({ type: "huddle.publish", tracks: [{ mid: "0", kind: "audio" }] })]);
+    // The browser is asked for no other meanwhile.
+    showHuddleCamera(true);
+
+    give(asCamera());
+    await settled();
+    expect(joinedHuddle()).toMatchObject({ camera });
+    expect(room.take()).toEqual([{ type: "huddle.publish", sdp: "offer 2", tracks: [{ mid: "0", kind: "video" }] }]);
+    expect(connection().transceivers[0]!.sender.track).toBe(cameraTrack());
+    expect(asked).not.toHaveBeenCalled();
+  });
+
+  it("says so when the browser has none for a tab that joined while it was opening, and is closed again when the tab left meanwhile", async () => {
+    let give!: (stream: MediaStream | null) => void;
+    const opening = () => new Promise<MediaStream | null>((resolve) => (give = resolve));
+    const said = vi.fn();
+    const stop = hearHuddle(said);
+    const room = await joined([], { camera: opening() });
+    room.take();
+    give(null);
+    await settled();
+    expect(said).toHaveBeenCalledExactlyOnceWith(NO_CAMERA);
+    expect(joinedHuddle()).toMatchObject({ camera: null, connected: true });
+    expect(room.take()).toEqual([]);
+    stop();
+
+    await joined([], { camera: opening() });
+    leaveHuddle();
+    give(asCamera());
+    await settled();
+    expect(cameraTrack().readyState).toBe("ended");
+    expect(joinedHuddle()).toBeNull();
+  });
 });
 
 describe("Watching the others in a huddle", () => {
@@ -1156,6 +1195,36 @@ describe("Watching the others in a huddle", () => {
     room.receive({ type: "huddle.listening", kind: "video" });
     expect(taken("video")).toEqual([{ type: "huddle.listen", kind: "video", watch: [] }]);
     expect(joinedHuddle()!.watched).toEqual(new Map());
+  });
+
+  it("takes the camera an offer brings while the huddle is closed, which the room offers once, and shows it when the huddle has opened again by the round's end", async () => {
+    const room = await joined([person(grace, { video: true })]);
+    room.take();
+    openHuddle(false);
+    room.receive(pictures(["0", grace]));
+    await settled();
+    expect(taken("video")).toEqual([{ type: "huddle.answer", kind: "video", sdp: "answer to offer:0" }]);
+    openHuddle(true);
+    room.receive({ type: "huddle.listening", kind: "video" });
+    expect(taken("video")).toEqual([{ type: "huddle.listen", kind: "video", watch: [grace.id] }]);
+    // The room sends her already, and has nobody more to offer.
+    room.receive({ type: "huddle.listening", kind: "video" });
+    expect((joinedHuddle()!.watched.get(grace.id) as unknown as FakeStream).tracks).toEqual([connection().transceivers[0]!.receiver.track]);
+    await wait(LISTEN_AGAIN_MS[1] * 2);
+    expect(taken("video")).toEqual([]);
+  });
+
+  it("has the room stop sending the camera an offer brings while the huddle is closed, when it's closed still by the round's end", async () => {
+    const room = await joined([person(grace, { video: true })]);
+    room.take();
+    openHuddle(false);
+    room.receive(pictures(["0", grace]));
+    await settled();
+    room.receive({ type: "huddle.listening", kind: "video" });
+    expect(taken("video")).toEqual([{ type: "huddle.answer", kind: "video", sdp: "answer to offer:0" }, { type: "huddle.listen", kind: "video", watch: [] }]);
+    expect(joinedHuddle()!.watched).toEqual(new Map());
+    room.receive({ type: "huddle.listening", kind: "video" });
+    expect(connection().connectionState).toBe("closed");
   });
 
   it("watches no more cameras than a huddle shows", async () => {

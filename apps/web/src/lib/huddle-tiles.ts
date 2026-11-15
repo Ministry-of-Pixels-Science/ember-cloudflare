@@ -41,6 +41,8 @@ export function tilesLayout(count: number, width: number, height: number): Tiles
   for (let columns = even; columns <= count; columns++) consider(columns);
   for (let columns = even - 1; columns >= 1; columns--) consider(columns);
   if (best.width >= NARROWEST) return { columns: best.columns, width: Math.floor(best.width), square };
-  const columns = Math.max(1, Math.min(count, Math.floor((width + TILE_GAP) / (NARROWEST + TILE_GAP))));
-  return { columns, width: Math.max(NARROWEST, Math.floor(across(columns))), square };
+  const fit = Math.max(1, Math.floor((width + TILE_GAP) / (NARROWEST + TILE_GAP)));
+  // A row with room to spare, in a space too short for a tile, keeps its tiles to their least: only a full row shares out what's left of it.
+  if (count <= fit) return { columns: Math.max(1, count), width: NARROWEST, square };
+  return { columns: fit, width: Math.max(NARROWEST, Math.floor(across(fit))), square };
 }

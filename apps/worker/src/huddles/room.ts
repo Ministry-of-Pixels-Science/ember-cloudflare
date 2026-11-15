@@ -78,7 +78,10 @@ const RETRIED_PER_CHECK = 10;
 const UNCLOSED_KEPT_MS = 60 * 60 * 1000;
 const UNCLOSED_KEPT = 200;
 
-/** The most sessions a deleted room has the SFU close what was published on, which is as many requests as an event may make. */
+/**
+ * The most sessions a deleted room has the SFU close what was published on as it's deleted, which is as
+ * many requests as an event may make. The rest wait for its alarm.
+ */
 const SILENCED_PER_DELETE = 50;
 
 /** What the room's object keeps in its own storage while the SFU has tracks to close that it didn't: the sessions and their tracks. */
@@ -372,10 +375,11 @@ export class Huddle {
 
   /**
    * Has the SFU close what each of `members` published, as it was when their sockets closed. That's a
-   * request for each microphone and each camera, the microphones first, and as many as the 50 an event
-   * may make on Workers' free plan: a full huddle's microphones fit, which closing what each heard as
-   * well wouldn't, and it's all it takes for nobody to hear anything. The SFU is asked once: a deleted
-   * room's alarm erases the room, and checks no huddle.
+   * request for each microphone and each camera, the microphones first, and as many now as the 50 an
+   * event may make on Workers' free plan: a full huddle's microphones fit, which closing what each
+   * heard as well wouldn't, and it's all it takes for nobody to hear anything. The cameras that don't
+   * fit, and whatever the SFU didn't close, are kept for the deleted room's alarm, which asks about
+   * them (`closeUnclosed`) before it erases the room.
    */
   private async silence(members: Member[]): Promise<void> {
     const app = await this.appNow().catch(() => undefined);
@@ -383,11 +387,14 @@ export class Huddle {
     const published = HUDDLE_TRACK_KINDS.flatMap((kind) =>
       members.flatMap(({ socket, attachment }) => (attachment.appId === app.appId ? sessionsOf({ publishing: connectionsOf(attachment, kind).publishing }).map((session) => ({ socket, kind, session })) : [])),
     );
+    const unclosed = published.slice(SILENCED_PER_DELETE).map(({ session }) => session);
     for (const { socket, kind, session } of published.slice(0, SILENCED_PER_DELETE)) {
       // A tab publishing as its socket closed has what that made closed by the frame that made it.
       await this.sending[kind].get(socket)?.last;
-      await this.closeOn(app, session);
+      const mids = await this.closeOn(app, session);
+      if (mids.length > 0) unclosed.push({ sessionId: session.sessionId, mids });
     }
+    await this.keep(app.appId, unclosed);
   }
 
   /**
@@ -406,7 +413,7 @@ export class Huddle {
       else for (const { socket } of members.filter((member) => this.isSilent(member, now)).slice(0, REMOVED_PER_CHECK)) this.remove(socket, CloseCode.Reconnect);
     }
     const reported = await this.report();
-    const unclosed = await this.retry(now);
+    const unclosed = await this.closeUnclosed(now);
     return this.live || unclosed || !reported ? now + HUDDLE_CHECK_MS : null;
   }
 
@@ -672,12 +679,12 @@ export class Huddle {
     if (sessions.length === 0) return;
     const app = await this.appNow().catch(() => undefined);
     if (app === null || (app && app.appId !== appId)) return;
-    const unclosed: Unclosed[] = [];
+    const unclosed: Session[] = [];
     for (const session of sessions) {
       const mids = app ? await this.closeOn(app, session) : session.mids;
-      if (mids.length > 0) unclosed.push({ appId, sessionId: session.sessionId, mids, since: Date.now() });
+      if (mids.length > 0) unclosed.push({ sessionId: session.sessionId, mids });
     }
-    if (unclosed.length > 0) await this.keep(unclosed).catch((error: unknown) => console.error("Could not keep a huddle's tracks to close:", logged(error)));
+    await this.keep(appId, unclosed);
   }
 
   /** Has the SFU close `mids` on a session, and answers the ones it didn't. */
@@ -695,22 +702,37 @@ export class Huddle {
     return (this.kept ??= this.ctx.storage.get<Unclosed[]>(UNCLOSED).then((kept) => kept ?? []));
   }
 
-  /** Keeps tracks the SFU didn't close, in the object's storage, and has the alarm ask about them again. */
-  private async keep(unclosed: Unclosed[]): Promise<void> {
-    const kept = await this.unclosed();
-    kept.push(...unclosed);
-    if (kept.length > UNCLOSED_KEPT) kept.splice(0, kept.length - UNCLOSED_KEPT);
-    await this.ctx.storage.put(UNCLOSED, kept);
-    await this.wakeBy(Date.now() + HUDDLE_CHECK_MS);
+  /** Whether the SFU has tracks to close still, which the room's alarm comes back to ask it about. */
+  async hasUnclosed(): Promise<boolean> {
+    return (await this.unclosed()).length > 0;
+  }
+
+  /**
+   * Keeps the tracks on `sessions`, which the SFU has yet to close as the app whose ID is `appId`, in
+   * the object's storage, and has the alarm ask about them again.
+   */
+  private async keep(appId: string, sessions: Session[]): Promise<void> {
+    if (sessions.length === 0) return;
+    try {
+      const kept = await this.unclosed();
+      const since = Date.now();
+      kept.push(...sessions.map((session) => ({ appId, ...session, since })));
+      if (kept.length > UNCLOSED_KEPT) kept.splice(0, kept.length - UNCLOSED_KEPT);
+      await this.ctx.storage.put(UNCLOSED, kept);
+      await this.wakeBy(Date.now() + HUDDLE_CHECK_MS);
+    } catch (error) {
+      console.error("Could not keep a huddle's tracks to close:", logged(error));
+    }
   }
 
   /**
    * Asks the SFU again to close the tracks it didn't, a few sessions at a time, and answers whether
    * any are left to ask about. Those of an app huddles no longer run through are dropped, as are those
    * it has been asked about for `UNCLOSED_KEPT_MS`. A session stays among those kept until the SFU has
-   * answered for it, since tracks kept meanwhile store the list as it is then.
+   * answered for it, since tracks kept meanwhile store the list as it is then. A check of the huddle
+   * asks, and so does the alarm of a deleted room, which checks no huddle, before it erases the room.
    */
-  private async retry(now: number): Promise<boolean> {
+  async closeUnclosed(now = Date.now()): Promise<boolean> {
     const kept = await this.unclosed();
     if (kept.length === 0) return false;
     const app = await this.appNow().catch(() => undefined);

@@ -82,6 +82,12 @@ describe("The huddle opened", () => {
     expect(opened()).toHaveAttribute("id", "huddle");
   });
 
+  it("covers every row of the layout, which has one more on a phone at a page of community settings", () => {
+    renderView();
+    expect(opened()).toHaveClass("absolute", "inset-0", "row-start-1", "row-end-[-1]");
+    expect(opened()).not.toHaveClass("row-span-2");
+  });
+
   it("minimizes from the button at either end of its header, a phone's and a computer's", async () => {
     const { setOpen, user } = renderView();
     const [phones, computers] = screen.getAllByRole("button", { name: "Minimize huddle" });

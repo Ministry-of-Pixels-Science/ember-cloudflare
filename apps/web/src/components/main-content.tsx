@@ -18,7 +18,7 @@ export function SkipLink({ className, to = MAIN_CONTENT }: { className?: string;
         document.getElementById(to)?.focus();
       }}
       className={cn(
-        "sr-only focus:top-16 focus:left-[max(1ch,env(safe-area-inset-left))] focus:z-[11] focus:m-0 focus:h-auto focus:w-auto focus:overflow-visible focus:[clip-path:none]",
+        "sr-only focus:top-16 focus:left-[max(1ch,env(safe-area-inset-left))] focus:z-[21] focus:m-0 focus:h-auto focus:w-auto focus:overflow-visible focus:[clip-path:none]",
         "focus:rounded-[9px] focus:border focus:bg-background focus:px-[1.1em] focus:py-[0.5em] focus:font-medium focus:text-foreground",
         className,
       )}

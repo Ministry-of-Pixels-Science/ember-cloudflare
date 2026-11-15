@@ -4,7 +4,7 @@ import { evictDurableObject, runDurableObjectAlarm, runInDurableObject } from "c
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HUDDLE_HEADER, type ChatRoom } from "../src/chat-room";
 import { HUDDLE_CHECK_MS, HUDDLE_SILENT_MS, HUDDLE_TAG, NO_OFFER, PUBLICATION_SETTLES_MS, TOO_FAST, type Huddle, type HuddleAttachment } from "../src/huddles/room";
-import { sessionTag } from "../src/revocations";
+import { REVOCATIONS_KEPT_MS, sessionTag } from "../src/revocations";
 import { MAX_ROOM_FRAME_SIZE } from "../src/sockets";
 import { viewersOf } from "../src/viewing";
 import {
@@ -920,24 +920,48 @@ describe("Cameras in a huddle", () => {
     expect(sfu.asked.slice(asked).map(({ path }) => path)).toEqual([adasVoice, gracesVoice, adasPicture, gracesPicture].map((id) => `/sessions/${id}/tracks/close`));
   });
 
-  it("asks the SFU no more than an event may when a full huddle ends with its room: to close every microphone, and no camera", async () => {
+  it("asks the SFU no more than an event may when a full huddle ends with its room: to close every microphone, and the cameras from its alarm, before the room is erased", async () => {
     const { ada, sfu } = await huddlesOn();
     const room = (await createRoom("Crowded", { as: ada })).id;
     const sockets = await crowd(room, MAX_HUDDLE_PEOPLE);
     const microphones: string[] = [];
     for (const socket of sockets) microphones.push(await publishing(sfu, socket));
-    for (const socket of sockets.slice(0, MAX_HUDDLE_CAMERAS)) await publishCamera(socket);
+    const cameras: string[] = [];
+    for (const socket of sockets.slice(0, MAX_HUDDLE_CAMERAS)) cameras.push(await showing(sfu, socket));
     const asked = sfu.asked.length;
-
-    expect((await api(`/api/rooms/${room}`, { method: "DELETE", headers: { Cookie: ada.cookie } })).status).toBe(204);
-    await vi.waitFor(() => expect(sfu.asked.length - asked).toBe(MAX_HUDDLE_PEOPLE));
-    await sleep(20);
-    expect(
+    const sessionsAsked = () =>
       sfu.asked
         .slice(asked)
         .map(({ sessionId }) => sessionId)
-        .sort(),
-    ).toEqual([...microphones].sort());
+        .sort();
+
+    const deletedAt = Date.now();
+    expect((await api(`/api/rooms/${room}`, { method: "DELETE", headers: { Cookie: ada.cookie } })).status).toBe(204);
+    await vi.waitFor(() => expect(sfu.asked.length - asked).toBe(MAX_HUDDLE_PEOPLE));
+    await sleep(20);
+    expect(sessionsAsked()).toEqual([...microphones].sort());
+    // The cameras wait for the room's alarm, which comes within a check for them, and no longer when the room is to be erased.
+    await vi.waitFor(async () => expect(await kept(room, "huddleUnclosed")).toMatchObject(cameras.map((sessionId) => ({ appId: APP.appId, sessionId, mids: ["0"] }))));
+    await vi.waitFor(async () => expect(await alarmOf(room)).toBeLessThanOrEqual(Date.now() + HUDDLE_CHECK_MS));
+    const eraseDue = (await kept(room, "eraseDue")) as number;
+    expect(eraseDue).toBeGreaterThanOrEqual(deletedAt + REVOCATIONS_KEPT_MS);
+
+    // A few sessions an alarm, until none is left.
+    await ring(room);
+    expect(await kept(room, "huddleUnclosed")).toHaveLength(MAX_HUDDLE_CAMERAS - 10);
+    expect(await alarmOf(room)).toBeLessThanOrEqual(Date.now() + HUDDLE_CHECK_MS);
+    await ring(room);
+    await ring(room);
+    expect(cameras.map((id) => closedOn(sfu, id))).toEqual(cameras.map(() => ["0"]));
+    expect(sessionsAsked()).toEqual([...microphones, ...cameras].sort());
+    expect(await kept(room, "huddleUnclosed")).toBeUndefined();
+    // The room is erased no sooner than it was to be.
+    expect(await alarmOf(room)).toBe(eraseDue);
+    expect(await kept(room, "deletedRoom")).toBe(room);
+    await runInDurableObject(roomStub(room), (_room, state: DurableObjectState) => state.storage.put("eraseDue", Date.now() - 1));
+    await ring(room);
+    expect(await runInDurableObject(roomStub(room), async (_room, state: DurableObjectState) => [...(await state.storage.list()).keys()])).toEqual([]);
+    expect(await alarmOf(room)).toBeNull();
   });
 
   it("keeps what each tab shows and watches while the room hibernates", async () => {
@@ -1185,22 +1209,36 @@ describe("Who a huddle is for", () => {
     await sleep(20);
     expect(sfu.asked.slice(asked).map(({ path }) => path)).toEqual([`/sessions/${fromAda}/tracks/close`, `/sessions/${fromGrace}/tracks/close`]);
     expect(closedOn(sfu, toGrace)).toEqual([]);
+    // With nothing left for the SFU to close, the room's alarm is the one that erases it.
+    expect(await kept(room, "huddleUnclosed")).toBeUndefined();
+    expect(await kept(room, "eraseDue")).toBeUndefined();
+    expect(await alarmOf(room)).toBeGreaterThan(Date.now() + HUDDLE_CHECK_MS);
   });
 
-  it("asks the SFU once to close what a deleted room's huddle published, and keeps nothing to ask about again", async () => {
+  it("asks the SFU again, from a deleted room's alarm, to close what its huddle published and the SFU didn't, and erases the room after", async () => {
     const { ada, sfu } = await huddlesOn();
     vi.spyOn(console, "warn").mockImplementation(() => {});
     const room = (await createRoom("Refused", { as: ada })).id;
     const adas = await welcomed(room, ada);
-    await publishing(sfu, adas);
+    const fromAda = await publishing(sfu, adas);
     const asked = sfu.asked.length;
 
     sfu.refuse(/tracks\/close$/, 503, "temporarily_unavailable_error");
     expect((await api(`/api/rooms/${room}`, { method: "DELETE", headers: { Cookie: ada.cookie } })).status).toBe(204);
-    await vi.waitFor(() => expect(sfu.asked).toHaveLength(asked + 1));
-    await sleep(20);
+    await vi.waitFor(async () => expect(await kept(room, "huddleUnclosed")).toMatchObject([{ appId: APP.appId, sessionId: fromAda, mids: ["0"] }]));
     expect(sfu.asked).toHaveLength(asked + 1);
+    await vi.waitFor(async () => expect(await alarmOf(room)).toBeLessThanOrEqual(Date.now() + HUDDLE_CHECK_MS));
+
+    // Refused again, the alarm comes back for it, and the room stays.
+    sfu.refuse(/tracks\/close$/, 503, "temporarily_unavailable_error");
+    await ring(room);
+    expect(await kept(room, "huddleUnclosed")).toMatchObject([{ sessionId: fromAda }]);
+    expect(await alarmOf(room)).toBeLessThanOrEqual(Date.now() + HUDDLE_CHECK_MS);
+    await ring(room);
+    expect(closedOn(sfu, fromAda)).toEqual(["0"]);
     expect(await kept(room, "huddleUnclosed")).toBeUndefined();
+    expect(await kept(room, "deletedRoom")).toBe(room);
+    expect(await alarmOf(room)).toBe(await kept(room, "eraseDue"));
   });
 });
 

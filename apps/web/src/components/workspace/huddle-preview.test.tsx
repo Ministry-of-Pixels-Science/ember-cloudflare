@@ -452,6 +452,21 @@ describe("A huddle's camera", () => {
     expect(media.opened[1]!.track.stopped).toBe(true);
   });
 
+  it("starts the huddle with the camera the browser is still opening, which is the huddle's to show and to close from then on", async () => {
+    const { user, unmount } = await openedPreview();
+    media.pending = true;
+    await user.click(screen.getByRole("button", { name: "Turn on camera" }));
+    // Asked for again while the browser hasn't answered, the first one asked for is nobody's.
+    await user.click(screen.getByRole("button", { name: "Turn on camera" }));
+    await user.click(screen.getByRole("button", { name: "Start Huddle" }));
+    const { camera } = vi.mocked(joinHuddle).mock.calls[0]![0];
+    expect(camera).toBeInstanceOf(Promise);
+    unmount();
+    await media.answer();
+    expect(await camera).toBe(media.opened[2]);
+    expect(media.opened.map(({ track }) => track.stopped)).toEqual([false, true, false]);
+  });
+
   it("keeps the camera through a change of microphone", async () => {
     const { user } = await previewWithCamera();
     await user.selectOptions(microphoneSelect(), "USB Microphone");

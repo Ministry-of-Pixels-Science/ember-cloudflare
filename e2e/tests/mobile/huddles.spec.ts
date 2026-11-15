@@ -123,6 +123,11 @@ test("the huddle you're in fits the phone, opened with a tile for each person an
   await opened.getByRole("button", { name: "Turn on camera" }).tap();
   await expect(tiles.last().getByLabel("Your camera")).toBeVisible();
   await screenIsFine();
+  // Skip to main content, which leads to the huddle, shows over it once it has the focus.
+  const skip = page.getByRole("link", { name: "Skip to main content" });
+  await skip.focus();
+  expect(await skip.evaluate((link) => document.elementFromPoint(link.getBoundingClientRect().x + 4, link.getBoundingClientRect().y + 4) === link)).toBe(true);
+  await opened.focus();
 
   // Minimized, it's a bar along the base of the page.
   await opened.getByRole("button", { name: "Minimize huddle" }).tap();
@@ -132,6 +137,16 @@ test("the huddle you're in fits the phone, opened with a tile for each person an
   await expect(header(page).getByRole("button", { name: "Leave huddle", exact: true })).toBeVisible();
   await screenIsFine();
 
-  await bar.getByRole("button", { name: "Leave", exact: true }).tap();
+  // Opened again over a page of community settings, whose links have a row of their own on a phone, it fills the screen as before.
+  await header(page).getByRole("link", { name: "Settings for this room" }).tap();
+  await expect(page).toHaveURL(/\/edit$/);
+  await bar.getByTitle("Open huddle").first().tap();
+  await expect(tiles).toHaveCount(3);
+  expect((await opened.boundingBox())!.height).toBeCloseTo(page.viewportSize()!.height, 0);
+  for (const tile of await tiles.all()) await expect(tile).toBeInViewport({ ratio: 1 });
+  await screenIsFine();
+
+  await opened.getByRole("button", { name: "Leave", exact: true }).tap();
+  await expect(opened).toHaveCount(0);
   await expect(bar).toHaveCount(0);
 });

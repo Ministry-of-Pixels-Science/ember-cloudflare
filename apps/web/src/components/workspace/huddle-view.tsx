@@ -99,7 +99,8 @@ export function HuddleView({ huddle, room, meId }: Props) {
       id={OPEN_HUDDLE}
       tabIndex={-1}
       aria-label={name}
-      className="absolute inset-0 z-20 col-start-3 col-end-[-1] row-span-2 row-start-1 flex min-h-0 min-w-0 flex-col bg-surface pr-[env(safe-area-inset-right)] outline-none max-md:col-start-1 max-md:pl-[env(safe-area-inset-left)]"
+      // Every row the layout has, which on a phone is one more on a page of community settings.
+      className="absolute inset-0 z-20 col-start-3 col-end-[-1] row-start-1 row-end-[-1] flex min-h-0 min-w-0 flex-col bg-surface pr-[env(safe-area-inset-right)] outline-none max-md:col-start-1 max-md:pl-[env(safe-area-inset-left)]"
     >
       <header className="flex min-h-header items-center gap-2.5 border-b bg-background py-2.5 pr-3.5 pl-5 max-md:min-h-[calc(56px+env(safe-area-inset-top))] max-md:gap-1.5 max-md:px-2 max-md:pt-[env(safe-area-inset-top)] max-md:pb-0">
         <button type="button" aria-label="Minimize huddle" onClick={minimize} className="hidden size-11 shrink-0 cursor-pointer items-center justify-center rounded-lg max-md:flex">

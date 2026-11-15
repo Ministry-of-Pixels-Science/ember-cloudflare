@@ -36,8 +36,12 @@ export interface HuddleJoin {
   muted: boolean;
   /** The microphone, open already, which the huddle stops as it's left, or null to join listening only. */
   microphone: MediaStream | null;
-  /** The camera, open already, of a tab that joins showing it, which the huddle stops as it's turned off or left. Null joins with it off. */
-  camera: MediaStream | null;
+  /**
+   * The camera of a tab that joins showing it, open already, or still opening where the browser hadn't
+   * answered for it as the preview was left: the huddle shows it once it's open, and stops it as it's
+   * turned off or left. Null joins with it off.
+   */
+  camera: MediaStream | Promise<MediaStream | null> | null;
   /** The speaker the others play through, by its device's id, or empty for the browser's own. */
   speakerId: string;
 }
@@ -150,7 +154,9 @@ interface Sent extends Carried {
 
 /** Whose tracks a receiving connection receives, and what becomes of each. */
 interface Received extends Carried {
-  /** Whom the tab would receive now, of those who can be. */
+  /** Who can be received now: everyone else whose connection for this kind of track has connected. */
+  receivable(): UserId[];
+  /** Whom of them the tab would receive now, which for cameras is nobody while its huddle is closed to its bar. */
   wanted(): UserId[];
   /** Whether the room is asked for them by name, as it is for cameras, and so stops sending whoever isn't named. */
   byName: boolean;
@@ -268,7 +274,7 @@ function sendingConnection({ kind, vital, track, sends }: Sent, { send, rejoin, 
  * doesn't yet, a round at a time: the tab asks (`huddle.listen`), answers the offer if one comes, and
  * the room says `huddle.listening`.
  */
-function receivingConnection({ kind, vital, wanted, byName, play, stop }: Received, { send, rejoin, isOver }: Huddled) {
+function receivingConnection({ kind, vital, receivable, wanted, byName, play, stop }: Received, { send, rejoin, isOver }: Huddled) {
   let connection: RTCPeerConnection | null = null;
   /** Whom the tab has been offered, and so receives. */
   const heard = new Set<UserId>();
@@ -337,11 +343,14 @@ function receivingConnection({ kind, vital, wanted, byName, play, stop }: Receiv
    * one. The first offer makes the connection. The tab receives whoever the offer names from when it
    * comes, though the connection takes a moment to have their tracks: whoever leaves or begins publishing
    * anew in that moment is forgotten, and isn't played what the offer carries of them, which is of before.
+   * It receives them whether or not it would by now, as when its huddle closed to its bar while the
+   * offer was on its way: the room sends them from the answer on, and offers nobody twice, so they're
+   * the tab's to play, or to stop being sent in its next round.
    */
   async function answerTo(sdp: string, tracks: OfferedHuddleTrack[]): Promise<string | undefined> {
     const made = (connection ??= open());
-    const receivable = wanted();
-    for (const { userId } of tracks) if (receivable.includes(userId)) heard.add(userId);
+    const present = receivable();
+    for (const { userId } of tracks) if (present.includes(userId)) heard.add(userId);
     try {
       await made.setRemoteDescription({ type: "offer", sdp });
       if (connection !== made) return undefined;
@@ -472,6 +481,8 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
   /** Everyone else in the huddle whom `can` is true of. */
   const others = (can: (person: HuddlePerson) => boolean) => huddle.people.filter((person) => person.user.id !== huddle.you?.id && can(person)).map(({ user }) => user.id);
   const cameraTrack = () => huddle.camera?.getVideoTracks()[0] ?? null;
+  const listenable = () => others(({ audio }) => audio);
+  const watchable = () => others(({ video }) => video);
 
   // The connections that carry the voices, which a huddle has throughout, and the cameras', which it has
   // while its own camera is on, and while it's open and someone else's is.
@@ -480,8 +491,8 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
     video: sendingConnection({ kind: "video", vital: false, track: cameraTrack, sends: { direction: "sendonly", sendEncodings: [{ maxBitrate: CAMERA_BITRATE }] } }, huddled),
   };
   const receiving = {
-    audio: receivingConnection({ kind: "audio", vital: true, wanted: () => others(({ audio }) => audio), byName: false, play: voices.play, stop: voices.stop }, huddled),
-    video: receivingConnection({ kind: "video", vital: false, wanted: () => (huddle.open ? others(({ video }) => video).slice(0, MAX_HUDDLE_CAMERAS) : []), byName: true, play: watch, stop: unwatch }, huddled),
+    audio: receivingConnection({ kind: "audio", vital: true, receivable: listenable, wanted: listenable, byName: false, play: voices.play, stop: voices.stop }, huddled),
+    video: receivingConnection({ kind: "video", vital: false, receivable: watchable, wanted: () => (huddle.open ? watchable().slice(0, MAX_HUDDLE_CAMERAS) : []), byName: true, play: watch, stop: unwatch }, huddled),
   };
 
   const controls: HuddleControls = {
@@ -496,7 +507,7 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
       show({ muted: to });
     },
     setCamera(on) {
-      if (on) void turnCameraOn();
+      if (on) turnCameraOn();
       else turnCameraOff();
     },
     // Only an open huddle watches cameras, so the tab asks for them as it opens, and for none as it closes.
@@ -524,10 +535,14 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
   track?.addEventListener("ended", microphoneGone);
 
   /** Turns the camera on: asks the browser for one, which asks the person the first time, and shows it. */
-  async function turnCameraOn() {
-    if (over || huddle.camera || openingCamera) return;
+  function turnCameraOn() {
+    if (!over && !huddle.camera && !openingCamera) void showOnceOpen(openCamera(rememberedDevice("camera")));
+  }
+
+  /** Shows the camera the browser is opening, once it has, or tells the tab's person that there's none for it. */
+  async function showOnceOpen(opening: Promise<MediaStream | null>) {
     openingCamera = true;
-    const stream = await openCamera(rememberedDevice("camera"));
+    const stream = await opening;
     openingCamera = false;
     if (over) return closeDevice(stream);
     if (stream) showCamera(stream);
@@ -670,5 +685,6 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
   }
 
   show({});
-  if (camera) showCamera(camera);
+  if (camera instanceof Promise) void showOnceOpen(camera);
+  else if (camera) showCamera(camera);
 }

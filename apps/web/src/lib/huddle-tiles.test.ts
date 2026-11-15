@@ -53,8 +53,17 @@ describe("A huddle's tiles", () => {
     expect(tilesLayout(12, 296, 500)).toEqual({ columns: 2, width: 142, square: true });
   });
 
+  it("keeps a few people's tiles to their least width in a space too short for one, rather than as wide as the space", () => {
+    expect(tilesLayout(1, 1000, 90)).toEqual({ columns: 1, width: 132, square: false });
+    expect(tilesLayout(3, 1000, 90)).toEqual({ columns: 3, width: 132, square: false });
+    // As many as fit in a row stay in one, and one more than fit share out the row.
+    expect(tilesLayout(6, 1000, 90)).toEqual({ columns: 6, width: 132, square: false });
+    expect(tilesLayout(8, 1000, 90)).toEqual({ columns: 7, width: 132, square: false });
+    expect(tilesLayout(8, 1040, 90)).toEqual({ columns: 7, width: 138, square: false });
+  });
+
   it("has a tile's least width even before there's any space to measure, or anyone to show", () => {
     expect(tilesLayout(3, 0, 0)).toEqual({ columns: 1, width: 132, square: true });
-    expect(tilesLayout(0, 1000, 700).columns).toBe(1);
+    expect(tilesLayout(0, 1000, 700)).toEqual({ columns: 1, width: 132, square: false });
   });
 });
