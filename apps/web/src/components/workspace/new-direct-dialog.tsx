@@ -1,5 +1,5 @@
 import { useContext, useEffect, useEffectEvent, useId, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type MouseEvent } from "react";
-import type { DirectoryUser, UserId } from "@ember/protocol";
+import type { DirectoryUser, Me, UserId } from "@ember/protocol";
 import { Search, Xmark } from "@/components/icons/iconoir";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { PeopleContext, useNameOf } from "@/hooks/use-directory";
@@ -48,7 +48,8 @@ export function returnFocus(opener: HTMLElement | null) {
 interface Props {
   /** The link that opened it, or null when the page's address did. */
   opener: HTMLElement | null;
-  meId: UserId;
+  /** Who's looking, who isn't listed, nor the AI agents only administrators can ask unless they're one. */
+  me: Me;
   /** Loads the people directory again, settling once it has or failed, as opening the dialog does. */
   reloadPeople: () => Promise<void>;
   /** Called as a DM starts, with what lists it, for the sidebar, as the server answers. */
@@ -68,7 +69,7 @@ interface Props {
  * the DM between them and you, starting it if they don't have one, and goes there. It's open from when
  * it's shown until it closes, which it can't while a DM is starting.
  */
-export function NewDirectDialog({ opener, meId, reloadPeople, askForRoom, onClose, onFailed }: Props) {
+export function NewDirectDialog({ opener, me, reloadPeople, askForRoom, onClose, onFailed }: Props) {
   const people = useContext(PeopleContext);
   const nameOf = useNameOf();
   const isAgent = useIsAgent();
@@ -90,7 +91,7 @@ export function NewDirectDialog({ opener, meId, reloadPeople, askForRoom, onClos
   const started = useRef<"opened" | "shown" | null>(null);
 
   const name = soughtName(typed);
-  const matches = useMemo(() => peopleMatching(people.values(), meId, name), [people, meId, name]);
+  const matches = useMemo(() => peopleMatching(people.values(), me, name), [people, me, name]);
   const shown = matches.slice(0, pages * PEOPLE_PAGE);
   const options = shown.filter((person) => !picked.some((p) => p.id === person.id));
   // The directory lists everyone, you included, once it's loaded.

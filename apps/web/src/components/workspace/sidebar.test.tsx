@@ -37,8 +37,11 @@ function renderSidebar(props: Partial<Props> = {}, account = EMBER, people: read
     loaded: true,
     currentRoomId: null,
     unreadOnly: false,
+    agents: 0,
+    agentsOpen: false,
     onSelect: vi.fn(),
     onNewDirect: vi.fn(),
+    onOpenAgents: vi.fn(),
     onStarred: vi.fn(),
     onSessionChanged: vi.fn(),
     ...props,
@@ -607,7 +610,7 @@ describe("Group DMs and DM names", () => {
       <PeopleContext value={new Map([[renamed.id, renamed]])}>
         <Sidebar
           {...{ workspaceName: "Ember", meId: ada!.id, loaded: true, favorites: unstarred, sharedOrder: [], huddles: {}, currentRoomId: null, unreadOnly: false }}
-          {...{ onSelect: vi.fn(), onNewDirect: vi.fn(), onStarred: vi.fn(), onSessionChanged: vi.fn() }}
+          {...{ agents: 0, agentsOpen: false, onSelect: vi.fn(), onNewDirect: vi.fn(), onOpenAgents: vi.fn(), onStarred: vi.fn(), onSessionChanged: vi.fn() }}
           rooms={[direct("d1", [ada!, grace!])]}
         />
       </PeopleContext>,
@@ -715,6 +718,34 @@ describe("Activity filter", () => {
     rerender({ currentRoomId: "d1" });
     expect(directRows()).toEqual([]);
     expect(screen.getByText("You’re all caught up. No unread conversations.")).toBeInTheDocument();
+  });
+});
+
+describe("Available Agents", () => {
+  const row = () => screen.queryByRole("button", { name: /^Available Agents/ });
+
+  it("says how many AI agents there are to ask, under the DMs, and opens the list of them from its row", async () => {
+    const { onOpenAgents, rerender } = renderSidebar({ rooms: [...rooms, direct("d1", [ada!, grace!])], agents: 6 });
+    expect(row()).toHaveAccessibleName("Available Agents, 6 to ask");
+    expect(within(screen.getByRole("region", { name: "Agents" })).getByText("6")).toHaveAttribute("aria-hidden", "true");
+    expect(row()).toHaveAttribute("aria-haspopup", "dialog");
+    expect(row()).toHaveAttribute("aria-expanded", "false");
+    // After the DMs.
+    expect(screen.getByRole("region", { name: "DMs" }).compareDocumentPosition(row()!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    await userEvent.click(row()!);
+    expect(onOpenAgents).toHaveBeenCalledExactlyOnceWith(row());
+    rerender({ agents: 6, agentsOpen: true });
+    expect(row()).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("isn't there while there are none to ask, as while Ember AI is off, nor while Activity shows only what's unread", () => {
+    const { rerender } = renderSidebar();
+    expect(row()).toBeNull();
+    rerender({ agents: 2, unreadOnly: true });
+    expect(row()).toBeNull();
+    rerender({ agents: 2 });
+    expect(row()).toHaveAccessibleName("Available Agents, 2 to ask");
   });
 });
 

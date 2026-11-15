@@ -1,9 +1,11 @@
-// The pages few visits need, a huddle's preview and bar, and first run's question about huddles, which load
-// together apart from the rest of the app (`rarePage` in workspace.tsx, `loadSetupHuddles` in setup-page.tsx).
+// The pages few visits need, Available Agents, a huddle's preview and bar, and first run's question about
+// huddles, which load together apart from the rest of the app (`rarePage` in workspace.tsx,
+// `loadSetupHuddles` in setup-page.tsx).
 export { SetupHuddles } from "../setup-huddles";
 export { AgentSettingsPage, NewAgentPage } from "./agent-page";
 export { AppSettingsPage, NewAppPage } from "./app-page";
 export { AppSignedInPage } from "./app-signed-in-page";
+export { AvailableAgentsDialog } from "./available-agents";
 export { BotSettingsPage, NewBotPage } from "./bot-settings-page";
 export { BotsPage } from "./bots-page";
 export { CustomStylesPage } from "./custom-styles-page";

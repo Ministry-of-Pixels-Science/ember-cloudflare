@@ -566,6 +566,15 @@ Objects, D1 or speed call for something else.
   in the `assistant` setting, beside the API token, at most 20 of them, so they're forgotten with
   the token when Ember AI is turned off. A pick that's no longer among them is kept, and followed
   again once the model is added back.
+- **Who can ask an AI agent is a column of its person.** Campfire has no AI agents.
+  `users.agent_access` (workspace migration 0063) is null for an agent anyone can ask, and for
+  everyone who isn't an agent, `'admins'` for one only administrators can ask, and `'admin-dms'` for
+  one only their direct messages reach, which is in no other room. It's on `users` rather than
+  `agents` so that it outlasts the agent: deleting an agent deletes its row in `agents` and keeps its
+  person, whose answers stay, and one that only administrators were told of stays untold. The
+  statements that list people, such as the directory's and the mention prompt's, and the one that
+  finds who answers a question, check it against the asker's role in SQL, so nobody is sent a person
+  they aren't told of.
 
 ## Writing SQL here
 

@@ -2,13 +2,13 @@ import { act, render, renderHook, screen, waitFor, within } from "@testing-libra
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ASSISTANT_ID, type DirectoryUser } from "@ember/protocol";
-import { AGENT_CHANGED, AGENTS_FORBIDDEN, AGENTS_FULL, MAX_AGENTS, type Agent } from "@ember/protocol/agents";
+import { AGENT_CHANGED, AGENTS_FORBIDDEN, AGENTS_FULL, EMBER_DOES, MAX_AGENTS, type Agent } from "@ember/protocol/agents";
 import { ASSISTANT_OFF, TOP_LEVELS, type AssistantSettings as Assistant } from "@ember/protocol/assistant";
 import { FlashProvider } from "@/components/flash";
 import { PeopleContext, type People } from "@/hooks/use-directory";
 import { agentSettingsPath, NEW_AGENT_PATH } from "@/hooks/use-route";
 import { ApiError } from "@/lib/api";
-import { AGENTS_EXPLAINED, AGENTS_PATH, AgentList, EMBER_DOES, roomsOf, SEARCHES_THE_WEB, useAgentsOnly } from "./agent-list";
+import { AGENTS_EXPLAINED, AGENTS_PATH, AgentList, reachOf, roomsOf, SEARCHES_THE_WEB, useAgentsOnly } from "./agent-list";
 
 /** Ember AI on GLM-4.7 Flash, the only model people can pick, which can't search the web. */
 const ON: Assistant = {
@@ -23,7 +23,7 @@ const ON: Assistant = {
   avatar: false,
 };
 
-/** An agent called `name`, with `id`, as the AI assistant tab lists it, in every open room and off the web unless `agent` says. */
+/** An agent called `name`, with `id`, as the AI assistant tab lists it, in every open room, off the web and for everyone to ask unless `agent` says. */
 const agent = (id: string, name: string, agent: Partial<Agent> = {}): Agent => ({
   id,
   name,
@@ -35,6 +35,7 @@ const agent = (id: string, name: string, agent: Partial<Agent> = {}): Agent => (
   model: "anthropic/claude-sonnet-5.5",
   modelName: "Claude Sonnet 5.5",
   webTools: [],
+  access: "everyone",
   rooms: null,
   ...agent,
 });
@@ -84,10 +85,21 @@ describe("Agents", () => {
     expect(card()).toHaveTextContent(AGENTS_EXPLAINED);
     const [ember, recap, scout] = await rows();
     expect(await names()).toEqual(["Ember", "Recap", "Scout"]);
-    expect(ember).toHaveTextContent(`EmberBuilt in${EMBER_DOES}GLM-4.7 Flash · Every open room`);
-    expect(recap).toHaveTextContent("RecapSums up threads into decisions and to-dos.Claude Sonnet 5.5 · Every open room");
+    expect(ember).toHaveTextContent(`EmberBuilt in${EMBER_DOES}GLM-4.7 Flash · Every room`);
+    expect(recap).toHaveTextContent("RecapSums up threads into decisions and to-dos.Claude Sonnet 5.5 · Every room");
     expect(recap).not.toHaveTextContent("Built in");
     expect(scout).toHaveTextContent(`ScoutLooks up what's new on the web.GPT-6.1 Sol · ${SEARCHES_THE_WEB} · research`);
+  });
+
+  it("says which agents are kept for administrators, before their rooms, or in place of them for one only their DMs reach", async () => {
+    const herald = agent("0mgk3x2a9b4c62", "Herald", { access: "admins", rooms: [{ id: "0mgk3x2a9b4c5a", name: "research" }] });
+    const steward = agent("0mgk3x2a9b4c63", "Steward", { access: "admin-dms", rooms: [] });
+    serve(() => Response.json({ agents: [herald, steward] }));
+    showList();
+    const [, heraldRow, stewardRow] = await rows();
+    expect(heraldRow).toHaveTextContent("Claude Sonnet 5.5 · Admins only · research");
+    expect(stewardRow).toHaveTextContent("Claude Sonnet 5.5 · Admin DMs only");
+    expect(stewardRow).not.toHaveTextContent("Direct messages only");
   });
 
   it("links each row to its agent's page, @ember's too", async () => {
@@ -107,7 +119,7 @@ describe("Agents", () => {
       webTools: ["search", "read"],
     });
     const [ember] = await rows();
-    expect(ember).toHaveTextContent(`Claude Sonnet 5.5, or the model each person picks · ${SEARCHES_THE_WEB} · Every open room`);
+    expect(ember).toHaveTextContent(`Claude Sonnet 5.5, or the model each person picks · ${SEARCHES_THE_WEB} · Every room`);
   });
 
   it("shows @ember alone while there are no agents", async () => {
@@ -154,9 +166,15 @@ describe("Agents", () => {
 describe("Rooms an agent is in", () => {
   const room = (name: string, index: number) => ({ id: `0mgk3x2a9b4c${index}a`, name });
 
-  it("says every open room, new ones too, for an agent in each, and direct messages for one in none", () => {
-    expect(roomsOf(null)).toBe("Every open room");
+  it("says every room for an agent in each open one, new ones too, and direct messages for one in none", () => {
+    expect(roomsOf(null)).toBe("Every room");
     expect(roomsOf([])).toBe("Direct messages only");
+  });
+
+  it("says who can ask it first, when that's administrators alone", () => {
+    expect(reachOf({ access: "everyone", rooms: null })).toEqual(["Every room"]);
+    expect(reachOf({ access: "admins", rooms: [] })).toEqual(["Admins only", "Direct messages only"]);
+    expect(reachOf({ access: "admin-dms", rooms: [] })).toEqual(["Admin DMs only"]);
   });
 
   it("names up to three rooms, counting the rest", () => {

@@ -376,6 +376,7 @@ describe("AI agents", () => {
         description: RECAP.description,
         model: HAIKU,
         modelName: "Claude Haiku 5.5",
+        access: "everyone",
         rooms: null,
         instructions: RECAP.instructions,
         promptTemplate: null,
@@ -399,8 +400,8 @@ describe("AI agents", () => {
       expect(await workspaceSql("SELECT role, bot_token, email_address, password_digest FROM users WHERE id = ?", recap.id)).toEqual([
         { role: 2, bot_token: null, email_address: null, password_digest: null },
       ]);
-      const { id, name, bio, role, status, avatarUrl, agent, description, model, modelName, webTools, rooms } = recap;
-      expect(await listed(administrator)).toEqual([{ id, name, bio, role, status, avatarUrl, agent, description, model, modelName, webTools, rooms }]);
+      const { id, name, bio, role, status, avatarUrl, agent, description, model, modelName, webTools, access, rooms } = recap;
+      expect(await listed(administrator)).toEqual([{ id, name, bio, role, status, avatarUrl, agent, description, model, modelName, webTools, access, rooms }]);
       expect(await shownAgent(administrator, recap.id)).toEqual(recap);
       const asListed = { id, name, bio, role, status, avatarUrl, agent };
       expect(await inDirectory(administrator, recap.id)).toEqual(asListed);

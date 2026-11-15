@@ -59,7 +59,7 @@ import {
   type WebTool,
   type YourAssistantChanges,
 } from "@ember/protocol/assistant";
-import type { AgentProfile, AgentRoom } from "@ember/protocol/agents";
+import type { AgentAccess, AgentProfile, AgentRoom } from "@ember/protocol/agents";
 import type { AppId } from "@ember/protocol/apps";
 import type { LiveHuddle } from "@ember/protocol/huddles";
 import { statement, type Db, type Statement } from "./db";
@@ -285,7 +285,16 @@ export interface DirectoryEntry extends User {
   updatedAt: string;
   /** Whether they're an AI agent, @ember or one an administrator made, deleted ones too. */
   agent: boolean;
+  /**
+   * Whom an AI agent is kept for: "admins" for one only administrators can ask, "admin-dms" for one only
+   * their direct messages reach, which nobody else is told of, even once it's deleted, or null for an
+   * agent anyone can ask, and for anyone else.
+   */
+  keptFor: KeptFor | null;
 }
+
+/** Whom an AI agent that not everyone can ask is kept for (`AgentAccess`). */
+export type KeptFor = Exclude<AgentAccess, "everyone">;
 
 /** Someone as the people directory lists them, with their email address, which their profile shows too. */
 export interface ProfileEntry extends DirectoryEntry {
@@ -448,14 +457,15 @@ export interface AnsweringAgent extends Pick<AgentSetup, "instructions" | "promp
 
 /**
  * An agent as the AI assistant tab lists it: as the people directory lists it, with what it does, its
- * model, what it may do on the web, and the open rooms it's kept to, by name, or null while it's in every
- * one.
+ * model, what it may do on the web, who can ask it, and the open rooms it's kept to, by name, or null
+ * while it's in every one.
  */
 export interface StoredAgent extends DirectoryEntry {
   description: string;
   model: string;
   modelName: string;
   webTools: WebTool[];
+  access: AgentAccess;
   rooms: AgentRoom[] | null;
 }
 
@@ -467,25 +477,39 @@ export interface StoredAgentSettings extends StoredAgent, AgentSetup {
 }
 
 /**
- * An agent to add, made by `createdBy`: its id and name, its setup, the open rooms it's in, or null for
- * every one, and its avatar, or null for none.
+ * An agent as Available Agents lists it to someone who can ask it: as the people directory lists it, with
+ * what it does, who can ask it, and the rooms it shares with them, by name, or null while it's in every
+ * open one.
+ */
+export interface AvailableStoredAgent extends DirectoryEntry {
+  description: string;
+  access: AgentAccess;
+  rooms: AgentRoom[] | null;
+}
+
+/**
+ * An agent to add, made by `createdBy`: its id and name, its setup, who can ask it, the open rooms it's
+ * in, or null for every one, and its avatar, or null for none.
  */
 export interface NewStoredAgent extends AgentSetup {
   id: UserId;
   name: string;
+  access: AgentAccess;
   rooms: RoomId[] | null;
   avatar: StoredPicture | null;
   createdBy: UserId;
 }
 
 /**
- * A change to an agent by `changedBy`: its new name, if it has one, its setup as it is then, the open
- * rooms it's in then, or null for every one, if they changed, and its new avatar, or none, if that
- * changed, with the key of the one it had, for R2 to delete at `dueAt`.
+ * A change to an agent by `changedBy`: its new name, if it has one, its setup as it is then, who can ask
+ * it then, if that changed, the open rooms it's in then, or null for every one, if they changed, and its
+ * new avatar, or none, if that changed, with the key of the one it had, for R2 to delete at `dueAt`. One
+ * only administrators' direct messages reach from then on leaves every room, whatever `rooms` says.
  */
 export interface StoredAgentChange {
   name?: string;
   setup: AgentSetup;
+  access?: AgentAccess;
   rooms?: RoomId[] | null;
   avatar?: { avatar: StoredPicture | null; previous: string | null; dueAt: number };
   changedBy: UserId;
@@ -508,6 +532,8 @@ export interface AvatarOwner {
   name: string;
   bot: boolean;
   avatar: StoredPicture | null;
+  /** Whom they're kept for, if they're an AI agent not everyone can ask (`DirectoryEntry.keptFor`). */
+  keptFor: KeptFor | null;
 }
 
 /** Someone as the people directory lists them, with the avatar they've uploaded, or a bot was given. */
@@ -924,6 +950,7 @@ interface DirectoryRow {
   status: number;
   updated_at: string;
   agent: number;
+  agent_access: string | null;
 }
 
 /** The columns that say what avatar someone has uploaded (migrations/0032_avatars.sql). */
@@ -960,6 +987,21 @@ const roomsChange = (agentId: UserId, rooms: RoomId[] | null, now: string): Stat
         statement(GRANT_PICKED_ROOMS, agentId, JSON.stringify(rooms), now),
       ];
 
+/**
+ * What takes agent `agentId` out of every room but its DMs, the private rooms it was put in too, as one
+ * only administrators' direct messages reach is in none, and records that it's in none.
+ */
+const leaveEveryRoom = (agentId: UserId): Statement[] => [
+  statement(`UPDATE agents SET every_open_room = 0 WHERE user_id = ?`, agentId),
+  statement(LEAVE_SHARED_ROOMS, agentId),
+];
+
+/** Whom an agent is kept for, as its user keeps it, `kept`: nobody for null, as for anyone who isn't one, or for what can't be, as nothing Ember writes is. */
+const keptForIn = (kept: string | null): KeptFor | null => (kept === "admins" || kept === "admin-dms" ? kept : null);
+
+/** Whom an agent `access` says who can ask is kept for, as its user keeps it: nobody when everyone can. */
+const keptForOf = (access: AgentAccess): KeptFor | null => (access === "everyone" ? null : access);
+
 const directoryEntry = (row: DirectoryRow): DirectoryEntry => ({
   id: row.id,
   name: row.name,
@@ -968,6 +1010,7 @@ const directoryEntry = (row: DirectoryRow): DirectoryEntry => ({
   status: STATUSES[row.status] ?? "active",
   updatedAt: row.updated_at,
   agent: row.agent === 1,
+  keptFor: keptForIn(row.agent_access),
 });
 
 interface BotRow extends DirectoryRow {
@@ -1005,6 +1048,7 @@ const storedAgent = (row: AgentRow, rooms: AgentRoom[]): StoredAgent => ({
   model: row.model,
   modelName: row.model_name,
   webTools: webToolsIn(row.web_tools),
+  access: keptForIn(row.agent_access) ?? "everyone",
   rooms: row.every_open_room === 1 ? null : rooms,
 });
 
@@ -1708,15 +1752,40 @@ const deliveryOf = (row: DeliveryRow): PushDelivery => ({
   badge: row.badge,
 });
 
+/** Whether `id`, a parameter, is an active administrator's, as a statement asks of whoever it reads `users` for. */
+const administratorIs = (id: string) => `EXISTS (SELECT 1 FROM users AS askers WHERE askers.id = ${id} AND askers.role = ${ADMINISTRATOR} AND askers.status = ${ACTIVE})`;
+
+/**
+ * Whether the user `users` reads is listed to `asker`, a parameter: anyone but an AI agent only
+ * administrators' direct messages reach, deleted or not, which only an administrator is told of.
+ */
+const listedTo = (asker: string) => `(users.agent_access IS NOT 'admin-dms' OR ${administratorIs(asker)})`;
+
+/**
+ * Whether `asker`, a parameter, can ask the user `users` reads: anyone can, unless it's an AI agent kept
+ * for administrators, which only an administrator mentions or writes to.
+ */
+const askedBy = (asker: string) => `(users.agent_access IS NULL OR ${administratorIs(asker)})`;
+
+/**
+ * Whether the bot `users` reads answers `asker` in room `room`, both parameters: any does, unless it's an
+ * AI agent kept for administrators, which answers only an administrator, and one only their direct
+ * messages reach only where nobody else in the room is a member, so that nobody else reads what it says.
+ */
+const answersTo = (asker: string, room: string) => `(users.agent_access IS NULL OR (${administratorIs(asker)}
+    AND (users.agent_access <> 'admin-dms' OR NOT EXISTS (SELECT 1 FROM memberships AS others JOIN users AS people ON people.id = others.user_id
+      WHERE others.room_id = ${room} AND people.role = ${MEMBER}))))`;
+
 /**
  * The bots a new message, numbered ?4, by ?2 in room ?1 goes to: in a DM, the active bots in it, and in
  * any other room, the active bots in it whom the message mentions, a JSON list ?3; never its author.
  * They're the bots with webhooks, which it's delivered to, and @ember and the agents, which answer it
  * (`answers` 1) unless a bot wrote it, @ember or an agent among them, so that bots can't keep each other
- * talking. Each comes with the room's name, but a DM's, and the author's, and its id: a bot's webhook
- * `BOT_WEBHOOK` reads once the delivery's turn comes. Nothing once the Workspace has applied the
- * message's event. Webhooks and agents are few, so they're read first, with @ember, and each one's bot
- * and membership found by their keys.
+ * talking, or it's from someone an agent kept for administrators doesn't answer (`answersTo`). Each
+ * comes with the room's name, but a DM's, and the author's, and its id: a bot's webhook `BOT_WEBHOOK`
+ * reads once the delivery's turn comes. Nothing once the Workspace has applied the message's event.
+ * Webhooks and agents are few, so they're read first, with @ember, and each one's bot and membership
+ * found by their keys.
  */
 export const MESSAGE_BOTS = `SELECT users.id, bots.answers,
     (SELECT name FROM rooms WHERE id = ?1 AND kind <> 'direct') AS room_name, (SELECT name FROM users AS authors WHERE authors.id = ?2) AS author_name
@@ -1726,6 +1795,7 @@ export const MESSAGE_BOTS = `SELECT users.id, bots.answers,
     AND (bots.answers = 0 OR NOT EXISTS (SELECT 1 FROM users AS authors WHERE authors.id = ?2 AND authors.role = ${BOT}))
     AND EXISTS (SELECT 1 FROM memberships WHERE memberships.room_id = ?1 AND memberships.user_id = users.id)
     AND (users.id IN (SELECT value FROM json_each(?3)) OR EXISTS (SELECT 1 FROM rooms WHERE id = ?1 AND kind = 'direct'))
+    AND ${answersTo("?2", "?1")}
     AND ?4 > (SELECT applied_seq FROM rooms WHERE id = ?1)
   ORDER BY lower(users.name), users.id`;
 
@@ -1779,6 +1849,9 @@ const APPLIED_WITH_MESSAGE = `UPDATE rooms SET applied_seq = ?1, last_message_at
 
 /** Whether someone is one of the workspace's active administrators. */
 export const ACTIVE_ADMINISTRATOR = `SELECT 1 FROM users WHERE id = ? AND role = ${ADMINISTRATOR} AND status = ${ACTIVE}`;
+
+/** The active administrators, who alone hear of an AI agent only their direct messages reach. */
+const ACTIVE_ADMINISTRATORS = `SELECT id AS user_id FROM users WHERE role = ${ADMINISTRATOR} AND status = ${ACTIVE}`;
 
 /**
  * Renames the workspace and records when, unless it has that name already.
@@ -1972,19 +2045,20 @@ export function mergedSharedOrder(saved: Array<{ id: RoomId; orderable: boolean 
   return [...merged, ...listed];
 }
 
-/** Everyone active, by name. */
-export const ACTIVE_PEOPLE = `SELECT id, name FROM users WHERE status = ${ACTIVE} ORDER BY lower(name), id`;
+/** Everyone active who can be put in a room, by name: all but an AI agent only administrators' direct messages reach, which is in none. */
+export const ACTIVE_PEOPLE = `SELECT id, name FROM users WHERE status = ${ACTIVE} AND agent_access IS NOT 'admin-dms' ORDER BY lower(name), id`;
 
 /**
  * What the people directory lists of whoever `users` reads, as `DirectoryRow` has it, with whether they're
  * an AI agent: a bot without a token, as @ember and the agents administrators make are and chat bots never
- * are, deleted agents too, whose answers stay.
+ * are, deleted agents too, whose answers stay, and whom an agent not everyone can ask is kept for
+ * (migrations/0063_agent_access.sql).
  */
 const DIRECTORY_COLUMNS = `users.id, users.name, users.bio, users.role, users.status, users.updated_at,
-  (users.role = ${BOT} AND users.bot_token IS NULL) AS agent`;
+  (users.role = ${BOT} AND users.bot_token IS NULL) AS agent, users.agent_access`;
 
-/** Everyone, for the people directory: removed and banned people too, whose messages stay. */
-const DIRECTORY = `SELECT ${DIRECTORY_COLUMNS} FROM users ORDER BY id`;
+/** Everyone ?1 is told of, for the people directory: removed and banned people too, whose messages stay (`listedTo`). */
+const DIRECTORY = `SELECT ${DIRECTORY_COLUMNS} FROM users WHERE ${listedTo("?1")} ORDER BY id`;
 
 /** Someone active, as the directory lists them. */
 const ACTIVE_PERSON = `SELECT ${DIRECTORY_COLUMNS} FROM users WHERE id = ? AND status = ${ACTIVE}`;
@@ -2043,6 +2117,20 @@ const KEPT_AGENTS_ROOMS = `SELECT memberships.user_id, rooms.id, rooms.name
   FROM agents JOIN users ON users.id = agents.user_id JOIN memberships ON memberships.user_id = agents.user_id JOIN rooms ON rooms.id = memberships.room_id
   WHERE agents.every_open_room = 0 AND users.status = ${ACTIVE} AND rooms.kind = 'open' ORDER BY lower(rooms.name), rooms.id`;
 
+/** The active agents ?1 can ask (`askedBy`), by name, as Available Agents lists them: as the people directory does, with what each does. */
+const AVAILABLE_AGENTS = `SELECT ${DIRECTORY_COLUMNS}, agents.description, agents.every_open_room FROM agents JOIN users ON users.id = agents.user_id
+  WHERE users.status = ${ACTIVE} AND ${askedBy("?1")} ORDER BY lower(users.name), users.id`;
+
+/**
+ * The rooms but DMs each active agent kept to the open rooms picked shares with ?1, by name: the open
+ * rooms it's in, which everyone is in, and the private rooms it was put in that they're in too.
+ */
+const AVAILABLE_AGENTS_ROOMS = `SELECT theirs.user_id, rooms.id, rooms.name
+  FROM agents JOIN users ON users.id = agents.user_id JOIN memberships AS theirs ON theirs.user_id = agents.user_id JOIN rooms ON rooms.id = theirs.room_id
+  WHERE agents.every_open_room = 0 AND users.status = ${ACTIVE} AND rooms.kind <> 'direct'
+    AND EXISTS (SELECT 1 FROM memberships AS mine WHERE mine.room_id = theirs.room_id AND mine.user_id = ?1)
+  ORDER BY lower(rooms.name), rooms.id`;
+
 /** An active agent as its page shows it, with its avatar and who last changed it. */
 const ACTIVE_AGENT = `SELECT ${AGENT_COLUMNS}, users.avatar_key, users.avatar_variant,
     agents.instructions, agents.prompt_template, agents.format, agents.thinking_levels, agents.thinking, agents.answer_length,
@@ -2051,14 +2139,16 @@ const ACTIVE_AGENT = `SELECT ${AGENT_COLUMNS}, users.avatar_key, users.avatar_va
   WHERE agents.user_id = ? AND users.status = ${ACTIVE}`;
 
 /**
- * Agent ?2 as a question for it in room ?1 finds it, when its turn comes and again before its answer is
- * posted: its name, its model, and how it answers. Nothing unless it's an active agent in the room, so
- * that turning Ember AI off, deleting the agent or taking it out of the room stops what's on its way.
+ * Agent ?2 as a question ?3 asked it in room ?1 finds it, when its turn comes and again before its answer
+ * is posted: its name, its model, and how it answers. Nothing unless it's an active agent in the room
+ * that answers them there (`answersTo`), so that turning Ember AI off, deleting the agent, taking it out
+ * of the room, keeping it for administrators or making whoever asked a member stops what's on its way.
  */
-const ANSWERING_AGENT = `SELECT users.name, agents.model, agents.instructions, agents.prompt_template, agents.format, agents.thinking_levels, agents.thinking,
+export const ANSWERING_AGENT = `SELECT users.name, agents.model, agents.instructions, agents.prompt_template, agents.format, agents.thinking_levels, agents.thinking,
     agents.answer_length, agents.web_tools
   FROM agents JOIN users ON users.id = agents.user_id
-  WHERE agents.user_id = ?2 AND users.status = ${ACTIVE} AND EXISTS (SELECT 1 FROM memberships WHERE memberships.room_id = ?1 AND memberships.user_id = ?2)`;
+  WHERE agents.user_id = ?2 AND users.status = ${ACTIVE} AND EXISTS (SELECT 1 FROM memberships WHERE memberships.room_id = ?1 AND memberships.user_id = ?2)
+    AND ${answersTo("?3", "?1")}`;
 
 /** The open rooms someone is in, by name. */
 const OPEN_ROOMS_OF = `SELECT rooms.id, rooms.name FROM memberships JOIN rooms ON rooms.id = memberships.room_id
@@ -2082,6 +2172,9 @@ const MOVE_AGENTS_MODEL = `UPDATE agents SET format = ?, thinking_levels = ? WHE
 /** Changes an agent's setup, and records who changed it, and when. */
 const CHANGE_AGENT = `UPDATE agents SET description = ?2, instructions = ?3, model = ?4, model_name = ?5, format = ?6, thinking = ?7, answer_length = ?8,
   web_tools = ?9, prompt_template = ?10, thinking_levels = ?11, updated_by = ?12, updated_at = ?13 WHERE user_id = ?1`;
+
+/** Keeps whom agent ?2 is for on its user: 'admins', 'admin-dms', or null for everyone. */
+const KEEP_AGENT_FOR = `UPDATE users SET agent_access = ?1 WHERE id = ?2`;
 
 /** Puts ?1 in the open rooms the JSON list ?2 names, of those there are, keeping the memberships it has. */
 const GRANT_PICKED_ROOMS = `INSERT INTO memberships (room_id, user_id, created_at, updated_at)
@@ -2293,10 +2386,21 @@ const CHANGE_PROFILE = `UPDATE users SET name = ?, email_address = ?, bio = ?, p
 /** The same, with whether each is in a room, for its settings. */
 export const ACTIVE_PEOPLE_IN_ROOM = `SELECT users.id, users.name, memberships.user_id IS NOT NULL AS member
   FROM users LEFT JOIN memberships ON memberships.room_id = ? AND memberships.user_id = users.id
-  WHERE users.status = ${ACTIVE} ORDER BY lower(users.name), users.id`;
+  WHERE users.status = ${ACTIVE} AND users.agent_access IS NOT 'admin-dms' ORDER BY lower(users.name), users.id`;
 
 /** The people with the ids in a JSON array, whatever their status. */
 export const PEOPLE_WITH_IDS = `SELECT id, name FROM users WHERE id IN (SELECT value FROM json_each(?))`;
+
+/**
+ * The people a JSON array ?1 names whom ?2 can start a DM with, whatever their status: anyone, but an AI
+ * agent kept for administrators, which only an administrator writes to, and one only their direct
+ * messages reach only while nobody else named is a member, so that nobody else is shown it.
+ */
+export const DIRECT_PEOPLE = `SELECT users.id, users.name FROM users
+  WHERE users.id IN (SELECT value FROM json_each(?1))
+    AND (users.agent_access IS NULL OR (${administratorIs("?2")}
+      AND (users.agent_access <> 'admin-dms' OR NOT EXISTS (SELECT 1 FROM users AS others
+        WHERE others.id IN (SELECT value FROM json_each(?1)) AND others.role = ${MEMBER}))))`;
 
 /** The same, as the people directory lists them. */
 const DIRECTORY_WITH_IDS = `SELECT ${DIRECTORY_COLUMNS} FROM users WHERE id IN (SELECT value FROM json_each(?))`;
@@ -2305,16 +2409,16 @@ const DIRECTORY_WITH_IDS = `SELECT ${DIRECTORY_COLUMNS} FROM users WHERE id IN (
 export const MENTIONABLE_PAGE = 20;
 
 /**
- * Active people whose names contain ?1, by name. It's `LIKE`, so only ASCII letters ignore case, `%` and
- * `_` match anything, and "" matches everyone.
+ * Active people whose names contain ?1, by name, whom ?2 can ask (`askedBy`). It's `LIKE`, so only ASCII
+ * letters ignore case, `%` and `_` match anything, and "" matches everyone.
  */
 const MENTIONABLE_PEOPLE = `SELECT ${DIRECTORY_COLUMNS} FROM users
-  WHERE status = ${ACTIVE} AND name LIKE '%' || ?1 || '%' ORDER BY lower(name), id LIMIT ${MENTIONABLE_PAGE}`;
+  WHERE status = ${ACTIVE} AND name LIKE '%' || ?1 || '%' AND ${askedBy("?2")} ORDER BY lower(name), id LIMIT ${MENTIONABLE_PAGE}`;
 
-/** The same of room ?2's members (`Current.user.rooms.find(room_id).users`). */
+/** The same of room ?2's members (`Current.user.rooms.find(room_id).users`), for ?3. */
 const MENTIONABLE_MEMBERS = `SELECT ${DIRECTORY_COLUMNS}
   FROM memberships JOIN users ON users.id = memberships.user_id
-  WHERE memberships.room_id = ?2 AND users.status = ${ACTIVE} AND users.name LIKE '%' || ?1 || '%'
+  WHERE memberships.room_id = ?2 AND users.status = ${ACTIVE} AND users.name LIKE '%' || ?1 || '%' AND ${askedBy("?3")}
   ORDER BY lower(users.name), users.id LIMIT ${MENTIONABLE_PAGE}`;
 
 /** Whether someone in a room can change it: administrators and the room's creator can. */
@@ -2347,10 +2451,11 @@ const GRANT_OPEN_ROOMS_TO_USER = `INSERT INTO memberships (room_id, user_id, cre
 
 /**
  * Puts every active person in an open room, keeping the memberships they already have, and answers whom
- * it put in. Agents kept to the open rooms an administrator picked stay out.
+ * it put in. Agents kept to the open rooms an administrator picked stay out, as do those only
+ * administrators' direct messages reach.
  */
 const GRANT_ROOM_TO_ACTIVE_USERS = `INSERT INTO memberships (room_id, user_id, created_at, updated_at)
-  SELECT ?, id, ?, ? FROM users WHERE status = ${ACTIVE}
+  SELECT ?, id, ?, ? FROM users WHERE status = ${ACTIVE} AND agent_access IS NOT 'admin-dms'
     AND NOT EXISTS (SELECT 1 FROM agents WHERE agents.user_id = users.id AND agents.every_open_room = 0)
   ON CONFLICT DO NOTHING RETURNING user_id`;
 
@@ -2369,10 +2474,12 @@ const GRANT_FIRST_ROOM = `INSERT INTO memberships (room_id, user_id, created_at,
 const OPEN_ROOM_NAMED = `SELECT id, kind, name, icon FROM rooms WHERE kind = 'open' AND name = ? ORDER BY created_at, id LIMIT 1`;
 
 /**
- * Puts the people a JSON list names in a room, whatever their status, and answers whom it put in.
+ * Puts the people a JSON list names in a room, whatever their status, and answers whom it put in: none
+ * of them an AI agent only administrators' direct messages reach, which is in no room.
  */
 const GRANT_ROOM_TO_USERS = `INSERT INTO memberships (room_id, user_id, created_at, updated_at)
-  SELECT ?, id, ?, ? FROM users WHERE id IN (SELECT value FROM json_each(?)) ON CONFLICT DO NOTHING RETURNING user_id`;
+  SELECT ?, id, ?, ? FROM users WHERE id IN (SELECT value FROM json_each(?)) AND agent_access IS NOT 'admin-dms'
+  ON CONFLICT DO NOTHING RETURNING user_id`;
 
 /** Takes everyone but the people a JSON list names and anyone suspended whose membership it keeps (`KEPT_SUSPENDED_MEMBERSHIP`) out of a room, and answers whom. */
 export const REVOKE_ROOM_FROM_OTHERS = `DELETE FROM memberships WHERE room_id = ? AND user_id NOT IN (SELECT value FROM json_each(?)) AND NOT ${KEPT_SUSPENDED_MEMBERSHIP}
@@ -2723,6 +2830,11 @@ export class WorkspaceStore {
   /** Whether someone is one of the workspace's active administrators, as they are when this asks. */
   async isAdministrator(userId: UserId): Promise<boolean> {
     return (await this.db.all(ACTIVE_ADMINISTRATOR, userId)).length > 0;
+  }
+
+  /** The active administrators' ids. */
+  async administratorIds(): Promise<UserId[]> {
+    return userIdsOf(await this.db.all<UserIdRow>(ACTIVE_ADMINISTRATORS));
   }
 
   /**
@@ -3738,7 +3850,7 @@ export class WorkspaceStore {
     return { member: row!.member === 1, banned: row!.banned === 1 };
   }
 
-  /** Everyone active, by name. */
+  /** Everyone active who can be put in a room, by name (`ACTIVE_PEOPLE`). */
   async activePeople(): Promise<User[]> {
     return this.db.all<User>(ACTIVE_PEOPLE);
   }
@@ -3748,23 +3860,29 @@ export class WorkspaceStore {
     return this.db.all<User>(PEOPLE_WITH_IDS, JSON.stringify(ids));
   }
 
+  /** The people with `ids` who exist, active or not, whom `askerId` can start a DM with (`DIRECT_PEOPLE`). */
+  async directPeople(ids: UserId[], askerId: UserId): Promise<User[]> {
+    return this.db.all<User>(DIRECT_PEOPLE, JSON.stringify(ids), askerId);
+  }
+
   /** The people with `ids`, whatever their status, as the people directory lists them. */
   async directoryEntries(ids: UserId[]): Promise<DirectoryEntry[]> {
     return (await this.db.all<DirectoryRow>(DIRECTORY_WITH_IDS, JSON.stringify(ids))).map(directoryEntry);
   }
 
   /**
-   * The first page of the active people whose names contain `query`, by name: room `roomId`'s members,
-   * or anyone's when it's null.
+   * The first page of the active people whose names contain `query`, by name, whom `askerId` can ask:
+   * room `roomId`'s members, or anyone's when it's null.
    */
-  async mentionable(query: string, roomId: RoomId | null): Promise<DirectoryEntry[]> {
-    const rows = roomId === null ? await this.db.all<DirectoryRow>(MENTIONABLE_PEOPLE, query) : await this.db.all<DirectoryRow>(MENTIONABLE_MEMBERS, query, roomId);
+  async mentionable(query: string, roomId: RoomId | null, askerId: UserId): Promise<DirectoryEntry[]> {
+    const rows =
+      roomId === null ? await this.db.all<DirectoryRow>(MENTIONABLE_PEOPLE, query, askerId) : await this.db.all<DirectoryRow>(MENTIONABLE_MEMBERS, query, roomId, askerId);
     return rows.map(directoryEntry);
   }
 
-  /** Everyone, whatever their status, for the people directory. */
-  async directory(): Promise<DirectoryEntry[]> {
-    return (await this.db.all<DirectoryRow>(DIRECTORY)).map(directoryEntry);
+  /** Everyone `askerId` is told of, whatever their status, for the people directory. */
+  async directory(askerId: UserId): Promise<DirectoryEntry[]> {
+    return (await this.db.all<DirectoryRow>(DIRECTORY, askerId)).map(directoryEntry);
   }
 
   /** Someone as the people directory lists them, whatever their status, or null if nobody has id `userId`. */
@@ -3888,9 +4006,35 @@ export class WorkspaceStore {
     return row ? storedAgentSettings(row, rooms) : null;
   }
 
-  /** Agent `agentId` as a question for it in room `roomId` finds it (`ANSWERING_AGENT`), or null unless it's an active agent there. */
-  async answeringAgent(roomId: RoomId, agentId: UserId): Promise<AnsweringAgent | null> {
-    const [row] = await this.db.all<AnsweringColumns & { name: string; model: string }>(ANSWERING_AGENT, roomId, agentId);
+  /**
+   * The active agents `askerId` can ask, by name, as Available Agents lists them, each with the rooms it
+   * shares with them, if it's kept to the open rooms picked, and before them @ember as the people
+   * directory lists it, or null while Ember AI is off, read together.
+   */
+  async availableAgents(askerId: UserId): Promise<{ ember: DirectoryEntry | null; agents: AvailableStoredAgent[] }> {
+    const [[ember], agents, rooms] = (await this.db.batch([
+      statement(ACTIVE_PERSON, ASSISTANT_ID),
+      statement(AVAILABLE_AGENTS, askerId),
+      statement(AVAILABLE_AGENTS_ROOMS, askerId),
+    ])) as [DirectoryRow[], Array<DirectoryRow & Pick<AgentRow, "description" | "every_open_room">>, Array<AgentRoom & { user_id: UserId }>];
+    const roomsOf = Map.groupBy(rooms, (room) => room.user_id);
+    return {
+      ember: ember ? directoryEntry(ember) : null,
+      agents: agents.map((row) => ({
+        ...directoryEntry(row),
+        description: row.description,
+        access: keptForIn(row.agent_access) ?? "everyone",
+        rooms: row.every_open_room === 1 ? null : (roomsOf.get(row.id) ?? []).map(({ id, name }) => ({ id, name })),
+      })),
+    };
+  }
+
+  /**
+   * Agent `agentId` as a question `askerId` asked it in room `roomId` finds it (`ANSWERING_AGENT`), or null
+   * unless it's an active agent there that answers them.
+   */
+  async answeringAgent(roomId: RoomId, agentId: UserId, askerId: UserId): Promise<AnsweringAgent | null> {
+    const [row] = await this.db.all<AnsweringColumns & { name: string; model: string }>(ANSWERING_AGENT, roomId, agentId, askerId);
     return row ? { name: row.name, model: row.model, ...answeringOf(row) } : null;
   }
 
@@ -3928,12 +4072,15 @@ export class WorkspaceStore {
 
   /**
    * Adds an agent as `agent` has it, in one batch: a bot without a token, so that no key opens anything as
-   * it, with its avatar if it has one, what makes it an agent, and its memberships of every open room, or
-   * of the open rooms picked, of those there are.
+   * it, with its avatar if it has one, whom it's kept for, unless everyone can ask it, what makes it an
+   * agent, and its memberships of every open room, or of the open rooms picked, of those there are: of
+   * none, for one only administrators' direct messages reach.
    */
-  async createAgent({ id, name, avatar, rooms, createdBy, ...setup }: NewStoredAgent, now: string): Promise<void> {
+  async createAgent({ id, name, avatar, access, rooms: picked, createdBy, ...setup }: NewStoredAgent, now: string): Promise<void> {
+    const rooms = access === "admin-dms" ? [] : picked;
     await this.db.batch([
       statement(INSERT_BOT, id, name, null, avatar?.key ?? null, avatar?.variant ?? null, now, now),
+      ...(access === "everyone" ? [] : [statement(KEEP_AGENT_FOR, access, id)]),
       ...keeping(avatar),
       statement(INSERT_AGENT, id, ...agentColumns(setup), rooms === null ? 1 : 0, createdBy, now),
       rooms === null ? statement(GRANT_OPEN_ROOMS_TO_USER, id, now, now) : statement(GRANT_PICKED_ROOMS, id, JSON.stringify(rooms), now),
@@ -3942,15 +4089,17 @@ export class WorkspaceStore {
 
   /**
    * Changes agent `agentId` as `change` has it, in one batch: its name, its avatar, as `changeAvatar` gives
-   * someone theirs, its setup, recording who changed it, and when, and the open rooms it's in: every one,
-   * or just the ones picked, keeping the rooms it's in that aren't open.
+   * someone theirs, its setup, recording who changed it, and when, whom it's kept for, and the open rooms
+   * it's in: every one, or just the ones picked, keeping the rooms it's in that aren't open, or none at
+   * all, private rooms neither, once only administrators' direct messages reach it.
    */
-  async changeAgent(agentId: UserId, { name, setup, rooms, avatar, changedBy }: StoredAgentChange, now: string): Promise<void> {
+  async changeAgent(agentId: UserId, { name, setup, access, rooms, avatar, changedBy }: StoredAgentChange, now: string): Promise<void> {
     await this.db.batch([
       ...(name === undefined ? [] : [statement(RENAME_BOT, name, now, agentId)]),
       ...(avatar ? avatarChange(agentId, avatar.avatar, avatar.previous, now, avatar.dueAt) : []),
       statement(CHANGE_AGENT, agentId, ...agentColumns(setup), changedBy, now),
-      ...(rooms === undefined ? [] : roomsChange(agentId, rooms, now)),
+      ...(access === undefined ? [] : [statement(KEEP_AGENT_FOR, keptForOf(access), agentId)]),
+      ...(access === "admin-dms" ? leaveEveryRoom(agentId) : rooms === undefined ? [] : roomsChange(agentId, rooms, now)),
     ]);
   }
 
@@ -4295,8 +4444,11 @@ export class WorkspaceStore {
 
   /** What the avatar of whoever has id `userId` is drawn from, whatever their status, or null if nobody does. */
   async avatarOwner(userId: UserId): Promise<AvatarOwner | null> {
-    const [row] = await this.db.all<{ name: string; role: number } & AvatarColumns>(`SELECT name, role, avatar_key, avatar_variant FROM users WHERE id = ?`, userId);
-    return row ? { name: row.name, bot: ROLES[row.role] === "bot", avatar: avatarOf(row) } : null;
+    const [row] = await this.db.all<{ name: string; role: number; agent_access: string | null } & AvatarColumns>(
+      `SELECT name, role, avatar_key, avatar_variant, agent_access FROM users WHERE id = ?`,
+      userId,
+    );
+    return row ? { name: row.name, bot: ROLES[row.role] === "bot", avatar: avatarOf(row), keptFor: keptForIn(row.agent_access) } : null;
   }
 
   /** Someone with the avatar they've uploaded, or a bot was given, whatever their status, or null if nobody has id `userId`. */
@@ -4417,7 +4569,7 @@ export class WorkspaceStore {
     return row ? roomToChange(row) : null;
   }
 
-  /** The same, with everyone active and whether they're in the room, read together. */
+  /** The same, with everyone active who can be put in a room and whether they're in it, read together. */
   async roomSettings(roomId: RoomId, userId: UserId): Promise<RoomSettings | null> {
     const [[row], people] = (await this.db.batch([statement(ROOM_TO_CHANGE, roomId, userId), statement(ACTIVE_PEOPLE_IN_ROOM, roomId)])) as [
       RoomToChangeRow[],

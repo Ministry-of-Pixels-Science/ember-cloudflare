@@ -824,8 +824,22 @@ agent's page, which changes it. The page sets up:
   longer offers keeps it, marked so in the menu, until it's saved with another.
 - **Search the web**, as @ember's does, for every model Ember offers. Turned on for a model kept from
   before that can't search, it says in red that the model can't, until the model or the switch changes.
-- **Rooms**: every room open to everyone, new ones too, as @ember is, or only the open rooms chosen.
-  People can still add it to a closed room or DM it, as they can anyone.
+- **Rooms**: Every room, which is every room open to everyone, new ones too, as @ember is, or only the
+  open rooms chosen. People can still add it to a closed room or DM it, as they can anyone.
+- **Admin access**, two switches, both off for an agent anyone can ask:
+  - **Admins only** leaves the agent in its rooms, where everyone reads what it answers, but it answers
+    administrators alone. A mention or a DM from anyone else gets no answer, the mention prompt and New
+    direct message don't offer it to them, and its profile tells them that only administrators can ask
+    it.
+  - **Only available in admin DMs** takes the agent out of every room, private ones too, keeps it out
+    of them, and holds Admins only on. Nobody else can see it: their people directory, mention prompt
+    and Available Agents don't list it, and its profile and avatar aren't there for them. Only an
+    administrator can start a DM with it, and it answers there while everyone in the DM is an
+    administrator.
+
+  Whoever becomes an administrator can ask these agents from then on, and no longer once they aren't
+  one. A DM someone had with an agent before it was kept for administrators stays theirs to read, and
+  the agent answers nothing more in it.
 
 Try it asks the agent a question as the page sets it up, before anyone saves, and shows the answer as
 the agent's message would, with how long it took, to nobody else. Create agent, and Save changes when
@@ -847,6 +861,13 @@ messages, deleted agents' too, on a DM with it alone in the sidebar and the room
 mention prompt and New direct message, and on its profile. The profile shows everyone what the agent
 does, the model it answers with, where that runs (Cloudflare's Workers AI, or the company that makes
 the model, which AI Gateway sends what it's asked to), and who set it up, but not its instructions.
+
+Available Agents, under the DMs in everyone's sidebar while Ember AI is on, says how many agents they
+can ask, @ember among them, and opens the list of them: each agent's picture, the @name that summons
+it, which a click copies, what it does, the rooms it shares with whoever is looking, each a link to the
+room, and a button that starts a DM with it. People who aren't administrators are listed only the
+agents anyone can ask. Administrators are listed the ones kept for them too, marked Admins only or
+Admin DMs only, with a link to each agent's page and to New agent.
 
 #### What Ember adds around the instructions
 

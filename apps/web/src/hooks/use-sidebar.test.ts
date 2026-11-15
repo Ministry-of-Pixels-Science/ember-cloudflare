@@ -207,7 +207,7 @@ describe("Live sidebar updates", () => {
 
   it("says each time it loads again by itself, for the people directory to load again too, failing or not", async () => {
     const onReload = vi.fn(() => Promise.reject(new TypeError("Failed to fetch")));
-    const { result } = renderHook(() => useSidebar(ada, () => {}, { people: new Map(), reload: onReload, update: () => {} }));
+    const { result } = renderHook(() => useSidebar(ada, () => {}, { people: new Map(), reload: onReload, update: () => {}, remove: () => {} }));
     await settle();
     expect(onReload).toHaveBeenCalledOnce();
     socket().connect();
@@ -415,14 +415,15 @@ describe("Huddles in your rooms", () => {
 });
 
 describe("Make or revoke administrators", () => {
-  /** Ada's sidebar, connected, telling `onSessionChanged` and the directory's `update`. */
+  /** Ada's sidebar, connected, telling `onSessionChanged` and the directory's `reload`, `update` and `remove`. */
   async function connected() {
-    const [onSessionChanged, update] = [vi.fn(), vi.fn()];
-    renderHook(() => useSidebar(ada, onSessionChanged, { people: new Map(), reload: async () => {}, update }));
+    const [onSessionChanged, update, remove] = [vi.fn(), vi.fn(), vi.fn()];
+    const reload = vi.fn(async () => {});
+    renderHook(() => useSidebar(ada, onSessionChanged, { people: new Map(), reload, update, remove }));
     await settle();
     socket().connect();
     await settle();
-    return { onSessionChanged, update };
+    return { onSessionChanged, reload, update, remove };
   }
 
   it("changes whoever the workspace socket says has changed in the people directory", async () => {
@@ -431,6 +432,28 @@ describe("Make or revoke administrators", () => {
     socket().receive({ type: "user.updated", user: promoted });
     expect(update).toHaveBeenCalledWith(promoted);
     expect(onSessionChanged).not.toHaveBeenCalled();
+  });
+
+  it("takes out of the people directory whoever the workspace socket says this person is no longer told of", async () => {
+    const { update, remove } = await connected();
+    socket().receive({ type: "user.gone", userId: grace.id });
+    expect(remove).toHaveBeenCalledExactlyOnceWith(grace.id);
+    expect(update).not.toHaveBeenCalled();
+    expect(sidebarRequests()).toHaveLength(2);
+  });
+
+  it("loads the people directory again once the person signed in is given another role, which decides who it lists them", async () => {
+    const { reload } = await connected();
+    expect(reload).toHaveBeenCalledTimes(2);
+    socket().receive({ type: "user.updated", user: listed(ada, "administrator") });
+    expect(reload).toHaveBeenCalledTimes(3);
+    socket().receive({ type: "user.updated", user: listed(ada, "member") });
+    expect(reload).toHaveBeenCalledTimes(4);
+
+    // But not for anything else about them, nor for someone else's role.
+    socket().receive({ type: "user.updated", user: { ...listed(ada, "member"), bio: "Poet of science" } });
+    socket().receive({ type: "user.updated", user: listed(grace, "administrator") });
+    expect(reload).toHaveBeenCalledTimes(4);
   });
 
   it("says when the person signed in has been made an administrator, or a member again", async () => {
@@ -450,7 +473,7 @@ describe("Make or revoke administrators", () => {
 
   it("takes a change heard before the welcome over the welcome, which may be older, until it connects again", async () => {
     const [onSessionChanged, update] = [vi.fn(), vi.fn()];
-    renderHook(() => useSidebar(ada, onSessionChanged, { people: new Map(), reload: async () => {}, update }));
+    renderHook(() => useSidebar(ada, onSessionChanged, { people: new Map(), reload: async () => {}, update, remove: () => {} }));
     await settle();
     socket().open();
     socket().receive({ type: "user.updated", user: listed(ada, "administrator") });
@@ -467,7 +490,7 @@ describe("Make or revoke administrators", () => {
 
   it("takes the next connection's welcome again after one that stopped answering", async () => {
     const [onSessionChanged, update] = [vi.fn(), vi.fn()];
-    renderHook(() => useSidebar(ada, onSessionChanged, { people: new Map(), reload: async () => {}, update }));
+    renderHook(() => useSidebar(ada, onSessionChanged, { people: new Map(), reload: async () => {}, update, remove: () => {} }));
     await settle();
     socket().open();
     socket().receive({ type: "user.updated", user: listed(ada, "administrator") });
@@ -571,7 +594,7 @@ describe("Welcome card for administrators, until they dismiss it", () => {
 describe("Shared room order", () => {
   it("loads its rooms again a while after the workspace socket says the shared order changed, once for the news that comes meanwhile", async () => {
     const onReload = vi.fn(async () => {});
-    const { result } = renderHook(() => useSidebar(ada, () => {}, { people: new Map(), reload: onReload, update: () => {} }));
+    const { result } = renderHook(() => useSidebar(ada, () => {}, { people: new Map(), reload: onReload, update: () => {}, remove: () => {} }));
     socket().connect();
     await settle();
     expect(sidebarRequests()).toHaveLength(2);
@@ -639,7 +662,7 @@ describe("Shared room order", () => {
 describe("People", () => {
   const hedy: Me = { id: "u3", name: "Hedy", administrator: false };
   /** A people directory that lists Hedy as `status`. */
-  const listingHedy = (status: DirectoryUser["status"]) => ({ people: new Map([[hedy.id, { ...listed(hedy, "member"), status }]]), reload: async () => {}, update: () => {} });
+  const listingHedy = (status: DirectoryUser["status"]) => ({ people: new Map([[hedy.id, { ...listed(hedy, "member"), status }]]), reload: async () => {}, update: () => {}, remove: () => {} });
 
   it("doesn't load its rooms again for someone new, someone back, or someone changing, since it lists only DMs someone is in", async () => {
     renderHook(() => useSidebar(ada, () => {}, listingHedy("suspended")));

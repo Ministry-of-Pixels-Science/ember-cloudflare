@@ -1,4 +1,4 @@
-import type { DirectoryUser, DirectRoom } from "@ember/protocol";
+import type { DirectoryUser, DirectRoom, Me } from "@ember/protocol";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -33,10 +33,13 @@ interface Options {
   reloadPeople?: () => Promise<void>;
   /** Puts the link that opened it in the page. */
   opener?: boolean;
+  /** Whether Ada is an administrator, which she isn't by default. */
+  administrator?: boolean;
 }
 
 /** New direct message as Ada opens it, over a page with the drawer's toggle in its header. */
-function showDialog({ people = everyone, reloadPeople = vi.fn(async () => {}), opener = true }: Options = {}) {
+function showDialog({ people = everyone, reloadPeople = vi.fn(async () => {}), opener = true, administrator = false }: Options = {}) {
+  const me: Me = { id: ada.id, name: ada.name, administrator };
   const [onClose, onFailed, onAnswered] = [vi.fn(), vi.fn(), vi.fn()];
   const askForRoom = vi.fn(() => (answer: RoomAnswer) => onAnswered(answer));
   render(
@@ -50,7 +53,7 @@ function showDialog({ people = everyone, reloadPeople = vi.fn(async () => {}), o
   const link = opener ? screen.getByRole("link", { name: "DMs" }) : null;
   const dialog = (people: DirectoryUser[]) => (
     <PeopleContext value={directory(people)}>
-      <NewDirectDialog opener={link} meId={ada.id} reloadPeople={reloadPeople} askForRoom={askForRoom} onClose={onClose} onFailed={onFailed} />
+      <NewDirectDialog opener={link} me={me} reloadPeople={reloadPeople} askForRoom={askForRoom} onClose={onClose} onFailed={onFailed} />
     </PeopleContext>
   );
   const { rerender } = render(dialog(people));
@@ -112,6 +115,28 @@ describe("Where bots show up", () => {
     showDialog({ people: [...everyone, ...bots] });
     await waitFor(() => expect(listed()).toEqual(["Ada Byron", "alan Turing", "Barbara Liskov", "Build Bot", "Grace Hopper", "Linus Torvalds", "Recap Agent"]));
     expect(within(option("Recap Agent")).getByText("Agent")).toHaveAttribute("data-slot", "badge");
+  });
+});
+
+describe("AI agents only administrators can ask", () => {
+  const agents = [
+    { ...person("b2", "Recap"), role: "bot" as const, agent: true as const },
+    { ...person("b3", "Herald"), role: "bot" as const, agent: true as const, adminsOnly: true as const },
+  ];
+
+  it("leaves them out for anyone else, as a DM with one wouldn't start", async () => {
+    const { user } = showDialog({ people: [...everyone, ...agents] });
+    await waitFor(() => expect(listed()).toContain("Recap Agent"));
+    expect(listed()).not.toContain("Herald Agent");
+    await user.type(search(), "herald");
+    expect(listed()).toEqual([]);
+    expect(status()).toHaveTextContent("No people found. Try another name.");
+  });
+
+  it("lists them for an administrator", async () => {
+    const { user } = showDialog({ people: [...everyone, ...agents], administrator: true });
+    await user.type(search(), "herald");
+    expect(listed()).toEqual(["Herald Agent"]);
   });
 });
 

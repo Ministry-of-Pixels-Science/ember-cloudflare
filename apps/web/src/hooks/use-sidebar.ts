@@ -55,9 +55,11 @@ interface Directory {
   reload: () => Promise<void>;
   /** Changes someone in it, as the socket says they are now. */
   update: (user: DirectoryUser) => void;
+  /** Takes someone out of it, once the socket says this person is no longer told of them. */
+  remove: (userId: UserId) => void;
 }
 
-const NO_DIRECTORY: Directory = { people: new Map(), reload: async () => {}, update: () => {} };
+const NO_DIRECTORY: Directory = { people: new Map(), reload: async () => {}, update: () => {}, remove: () => {} };
 
 /** Whether `you` and `me` are the same person, as they are now. */
 const isSame = (you: Me, me: Me) => you.id === me.id && you.name === me.name && you.administrator === me.administrator;
@@ -71,17 +73,19 @@ const isSame = (you: Me, me: Me) => you.id === me.id && you.name === me.name && 
  * in any of them. It loads again when the tab is shown after more than a minute hidden too, as
  * `refresh-room:visible` reloads it (Campfire's users/sidebar_helper.rb), which Campfire does on a
  * room's page and this does on every page, and, its rooms only, a while after the socket says the shared
- * order has changed, and once it says this person has been given another role. It loads again at once
- * after a list that may have a room in the wrong place, one this person was taken out of and put back
- * in while the list was on its way. `refresh` asks for it again, settling once a list asked for since
- * has come, or failing as that did.
+ * order has changed. Once it says this person has been given another role, it loads again with the
+ * people directory, which lists administrators more. It loads again at once after a list that may have
+ * a room in the wrong place, one this person was taken out of and put back in while the list was on its
+ * way. `refresh` asks for it again, settling once a list asked for since has come, or failing as that
+ * did.
  *
  * `onSessionChanged` hears when who the browser's session signs in changes: null once it has expired,
  * whoever another tab signed in as, or `me` as they are now, once they've been made an administrator,
  * say. The people `directory` loads again each time the sidebar does by itself, and hears whoever the
- * socket says has changed. `onAccountChanged` hears the workspace as the socket says it is, each time
- * it connects and whenever an administrator changes it. `onGone` hears of each room the socket says is
- * gone as it leaves the list.
+ * socket says has changed, or says this person is no longer told of, as an AI agent kept to
+ * administrators' direct messages is. `onAccountChanged` hears the workspace as the socket says it is,
+ * each time it connects and whenever an administrator changes it. `onGone` hears of each room the
+ * socket says is gone as it leaves the list.
  */
 export function useSidebar(
   me: Me,
@@ -137,6 +141,7 @@ export function useSidebar(
     directory.update(user);
     if (user.id === me.id) signsIn({ id: user.id, name: user.name, administrator: user.role === "administrator" });
   });
+  const hidden = useEffectEvent((userId: UserId) => directory.remove(userId));
 
   useEffect(() => {
     let closed = false;
@@ -195,10 +200,13 @@ export function useSidebar(
         case "user.updated":
           if (!isSomeoneElse(frame.user)) {
             toldOf.you = true;
-            // Only administrators are given the welcome card with their rooms, so a new role loads them again.
-            if ((frame.user.role === "administrator") !== heard.current.administrator) reloadRooms();
+            // Only administrators are given the welcome card with their rooms, and told of the AI agents
+            // only their direct messages reach, so a new role loads the rooms and the people again.
+            if ((frame.user.role === "administrator") !== heard.current.administrator) reload();
           }
           return changed(frame.user);
+        case "user.gone":
+          return hidden(frame.userId);
         case "room.involvement":
           heardOf(frame.roomId);
           return change({ type: "involved", roomId: frame.roomId, involvement: frame.involvement });
