@@ -1,21 +1,21 @@
 // Memberful's keys, which administrators give Ember in Set up Memberful, behind Membership's Memberful
 // card, through `/api/account/memberful_keys`, unless the deployment has them as secrets: the address of
-// the Memberful site whose members sign in, the OAuth identifier, OAuth secret and API key of a custom app
+// the Memberful site whose members sign in, the API Key, OAuth Identifier and OAuth Secret of a custom app
 // there, and the secret key of the webhook it sends Ember. The Worker asks Memberful about them before
 // Ember keeps them, and keeps the secrets sealed, never showing them again.
 
 import { isLoopback } from "./apps.ts";
 import type { WorkspaceSettings } from "./index.ts";
 
-/** What Set up Memberful gives `PUT /api/account/memberful_keys`, as Memberful's dashboard shows them. */
+/** What Set up Memberful gives `PUT /api/account/memberful_keys`, as Memberful's dashboard shows them, top to bottom. */
 export interface MemberfulKeysChange {
   /** The Memberful site's address, such as https://example.memberful.com, which Ember keeps as its origin. */
   site: string;
-  /** The custom app's OAuth identifier and secret, which members sign in with. */
+  /** The custom app's API Key, which Ember checks memberships with. */
+  apiKey: string;
+  /** The custom app's OAuth Identifier and Secret, which members sign in with. */
   clientId: string;
   clientSecret: string;
-  /** The custom app's API key, which Ember checks memberships with. */
-  apiKey: string;
   /** The secret key Memberful signs the webhook's requests with. */
   webhookSecret: string;
 }
@@ -30,18 +30,28 @@ export type MemberfulSaved = Pick<WorkspaceSettings, "memberfulSite" | "memberfu
 const MAX_SITE_LENGTH = 2048;
 const MAX_KEY_LENGTH = 255;
 
+/** A Memberful site's name alone, such as `example` for https://example.memberful.com: letters, digits and hyphens, as a host's label is. */
+const SITE_NAME = /^[a-z\d](?:[a-z\d-]*[a-z\d])?$/i;
+
+/**
+ * A host's name as an address gives it once it's read: such labels between dots, or an IPv6 address in
+ * brackets. Browsers read some hosts that aren't, such as one with a space, which Chrome keeps as `%20`
+ * where the Worker refuses it, so that the steps would link to a site whose address Save refuses.
+ */
+const HOST = /^(?:[a-z\d](?:[a-z\d-]*[a-z\d])?\.)*[a-z\d](?:[a-z\d-]*[a-z\d])?\.?$|^\[[\da-f:.]+\]$/i;
+
 /** Why Set up Memberful's fields are refused before Memberful is asked about them. */
-export const MEMBERFUL_SITE_REFUSED = "Give your Memberful site's address, such as https://example.memberful.com.";
-export const MEMBERFUL_CLIENT_ID_REFUSED = "Copy the OAuth identifier from your custom app in Memberful.";
-export const MEMBERFUL_CLIENT_SECRET_REFUSED = "Copy the OAuth secret from your custom app in Memberful.";
-export const MEMBERFUL_API_KEY_REFUSED = "Copy the API key from your custom app in Memberful.";
+export const MEMBERFUL_SITE_REFUSED = "Give your Memberful site's address, such as yoursite.memberful.com.";
+export const MEMBERFUL_API_KEY_REFUSED = "Copy the API Key from your custom app in Memberful.";
+export const MEMBERFUL_CLIENT_ID_REFUSED = "Copy the OAuth Identifier from your custom app in Memberful.";
+export const MEMBERFUL_CLIENT_SECRET_REFUSED = "Copy the OAuth Secret from your custom app in Memberful.";
 export const MEMBERFUL_WEBHOOK_SECRET_REFUSED = "Copy the secret key from your webhook in Memberful.";
 
 /** Why they're refused once Memberful has been asked about them, or couldn't be. */
 export const MEMBERFUL_SITE_UNREACHABLE = "Ember couldn't reach a site at that address. Check your Memberful site's address.";
-export const MEMBERFUL_SITE_UNKNOWN = "That isn't a Memberful site's address. Give the one your members sign in at, such as https://example.memberful.com.";
-export const MEMBERFUL_API_KEY_UNKNOWN = "Memberful didn't take that API key. Copy it again from your custom app.";
-export const MEMBERFUL_CLIENT_UNKNOWN = "Memberful doesn't know that OAuth identifier and secret together. Copy both again from your custom app.";
+export const MEMBERFUL_SITE_UNKNOWN = "That isn't a Memberful site's address. Give the one your members sign in at, such as yoursite.memberful.com.";
+export const MEMBERFUL_API_KEY_UNKNOWN = "Memberful didn't take that API Key. Copy it again from your custom app.";
+export const MEMBERFUL_CLIENT_UNKNOWN = "Memberful doesn't know that OAuth Identifier and Secret together. Copy both again from your custom app.";
 export const MEMBERFUL_KEYS_UNCHECKED = "Ember couldn't check the keys with Memberful. Try again.";
 
 /**
@@ -58,16 +68,17 @@ declare const URL: {
 
 /**
  * The Memberful site `text` gives, as its origin, so that a path or a slash after it changes nothing, or
- * null when it can't be one's: an https address, https being taken as read without a scheme, with a host
- * and no name and password, or an http one on this computer, where the browser tests fake a site.
+ * null when it can't be one's: a site's name alone, which is its address at memberful.com, or an https
+ * address, https being taken as read without a scheme, with a host's name (`HOST`) and no name and
+ * password, or an http one on this computer, where the browser tests fake a site.
  */
 export function memberfulSiteOf(text: string): string | null {
   const given = text.trim();
   if (given === "" || given.length > MAX_SITE_LENGTH) return null;
-  const address = /^[a-z][a-z\d+.-]*:\/\//i.test(given) ? given : `https://${given}`;
+  const address = SITE_NAME.test(given) ? `https://${given}.memberful.com` : /^[a-z][a-z\d+.-]*:\/\//i.test(given) ? given : `https://${given}`;
   if (!URL.canParse(address)) return null;
   const { origin, protocol, hostname, username, password } = new URL(address);
-  if (hostname === "" || username !== "" || password !== "") return null;
+  if (!HOST.test(hostname) || username !== "" || password !== "") return null;
   return protocol === "https:" || (protocol === "http:" && isLoopback(hostname)) ? origin : null;
 }
 
@@ -77,11 +88,11 @@ export function memberfulKeyOf(text: string): string | null {
   return key.length <= MAX_KEY_LENGTH && /^[\x21-\x7e]+$/.test(key) ? key : null;
 }
 
-/** Why each key is refused before Memberful is asked about it. */
+/** Why each key is refused before Memberful is asked about it, in the order Set up Memberful asks for them. */
 const KEY_REFUSED = {
+  apiKey: MEMBERFUL_API_KEY_REFUSED,
   clientId: MEMBERFUL_CLIENT_ID_REFUSED,
   clientSecret: MEMBERFUL_CLIENT_SECRET_REFUSED,
-  apiKey: MEMBERFUL_API_KEY_REFUSED,
   webhookSecret: MEMBERFUL_WEBHOOK_SECRET_REFUSED,
 } as const satisfies Record<Exclude<MemberfulField, "site">, string>;
 
@@ -94,7 +105,7 @@ export function parseMemberfulKeysChange(data: unknown): MemberfulKeysChange | {
   };
   const site = memberfulSiteOf(text("site"));
   if (site === null) return { error: MEMBERFUL_SITE_REFUSED, field: "site" };
-  const keys = { clientId: "", clientSecret: "", apiKey: "", webhookSecret: "" };
+  const keys = { apiKey: "", clientId: "", clientSecret: "", webhookSecret: "" };
   for (const field of Object.keys(KEY_REFUSED) as Array<keyof typeof KEY_REFUSED>) {
     const key = memberfulKeyOf(text(field));
     if (key === null) return { error: KEY_REFUSED[field], field };

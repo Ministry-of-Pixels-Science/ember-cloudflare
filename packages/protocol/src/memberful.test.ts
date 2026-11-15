@@ -30,9 +30,19 @@ describe("a Memberful site's address", () => {
     expect(memberfulSiteOf("https://members.fernwood.example:8443")).toBe("https://members.fernwood.example:8443");
   });
 
+  it("takes a site's name alone as its address at memberful.com, kept as the address in full is, so that accounts linked at it stay linked", () => {
+    for (const given of ["fernwood", " Fernwood ", "FERNWOOD"]) expect(memberfulSiteOf(given), given).toBe(SITE);
+    expect(memberfulSiteOf("fern-wood-2")).toBe("https://fern-wood-2.memberful.com");
+    expect(memberfulSiteOf("42")).toBe("https://42.memberful.com");
+    // Never a site of that name elsewhere, nor a name that's no host's label.
+    expect(memberfulSiteOf("fernwood")).not.toBe("https://fernwood");
+    for (const given of ["fern wood", "fern_wood", "-fernwood-"]) expect(memberfulSiteOf(given) ?? "", given).not.toContain("memberful.com");
+  });
+
   it("is http only on this computer, where the browser tests fake a site", () => {
     expect(memberfulSiteOf("http://127.0.0.1:8790")).toBe("http://127.0.0.1:8790");
     expect(memberfulSiteOf("http://localhost:8790/")).toBe("http://localhost:8790");
+    expect(memberfulSiteOf("http://[::1]:8790")).toBe("http://[::1]:8790");
     for (const given of ["http://fernwood.memberful.com", "ftp://fernwood.memberful.com", "javascript:alert(1)", "data:text/html,hi", "file:///etc/passwd"]) {
       expect(memberfulSiteOf(given), given).toBeNull();
     }
@@ -42,6 +52,15 @@ describe("a Memberful site's address", () => {
     for (const given of ["", "   ", "https://", "https:// fernwood.memberful.com", "https://ada:secret@fernwood.memberful.com", "https://ada@fernwood.memberful.com", `https://${"a".repeat(2048)}.com`]) {
       expect(memberfulSiteOf(given), given.slice(0, 40)).toBeNull();
     }
+  });
+
+  it("refuses a host that's no host's name, as Chrome refuses it too, which reads some of them as hosts the Worker refuses", () => {
+    for (const given of ["fern wood", "https://fern wood", "fern%20wood.memberful.com", "fern*wood.memberful.com", "fern_wood", "fern_wood.memberful.com", 'fern"wood.com', "fern{wood}.com", "-fernwood-"]) {
+      expect(memberfulSiteOf(given), given).toBeNull();
+    }
+    // Every host DNS names is one, an international one as browsers send it.
+    expect(memberfulSiteOf("members.fern-wood.co.uk")).toBe("https://members.fern-wood.co.uk");
+    expect(memberfulSiteOf("https://ファーン.example")).toBe("https://xn--bck9etd9a.example");
   });
 });
 
@@ -72,12 +91,13 @@ describe("Set up Memberful's keys", () => {
     ).toEqual(KEYS);
   });
 
-  it("refuses each field that can't be what it's for, on that field, the site first", () => {
+  it("refuses each field that can't be what it's for, on that field, the site first, then the keys as Memberful's dashboard shows them", () => {
     expect(parseMemberfulKeysChange({ ...KEYS, site: "http://fernwood.memberful.com", clientId: "" })).toEqual({ error: MEMBERFUL_SITE_REFUSED, field: "site" });
+    expect(parseMemberfulKeysChange({ ...KEYS, clientId: "", apiKey: "" })).toEqual({ error: MEMBERFUL_API_KEY_REFUSED, field: "apiKey" });
     const refusals = [
+      ["apiKey", MEMBERFUL_API_KEY_REFUSED],
       ["clientId", MEMBERFUL_CLIENT_ID_REFUSED],
       ["clientSecret", MEMBERFUL_CLIENT_SECRET_REFUSED],
-      ["apiKey", MEMBERFUL_API_KEY_REFUSED],
       ["webhookSecret", MEMBERFUL_WEBHOOK_SECRET_REFUSED],
     ] as const;
     for (const [field, error] of refusals) {

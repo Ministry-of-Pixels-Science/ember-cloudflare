@@ -908,6 +908,39 @@ const subscriptionChanged = (member: { id: string }, event = "subscription.deact
   subscription: { id: 101, active: false, autorenew: false, member: { id: Number(member.id), email: "someone@example.com" } },
 });
 
+/**
+ * Every webhook Memberful sends, each as its webhook event reference shows its payload
+ * (memberful.com/docs/api-reference/webhook-event-reference): those about a member, `member`, naming them
+ * by their id, a number, as a member's own events, their subscriptions' and their orders' do, and those
+ * about nobody's membership, a plan's price's, which it sends as `subscription`, and a download's.
+ */
+function memberfulEvents(member: { id: string }) {
+  const id = Number(member.id);
+  const about = { id, email: "someone@example.com", first_name: "Someone", full_name: "Someone Else", unrestricted_access: false };
+  const pass = { id: 7, name: "Members" };
+  const subscription = { id: 101, active: true, autorenew: true, member_id: id, member: about, pass, subscription_plan: { id: 3, label: "$10/month", name: "Monthly" } };
+  const order = { uuid: "4DACB7B0-B728-0130-F9E8-102B343DC979", number: "4DACB7B0", total: 9900, member: about, products: [], subscriptions: [{ id: 101, active: true, pass }] };
+  const plan = { id: 3, price: 1000, name: "Monthly", label: "$10/month", renewal_period: "monthly", for_sale: true, pass, type: "standard_plan" };
+  const product = { id: 5, name: "Sample download", price: 1000, for_sale: true, type: "download" };
+  return {
+    aboutMember: [
+      { event: "member_signup", member: about },
+      { event: "member_updated", member: about, changed: { email: ["old_email@example.com", about.email] } },
+      { event: "member.deleted", member: { deleted: true, id } },
+      { event: "tax_id.updated", member: about, tax_id: { country: "FR", type: "eu_vat", value: "FR1234567890" } },
+      { event: "custom_fields.updated", member: about, custom_fields: [{ field: { id: 1, label: "T-shirt size" }, value: "M" }] },
+      ...["created", "updated", "activated", "reactivated", "deactivated", "deleted"].map((change) => ({ event: `subscription.${change}`, subscription })),
+      // A renewal's order names nobody: its subscription does.
+      { event: "subscription.renewed", subscription, order: { uuid: order.uuid, status: "completed", total: 9900 } },
+      ...["purchased", "refunded", "suspended", "completed"].map((status) => ({ event: `order.${status}`, order: { ...order, status } })),
+    ],
+    aboutNobody: [
+      ...["created", "updated", "deleted"].map((change) => ({ event: `subscription_plan.${change}`, subscription: plan })),
+      ...["created", "updated", "deleted"].map((change) => ({ event: `download.${change}`, product })),
+    ],
+  };
+}
+
 /** A test run while the Workspace has every Memberful key too, as a deployment that hears Memberful's webhooks does. */
 const hearingWebhooks = (run: () => Promise<void>) => () => withWorkspaceEnv(ALL_KEYS, run);
 
@@ -1007,7 +1040,7 @@ describe("Memberful memberships", () => {
           { event: "order.suspended", order: { uuid: "an-order", member: { id: 4242 } } },
         ];
         for (const payload of named) {
-          expect((await webhook(payload)).status).toBe(204);
+          expect((await webhook(payload)).status).toBe(200);
           await checked();
           expect(askedAfter(site.requests).at(-1), payload.event).toEqual(["4242"]);
         }
@@ -1020,11 +1053,34 @@ describe("Memberful memberships", () => {
           body: JSON.stringify({ role: "administrator" }),
         });
         expect(promoted.status).toBe(200);
-        for (const payload of [subscriptionChanged({ id: "9999" }), subscriptionChanged(dorothy), { event: "subscription_plan.updated", subscription_plan: { id: 3 } }, "not an object"]) {
-          expect((await webhook(payload)).status).toBe(204);
+        const planChanged = { event: "subscription_plan.updated", subscription: { id: 3, name: "Monthly", pass: { id: 1, name: "Members" } } };
+        for (const payload of [subscriptionChanged({ id: "9999" }), subscriptionChanged(dorothy), planChanged, "not an object"]) {
+          expect((await webhook(payload)).status).toBe(200);
         }
         expect(await queuedChecks()).toEqual([]);
         expect(site.requests.slice(asked).filter(({ url }) => url === `${SITE}/api/graphql`)).toEqual([]);
+      }),
+    );
+
+    it(
+      "answer 200 to every event Memberful sends, checking the membership of the member one is about, whatever it's called, and nobody's for one about a plan, a download or nothing Ember knows of",
+      hearingWebhooks(async () => {
+        await setUpWithMemberful();
+        const site = fakeMemberful();
+        await memberfulSession();
+        const { aboutMember, aboutNobody } = memberfulEvents(katherine);
+        for (const payload of aboutMember) {
+          const asked = askedAfter(site.requests).length;
+          expect((await webhook(payload)).status, payload.event).toBe(200);
+          await checked();
+          expect(askedAfter(site.requests).slice(asked), payload.event).toEqual([["4242"]]);
+        }
+
+        const asked = site.requests.length;
+        const unheardOf = [{ event: "member.renamed", account: { id: 4242 } }, { event: "something.new" }, {}, []];
+        for (const payload of [...aboutNobody, ...unheardOf]) expect((await webhook(payload)).status, JSON.stringify(payload)).toBe(200);
+        expect(await queuedChecks()).toEqual([]);
+        expect(site.requests.slice(asked)).toEqual([]);
       }),
     );
 
@@ -1036,7 +1092,7 @@ describe("Memberful memberships", () => {
         const { id } = (await memberfulSession()).user;
         await turnMemberful(administrator, false);
         site.member = { ...katherine, subscriptions: [{ active: false }] };
-        expect((await webhook(subscriptionChanged(katherine))).status).toBe(204);
+        expect((await webhook(subscriptionChanged(katherine))).status).toBe(200);
         await checked();
         expect(await statusOf(administrator, id)).toBe("suspended");
       }),
@@ -1047,9 +1103,9 @@ describe("Memberful memberships", () => {
       hearingWebhooks(async () => {
         const administrator = await setUpWithMemberful();
         fakeMemberful();
-        expect((await webhook(subscriptionChanged(katherine))).status).toBe(204);
+        expect((await webhook(subscriptionChanged(katherine))).status).toBe(200);
         await turnMemberful(administrator, false);
-        expect((await webhook(subscriptionChanged(katherine))).status).toBe(204);
+        expect((await webhook(subscriptionChanged(katherine))).status).toBe(200);
         expect(await queuedChecks()).toEqual([]);
         expect(await count("membership_catch_ups")).toBe(0);
 
@@ -1075,7 +1131,7 @@ describe("Memberful memberships", () => {
         const rooms = await count("memberships");
 
         site.member = { ...katherine, subscriptions: [{ active: false }] };
-        expect((await webhook(subscriptionChanged(katherine))).status).toBe(204);
+        expect((await webhook(subscriptionChanged(katherine))).status).toBe(200);
         expect((await theirs.closed).code).toBe(4003);
         await checked();
         expect(await statusOf(administrator, id)).toBe("suspended");
@@ -1351,7 +1407,7 @@ describe("Memberful memberships", () => {
 
         site.member = { ...katherine, subscriptions: [{ active: false }] };
         site.held = Promise.resolve();
-        expect((await webhook(subscriptionChanged(katherine))).status).toBe(204);
+        expect((await webhook(subscriptionChanged(katherine))).status).toBe(200);
         answered.resolve();
         await checking;
         await checked();

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode, type RefObject } from "react";
 import { MEMBERFUL_CALLBACK_PATH, MEMBERFUL_WEBHOOK_PATH } from "@ember/protocol";
-import { memberfulSiteKept, parseMemberfulKeysChange, type MemberfulField, type MemberfulSaved } from "@ember/protocol/memberful";
+import { memberfulSiteKept, memberfulSiteOf, parseMemberfulKeysChange, type MemberfulField, type MemberfulSaved } from "@ember/protocol/memberful";
 import { FIELD_INPUT, Field } from "@/components/field";
 import { Xmark } from "@/components/icons/iconoir";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
@@ -17,15 +17,33 @@ import { DIALOG, DIALOG_BACKDROP, DIALOG_CLOSE, DIALOG_TITLE } from "./unsaved-c
 
 // Set up Memberful, for administrators: the dialog that Membership's Memberful card opens, as its switch
 // does until Ember has a Memberful site's keys, which gives Ember them here rather than as the Worker's
-// secrets, as the project's owner asked (2026-11-14). Three steps: the site's address, then a custom app
-// there, which sends members back to Ember, and its OAuth identifier, OAuth secret and API key, then a
-// webhook, which tells Ember when a membership changes, and its secret key, each of Ember's addresses
-// with a button that copies it. The Worker asks Memberful about the keys before it keeps them, and why it
-// didn't, if it didn't, is said on the field it's about. Styled as Set up huddles is.
+// secrets, as the project's owner asked (2026-11-14). Three steps: the site's address, which its name
+// alone gives too, then a custom app there, which sends members back to Ember, and its API Key, OAuth
+// Identifier and OAuth Secret, as the app's page shows them, top to bottom, then a webhook, which tells
+// Ember when a membership changes, and its secret key. Each says what to fill in on Memberful's form, by
+// the names Memberful gives its fields, as the owner asked once they'd set it up for real, with Ember's
+// addresses to copy, and links to the form once the site's address is at memberful.com, where Memberful
+// serves its admin, since Settings in Memberful's sidebar opens the account's profile rather than its
+// settings. The Worker asks Memberful about the keys before it keeps them, and why it didn't, if it
+// didn't, is said on the field it's about. Styled as Set up huddles is.
 
 /** What the dialog says first. */
 export const MEMBERFUL_SETUP_EXPLAINED =
   "Members of your Memberful site can join and sign in with their Memberful account. Add a custom app and a webhook for Ember there, then copy their keys here.";
+
+/** What's said under the site's address, unless Ember keeps the site. */
+const WHERE_THE_SITE_IS = "It's the address in your browser when you're signed in to Memberful's admin, such as yoursite.memberful.com.";
+
+/** A Memberful site's address at memberful.com, where Memberful serves the site's admin, unlike a custom domain, which may not. */
+const AT_MEMBERFUL = /^https:\/\/[^/]+\.memberful\.com$/;
+
+/** The page of the Memberful site `site`'s admin settings at `path`, once there's a site at memberful.com, or null. */
+const adminPageOf = (site: string | null, path: string) => (site !== null && AT_MEMBERFUL.test(site) ? `${site}/admin/settings/${path}` : null);
+
+/** Where the Memberful site `site`, an origin, adds a custom app, which the second step links to: its admin's form for one. */
+export const memberfulNewApp = (site: string | null) => adminPageOf(site, "custom_applications/new");
+/** And where it adds a webhook, which the third step links to. */
+export const memberfulNewWebhook = (site: string | null) => adminPageOf(site, "webhooks/new");
 
 /** What the line under the last key says while there's nothing else to say. */
 const SECRETS_KEPT = "Ember checks the keys with Memberful, then keeps the secrets encrypted.";
@@ -81,11 +99,11 @@ export function MemberfulSetup({ memberful, onSaved, onClose, onFailed }: Props)
   const [clientId, setClientId] = useState("");
   // Uncontrolled, as passwords are, so the secrets never reach their fields' `value` attributes, where custom CSS could read them.
   const secrets: Record<SecretField, RefObject<HTMLInputElement | null>> = {
-    clientSecret: useRef<HTMLInputElement>(null),
     apiKey: useRef<HTMLInputElement>(null),
+    clientSecret: useRef<HTMLInputElement>(null),
     webhookSecret: useRef<HTMLInputElement>(null),
   };
-  const [secretsTyped, setSecretsTyped] = useState<Record<SecretField, boolean>>({ clientSecret: false, apiKey: false, webhookSecret: false });
+  const [secretsTyped, setSecretsTyped] = useState<Record<SecretField, boolean>>({ apiKey: false, clientSecret: false, webhookSecret: false });
   const [refusal, setRefusal] = useState<Refusal | null>(null);
   // Checking the keys with Memberful holds the dialog open until it's answered.
   const [saving, setSaving] = useState(false);
@@ -93,6 +111,8 @@ export function MemberfulSetup({ memberful, onSaved, onClose, onFailed }: Props)
   const mounted = useMounted();
   const title = useRef<HTMLHeadingElement>(null);
   const typed = site.trim() !== "" && clientId.trim() !== "" && Object.values(secretsTyped).every(Boolean);
+  // The site, once what's typed can be its address, at whose admin the steps link to Memberful's forms.
+  const address = memberfulSiteOf(site);
 
   // What it says once the keys are kept starts at its title, so that it's read first.
   useEffect(() => {
@@ -111,9 +131,9 @@ export function MemberfulSetup({ memberful, onSaved, onClose, onFailed }: Props)
     const secretOf = (field: SecretField) => secrets[field].current?.value ?? "";
     const keys = parseMemberfulKeysChange({
       site,
+      apiKey: secretOf("apiKey"),
       clientId,
       clientSecret: secretOf("clientSecret"),
-      apiKey: secretOf("apiKey"),
       webhookSecret: secretOf("webhookSecret"),
     });
     if ("error" in keys) return setRefusal(keys);
@@ -183,29 +203,41 @@ export function MemberfulSetup({ memberful, onSaved, onClose, onFailed }: Props)
                   value={site}
                   readOnly={kept !== null}
                   inputMode="url"
-                  placeholder="https://example.memberful.com"
-                  note={kept !== null ? memberfulSiteKept(kept) : null}
+                  note={kept !== null ? memberfulSiteKept(kept) : WHERE_THE_SITE_IS}
                 />
               </Step>
               <Step number={2} title="Add a custom app" roomy={false}>
                 <Instructions first>
-                  In Memberful, open <em>Settings</em>, then <em>Custom applications</em>, and add one. Check{" "}
-                  <em>Include OAuth tokens with this application</em>, choose <em>Server-side</em>, and give it this OAuth Redirect URL:
+                  In Memberful, <MemberfulLink href={memberfulNewApp(address)}>create a new app for Ember</MemberfulLink>. Don't reuse an existing one,
+                  because its redirect URL must point at Ember. Name it <strong>Ember</strong>, check <em>Include OAuth tokens with this application</em>,
+                  choose <em>Server-side Application</em>, and paste this as the <em>OAuth Redirect URL</em>:
                 </Instructions>
-                <AddressToCopy url={redirectUrl} label="OAuth Redirect URL" />
-                <Instructions>Once it's made, copy its keys here.</Instructions>
+                <div>
+                  <AddressToCopy url={redirectUrl} label="OAuth Redirect URL" />
+                  <p className={cn(NOTE, "mt-1.5")}>
+                    Choose Server-side even if you plan a mobile app. Ember's server handles the sign-in; phone apps sign in through Ember.
+                  </p>
+                </div>
+                <Instructions>After you save, Memberful opens the app's page with its keys. Copy them here from top to bottom.</Instructions>
                 <div className="flex flex-col gap-4">
-                  <KeyInput field="clientId" label="OAuth identifier" {...keyProps} value={clientId} />
-                  <KeyInput field="clientSecret" label="OAuth secret" {...keyProps} secret={secrets.clientSecret} />
-                  <KeyInput field="apiKey" label="API key" {...keyProps} secret={secrets.apiKey} />
+                  <KeyInput field="apiKey" label="API Key" {...keyProps} secret={secrets.apiKey} />
+                  <KeyInput field="clientId" label="OAuth Identifier" {...keyProps} value={clientId} />
+                  <KeyInput field="clientSecret" label="OAuth Secret" {...keyProps} secret={secrets.clientSecret} />
                 </div>
               </Step>
               <Step number={3} title="Add a webhook" roomy={false}>
                 <Instructions first>
-                  Under <em>Settings</em>, then <em>Webhooks</em>, add one that sends the member, subscription and order events to this URL:
+                  So Ember removes access as soon as a membership ends, rather than at its daily check. This is separate from the app. In Memberful, go to{" "}
+                  <MemberfulLink href={memberfulNewWebhook(address)}>
+                    <em>Settings</em> → <em>Webhooks</em> → <em>Create webhook</em>
+                  </MemberfulLink>
+                  . Name it <strong>Ember</strong>, and paste this as the <em>Endpoint URL</em>:
                 </Instructions>
-                <AddressToCopy url={webhookUrl} label="webhook URL" />
-                <Instructions>Then copy its secret key here.</Instructions>
+                <AddressToCopy url={webhookUrl} label="Endpoint URL" />
+                <Instructions>
+                  Select every event under <em>Member</em>, <em>Order</em>, <em>Subscription</em>, and <em>Plan</em>. <em>Download</em> isn't needed. After you
+                  save it, Memberful gives the webhook a secret key. Copy it here.
+                </Instructions>
                 <div>
                   <KeyInput
                     field="webhookSecret"
@@ -233,6 +265,16 @@ export function MemberfulSetup({ memberful, onSaved, onClose, onFailed }: Props)
 /** What a step asks, before or after its address and fields, the `first` of it closer to the step's title. */
 function Instructions({ first = false, children }: { first?: boolean; children: ReactNode }) {
   return <p className={cn("leading-[1.6] text-muted-foreground", first && "-mt-2")}>{children}</p>;
+}
+
+/** `children`, as a link to `href` in Memberful's admin, which opens in a new tab, so that the keys typed here stay, or as they are while there's no page to link to. */
+export function MemberfulLink({ href, children }: { href: string | null; children: ReactNode }) {
+  if (href === null) return <>{children}</>;
+  return (
+    <a href={href} target="_blank" rel="noopener" className="underline">
+      {children}
+    </a>
+  );
 }
 
 /** An address of Ember's to give Memberful, with a button that copies it, called after `label`. */
@@ -263,7 +305,6 @@ interface KeyInputProps {
   secret?: RefObject<HTMLInputElement | null>;
   readOnly?: boolean;
   inputMode?: "url";
-  placeholder?: string;
   /** What's said under it, while it isn't refused. */
   note?: string | null;
   /** The id of what's said of it elsewhere, while it isn't refused. */
@@ -271,7 +312,7 @@ interface KeyInputProps {
 }
 
 /** A field of the steps, with why it's refused under it, if it is, or else its note. */
-function KeyInput({ field, label, refusal, saving, onType, value, secret, readOnly = false, inputMode, placeholder, note = null, describedBy }: KeyInputProps) {
+function KeyInput({ field, label, refusal, saving, onType, value, secret, readOnly = false, inputMode, note = null, describedBy }: KeyInputProps) {
   const id = FIELD_IDS[field];
   const refused = refusal?.field === field ? refusal.error : null;
   const said = refused !== null ? `${id}_refusal` : note !== null ? `${id}_note` : describedBy;
@@ -286,7 +327,6 @@ function KeyInput({ field, label, refusal, saving, onType, value, secret, readOn
           autoCorrect="off"
           spellCheck={false}
           inputMode={inputMode}
-          placeholder={placeholder}
           value={secret ? undefined : value}
           readOnly={readOnly}
           disabled={saving}
