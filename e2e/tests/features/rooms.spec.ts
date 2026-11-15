@@ -1,21 +1,23 @@
 import type { Room, Sidebar, WorkspaceServerFrame } from "@ember/protocol";
-import type { APIRequestContext, Page, WebSocketRoute } from "@playwright/test";
+import type { APIRequestContext, BrowserContext, Page, WebSocketRoute } from "@playwright/test";
 import { administratorSession, connectWorkspace, cookieHeader, createRoom, invitation, keepOtherRoomsOut, listing, makeAdministrator, rowsWithStars, signInAs, WORKSPACE_SOCKET } from "../../fixtures";
 import { expect, test, unique, type Member } from "./fixtures";
 
 /**
- * Lists in `page`'s sidebar just the rooms `shows` picks, and any DMs, as the list loads and as the
- * workspace socket brings rooms saved since, since every other test's open rooms take everyone in too.
+ * Makes every page in `context` list just the rooms `shows` picks, and any DMs, as the list loads and as
+ * the workspace socket brings rooms saved since, since every other test's open rooms take everyone in
+ * too. It routes the context, as `members` does, which stops routing it before closing it, so the test
+ * can end while a list is still loading.
  */
-async function showRoomsPicked(page: Page, shows: (room: Room) => boolean): Promise<void> {
+async function showRoomsPicked(context: BrowserContext, shows: (room: Room) => boolean): Promise<void> {
   const picked = (room: Room) => room.kind === "direct" || shows(room);
-  await page.route("**/api/sidebar", async (route) => {
+  await context.route("**/api/sidebar", async (route) => {
     const response = await route.fetch();
     if (!response.ok()) return route.fulfill({ response });
     const list = (await response.json()) as Sidebar;
     await route.fulfill({ response, json: { ...list, rooms: list.rooms.filter(picked) } });
   });
-  await page.routeWebSocket(WORKSPACE_SOCKET, (ws) => void connectWorkspace(ws, (frame) => frame.type !== "room.saved" || picked(frame.room)));
+  await context.routeWebSocket(WORKSPACE_SOCKET, (ws) => void connectWorkspace(ws, (frame) => frame.type !== "room.saved" || picked(frame.room)));
 }
 
 test.describe("Conversations sidebar", () => {
@@ -68,7 +70,7 @@ test.describe("Live sidebar updates", () => {
     // This test's rooms, and the ones it makes, whose names end with its tag.
     const tag = crypto.randomUUID().slice(0, 8);
     const ours = (room: Room) => room.id === rooms.general.id || room.id === rooms.random.id || (room.kind !== "direct" && room.name.endsWith(tag));
-    const showOurs = (page: Page) => showRoomsPicked(page, ours);
+    const showOurs = (page: Page) => showRoomsPicked(page.context(), ours);
     const ada = await members.signIn("Ada", { serverRooms: true, beforeOpen: showOurs });
     const grace = await members.signIn("Grace", { serverRooms: true, beforeOpen: showOurs });
     const rows = (member: Member) => member.page.getByRole("region", { name: "Rooms" }).getByRole("link");
