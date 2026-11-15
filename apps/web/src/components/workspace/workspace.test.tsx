@@ -38,7 +38,6 @@ const roomList = (listed: Room[], favorites: RoomId[] = [], sharedOrder: RoomId[
   favorites: { rooms: favorites, version: 0 },
   sharedOrder,
   invitation: null,
-  suggestions: [],
   huddles: {},
 });
 const generalSettings: RoomSettings = { room: rooms[0]!, canAdminister: true, people: [{ ...ada, member: true }] };
@@ -792,78 +791,6 @@ describe("New direct message dialog", () => {
   });
 });
 
-describe("Suggested people", () => {
-  const grace = withGrace.members[1]!;
-  const suggestion = () => within(screen.getByRole("region", { name: "DMs" })).queryByRole("button", { name: "Start a direct message with Grace" });
-
-  it("starts a DM with someone suggested and opens it, listed in the suggestion's place, for its composer to take focus", async () => {
-    vi.stubGlobal("WebSocket", OpenRoomSocket);
-    serve({
-      "GET /api/sidebar": () => Response.json({ ...roomList(rooms), suggestions: [grace] }),
-      "POST /api/directs": () => Response.json({ room: withGrace }, { status: 201 }),
-    });
-    const { user } = showWorkspace("/rooms/general");
-    await roomHeading();
-    await user.click(suggestion()!);
-    expect(await screen.findByRole("heading", { level: 1, name: "Direct message with Grace" })).toBeInTheDocument();
-    expect(location.pathname).toBe("/rooms/d1");
-    expect(fetch).toHaveBeenCalledWith("/api/directs", expect.objectContaining({ method: "POST", body: JSON.stringify({ userIds: [grace.id] }) }));
-    expect(within(screen.getByRole("region", { name: "DMs" })).getByRole("link", { name: "Direct message with Grace" })).toHaveAttribute("aria-current", "page");
-    expect(suggestion()).not.toBeInTheDocument();
-    expect(await screen.findByRole("textbox", { name: "Write a message" })).toHaveFocus();
-  });
-
-  it("stays on a page the person goes to while the DM starts, listing the DM", async () => {
-    let answer = (_: Response) => {};
-    serve({
-      "GET /api/sidebar": () => Response.json({ ...roomList(rooms), suggestions: [grace] }),
-      "POST /api/directs": () => new Promise<Response>((resolve) => (answer = resolve)),
-    });
-    const { user } = showWorkspace("/rooms/general");
-    await roomHeading();
-    await user.click(suggestion()!);
-    await user.click(within(screen.getByRole("region", { name: "Rooms" })).getByRole("link", { name: /random/ }));
-    expect(await roomHeading()).toHaveTextContent("random");
-
-    await act(async () => answer(Response.json({ room: withGrace }, { status: 201 })));
-    expect(location.pathname).toBe("/rooms/random");
-    expect(within(screen.getByRole("region", { name: "DMs" })).getByRole("link", { name: "Direct message with Grace" })).not.toHaveAttribute("aria-current");
-    expect(suggestion()).not.toBeInTheDocument();
-  });
-
-  it("says why a DM didn't start, keeping the page and the suggestion", async () => {
-    serve({
-      "GET /api/sidebar": () => Response.json({ ...roomList(rooms), suggestions: [grace] }),
-      "POST /api/directs": () => Promise.reject(new TypeError("Failed to fetch")),
-    });
-    const { user } = showWorkspace("/rooms/general");
-    await roomHeading();
-    await user.click(suggestion()!);
-    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't reach Ember. Check your connection and try again.");
-    expect(location.pathname).toBe("/rooms/general");
-    expect(suggestion()).toBeInTheDocument();
-    expect(suggestion()).not.toHaveAttribute("aria-disabled");
-  });
-});
-
-describe("Remove someone from the workspace", () => {
-  const grace: DirectoryUser = { ...withGrace.members[1]!, bio: null, role: "member", status: "active", avatarUrl: "/users/u2/avatar" };
-  const suggestion = () => within(screen.getByRole("region", { name: "DMs" })).queryByRole("button", { name: "Start a direct message with Grace" });
-
-  it("suggests nobody the workspace socket says has been removed since the sidebar loaded", async () => {
-    vi.stubGlobal("WebSocket", WorkspaceSocket);
-    serve({
-      "GET /api/sidebar": () => Response.json({ ...roomList(rooms), suggestions: [withGrace.members[1]] }),
-      "GET /api/users": () => Response.json({ users: [grace] }),
-    });
-    showWorkspace("/rooms/general");
-    await roomHeading();
-    expect(suggestion()).toBeInTheDocument();
-    await workspaceSends({ type: "user.updated", user: { ...grace, status: "deactivated" } });
-    expect(suggestion()).not.toBeInTheDocument();
-  });
-});
-
 describe("Rename the workspace", () => {
   it("passes on the workspace's name as its settings load it, which another administrator may have changed", async () => {
     serve({ "GET /api/account": () => Response.json({ ...workspaceSettings, account: { name: "Difference Engines" } }) });
@@ -1267,6 +1194,35 @@ describe("Someone's profile page", () => {
     expect(await screen.findByRole("heading", { level: 1, name: "Direct message with Grace" })).toBeInTheDocument();
     expect(location.pathname).toBe("/rooms/d1");
     expect(fetch).toHaveBeenCalledWith("/api/directs", expect.objectContaining({ method: "POST", body: JSON.stringify({ userIds: [grace.id] }) }));
+    expect(within(screen.getByRole("region", { name: "DMs" })).getByRole("link", { name: "Direct message with Grace" })).toHaveAttribute("aria-current", "page");
+  });
+
+  it("stays on a page the person goes to while the DM starts, listing the DM", async () => {
+    let answer = (_: Response) => {};
+    serve({
+      "GET /api/users/u2": () => Response.json({ person: grace }),
+      "POST /api/directs": () => new Promise<Response>((resolve) => (answer = resolve)),
+    });
+    const { user } = showWorkspace("/users/u2");
+    await user.click(await screen.findByRole("button", { name: "Ping Grace" }));
+    await user.click(within(screen.getByRole("region", { name: "Rooms" })).getByRole("link", { name: /random/ }));
+    expect(await roomHeading()).toHaveTextContent("random");
+
+    await act(async () => answer(Response.json({ room: withGrace }, { status: 201 })));
+    expect(location.pathname).toBe("/rooms/random");
+    expect(within(screen.getByRole("region", { name: "DMs" })).getByRole("link", { name: "Direct message with Grace" })).not.toHaveAttribute("aria-current");
+  });
+
+  it("says why a DM didn't start, keeping the page", async () => {
+    serve({
+      "GET /api/users/u2": () => Response.json({ person: grace }),
+      "POST /api/directs": () => Promise.reject(new TypeError("Failed to fetch")),
+    });
+    const { user } = showWorkspace("/users/u2");
+    await user.click(await screen.findByRole("button", { name: "Ping Grace" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't reach Ember. Check your connection and try again.");
+    expect(location.pathname).toBe("/users/u2");
+    expect(screen.getByRole("button", { name: "Ping Grace" })).not.toHaveAttribute("aria-disabled");
   });
 
   it("loads the page again when nobody has the id, for the Worker to answer Campfire's 404 page", async () => {

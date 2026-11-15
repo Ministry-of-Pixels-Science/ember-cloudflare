@@ -99,7 +99,6 @@ import {
   signsUpOpenly,
   signsUpWithEmailDomain,
   startingInvolvement,
-  suggestedCount,
   TAGLINE_TOO_LONG,
   TURNSTILE_FAILED,
   TURNSTILE_SECRET_KEY_REFUSED,
@@ -436,16 +435,6 @@ describe("Start or reopen a direct message", () => {
       expect(parseNewDirect(body), JSON.stringify(body).slice(0, 40)).toBe(refused);
     }
     expect(parseNewDirect({ userIds: tooMany.slice(1) })).not.toBeTypeOf("string");
-  });
-});
-
-describe("Suggested people", () => {
-  it("suggests 20 people less those in your DMs, you included, and one more", () => {
-    expect(suggestedCount(0)).toBe(19);
-    expect(suggestedCount(1)).toBe(18);
-    expect(suggestedCount(2)).toBe(17);
-    expect(suggestedCount(19)).toBe(0);
-    expect(suggestedCount(25)).toBe(0);
   });
 });
 

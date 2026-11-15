@@ -1,5 +1,3 @@
-import type { Sidebar } from "@ember/protocol";
-import { cookieHeader } from "../../fixtures";
 import { expect, startDirect, test, unique, type Member } from "./fixtures";
 
 /** `member`'s sidebar row for their DM with `others`, named for them in the order the DM lists them, which is by id. */
@@ -10,9 +8,6 @@ function directRow(member: Member, others: Member[]) {
 
 /** `member`'s DM rows, top to bottom. */
 const directRows = (member: Member) => member.page.getByRole("region", { name: "DMs" }).getByRole("link", { name: /^Direct message with / });
-
-/** `member`'s rows suggesting people for DMs, top to bottom. */
-const suggestionRows = (member: Member) => member.page.getByRole("region", { name: "DMs" }).getByRole("button", { name: /^Start a direct message with / });
 
 const settingsLink = (member: Member) => member.page.getByRole("link", { name: "Settings for this Ping" });
 
@@ -251,21 +246,16 @@ test.describe("DM order", () => {
   });
 });
 
-test.describe("Suggested people", () => {
-  test("starts a DM with someone suggested, whom the sidebar suggests no more, and goes there for its composer to take focus", async ({ members, request }) => {
+test.describe("DMs in the sidebar", () => {
+  test("lists only the DMs someone is in, never the people who've joined, until they start one", async ({ members, request }) => {
     const ada = await members.signIn(unique("Ada"));
-    // Everyone new is suggested the server's oldest accounts, the administrator's first.
-    const first = suggestionRows(ada).first();
-    const name = (await first.textContent())!.replace(/^Start a direct message with/, "").trim();
-    const [started] = await Promise.all([ada.page.waitForRequest("**/api/directs"), first.click()]);
-    const [personId] = (started.postDataJSON() as { userIds: string[] }).userIds;
-    await expect(ada.page.getByRole("heading", { level: 1 })).toHaveText(`Direct message with ${name}`);
-    await expect(directRows(ada)).toHaveText([`Direct message with ${name}`]);
-    await expect(directRows(ada)).toHaveAttribute("aria-current", "page");
-    await ada.connected();
-    await expect(ada.composer()).toBeFocused();
-
-    const sidebar = await request.get("/api/sidebar", { headers: { Cookie: cookieHeader(ada.session) } });
-    expect(((await sidebar.json()) as Sidebar).suggestions.map((person) => person.id)).not.toContain(personId);
+    const grace = await members.signIn(unique("Grace"));
+    await ada.page.reload();
+    const dms = ada.page.getByRole("region", { name: "DMs" });
+    await expect(dms.getByRole("link", { name: "New direct message" })).toBeVisible();
+    await expect(directRows(ada)).toHaveCount(0);
+    await expect(dms.getByRole("button")).toHaveCount(0);
+    await startDirect(request, grace, [ada]);
+    await expect(directRows(ada)).toHaveText([`Direct message with ${grace.name}`]);
   });
 });
