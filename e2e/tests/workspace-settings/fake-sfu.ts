@@ -9,9 +9,9 @@ import { SFU_APP, SFU_PORT } from "../../projects/workspace-settings";
 // that isn't the app's. Cloudflare documents that refusal's error code but not its status, so 401 here
 // is a guess, and Ember reads either.
 //
-// Given a page, it carries what's published as well: each session is a connection of the page's, which
-// answers the offer a browser publishes with, and offers a browser the tracks it pulls, passing on what
-// their publishers send it. Its descriptions name an address of its own, as the SFU's name the SFU's,
+// Given a page, it carries what's published as well, voices and cameras alike: each session is a
+// connection of the page's, which answers the offer a browser publishes with, and offers a browser the
+// tracks it pulls, passing on what their publishers send it. Its descriptions name an address of its own, as the SFU's name the SFU's,
 // since a browser in a huddle sends the room none of its own.
 
 /** What Ember asked the SFU: how, where, and with which secret. */
@@ -115,7 +115,7 @@ async function relayOn(page: Page): Promise<Relay> {
       closed: Set<string>;
     }
     const sessions = new Map<string, Session>();
-    const playing = new Map<MediaStreamTrack, HTMLAudioElement>();
+    const playing = new Map<MediaStreamTrack, HTMLMediaElement>();
 
     const sessionOf = (sessionId: string): Session => {
       const session = sessions.get(sessionId) ?? { connection: new RTCPeerConnection({ bundlePolicy: "max-bundle" }), published: new Map(), closed: new Set() };
@@ -135,12 +135,12 @@ async function relayOn(page: Page): Promise<Relay> {
       return { type: description.type, sdp: connection.localDescription!.sdp };
     };
 
-    /** Chromium takes the sound a connection receives from whatever plays it, so a track is passed on only while something does. */
+    /** Chromium takes the sound a connection receives from whatever plays it, so a track is passed on only while something does: a camera's, in a video. */
     const play = (track: MediaStreamTrack) => {
-      const audio = new Audio();
-      audio.srcObject = new MediaStream([track]);
-      playing.set(track, audio);
-      void audio.play();
+      const player = track.kind === "video" ? Object.assign(document.createElement("video"), { muted: true }) : new Audio();
+      player.srcObject = new MediaStream([track]);
+      playing.set(track, player);
+      void player.play();
     };
 
     const notFound = ({ sessionId, trackName }: Pulled) => ({ sessionId, trackName, errorCode: "not_found_track_error", errorDescription: "Track not found" });

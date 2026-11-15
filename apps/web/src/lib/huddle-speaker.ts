@@ -1,7 +1,7 @@
 import { listsSpeaker, watchDevices } from "./huddle-devices";
 
-/** What a browser takes for the person's touch, and lets a sound play from. A tap is one at its click, and not as the finger lands. */
-const TOUCHES = ["click", "keydown"] as const;
+/** What a browser takes for the person's touch, and lets a sound or a video play from. A tap is one at its click, and not as the finger lands. */
+export const TOUCHES = ["click", "keydown"] as const;
 
 /** Plays `audio` through the speaker `deviceId`, or the system's for none. Safari has no way to choose one, and plays through the system's. */
 function playThrough(audio: HTMLAudioElement, deviceId: string): void {

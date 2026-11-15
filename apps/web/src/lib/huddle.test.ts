@@ -1,9 +1,10 @@
 import { CloseCode, type User } from "@ember/protocol";
-import { HuddleCloseCode, type HuddlePerson, type HuddleServerFrame, type OfferedHuddleTrack } from "@ember/protocol/huddles";
+import { CAMERAS_FULL, HuddleCloseCode, MAX_HUDDLE_CAMERAS, type HuddlePerson, type HuddleServerFrame, type HuddleTrackKind, type OfferedHuddleTrack } from "@ember/protocol/huddles";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ANSWER_TIMEOUT_MS, joinHuddle, LISTEN_AGAIN_MS, PUBLISH_AGAIN_MS } from "./huddle";
+import { ANSWER_TIMEOUT_MS, CAMERA_BITRATE, joinHuddle, LISTEN_AGAIN_MS, PUBLISH_AGAIN_MS } from "./huddle";
+import { NO_CAMERA } from "./huddle-devices";
 import { MUSIC_AFTER_MS } from "./huddle-sounds";
-import { hearHuddleEnd, joinedHuddle, leaveHuddle, muteHuddle, watchHuddle } from "./huddle-store";
+import { hearHuddle, joinedHuddle, leaveHuddle, muteHuddle, openHuddle, showHuddleCamera, watchHuddle } from "./huddle-store";
 
 /** Stands in for the browser's WebSocket; tests play the room and the network. */
 class FakeSocket {
@@ -60,17 +61,20 @@ class FakeSocket {
   }
 }
 
-/** Stands in for a microphone's track, or one a connection receives. */
+/** Stands in for a microphone's track or a camera's, or one a connection receives. */
 class FakeTrack extends EventTarget {
-  readonly kind = "audio";
   enabled = true;
   readyState: MediaStreamTrackState = "live";
+
+  constructor(readonly kind: HuddleTrackKind = "audio") {
+    super();
+  }
 
   stop() {
     this.readyState = "ended";
   }
 
-  /** Ends as an unplugged microphone's does. */
+  /** Ends as an unplugged microphone's does, or camera's. */
   end() {
     this.readyState = "ended";
     this.dispatchEvent(new Event("ended"));
@@ -80,12 +84,14 @@ class FakeTrack extends EventTarget {
 class FakeStream {
   constructor(readonly tracks: FakeTrack[] = []) {}
   getTracks = () => this.tracks;
-  getAudioTracks = () => this.tracks;
+  getAudioTracks = () => this.tracks.filter(({ kind }) => kind === "audio");
+  getVideoTracks = () => this.tracks.filter(({ kind }) => kind === "video");
 }
 
 interface FakeTransceiver {
   mid: string | null;
   direction?: string;
+  sendEncodings?: RTCRtpEncodingParameters[];
   sender: { track: FakeTrack | null };
   receiver: { track: FakeTrack };
 }
@@ -110,8 +116,8 @@ class FakeConnection {
     FakeConnection.all.push(this);
   }
 
-  addTransceiver(track: FakeTrack, { direction }: { direction: string }) {
-    const transceiver: FakeTransceiver = { mid: null, direction, sender: { track }, receiver: { track: new FakeTrack() } };
+  addTransceiver(track: FakeTrack, { direction, sendEncodings }: RTCRtpTransceiverInit) {
+    const transceiver: FakeTransceiver = { mid: null, direction, ...(sendEncodings && { sendEncodings }), sender: { track }, receiver: { track: new FakeTrack() } };
     this.transceivers.push(transceiver);
     return transceiver;
   }
@@ -161,7 +167,7 @@ class FakeConnection {
 const ada: User = { id: "u1", name: "Ada" };
 const grace: User = { id: "u2", name: "Grace" };
 const linus: User = { id: "u3", name: "Linus" };
-const person = (user: User, overrides: Partial<HuddlePerson> = {}): HuddlePerson => ({ user, muted: false, audio: true, ...overrides });
+const person = (user: User, overrides: Partial<HuddlePerson> = {}): HuddlePerson => ({ user, muted: false, audio: true, video: false, ...overrides });
 const STARTED_AT = "2026-11-10T09:00:00.000Z";
 
 const socket = () => FakeSocket.all.at(-1)!;
@@ -189,7 +195,7 @@ const microphoneTrack = () => microphone.tracks[0]!;
 
 /** Joins general's huddle, which the room lets the tab into with `people` in it besides Ada, who the tab is. */
 async function joined(people: HuddlePerson[] = [], join: Partial<Parameters<typeof joinHuddle>[0]> = {}) {
-  joinHuddle({ roomId: "general", muted: false, microphone: microphone as unknown as MediaStream, speakerId: "", ...join });
+  joinHuddle({ roomId: "general", muted: false, microphone: microphone as unknown as MediaStream, camera: null, speakerId: "", ...join });
   socket().open();
   return welcomed(people);
 }
@@ -201,17 +207,22 @@ async function welcomed(people: HuddlePerson[] = [], mine: Partial<HuddlePerson>
   return socket();
 }
 
-/** The room's offer of `tracks`, as the SFU makes it. */
-const offer = (...tracks: Array<[mid: string, user: User]>): HuddleServerFrame => ({
+const offerOf = (kind: HuddleTrackKind, tracks: Array<[mid: string, user: User]>): HuddleServerFrame => ({
   type: "huddle.offer",
+  kind,
   sdp: `offer:${tracks.map(([mid]) => mid).join(",")}`,
-  tracks: tracks.map(([mid, user]): OfferedHuddleTrack => ({ mid, kind: "audio", userId: user.id })),
+  tracks: tracks.map(([mid, user]): OfferedHuddleTrack => ({ mid, kind, userId: user.id })),
 });
+
+/** The room's offer of the voices on `tracks`, as the SFU makes it. */
+const offer = (...tracks: Array<[mid: string, user: User]>) => offerOf("audio", tracks);
+/** And of the cameras on `tracks`. */
+const pictures = (...tracks: Array<[mid: string, user: User]>) => offerOf("video", tracks);
 
 /** The tab's sending connection has its answer and has connected, which it tells the room. */
 async function publishedAndConnected() {
   const sending = connection();
-  socket().receive({ type: "huddle.published", sdp: "the SFU's answer" });
+  socket().receive({ type: "huddle.published", kind: "audio", sdp: "the SFU's answer" });
   await settled();
   sending.becomes("connected");
   return sending;
@@ -221,9 +232,44 @@ async function publishedAndConnected() {
 async function offeredRound(...tracks: Array<[mid: string, user: User]>) {
   socket().receive(offer(...tracks));
   await settled();
-  socket().receive({ type: "huddle.listening" });
+  socket().receive({ type: "huddle.listening", kind: "audio" });
   await settled();
 }
+
+/** The same for cameras, and the round the tab asks at once after it, which brings nobody new. */
+async function watchedRound(...tracks: Array<[mid: string, user: User]>) {
+  socket().receive(pictures(...tracks));
+  await settled();
+  socket().receive({ type: "huddle.listening", kind: "video" });
+  socket().receive({ type: "huddle.listening", kind: "video" });
+  await settled();
+}
+
+let camera: FakeStream;
+const cameraTrack = () => camera.tracks[0]!;
+const asCamera = () => camera as unknown as MediaStream;
+
+/** Has the browser give the tab `camera` when it asks for one, or with `none`, refuse. Answers what the tab asked it. */
+function browserCamera(none = false) {
+  const getUserMedia = vi.fn(async (_constraints: MediaStreamConstraints) => {
+    if (none) throw new DOMException("Permission denied", "NotAllowedError");
+    return camera;
+  });
+  vi.stubGlobal("navigator", { mediaDevices: Object.assign(new EventTarget(), { getUserMedia }) });
+  return getUserMedia;
+}
+
+/** What the tab has said of one kind of track since the test last asked, leaving the rest for it to ask about. */
+function taken(kind: HuddleTrackKind) {
+  const { sent } = socket();
+  const of = (frame: Record<string, unknown>) => (frame.kind ?? (frame.tracks as Array<{ kind: string }> | undefined)?.[0]?.kind) === kind;
+  const frames = sent.filter(of);
+  sent.splice(0, sent.length, ...sent.filter((frame) => !of(frame)));
+  return frames;
+}
+
+/** The connections the tab has made that aren't closed, in the order it made them. */
+const open = () => FakeConnection.all.filter(({ connectionState }) => connectionState !== "closed");
 
 beforeEach(() => {
   FakeSocket.all = [];
@@ -231,6 +277,7 @@ beforeEach(() => {
   FakeConnection.offers = 0;
   FakeConnection.refusing = false;
   microphone = new FakeStream([new FakeTrack()]);
+  camera = new FakeStream([new FakeTrack("video")]);
   vi.stubGlobal("WebSocket", FakeSocket);
   vi.stubGlobal("RTCPeerConnection", FakeConnection);
   vi.stubGlobal("MediaStream", FakeStream);
@@ -256,10 +303,10 @@ describe("Joining a huddle", () => {
   it("connects to the room's huddle, and shows it as joining until the room lets the tab in", async () => {
     const shown = vi.fn();
     const stop = watchHuddle(shown);
-    joinHuddle({ roomId: "general", muted: false, microphone: microphone as unknown as MediaStream, speakerId: "" });
+    joinHuddle({ roomId: "general", muted: false, microphone: microphone as unknown as MediaStream, camera: null, speakerId: "" });
 
     expect(socket().url).toBe("ws://localhost:3000/api/rooms/general/huddle");
-    expect(joinedHuddle()).toEqual({ roomId: "general", connected: false, you: null, people: [], muted: false, microphone: true });
+    expect(joinedHuddle()).toEqual({ roomId: "general", connected: false, you: null, people: [], muted: false, microphone: true, camera: null, watched: new Map(), open: true });
     expect(shown).toHaveBeenCalledTimes(1);
     // Nothing is asked of the room before it has said who the tab is.
     socket().open();
@@ -268,12 +315,12 @@ describe("Joining a huddle", () => {
     expect(FakeConnection.all).toEqual([]);
 
     await welcomed([person(grace)]);
-    expect(joinedHuddle()).toEqual({ roomId: "general", connected: true, you: ada, people: [person(grace), person(ada, { audio: false })], muted: false, microphone: true });
+    expect(joinedHuddle()).toEqual({ roomId: "general", connected: true, you: ada, people: [person(grace), person(ada, { audio: false })], muted: false, microphone: true, camera: null, watched: new Map(), open: true });
     stop();
   });
 
   it("says in the address that the tab joins muted, and keeps its microphone off", async () => {
-    joinHuddle({ roomId: "team/ops", muted: true, microphone: microphone as unknown as MediaStream, speakerId: "" });
+    joinHuddle({ roomId: "team/ops", muted: true, microphone: microphone as unknown as MediaStream, camera: null, speakerId: "" });
     expect(socket().url).toBe("ws://localhost:3000/api/rooms/team%2Fops/huddle?muted=1");
     expect(microphoneTrack().enabled).toBe(false);
     expect(joinedHuddle()).toMatchObject({ muted: true, microphone: true });
@@ -283,7 +330,7 @@ describe("Joining a huddle", () => {
     const room = await joined([person(grace)], { microphone: null });
     expect(room.url).toBe("ws://localhost:3000/api/rooms/general/huddle?muted=1");
     expect(joinedHuddle()).toMatchObject({ muted: true, microphone: false });
-    expect(room.take()).toEqual([{ type: "huddle.listen", fresh: true }]);
+    expect(room.take()).toEqual([{ type: "huddle.listen", kind: "audio", fresh: true }]);
 
     muteHuddle(false);
     expect(joinedHuddle()).toMatchObject({ muted: true });
@@ -292,7 +339,7 @@ describe("Joining a huddle", () => {
 
   it("leaves the huddle the tab was in as it joins another", async () => {
     const first = await joined();
-    joinHuddle({ roomId: "random", muted: false, microphone: new FakeStream([new FakeTrack()]) as unknown as MediaStream, speakerId: "" });
+    joinHuddle({ roomId: "random", muted: false, microphone: new FakeStream([new FakeTrack()]) as unknown as MediaStream, camera: null, speakerId: "" });
 
     expect(first.closedWith).toBe(1000);
     expect(microphoneTrack().readyState).toBe("ended");
@@ -309,14 +356,14 @@ describe("A huddle's microphone", () => {
     expect(sending.transceivers).toEqual([expect.objectContaining({ direction: "sendonly", sender: { track: microphoneTrack() } })]);
     expect(room.take()).toEqual([{ type: "huddle.publish", sdp: "offer 1", tracks: [{ mid: "0", kind: "audio" }] }]);
 
-    room.receive({ type: "huddle.published", sdp: "the SFU's answer" });
+    room.receive({ type: "huddle.published", kind: "audio", sdp: "the SFU's answer" });
     await settled();
     expect(sending.remoteDescription).toEqual({ type: "answer", sdp: "the SFU's answer" });
     expect(room.take()).toEqual([]);
     sending.becomes("connecting");
     expect(room.take()).toEqual([]);
     sending.becomes("connected");
-    expect(room.take()).toEqual([{ type: "huddle.connected" }]);
+    expect(room.take()).toEqual([{ type: "huddle.connected", kind: "audio" }]);
   });
 
   it("is published again, a little later each time, after its connection fails or the room couldn't publish it", async () => {
@@ -333,7 +380,7 @@ describe("A huddle's microphone", () => {
     expect(connection()).not.toBe(first);
 
     // The room couldn't: the SFU refused, or couldn't be reached.
-    room.receive({ type: "error", message: "The huddle couldn't connect. Trying again.", failed: "huddle.publish" });
+    room.receive({ type: "error", message: "The huddle couldn't connect. Trying again.", failed: "huddle.publish", kind: "audio" });
     await wait(PUBLISH_AGAIN_MS[0] * 2 - 1);
     expect(room.take()).toEqual([]);
     await wait(1);
@@ -341,7 +388,7 @@ describe("A huddle's microphone", () => {
 
     // Nor could the browser make sense of the SFU's answer.
     FakeConnection.refusing = true;
-    room.receive({ type: "huddle.published", sdp: "not a session description" });
+    room.receive({ type: "huddle.published", kind: "audio", sdp: "not a session description" });
     await wait(PUBLISH_AGAIN_MS[0] * 4);
     expect(room.take()).toEqual([expect.objectContaining({ type: "huddle.publish", sdp: "offer 4" })]);
 
@@ -355,11 +402,11 @@ describe("A huddle's microphone", () => {
   it("waits no longer than the longest wait between tries", async () => {
     const room = await joined();
     for (let tries = 0; tries < 6; tries++) {
-      room.receive({ type: "error", message: "The huddle couldn't connect. Trying again.", failed: "huddle.publish" });
+      room.receive({ type: "error", message: "The huddle couldn't connect. Trying again.", failed: "huddle.publish", kind: "audio" });
       await wait(PUBLISH_AGAIN_MS[1]);
     }
     room.take();
-    room.receive({ type: "error", message: "The huddle couldn't connect. Trying again.", failed: "huddle.publish" });
+    room.receive({ type: "error", message: "The huddle couldn't connect. Trying again.", failed: "huddle.publish", kind: "audio" });
     await wait(PUBLISH_AGAIN_MS[1] - 1);
     expect(room.take()).toEqual([]);
     await wait(1);
@@ -371,17 +418,17 @@ describe("A huddle's microphone", () => {
     const first = await publishedAndConnected();
     room.take();
 
-    room.receive({ type: "huddle.unpublished" });
+    room.receive({ type: "huddle.unpublished", kind: "audio" });
     await settled();
     expect(first.connectionState).toBe("closed");
     expect(room.take()).toEqual([expect.objectContaining({ type: "huddle.publish", sdp: "offer 2" })]);
 
     // The answer on its way is to the offer just made, which a third would take for its own.
-    room.receive({ type: "huddle.unpublished" });
+    room.receive({ type: "huddle.unpublished", kind: "audio" });
     await settled();
     expect(room.take()).toEqual([]);
     expect(FakeConnection.all).toHaveLength(2);
-    room.receive({ type: "huddle.published", sdp: "the SFU's answer" });
+    room.receive({ type: "huddle.published", kind: "audio", sdp: "the SFU's answer" });
     await settled();
     expect(connection().remoteDescription).toEqual({ type: "answer", sdp: "the SFU's answer" });
   });
@@ -389,8 +436,8 @@ describe("A huddle's microphone", () => {
   it("takes no answer it isn't waiting on", async () => {
     const room = await joined();
     await publishedAndConnected();
-    room.receive({ type: "huddle.published", sdp: "another answer" });
-    room.receive({ type: "error", message: "The huddle couldn't connect. Trying again.", failed: "huddle.publish" });
+    room.receive({ type: "huddle.published", kind: "audio", sdp: "another answer" });
+    room.receive({ type: "error", message: "The huddle couldn't connect. Trying again.", failed: "huddle.publish", kind: "audio" });
     await wait(PUBLISH_AGAIN_MS[1]);
     expect(connection().remoteDescription).toEqual({ type: "answer", sdp: "the SFU's answer" });
     expect(FakeConnection.all).toHaveLength(1);
@@ -424,7 +471,7 @@ describe("A huddle's microphone", () => {
     muteHuddle(false);
     expect(joinedHuddle()).toMatchObject({ muted: true });
     // And nothing more is published of it.
-    room.receive({ type: "huddle.unpublished" });
+    room.receive({ type: "huddle.unpublished", kind: "audio" });
     await settled();
     expect(room.take()).toEqual([]);
   });
@@ -433,7 +480,7 @@ describe("A huddle's microphone", () => {
 describe("Hearing the others in a huddle", () => {
   it("asks for whoever can be listened to, answers the SFU's offer, and plays each person's track", async () => {
     const room = await joined([person(grace), person(linus, { audio: false })]);
-    expect(room.take()).toEqual([{ type: "huddle.listen", fresh: true }, expect.objectContaining({ type: "huddle.publish" })]);
+    expect(room.take()).toEqual([{ type: "huddle.listen", kind: "audio", fresh: true }, expect.objectContaining({ type: "huddle.publish" })]);
     expect(FakeConnection.all).toHaveLength(1);
 
     room.receive(offer(["0", grace]));
@@ -442,7 +489,7 @@ describe("Hearing the others in a huddle", () => {
     expect(FakeConnection.all).toHaveLength(2);
     expect(receiving.configuration).toEqual({ iceServers: [{ urls: "stun:stun.cloudflare.com:3478" }], bundlePolicy: "max-bundle" });
     expect(receiving.remoteDescription).toEqual({ type: "offer", sdp: "offer:0" });
-    expect(room.take()).toEqual([{ type: "huddle.answer", sdp: "answer to offer:0" }]);
+    expect(room.take()).toEqual([{ type: "huddle.answer", kind: "audio", sdp: "answer to offer:0" }]);
     expect(voices()).toHaveLength(1);
     expect(playedBy(voiceOf(grace))).toBe(receiving.transceivers[0]!.receiver.track);
     expect(voiceOf(grace)!.autoplay).toBe(true);
@@ -459,19 +506,19 @@ describe("Hearing the others in a huddle", () => {
     await settled();
     room.take();
 
-    room.receive({ type: "huddle.listening" });
-    expect(room.take()).toEqual([{ type: "huddle.listen" }]);
+    room.receive({ type: "huddle.listening", kind: "audio" });
+    expect(room.take()).toEqual([{ type: "huddle.listen", kind: "audio" }]);
     room.receive(offer(["0", grace], ["1", linus]));
     await settled();
     expect(FakeConnection.all).toHaveLength(2);
-    expect(room.take()).toEqual([{ type: "huddle.answer", sdp: "answer to offer:0,1" }]);
+    expect(room.take()).toEqual([{ type: "huddle.answer", kind: "audio", sdp: "answer to offer:0,1" }]);
     expect(playedBy(voiceOf(linus))).toBe(connection().transceivers[1]!.receiver.track);
 
     // And once more, since someone may have published anew while that offer was made.
-    room.receive({ type: "huddle.listening" });
-    expect(room.take()).toEqual([{ type: "huddle.listen" }]);
+    room.receive({ type: "huddle.listening", kind: "audio" });
+    expect(room.take()).toEqual([{ type: "huddle.listen", kind: "audio" }]);
     // A round that brings nobody is the last, with everyone heard.
-    room.receive({ type: "huddle.listening" });
+    room.receive({ type: "huddle.listening", kind: "audio" });
     await wait(LISTEN_AGAIN_MS[1] * 2);
     expect(room.take()).toEqual([]);
   });
@@ -481,11 +528,11 @@ describe("Hearing the others in a huddle", () => {
     room.take();
 
     for (const expected of [500, 1_000, 2_000, 4_000, 8_000, 8_000]) {
-      room.receive({ type: "huddle.listening" });
+      room.receive({ type: "huddle.listening", kind: "audio" });
       await wait(expected - 1);
       expect(room.take()).toEqual([]);
       await wait(1);
-      expect(room.take()).toEqual([{ type: "huddle.listen", fresh: true }]);
+      expect(room.take()).toEqual([{ type: "huddle.listen", kind: "audio", fresh: true }]);
     }
     expect([LISTEN_AGAIN_MS[0], LISTEN_AGAIN_MS[1]]).toEqual([500, 8_000]);
 
@@ -493,10 +540,10 @@ describe("Hearing the others in a huddle", () => {
     await offeredRound(["0", grace]);
     room.receive({ type: "huddle.joined", person: person(linus) });
     room.take();
-    room.receive({ type: "huddle.listening" });
-    room.receive({ type: "huddle.listening" });
+    room.receive({ type: "huddle.listening", kind: "audio" });
+    room.receive({ type: "huddle.listening", kind: "audio" });
     await wait(LISTEN_AGAIN_MS[0]);
-    expect(room.take()).toEqual([{ type: "huddle.listen" }]);
+    expect(room.take()).toEqual([{ type: "huddle.listen", kind: "audio" }]);
   });
 
   it("asks for someone as they join or become someone to listen to, and for nobody while a round is under way", async () => {
@@ -509,17 +556,17 @@ describe("Hearing the others in a huddle", () => {
     expect(room.take()).toEqual([]);
     room.receive({ type: "huddle.changed", person: person(grace) });
     expect(joinedHuddle()!.people).toEqual([person(ada, { audio: false }), person(grace)]);
-    expect(room.take()).toEqual([{ type: "huddle.listen", fresh: true }]);
+    expect(room.take()).toEqual([{ type: "huddle.listen", kind: "audio", fresh: true }]);
 
     // Linus can be listened to before the room has answered: the tab asks once it has.
     room.receive({ type: "huddle.joined", person: person(linus) });
     expect(room.take()).toEqual([]);
     await offeredRound(["0", grace]);
-    expect(room.take()).toEqual([{ type: "huddle.answer", sdp: "answer to offer:0" }, { type: "huddle.listen" }]);
+    expect(room.take()).toEqual([{ type: "huddle.answer", kind: "audio", sdp: "answer to offer:0" }, { type: "huddle.listen", kind: "audio" }]);
 
     // Someone muting is nobody new.
     await offeredRound(["0", grace], ["1", linus]);
-    room.receive({ type: "huddle.listening" });
+    room.receive({ type: "huddle.listening", kind: "audio" });
     room.take();
     room.receive({ type: "huddle.changed", person: person(grace, { muted: true }) });
     expect(joinedHuddle()!.people).toEqual([person(ada, { audio: false }), person(grace, { muted: true }), person(linus)]);
@@ -530,7 +577,7 @@ describe("Hearing the others in a huddle", () => {
   it("stops playing someone who leaves, and someone publishing anew, whose next track it asks for", async () => {
     const room = await joined([person(grace), person(linus)]);
     await offeredRound(["0", grace], ["1", linus]);
-    room.receive({ type: "huddle.listening" });
+    room.receive({ type: "huddle.listening", kind: "audio" });
     room.take();
 
     room.receive({ type: "huddle.left", userId: linus.id });
@@ -545,7 +592,7 @@ describe("Hearing the others in a huddle", () => {
     expect(graces.srcObject).toBeNull();
     expect(room.take()).toEqual([]);
     room.receive({ type: "huddle.changed", person: person(grace) });
-    expect(room.take()).toEqual([{ type: "huddle.listen" }]);
+    expect(room.take()).toEqual([{ type: "huddle.listen", kind: "audio" }]);
     await offeredRound(["2", grace]);
     expect(playedBy(voiceOf(grace))).toBe(connection().transceivers[2]!.receiver.track);
   });
@@ -559,15 +606,15 @@ describe("Hearing the others in a huddle", () => {
     await settled();
     expect(voices()).toEqual([]);
     // The connection answers all the same, as the SFU waits for it to.
-    expect(room.take()).toEqual([{ type: "huddle.answer", sdp: "answer to offer:0,1" }]);
+    expect(room.take()).toEqual([{ type: "huddle.answer", kind: "audio", sdp: "answer to offer:0,1" }]);
 
     // Linus isn't heard yet, so he's asked for once he can be: the round after the offer's, or a later one.
-    room.receive({ type: "huddle.listening" });
-    expect(room.take()).toEqual([{ type: "huddle.listen" }]);
+    room.receive({ type: "huddle.listening", kind: "audio" });
+    expect(room.take()).toEqual([{ type: "huddle.listen", kind: "audio" }]);
     room.receive({ type: "huddle.changed", person: person(linus) });
-    room.receive({ type: "huddle.listening" });
+    room.receive({ type: "huddle.listening", kind: "audio" });
     await wait(LISTEN_AGAIN_MS[0]);
-    expect(room.take()).toEqual([{ type: "huddle.listen" }]);
+    expect(room.take()).toEqual([{ type: "huddle.listen", kind: "audio" }]);
     await offeredRound(["2", linus]);
     expect(voices().map((audio) => audio.dataset.userId)).toEqual([linus.id]);
   });
@@ -581,14 +628,14 @@ describe("Hearing the others in a huddle", () => {
     room.receive({ type: "huddle.changed", person: person(grace) });
     await settled();
     expect(voices()).toEqual([]);
-    expect(room.take()).toEqual([{ type: "huddle.answer", sdp: "answer to offer:0" }]);
+    expect(room.take()).toEqual([{ type: "huddle.answer", kind: "audio", sdp: "answer to offer:0" }]);
 
     // The round after the offer's can't bring her yet, and the tab doesn't take her for heard: it asks again in a while.
-    room.receive({ type: "huddle.listening" });
-    expect(room.take()).toEqual([{ type: "huddle.listen" }]);
-    room.receive({ type: "huddle.listening" });
+    room.receive({ type: "huddle.listening", kind: "audio" });
+    expect(room.take()).toEqual([{ type: "huddle.listen", kind: "audio" }]);
+    room.receive({ type: "huddle.listening", kind: "audio" });
     await wait(LISTEN_AGAIN_MS[0]);
-    expect(room.take()).toEqual([{ type: "huddle.listen" }]);
+    expect(room.take()).toEqual([{ type: "huddle.listen", kind: "audio" }]);
     await offeredRound(["1", grace]);
     expect(playedBy(voiceOf(grace))).toBe(connection().transceivers[1]!.receiver.track);
   });
@@ -596,7 +643,7 @@ describe("Hearing the others in a huddle", () => {
   it("starts a fresh connection, in a while, when its receiving connection fails", async () => {
     const room = await joined([person(grace)]);
     await offeredRound(["0", grace]);
-    room.receive({ type: "huddle.listening" });
+    room.receive({ type: "huddle.listening", kind: "audio" });
     room.take();
     const receiving = connection();
 
@@ -606,7 +653,7 @@ describe("Hearing the others in a huddle", () => {
     await wait(LISTEN_AGAIN_MS[0] - 1);
     expect(room.take()).toEqual([]);
     await wait(1);
-    expect(room.take()).toEqual([{ type: "huddle.listen", fresh: true }]);
+    expect(room.take()).toEqual([{ type: "huddle.listen", kind: "audio", fresh: true }]);
     await offeredRound(["0", grace]);
     expect(connection()).not.toBe(receiving);
     expect(playedBy(voiceOf(grace))).toBe(connection().transceivers[0]!.receiver.track);
@@ -618,11 +665,11 @@ describe("Hearing the others in a huddle", () => {
     room.take();
     const receiving = connection();
 
-    room.receive({ type: "error", message: "The huddle couldn't connect. Trying again.", failed });
+    room.receive({ type: "error", message: "The huddle couldn't connect. Trying again.", failed, kind: "audio" });
     expect(receiving.connectionState).toBe("closed");
     expect(voices()).toEqual([]);
     await wait(LISTEN_AGAIN_MS[0]);
-    expect(room.take()).toEqual([{ type: "huddle.listen", fresh: true }]);
+    expect(room.take()).toEqual([{ type: "huddle.listen", kind: "audio", fresh: true }]);
     await offeredRound(["0", grace], ["1", linus]);
     expect(voices()).toHaveLength(2);
   });
@@ -638,7 +685,7 @@ describe("Hearing the others in a huddle", () => {
     expect(room.take()).toEqual([]);
 
     await wait(LISTEN_AGAIN_MS[0]);
-    expect(room.take()).toEqual([{ type: "huddle.listen", fresh: true }]);
+    expect(room.take()).toEqual([{ type: "huddle.listen", kind: "audio", fresh: true }]);
     await offeredRound(["0", grace]);
     expect(connection()).not.toBe(refused);
     expect(voices()).toHaveLength(1);
@@ -655,13 +702,13 @@ describe("Hearing the others in a huddle", () => {
     expect(voices()).toEqual([]);
     expect(room.take()).toEqual([]);
     await wait(LISTEN_AGAIN_MS[0]);
-    expect(room.take()).toEqual([{ type: "huddle.listen", fresh: true }]);
+    expect(room.take()).toEqual([{ type: "huddle.listen", kind: "audio", fresh: true }]);
   });
 
   it("waits for the round under way to end before it asks for a fresh connection, and drops what the round offers the one it gave up", async () => {
     const room = await joined([person(grace), person(linus)]);
     await offeredRound(["0", grace]);
-    expect(room.take().at(-1)).toEqual({ type: "huddle.listen" });
+    expect(room.take().at(-1)).toEqual({ type: "huddle.listen", kind: "audio" });
     const receiving = connection();
 
     // The round asked on this connection is still to be answered when it fails.
@@ -674,7 +721,7 @@ describe("Hearing the others in a huddle", () => {
     expect(voices()).toEqual([]);
     expect(room.take()).toEqual([]);
     await wait(LISTEN_AGAIN_MS[0]);
-    expect(room.take()).toEqual([{ type: "huddle.listen", fresh: true }]);
+    expect(room.take()).toEqual([{ type: "huddle.listen", kind: "audio", fresh: true }]);
 
     await offeredRound(["0", grace], ["1", linus]);
     expect(connection()).not.toBe(receiving);
@@ -795,6 +842,370 @@ describe("Hearing the others in a huddle", () => {
   });
 });
 
+describe("A huddle's camera", () => {
+  it("is shown from the start by a tab that joins with it on, and published from a connection of its own once the room lets the tab in", async () => {
+    joinHuddle({ roomId: "general", muted: false, microphone: microphone as unknown as MediaStream, camera: asCamera(), speakerId: "" });
+    expect(joinedHuddle()).toMatchObject({ camera, connected: false });
+    socket().open();
+    await settled();
+    expect(FakeConnection.all).toEqual([]);
+
+    const room = await welcomed();
+    const [voice, picture] = FakeConnection.all;
+    expect(FakeConnection.all).toHaveLength(2);
+    expect(picture!.configuration).toEqual(voice!.configuration);
+    expect(picture!.transceivers).toEqual([expect.objectContaining({ direction: "sendonly", sendEncodings: [{ maxBitrate: CAMERA_BITRATE }], sender: { track: cameraTrack() } })]);
+    expect(room.take()).toEqual([
+      { type: "huddle.publish", sdp: "offer 1", tracks: [{ mid: "0", kind: "audio" }] },
+      { type: "huddle.publish", sdp: "offer 2", tracks: [{ mid: "0", kind: "video" }] },
+    ]);
+
+    // Each answer is for the connection of its kind, which says for itself when it has connected.
+    room.receive({ type: "huddle.published", kind: "video", sdp: "the SFU's answer to the camera" });
+    await settled();
+    expect([voice!.remoteDescription, picture!.remoteDescription]).toEqual([null, { type: "answer", sdp: "the SFU's answer to the camera" }]);
+    picture!.becomes("connected");
+    expect(room.take()).toEqual([{ type: "huddle.connected", kind: "video" }]);
+  });
+
+  it("turns on in the huddle: asks the browser for the camera this browser last chose, shows it, and publishes it", async () => {
+    const asked = browserCamera();
+    localStorage.setItem("ember:huddle-camera", "front");
+    try {
+      const room = await joined();
+      room.take();
+      expect(joinedHuddle()).toMatchObject({ camera: null });
+
+      showHuddleCamera(true);
+      // Asked again while the browser asks the person, it's asked for once.
+      showHuddleCamera(true);
+      await settled();
+      expect(asked).toHaveBeenCalledExactlyOnceWith({ video: { width: { ideal: 640 }, height: { ideal: 360 }, deviceId: { exact: "front" } } });
+      expect(joinedHuddle()).toMatchObject({ camera });
+      expect(room.take()).toEqual([{ type: "huddle.publish", sdp: "offer 2", tracks: [{ mid: "0", kind: "video" }] }]);
+      expect(connection().transceivers[0]!.sender.track).toBe(cameraTrack());
+      // On already, there's nothing to turn on.
+      showHuddleCamera(true);
+      await settled();
+      expect(asked).toHaveBeenCalledTimes(1);
+      expect(FakeConnection.all).toHaveLength(2);
+    } finally {
+      localStorage.removeItem("ember:huddle-camera");
+    }
+  });
+
+  it("turns off: stops the camera, closes its connection, and has the room take down what it showed", async () => {
+    const room = await joined([], { camera: asCamera() });
+    const [voice, picture] = FakeConnection.all;
+    room.receive({ type: "huddle.published", kind: "video", sdp: "the SFU's answer" });
+    await settled();
+    room.take();
+
+    showHuddleCamera(false);
+    expect(cameraTrack().readyState).toBe("ended");
+    expect([voice!.connectionState, picture!.connectionState]).toEqual(["new", "closed"]);
+    expect(joinedHuddle()).toMatchObject({ camera: null, microphone: true });
+    expect(room.take()).toEqual([{ type: "huddle.unpublish", kind: "video" }]);
+    expect(microphoneTrack().readyState).toBe("live");
+    // Off already, there's nothing to turn off, and nothing more is published of it.
+    showHuddleCamera(false);
+    room.receive({ type: "huddle.unpublished", kind: "video" });
+    await wait(PUBLISH_AGAIN_MS[1]);
+    expect(room.take()).toEqual([]);
+    expect(FakeConnection.all).toHaveLength(2);
+  });
+
+  it("goes off as it's unplugged, or as the browser takes it away", async () => {
+    const room = await joined([], { camera: asCamera() });
+    room.take();
+    cameraTrack().end();
+    expect(joinedHuddle()).toMatchObject({ camera: null });
+    expect(room.take()).toEqual([{ type: "huddle.unpublish", kind: "video" }]);
+    expect(connection().connectionState).toBe("closed");
+  });
+
+  it("waits for the room's answer to an offer it has given up before it publishes again, since the answer doesn't say which offer it's to", async () => {
+    browserCamera();
+    const room = await joined([], { camera: asCamera() });
+    const first = connection();
+    room.take();
+
+    // Off and on again before the room has answered the first offer.
+    showHuddleCamera(false);
+    camera = new FakeStream([new FakeTrack("video")]);
+    showHuddleCamera(true);
+    await settled();
+    expect(joinedHuddle()).toMatchObject({ camera });
+    expect(room.take()).toEqual([{ type: "huddle.unpublish", kind: "video" }]);
+    expect(FakeConnection.all).toHaveLength(2);
+
+    // The answer to the first is nobody's now, and the second offer goes out once it has come.
+    room.receive({ type: "huddle.published", kind: "video", sdp: "the SFU's answer to the first" });
+    await settled();
+    expect(first.remoteDescription).toBeNull();
+    expect(room.take()).toEqual([{ type: "huddle.publish", sdp: "offer 3", tracks: [{ mid: "0", kind: "video" }] }]);
+    const second = connection();
+    expect(second.transceivers[0]!.sender.track).toBe(cameraTrack());
+    room.receive({ type: "huddle.published", kind: "video", sdp: "the SFU's answer to the second" });
+    await settled();
+    expect(second.remoteDescription).toEqual({ type: "answer", sdp: "the SFU's answer to the second" });
+  });
+
+  it("stays off, and says so, when the browser has no camera for it", async () => {
+    browserCamera(true);
+    const said = vi.fn();
+    const stop = hearHuddle(said);
+    const room = await joined();
+    room.take();
+
+    showHuddleCamera(true);
+    await settled();
+    expect(said).toHaveBeenCalledExactlyOnceWith(NO_CAMERA);
+    expect(joinedHuddle()).toMatchObject({ camera: null, connected: true });
+    expect(room.take()).toEqual([]);
+    expect(FakeConnection.all).toHaveLength(1);
+    stop();
+  });
+
+  it("goes off, with what the room says of it, when the huddle shows as many cameras as it does", async () => {
+    const said = vi.fn();
+    const stop = hearHuddle(said);
+    const room = await joined([], { camera: asCamera() });
+    room.take();
+
+    room.receive({ type: "error", message: CAMERAS_FULL, failed: "huddle.publish", kind: "video", refused: true });
+    expect(said).toHaveBeenCalledExactlyOnceWith(CAMERAS_FULL);
+    expect(joinedHuddle()).toMatchObject({ camera: null, connected: true });
+    expect(cameraTrack().readyState).toBe("ended");
+    expect(connection().connectionState).toBe("closed");
+    // It isn't tried again, and the huddle goes on.
+    await wait(PUBLISH_AGAIN_MS[1]);
+    expect(taken("video")).toEqual([{ type: "huddle.unpublish", kind: "video" }]);
+    expect(FakeConnection.all).toHaveLength(2);
+    expect(room.closedWith).toBeUndefined();
+    stop();
+  });
+
+  it("is published again by itself when the room couldn't publish it or leaves its offer unanswered, and the huddle goes on meanwhile", async () => {
+    const room = await joined([], { camera: asCamera() });
+    const [voice] = FakeConnection.all as [FakeConnection];
+    room.receive({ type: "huddle.published", kind: "audio", sdp: "the SFU's answer" });
+    await settled();
+    voice.becomes("connected");
+    room.take();
+
+    room.receive({ type: "error", message: "The huddle couldn't connect. Trying again.", failed: "huddle.publish", kind: "video" });
+    await wait(PUBLISH_AGAIN_MS[0] - 1);
+    expect(room.take()).toEqual([]);
+    await wait(1);
+    expect(room.take()).toEqual([{ type: "huddle.publish", sdp: "offer 3", tracks: [{ mid: "0", kind: "video" }] }]);
+
+    // Unanswered, where a microphone's offer has the tab join again, a camera's is only made again.
+    await wait(ANSWER_TIMEOUT_MS + PUBLISH_AGAIN_MS[0] * 2 - 1);
+    expect(room.take()).toEqual([]);
+    await wait(1);
+    expect(room.take()).toEqual([{ type: "huddle.publish", sdp: "offer 4", tracks: [{ mid: "0", kind: "video" }] }]);
+    expect(room.closedWith).toBeUndefined();
+    expect(joinedHuddle()).toMatchObject({ connected: true, camera });
+    expect(voice.connectionState).toBe("connected");
+    expect(cameraTrack().readyState).toBe("live");
+  });
+
+  it("stays on while the tab's connection to the room is down, and is published again once the room lets it back in", async () => {
+    const room = await joined([], { camera: asCamera() });
+    room.drop();
+    expect(joinedHuddle()).toMatchObject({ connected: false, camera });
+    expect(open()).toEqual([]);
+    expect(cameraTrack().readyState).toBe("live");
+
+    await wait(500);
+    socket().open();
+    await welcomed();
+    expect(socket().take()).toEqual([expect.objectContaining({ type: "huddle.publish", tracks: [{ mid: "0", kind: "audio" }] }), expect.objectContaining({ type: "huddle.publish", tracks: [{ mid: "0", kind: "video" }] })]);
+  });
+
+  it("stops with the huddle, which no longer answers for it", async () => {
+    const asked = browserCamera();
+    await joined([], { camera: asCamera() });
+    leaveHuddle();
+    expect(cameraTrack().readyState).toBe("ended");
+    for (const each of FakeConnection.all) expect(each.connectionState).toBe("closed");
+
+    showHuddleCamera(true);
+    await settled();
+    expect(asked).not.toHaveBeenCalled();
+  });
+
+  it("is closed again when the tab left while the browser asked its person for it", async () => {
+    let give!: (stream: FakeStream) => void;
+    const getUserMedia = vi.fn(() => new Promise<FakeStream>((resolve) => (give = resolve)));
+    vi.stubGlobal("navigator", { mediaDevices: Object.assign(new EventTarget(), { getUserMedia }) });
+    await joined();
+    showHuddleCamera(true);
+    await settled();
+    leaveHuddle();
+    give(camera);
+    await settled();
+    expect(cameraTrack().readyState).toBe("ended");
+    expect(joinedHuddle()).toBeNull();
+  });
+});
+
+describe("Watching the others in a huddle", () => {
+  it("asks for the cameras that are on, by whose they are, on a connection of its own, and shows each person's", async () => {
+    const room = await joined([person(grace, { video: true }), person(linus)]);
+    expect(room.take()).toEqual([{ type: "huddle.listen", kind: "audio", fresh: true }, { type: "huddle.listen", kind: "video", fresh: true, watch: [grace.id] }, expect.objectContaining({ type: "huddle.publish" })]);
+    expect(FakeConnection.all).toHaveLength(1);
+    expect(joinedHuddle()!.watched).toEqual(new Map());
+
+    room.receive(pictures(["0", grace]));
+    await settled();
+    const watching = connection();
+    expect(FakeConnection.all).toHaveLength(2);
+    expect(watching.configuration).toEqual({ iceServers: [{ urls: "stun:stun.cloudflare.com:3478" }], bundlePolicy: "max-bundle" });
+    expect(room.take()).toEqual([{ type: "huddle.answer", kind: "video", sdp: "answer to offer:0" }]);
+    const shown = joinedHuddle()!.watched.get(grace.id) as unknown as FakeStream;
+    expect([...joinedHuddle()!.watched.keys()]).toEqual([grace.id]);
+    expect(shown.tracks).toEqual([watching.transceivers[0]!.receiver.track]);
+    // A picture isn't a voice: nothing plays it but the huddle, opened.
+    expect(voices()).toEqual([]);
+
+    // Once more, as for voices, and then no more with everyone watched.
+    room.receive({ type: "huddle.listening", kind: "video" });
+    expect(room.take()).toEqual([{ type: "huddle.listen", kind: "video", watch: [grace.id] }]);
+    room.receive({ type: "huddle.listening", kind: "video" });
+    await wait(LISTEN_AGAIN_MS[1] * 2);
+    expect(room.take()).toEqual([]);
+    expect(watching.connectionState).toBe("new");
+  });
+
+  it("hears and watches on connections apart: a round of one waits on nothing of the other", async () => {
+    const room = await joined([person(grace, { video: true })]);
+    room.take();
+    room.receive(pictures(["0", grace]));
+    room.receive(offer(["0", grace]));
+    await settled();
+    const [, watching, hearing] = FakeConnection.all;
+    expect(FakeConnection.all).toHaveLength(3);
+    expect(taken("video")).toEqual([{ type: "huddle.answer", kind: "video", sdp: "answer to offer:0" }]);
+    expect(taken("audio")).toEqual([{ type: "huddle.answer", kind: "audio", sdp: "answer to offer:0" }]);
+    expect(playedBy(voiceOf(grace))).toBe(hearing!.transceivers[0]!.receiver.track);
+    expect((joinedHuddle()!.watched.get(grace.id) as unknown as FakeStream).tracks).toEqual([watching!.transceivers[0]!.receiver.track]);
+  });
+
+  it("asks for a camera as it comes on, and stops showing one that goes off, or whose person leaves", async () => {
+    const room = await joined([person(grace), person(linus)]);
+    room.take();
+    room.receive({ type: "huddle.changed", person: person(grace, { video: true }) });
+    expect(taken("video")).toEqual([{ type: "huddle.listen", kind: "video", fresh: true, watch: [grace.id] }]);
+    await watchedRound(["0", grace]);
+    room.take();
+
+    // Linus's is asked for beside hers, on the connection the tab has.
+    room.receive({ type: "huddle.changed", person: person(linus, { video: true }) });
+    expect(taken("video")).toEqual([{ type: "huddle.listen", kind: "video", watch: [grace.id, linus.id] }]);
+    await watchedRound(["1", linus]);
+    expect([...joinedHuddle()!.watched.keys()]).toEqual([grace.id, linus.id]);
+    room.take();
+
+    room.receive({ type: "huddle.changed", person: person(grace) });
+    expect([...joinedHuddle()!.watched.keys()]).toEqual([linus.id]);
+    room.receive({ type: "huddle.left", userId: linus.id });
+    expect(joinedHuddle()!.watched).toEqual(new Map());
+    // Neither is anyone to ask the room about: it stops sending what's no longer published.
+    expect(taken("video")).toEqual([]);
+    // Nor is the tab's own camera anyone's to watch.
+    room.receive({ type: "huddle.changed", person: person(ada, { audio: false, video: true }) });
+    expect(taken("video")).toEqual([]);
+  });
+
+  it("asks for nobody's once the huddle is closed to its bar, so the room stops sending them, and for them again once it's opened", async () => {
+    const room = await joined([person(grace, { video: true })]);
+    await watchedRound(["0", grace]);
+    room.take();
+    const watching = connection();
+
+    openHuddle(false);
+    expect(joinedHuddle()).toMatchObject({ open: false, watched: new Map() });
+    expect(room.take()).toEqual([{ type: "huddle.listen", kind: "video", watch: [] }]);
+    // With nobody on it, and nobody to ask for, the connection closes.
+    room.receive({ type: "huddle.listening", kind: "video" });
+    expect(watching.connectionState).toBe("closed");
+    // A camera that comes on meanwhile is nobody's to watch,
+    room.receive({ type: "huddle.joined", person: person(linus, { audio: false, video: true }) });
+    openHuddle(false);
+    expect(room.take()).toEqual([]);
+
+    // until the huddle is opened again, on a new connection.
+    openHuddle(true);
+    expect(joinedHuddle()).toMatchObject({ open: true });
+    expect(room.take()).toEqual([{ type: "huddle.listen", kind: "video", fresh: true, watch: [grace.id, linus.id] }]);
+    await watchedRound(["0", grace], ["1", linus]);
+    expect(connection()).not.toBe(watching);
+    expect([...joinedHuddle()!.watched.keys()]).toEqual([grace.id, linus.id]);
+  });
+
+  it("asks at once for nobody's when the huddle closes during a round, once that round is over", async () => {
+    const room = await joined([person(grace, { video: true })]);
+    room.take();
+    room.receive(pictures(["0", grace]));
+    await settled();
+    openHuddle(false);
+    expect(taken("video")).toEqual([{ type: "huddle.answer", kind: "video", sdp: "answer to offer:0" }]);
+    // What the round brought is shown until the room has been asked to stop sending it.
+    room.receive({ type: "huddle.listening", kind: "video" });
+    expect(taken("video")).toEqual([{ type: "huddle.listen", kind: "video", watch: [] }]);
+    expect(joinedHuddle()!.watched).toEqual(new Map());
+  });
+
+  it("watches no more cameras than a huddle shows", async () => {
+    const crowd = Array.from({ length: MAX_HUDDLE_CAMERAS + 1 }, (_, n) => person({ id: `p${n}`, name: `Person ${n}` }, { audio: false, video: true }));
+    const room = await joined(crowd);
+    const [asked] = taken("video");
+    expect(asked!.watch).toEqual(crowd.slice(0, MAX_HUDDLE_CAMERAS).map(({ user }) => user.id));
+    expect(room.take()).toEqual([expect.objectContaining({ type: "huddle.publish" })]);
+  });
+
+  it("starts watching over by itself when the room couldn't do what a round asked, or leaves it unanswered, and goes on hearing meanwhile", async () => {
+    const room = await joined([person(grace, { video: true })]);
+    await publishedAndConnected();
+    await offeredRound(["0", grace]);
+    room.receive({ type: "huddle.listening", kind: "audio" });
+    const hearing = connection();
+    await watchedRound(["0", grace]);
+    const watching = connection();
+    room.receive({ type: "huddle.joined", person: person(linus, { audio: false, video: true }) });
+    room.take();
+
+    room.receive({ type: "error", message: "The huddle couldn't connect. Trying again.", failed: "huddle.listen", kind: "video" });
+    expect(watching.connectionState).toBe("closed");
+    expect(joinedHuddle()!.watched).toEqual(new Map());
+    expect([hearing.connectionState, voices().length]).toEqual(["new", 1]);
+    await wait(LISTEN_AGAIN_MS[0]);
+    expect(room.take()).toEqual([{ type: "huddle.listen", kind: "video", fresh: true, watch: [grace.id, linus.id] }]);
+
+    // Unanswered, where a round of listening has the tab join again, a round of watching is only asked again.
+    await wait(ANSWER_TIMEOUT_MS + LISTEN_AGAIN_MS[0] * 2);
+    expect(room.take()).toEqual([{ type: "huddle.listen", kind: "video", fresh: true, watch: [grace.id, linus.id] }]);
+    expect(room.closedWith).toBeUndefined();
+    expect(joinedHuddle()).toMatchObject({ connected: true });
+    expect([hearing.connectionState, voices().length]).toEqual(["new", 1]);
+  });
+
+  it("shows nobody while the tab's connection to the room is down, and watches again once the room lets it back in", async () => {
+    const room = await joined([person(grace, { video: true })]);
+    await watchedRound(["0", grace]);
+    room.drop();
+    expect(joinedHuddle()!.watched).toEqual(new Map());
+    expect(open()).toEqual([]);
+
+    await wait(500);
+    socket().open();
+    await welcomed([person(grace, { video: true })]);
+    expect(taken("video")).toEqual([{ type: "huddle.listen", kind: "video", fresh: true, watch: [grace.id] }]);
+  });
+});
+
 describe("A huddle's own sounds", () => {
   it("play as the room lets the tab in and as someone else joins, and as someone leaves and the tab does", async () => {
     const room = await joined([person(grace)]);
@@ -836,7 +1247,7 @@ describe("A huddle's own sounds", () => {
     await settled();
     expect(played()).toEqual(["joined", "left"]);
 
-    joinHuddle({ roomId: "general", muted: false, microphone: null, speakerId: "" });
+    joinHuddle({ roomId: "general", muted: false, microphone: null, camera: null, speakerId: "" });
     socket().open();
     socket().drop(HuddleCloseCode.Full);
     await settled();
@@ -916,7 +1327,7 @@ describe("A huddle whose socket closes", () => {
     socket().open();
     await welcomed([person(grace), person(linus)]);
     expect(joinedHuddle()).toMatchObject({ connected: true, muted: true, people: [person(grace), person(linus), person(ada, { audio: false, muted: true })] });
-    expect(socket().take()).toEqual([{ type: "huddle.listen", fresh: true }, expect.objectContaining({ type: "huddle.publish", sdp: "offer 2" })]);
+    expect(socket().take()).toEqual([{ type: "huddle.listen", kind: "audio", fresh: true }, expect.objectContaining({ type: "huddle.publish", sdp: "offer 2" })]);
     expect(FakeConnection.all).toHaveLength(3);
   });
 
@@ -934,7 +1345,7 @@ describe("A huddle whose socket closes", () => {
     const room = await joined([person(grace)]);
     const sending = await publishedAndConnected();
     await offeredRound(["0", grace]);
-    room.receive({ type: "huddle.listening" });
+    room.receive({ type: "huddle.listening", kind: "audio" });
     // Two heartbeats with nothing heard between them.
     room.silent = true;
     await wait(25_000);
@@ -951,7 +1362,7 @@ describe("A huddle whose socket closes", () => {
     ["a round of listening", 1],
   ])("joins again on a new socket when the room leaves %s unanswered", async (_, people) => {
     const room = await joined(people ? [person(grace)] : []);
-    if (people) room.receive({ type: "huddle.published", sdp: "the SFU's answer" });
+    if (people) room.receive({ type: "huddle.published", kind: "audio", sdp: "the SFU's answer" });
     await wait(ANSWER_TIMEOUT_MS - 1);
     expect(room.closedWith).toBeUndefined();
     expect(joinedHuddle()).toMatchObject({ connected: true });
@@ -964,7 +1375,7 @@ describe("A huddle whose socket closes", () => {
     expect(FakeSocket.all).toHaveLength(2);
     socket().open();
     await welcomed(people ? [person(grace)] : []);
-    expect(socket().take()).toEqual([...(people ? [{ type: "huddle.listen", fresh: true }] : []), expect.objectContaining({ type: "huddle.publish" })]);
+    expect(socket().take()).toEqual([...(people ? [{ type: "huddle.listen", kind: "audio", fresh: true }] : []), expect.objectContaining({ type: "huddle.publish" })]);
   });
 });
 
@@ -1003,7 +1414,7 @@ describe("Leaving a huddle", () => {
     [CloseCode.NotFound, "You left the huddle, since its room is no longer there for you."],
   ])("ends for good, and says why, when the room closes its socket with %i", async (code, why) => {
     const said = vi.fn();
-    const stop = hearHuddleEnd(said);
+    const stop = hearHuddle(said);
     const room = await joined([person(grace)]);
     await offeredRound(["0", grace]);
 
@@ -1020,7 +1431,7 @@ describe("Leaving a huddle", () => {
 
   it("ends without a word when the person's sessions have ended, which the app says for itself", async () => {
     const said = vi.fn();
-    const stop = hearHuddleEnd(said);
+    const stop = hearHuddle(said);
     const room = await joined();
     room.drop(CloseCode.Revoked);
     expect(joinedHuddle()).toBeNull();
@@ -1032,7 +1443,7 @@ describe("Leaving a huddle", () => {
 
   it("connects again after any other close, as when the room asks it to", async () => {
     const said = vi.fn();
-    const stop = hearHuddleEnd(said);
+    const stop = hearHuddle(said);
     const room = await joined();
     room.drop(CloseCode.Reconnect);
     expect(joinedHuddle()).toMatchObject({ connected: false });
@@ -1044,18 +1455,18 @@ describe("Leaving a huddle", () => {
 
   it("says why to whoever listens now, and to nobody once they've stopped", () => {
     const [first, second] = [vi.fn(), vi.fn()];
-    const stopFirst = hearHuddleEnd(first);
-    const stopSecond = hearHuddleEnd(second);
+    const stopFirst = hearHuddle(first);
+    const stopSecond = hearHuddle(second);
     // The first to stop is no longer the one listening, and stops nothing.
     stopFirst();
-    joinHuddle({ roomId: "general", muted: false, microphone: null, speakerId: "" });
+    joinHuddle({ roomId: "general", muted: false, microphone: null, camera: null, speakerId: "" });
     socket().open();
     socket().drop(HuddleCloseCode.Off);
     expect(first).not.toHaveBeenCalled();
     expect(second).toHaveBeenCalledExactlyOnceWith("Huddles have been turned off.");
 
     stopSecond();
-    joinHuddle({ roomId: "general", muted: false, microphone: null, speakerId: "" });
+    joinHuddle({ roomId: "general", muted: false, microphone: null, camera: null, speakerId: "" });
     socket().open();
     socket().drop(HuddleCloseCode.Off);
     expect(second).toHaveBeenCalledTimes(1);

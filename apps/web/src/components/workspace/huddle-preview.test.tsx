@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PeopleContext } from "@/hooks/use-directory";
 import { joinHuddle } from "@/lib/huddle";
+import { NO_CAMERA } from "@/lib/huddle-devices";
 import { showHuddle } from "@/lib/huddle-store";
 import { ASKING_FOR_MICROPHONE, HuddlePreview, NO_MICROPHONE } from "./huddle-preview";
 
@@ -15,7 +16,7 @@ const person = (id: string, name: string): DirectoryUser => ({ id, name, bio: nu
 const PEOPLE = new Map([person("sam", "Sam Rivera"), person("priya", "Priya Patel"), person("ada", "Ada Lovelace")].map((listed) => [listed.id, listed]));
 const huddleOf = (...userIds: string[]): LiveHuddle => ({ startedAt: "2026-11-10T09:00:00.000Z", userIds });
 
-/** A microphone's track, as much of one as the preview and the tests read. */
+/** A microphone's track, or a camera's, as much of one as the preview and the tests read. */
 class FakeTrack extends EventTarget {
   stopped = false;
   /** Whether anything listens to it yet, as the preview does for its end, from an effect. */
@@ -41,20 +42,27 @@ class FakeTrack extends EventTarget {
 interface FakeStream {
   track: FakeTrack;
   getAudioTracks(): FakeTrack[];
+  getVideoTracks(): FakeTrack[];
   getTracks(): FakeTrack[];
 }
 
 const device = (kind: MediaDeviceKind, deviceId: string, label: string) => ({ kind, deviceId, label, groupId: "" }) as MediaDeviceInfo;
 const BUILT_IN = device("audioinput", "mic-1", "Built-in Microphone");
 const USB = device("audioinput", "mic-2", "USB Microphone");
+const FACETIME = device("videoinput", "cam-1", "FaceTime HD Camera");
+const WEBCAM = device("videoinput", "cam-2", "USB Webcam");
+/** What a huddle asks of whichever camera it opens. */
+const PICTURE = { width: { ideal: 640 }, height: { ideal: 360 } };
 
 /**
- * The browser's media devices: `devices` are the ones plugged in, and it opens the microphone asked for,
- * or the first, unless `refuses` or it has none. With `pending`, each request waits to be answered.
+ * The browser's media devices: `devices` are the ones plugged in, and it opens the microphone or the
+ * camera asked for, or the first, unless it `refuses` microphones, or `refusesCameras`, or has none.
+ * With `pending`, each request waits to be answered.
  */
 class FakeMedia extends EventTarget {
-  devices: MediaDeviceInfo[] = [BUILT_IN, USB];
+  devices: MediaDeviceInfo[] = [BUILT_IN, USB, FACETIME, WEBCAM];
   refuses = false;
+  refusesCameras = false;
   pending = false;
   /** The streams it has opened, oldest first. */
   opened: FakeStream[] = [];
@@ -65,19 +73,24 @@ class FakeMedia extends EventTarget {
   getUserMedia = async (constraints: MediaStreamConstraints): Promise<FakeStream> => {
     this.asked.push(constraints);
     if (this.pending) await new Promise<void>((answer) => this.waiting.push(answer));
-    if (this.refuses) throw Object.assign(new Error("Permission denied"), { name: "NotAllowedError" });
-    const microphones = this.devices.filter(({ kind }) => kind === "audioinput");
-    const wanted = typeof constraints.audio === "object" ? (constraints.audio.deviceId as { exact: string }).exact : undefined;
-    const found = wanted === undefined ? microphones[0] : microphones.find(({ deviceId }) => deviceId === wanted);
+    const camera = constraints.video !== undefined;
+    if (camera ? this.refusesCameras : this.refuses) throw Object.assign(new Error("Permission denied"), { name: "NotAllowedError" });
+    const listed = this.devices.filter(({ kind }) => kind === (camera ? "videoinput" : "audioinput"));
+    const asked = camera ? constraints.video : constraints.audio;
+    const wanted = typeof asked === "object" ? (asked.deviceId as { exact: string } | undefined)?.exact : undefined;
+    const found = wanted === undefined ? listed[0] : listed.find(({ deviceId }) => deviceId === wanted);
     if (!found) throw Object.assign(new Error("Requested device not found"), { name: wanted === undefined ? "NotFoundError" : "OverconstrainedError" });
     const track = new FakeTrack(found.deviceId, found.label);
-    const stream = { track, getAudioTracks: () => [track], getTracks: () => [track] };
+    const stream = { track, getAudioTracks: () => (camera ? [] : [track]), getVideoTracks: () => (camera ? [track] : []), getTracks: () => [track] };
     this.opened.push(stream);
     return stream;
   };
 
-  // Unnamed until a microphone has been opened, as browsers list them.
-  enumerateDevices = async () => (this.opened.length > 0 ? this.devices : this.devices.map(({ kind }) => device(kind, "", "")));
+  // Unnamed until one of their kind has been opened, as browsers list them: the speakers go with the microphones.
+  enumerateDevices = async () => {
+    const named = (kind: MediaDeviceKind) => this.opened.some((stream) => (kind === "videoinput" ? stream.getVideoTracks() : stream.getAudioTracks()).length > 0);
+    return this.devices.map((listed) => (named(listed.kind) ? listed : device(listed.kind, "", "")));
+  };
 
   /** Answers the requests that are waiting. */
   async answer() {
@@ -96,6 +109,8 @@ let media: FakeMedia;
 beforeEach(() => {
   media = new FakeMedia();
   Object.defineProperty(navigator, "mediaDevices", { value: media, configurable: true });
+  // jsdom plays nothing.
+  vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue();
 });
 
 afterEach(() => {
@@ -103,6 +118,7 @@ afterEach(() => {
   Reflect.deleteProperty(navigator, "mediaDevices");
   Reflect.deleteProperty(HTMLMediaElement.prototype, "setSinkId");
   vi.mocked(joinHuddle).mockReset();
+  vi.restoreAllMocks();
 });
 
 /** A browser that can play through a speaker it's told, as Chrome and Firefox can. */
@@ -129,6 +145,16 @@ async function openedPreview(live?: LiveHuddle) {
 const preview = () => screen.getByRole("dialog");
 const microphoneSelect = () => screen.getByRole<HTMLSelectElement>("combobox", { name: "Microphone" });
 const speakerSelect = () => screen.getByRole<HTMLSelectElement>("combobox", { name: "Speaker" });
+const cameraSelect = () => screen.getByRole<HTMLSelectElement>("combobox", { name: "Camera" });
+const picture = () => screen.getByLabelText<HTMLVideoElement>("Your camera");
+
+/** The preview with its camera turned on, once the browser has answered for that too: the second stream it opened. */
+async function previewWithCamera(live?: LiveHuddle) {
+  const shown = await openedPreview(live);
+  await shown.user.click(screen.getByRole("button", { name: "Turn on camera" }));
+  await screen.findByRole("button", { name: "Turn off camera" });
+  return shown;
+}
 const optionsOf = (select: HTMLSelectElement) => [...select.options].map((option) => option.textContent);
 
 describe("Starting a huddle", () => {
@@ -155,7 +181,7 @@ describe("Starting a huddle", () => {
   it("starts the huddle with the microphone it has open, which the huddle closes from then on", async () => {
     const { onClose, user, unmount } = await openedPreview();
     await user.click(screen.getByRole("button", { name: "Start Huddle" }));
-    expect(joinHuddle).toHaveBeenCalledExactlyOnceWith({ roomId: "general", muted: false, microphone: media.opened[0], speakerId: "" });
+    expect(joinHuddle).toHaveBeenCalledExactlyOnceWith({ roomId: "general", muted: false, microphone: media.opened[0], camera: null, speakerId: "" });
     expect(onClose).toHaveBeenCalledTimes(1);
     unmount();
     expect(media.opened[0]!.track.stopped).toBe(false);
@@ -177,7 +203,7 @@ describe("Starting a huddle", () => {
     expect(screen.getByRole("button", { name: "Unmute microphone" })).toBeDisabled();
     expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Start Huddle" }));
-    expect(joinHuddle).toHaveBeenCalledExactlyOnceWith({ roomId: "general", muted: false, microphone: null, speakerId: "" });
+    expect(joinHuddle).toHaveBeenCalledExactlyOnceWith({ roomId: "general", muted: false, microphone: null, camera: null, speakerId: "" });
   });
 
   it.each(["Cancel", "the × in its corner", "Escape"])("closes the microphone when it's left by %s", async (way) => {
@@ -296,6 +322,145 @@ describe("A huddle's microphone and speaker", () => {
   });
 });
 
+describe("A huddle's camera", () => {
+  it("leaves the camera off, and unasked for, until its switch turns it on", async () => {
+    const { user } = await openedPreview();
+    const off = screen.getByRole("button", { name: "Turn on camera" });
+    expect(off).toHaveClass("bg-background");
+    expect(media.asked).toEqual([{ audio: true }]);
+    expect(preview().querySelector("video")).toBeNull();
+    expect(preview().querySelectorAll("img")).toHaveLength(1);
+    expect(screen.queryByRole("combobox", { name: "Camera" })).not.toBeInTheDocument();
+
+    await user.click(off);
+    expect(await screen.findByRole("button", { name: "Turn off camera" })).toHaveClass("bg-foreground", "text-background");
+    expect(media.asked.at(-1)).toEqual({ video: PICTURE });
+    // Your own picture, as a mirror would show it, in place of your avatar.
+    expect(picture().srcObject).toBe(media.opened[1]);
+    expect(picture()).toHaveClass("-scale-x-100");
+    expect(picture()).toHaveProperty("muted", true);
+    expect(preview().querySelector("img")).toBeNull();
+    // The browser names the cameras once one is open.
+    await waitFor(() => expect(optionsOf(cameraSelect())).toEqual(["FaceTime HD Camera", "USB Webcam"]));
+    expect(cameraSelect()).toHaveValue("cam-1");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("starts the huddle with the camera it has open, which the huddle closes from then on", async () => {
+    const { user, unmount } = await previewWithCamera();
+    await user.click(screen.getByRole("button", { name: "Start Huddle" }));
+    expect(joinHuddle).toHaveBeenCalledExactlyOnceWith({ roomId: "general", muted: false, microphone: media.opened[0], camera: media.opened[1], speakerId: "" });
+    unmount();
+    expect(media.opened[1]!.track.stopped).toBe(false);
+  });
+
+  it("closes the camera once its switch turns it off, and starts without one", async () => {
+    const { user } = await previewWithCamera();
+    await user.click(screen.getByRole("button", { name: "Turn off camera" }));
+    expect(screen.getByRole("button", { name: "Turn on camera" })).toBeInTheDocument();
+    expect(media.opened[1]!.track.stopped).toBe(true);
+    expect(preview().querySelector("video")).toBeNull();
+    expect(preview().querySelectorAll("img")).toHaveLength(1);
+    expect(screen.queryByRole("combobox", { name: "Camera" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Start Huddle" }));
+    expect(joinHuddle).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ camera: null }));
+  });
+
+  it("says so when the browser has no camera to give, until it has one", async () => {
+    media.refusesCameras = true;
+    const { user } = await openedPreview();
+    await user.click(screen.getByRole("button", { name: "Turn on camera" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(NO_CAMERA);
+    expect(screen.getByRole("button", { name: "Turn on camera" })).toBeEnabled();
+    expect(preview().querySelector("video")).toBeNull();
+
+    media.refusesCameras = false;
+    await user.click(screen.getByRole("button", { name: "Turn on camera" }));
+    await screen.findByRole("button", { name: "Turn off camera" });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("shows without a microphone, when the camera is all there is to choose", async () => {
+    media.refuses = true;
+    const { user } = renderPreview();
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(NO_MICROPHONE));
+    await user.click(screen.getByRole("button", { name: "Turn on camera" }));
+    await waitFor(() => expect(optionsOf(cameraSelect())).toEqual(["FaceTime HD Camera", "USB Webcam"]));
+    expect(screen.getAllByRole("combobox")).toEqual([cameraSelect()]);
+    await user.click(screen.getByRole("button", { name: "Start Huddle" }));
+    expect(joinHuddle).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ microphone: null, camera: media.opened[0] }));
+  });
+
+  it("opens the camera this browser's last huddle chose", async () => {
+    localStorage.setItem("ember:huddle-camera", "cam-2");
+    await previewWithCamera();
+    expect(media.asked.at(-1)).toEqual({ video: { ...PICTURE, deviceId: { exact: "cam-2" } } });
+    await waitFor(() => expect(cameraSelect()).toHaveValue("cam-2"));
+  });
+
+  it("opens the browser's own choice once the one remembered is gone", async () => {
+    localStorage.setItem("ember:huddle-camera", "cam-9");
+    await previewWithCamera();
+    expect(media.asked.slice(-2)).toEqual([{ video: { ...PICTURE, deviceId: { exact: "cam-9" } } }, { video: PICTURE }]);
+    await waitFor(() => expect(cameraSelect()).toHaveValue("cam-1"));
+  });
+
+  it("opens another one chosen, closing the last, and remembers it", async () => {
+    const { user } = await previewWithCamera();
+    await waitFor(() => expect(optionsOf(cameraSelect())).toContain("USB Webcam"));
+    await user.selectOptions(cameraSelect(), "USB Webcam");
+    await waitFor(() => expect(cameraSelect()).toHaveValue("cam-2"));
+    expect(media.opened[1]!.track.stopped).toBe(true);
+    expect(media.opened[2]!.track.stopped).toBe(false);
+    expect(picture().srcObject).toBe(media.opened[2]);
+    expect(localStorage.getItem("ember:huddle-camera")).toBe("cam-2");
+    await user.click(screen.getByRole("button", { name: "Start Huddle" }));
+    expect(joinHuddle).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ microphone: media.opened[0], camera: media.opened[2] }));
+  });
+
+  it("names the camera that's open even if the browser's list leaves it out, and numbers ones without a name", async () => {
+    media.enumerateDevices = async () => [device("videoinput", "cam-7", "")];
+    await previewWithCamera();
+    expect(optionsOf(cameraSelect())).toEqual(["FaceTime HD Camera", "Camera 2"]);
+    expect(cameraSelect()).toHaveValue("cam-1");
+  });
+
+  it("goes off when the camera it has open is unplugged", async () => {
+    await previewWithCamera();
+    await waitFor(() => expect(media.opened[1]!.track.listenedTo).toBe(true));
+    act(() => void media.opened[1]!.track.dispatchEvent(new Event("ended")));
+    expect(screen.getByRole("button", { name: "Turn on camera" })).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(media.asked).toHaveLength(2);
+  });
+
+  it("closes the camera when it's left", async () => {
+    const { user, unmount } = await previewWithCamera();
+    await user.click(within(preview()).getAllByRole("button", { name: "Cancel" })[1]!);
+    expect(joinHuddle).not.toHaveBeenCalled();
+    unmount();
+    expect(media.opened.map(({ track }) => track.stopped)).toEqual([true, true]);
+  });
+
+  it("closes a camera the browser gives it after it has closed", async () => {
+    const { user, unmount } = await openedPreview();
+    media.pending = true;
+    await user.click(screen.getByRole("button", { name: "Turn on camera" }));
+    unmount();
+    await media.answer();
+    expect(media.opened).toHaveLength(2);
+    expect(media.opened[1]!.track.stopped).toBe(true);
+  });
+
+  it("keeps the camera through a change of microphone", async () => {
+    const { user } = await previewWithCamera();
+    await user.selectOptions(microphoneSelect(), "USB Microphone");
+    await waitFor(() => expect(microphoneSelect()).toHaveValue("mic-2"));
+    expect(media.opened[1]!.track.stopped).toBe(false);
+    expect(picture().srcObject).toBe(media.opened[1]);
+  });
+});
+
 describe("Joining a huddle", () => {
   it("says who's in the one going on, by first name as the directory has them", async () => {
     const { user } = await openedPreview(huddleOf("sam", "priya"));
@@ -341,7 +506,8 @@ describe("Joining a huddle", () => {
   });
 
   it("says that it leaves the huddle this tab is in", async () => {
-    act(() => showHuddle({ roomId: "other", connected: true, you: ada, people: [], muted: false, microphone: true }, { leave: vi.fn(), setMuted: vi.fn() }));
+    const elsewhere = { roomId: "other", connected: true, you: ada, people: [], muted: false, microphone: true, camera: null, watched: new Map(), open: false };
+    act(() => showHuddle(elsewhere, { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setOpen: vi.fn() }));
     const { unmount } = await openedPreview();
     expect(preview()).toHaveAccessibleDescription("Everyone in general can join once it starts. Starting it leaves the huddle you're in now.");
     unmount();

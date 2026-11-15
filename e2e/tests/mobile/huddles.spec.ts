@@ -4,14 +4,15 @@ import type { Page } from "@playwright/test";
 import { changeTheWorkspace, isolateRoom, listing, openRoom, signInAs, type TestRoom } from "../../fixtures";
 import { expect, hasDrawerLayout, test } from "./fixtures";
 
-// A room's huddle on a phone: its button in the room's header, the preview it starts from, and the bar
-// of the huddle the tab is in. The main test server has no huddles, whose keys Cloudflare would be asked
-// about, so these pages are told that huddles are on, and the huddle a tab joins is the test's own.
+// A room's huddle on a phone: its button in the room's header, the preview it starts from, and the
+// huddle the tab is in, opened and as its bar. The main test server has no huddles, whose keys Cloudflare
+// would be asked about, so these pages are told that huddles are on, and the huddle a tab joins is the
+// test's own.
 
 /** A huddle's socket, for `page.routeWebSocket`. */
 const HUDDLE_SOCKET = /\/api\/rooms\/[^/]+\/huddle/;
 
-// A microphone for the preview to open, which a page may use without asking anyone.
+// A microphone and a camera for the preview to open, which a page may use without asking anyone.
 test.use({
   launchOptions: { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined, args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"] },
 });
@@ -35,7 +36,7 @@ const header = (page: Page) => page.getByRole("navigation", { name: "Page" });
 
 /** Has the huddle the page joins welcome its person, `you`, after `others`, and say nothing more. */
 async function standInHuddle(page: Page, you: User, others: User[] = []): Promise<void> {
-  const people = [...others, you].map((user) => ({ user, muted: false, audio: false }));
+  const people = [...others, you].map((user) => ({ user, muted: false, audio: false, video: false }));
   await page.routeWebSocket(HUDDLE_SOCKET, (ws) => ws.send(JSON.stringify({ type: "huddle.welcome", you, people, startedAt: new Date().toISOString() } satisfies HuddleServerFrame)));
 }
 
@@ -75,12 +76,18 @@ test("the sidebar's row of a room with a huddle going on, which ends with who's 
   await screenIsFine();
 });
 
-test("the preview a huddle starts from, with its microphone and speaker to choose, fits the phone", async ({ page, room, screenIsFine }) => {
+test("the preview a huddle starts from, with its microphone and speaker to choose, and its camera once that's on, fits the phone", async ({ page, room, screenIsFine }) => {
   await openRoomWithHuddlesOn(page, room);
   await header(page).getByRole("button", { name: "Start huddle", exact: true }).tap();
   const preview = page.getByRole("dialog", { name: `Start a huddle in ${room.name}` });
   await expect(preview.getByRole("combobox", { name: "Microphone" })).toBeVisible();
   await expect(preview.getByRole("combobox", { name: "Speaker" })).toBeVisible();
+  await expect(preview.getByRole("combobox", { name: "Camera" })).toHaveCount(0);
+  await screenIsFine();
+
+  await preview.getByRole("button", { name: "Turn on camera" }).tap();
+  await expect(preview.getByLabel("Your camera")).toBeVisible();
+  await expect(preview.getByRole("combobox", { name: "Camera" })).toBeVisible();
   await screenIsFine();
 });
 
@@ -99,12 +106,26 @@ test("the preview of a huddle going on, for someone with no microphone to use, f
   await screenIsFine();
 });
 
-test("the bar of the huddle you're in fits the phone", async ({ page, room, session, participant, screenIsFine }) => {
+test("the huddle you're in fits the phone, opened with a tile for each person and minimized to its bar", async ({ page, room, session, participant, screenIsFine }) => {
   const others = await Promise.all(["Ada", "Grace"].map(async (name) => (await participant(name)).session.user));
   await standInHuddle(page, session.user, others);
   await openRoomWithHuddlesOn(page, room);
   await header(page).getByRole("button", { name: "Start huddle", exact: true }).tap();
   await page.getByRole("dialog", { name: `Start a huddle in ${room.name}` }).getByRole("button", { name: "Start Huddle" }).tap();
+  // It opens over the page, with everyone in it in sight.
+  const opened = page.locator("#huddle");
+  await expect(opened).toContainText("3 people");
+  const tiles = opened.getByRole("list", { name: "In the huddle" }).getByRole("listitem");
+  await expect(tiles).toHaveCount(3);
+  for (const tile of await tiles.all()) await expect(tile).toBeInViewport({ ratio: 1 });
+  await screenIsFine();
+  // Their own camera takes their tile.
+  await opened.getByRole("button", { name: "Turn on camera" }).tap();
+  await expect(tiles.last().getByLabel("Your camera")).toBeVisible();
+  await screenIsFine();
+
+  // Minimized, it's a bar along the base of the page.
+  await opened.getByRole("button", { name: "Minimize huddle" }).tap();
   const bar = page.getByRole("region", { name: `Huddle in ${room.name}` });
   await expect(bar).toContainText("Ada, Grace, and you are in the huddle");
   await expect(bar.getByRole("button", { name: "Mute microphone" })).toBeVisible();

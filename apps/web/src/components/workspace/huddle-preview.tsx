@@ -1,14 +1,15 @@
-import { useCallback, useContext, useEffect, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import type { LiveHuddle, Me, SharedRoom } from "@ember/protocol";
 import { Field } from "@/components/field";
-import { Microphone, MicrophoneMute, Xmark } from "@/components/icons/iconoir";
+import { Microphone, MicrophoneMute, VideoCamera, VideoCameraOff, Xmark } from "@/components/icons/iconoir";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { PeopleContext } from "@/hooks/use-directory";
 import { useHuddle } from "@/hooks/use-huddle";
 import { joinHuddle } from "@/lib/huddle";
-import { closeMicrophone, listDevices, microphoneOf, NO_DEVICES, openMicrophone, rememberDevice, rememberedDevice, watchDevices } from "@/lib/huddle-devices";
+import { cameraOf, closeDevice, listDevices, microphoneOf, NO_CAMERA, NO_DEVICES, openCamera, openMicrophone, rememberDevice, rememberedDevice, watchDevices } from "@/lib/huddle-devices";
 import { inItNow } from "@/lib/huddle-people";
 import { cn } from "@/lib/utils";
+import { HuddlePicture } from "./huddle-picture";
 import { SELECT } from "./model-picker";
 import { DIALOG, DIALOG_BACKDROP, DIALOG_CLOSE, DIALOG_TITLE, MAIN_ACTION, OTHER_ACTION } from "./unsaved-changes";
 import { UserAvatar } from "./user-avatar";
@@ -32,27 +33,28 @@ function usePreviewMicrophone() {
 
   const ask = useCallback(async (deviceId: string | null) => {
     const asking = ++asked.current;
-    closeMicrophone(open.current);
+    closeDevice(open.current);
     open.current = null;
     setStream(undefined);
     const opened = await openMicrophone(deviceId);
     const listed = asked.current === asking ? await listDevices() : NO_DEVICES;
-    if (asked.current !== asking) return closeMicrophone(opened);
+    if (asked.current !== asking) return closeDevice(opened);
     open.current = opened;
     setStream(opened);
     setDevices(listed);
   }, []);
+  const list = useCallback(() => void listDevices().then(setDevices), []);
 
   useEffect(() => {
     void ask(rememberedDevice("microphone"));
-    const stopWatching = watchDevices(() => void listDevices().then(setDevices));
+    const stopWatching = watchDevices(list);
     return () => {
       asked.current++;
       stopWatching();
-      closeMicrophone(open.current);
+      closeDevice(open.current);
       open.current = null;
     };
-  }, [ask]);
+  }, [ask, list]);
 
   // A microphone unplugged while it's previewed gives way to the browser's own choice.
   useEffect(() => {
@@ -69,7 +71,98 @@ function usePreviewMicrophone() {
     open.current = null;
     return taken;
   };
-  return { stream, devices, ask, take };
+  return { stream, devices, ask, list, take };
+}
+
+/**
+ * The camera the preview has open, which it asks the browser for only once its switch turns it on: null
+ * while it's off, and `refused` once there's none to use. It closes with the preview, unless the huddle
+ * took it. `opened` hears of each one, when the browser names the cameras.
+ */
+function usePreviewCamera(opened: () => void) {
+  const [stream, setStream] = useState<MediaStream | null>(null);
+  const [refused, setRefused] = useState(false);
+  const open = useRef<MediaStream | null>(null);
+  // Counts what the browser has been asked, so an answer to anything but the last is closed again.
+  const asked = useRef(0);
+
+  const turnOff = useCallback(() => {
+    asked.current++;
+    closeDevice(open.current);
+    open.current = null;
+    setStream(null);
+  }, []);
+  const turnOn = useCallback(
+    async (deviceId: string | null) => {
+      turnOff();
+      const asking = asked.current;
+      setRefused(false);
+      const camera = await openCamera(deviceId);
+      if (asked.current !== asking) return closeDevice(camera);
+      open.current = camera;
+      setStream(camera);
+      setRefused(!camera);
+      if (camera) opened();
+    },
+    [turnOff, opened],
+  );
+
+  useEffect(
+    () => () => {
+      asked.current++;
+      closeDevice(open.current);
+      open.current = null;
+    },
+    [],
+  );
+
+  // A camera unplugged while it's previewed goes off.
+  useEffect(() => {
+    const track = stream?.getVideoTracks()[0];
+    if (!track) return;
+    track.addEventListener("ended", turnOff);
+    return () => track.removeEventListener("ended", turnOff);
+  }, [stream, turnOff]);
+
+  /** Hands the camera to the huddle, which closes it from then on. */
+  const take = () => {
+    const taken = open.current;
+    open.current = null;
+    return taken;
+  };
+  return { stream, refused, turnOn, turnOff, take };
+}
+
+/** The devices to choose among, led by the one that's open where the browser's list leaves it out. */
+function withOpen(listed: MediaDeviceInfo[], deviceId: string, open: MediaStreamTrack | undefined): Pick<MediaDeviceInfo, "deviceId" | "label">[] {
+  return listed.some((device) => device.deviceId === deviceId) ? listed : [{ deviceId, label: open?.label ?? "" }, ...listed];
+}
+
+interface SwitchProps {
+  label: string;
+  /** Whether what it switches is on, which fills it. */
+  on: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}
+
+/** A round switch over the preview's picture: filled in ink while what it switches is on, as the huddle's own buttons are. */
+function PreviewSwitch({ label, on, disabled, onClick, children }: SwitchProps) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      disabled={disabled}
+      onClick={onClick}
+      className={cn(
+        "grid size-10 cursor-pointer place-items-center rounded-full border touch:size-11 disabled:cursor-default disabled:opacity-50 [&_svg]:size-5",
+        on ? "border-transparent bg-foreground text-background" : "bg-background text-foreground enabled:hover:bg-hover",
+      )}
+    >
+      {children}
+    </button>
+  );
 }
 
 /** Keeps a button's words on one line beside the other button, on a phone 320px wide too. */
@@ -85,14 +178,16 @@ interface Props {
 
 /**
  * The preview a huddle starts from, as Slack shows before one starts or you join one: who's in it, your
- * picture over the switch that mutes your microphone, what to speak and listen through, then Cancel and
- * Start Huddle or Join Huddle. Opening it asks the browser for the microphone, so the huddle starts with
- * it open, or listening only when there's none.
+ * picture over the switches that mute your microphone and turn your camera on, what to speak, listen
+ * and be seen through, then Cancel and Start Huddle or Join Huddle. Opening it asks the browser for the
+ * microphone, so the huddle starts with it open, or listening only when there's none. The camera stays
+ * off, and unasked for, until its switch turns it on, when the picture is its own.
  */
 export function HuddlePreview({ room, me, live, onClose }: Props) {
   const people = useContext(PeopleContext);
   const joined = useHuddle();
-  const { stream, devices, ask, take } = usePreviewMicrophone();
+  const { stream, devices, ask, list, take } = usePreviewMicrophone();
+  const camera = usePreviewCamera(list);
   const [muted, setMuted] = useState(false);
   const [speakerId, setSpeakerId] = useState(() => rememberedDevice("speaker") ?? "");
   const title = useRef<HTMLHeadingElement>(null);
@@ -106,11 +201,10 @@ export function HuddlePreview({ room, me, live, onClose }: Props) {
     joined && `${going ? "Joining" : "Starting"} it leaves the huddle you're in now.`,
   ];
 
-  // The microphone that's open leads the list where the browser's list leaves it out.
   const microphone = microphoneOf(stream ?? null);
-  const microphones = devices.microphones.some(({ deviceId }) => deviceId === microphone)
-    ? devices.microphones
-    : [{ deviceId: microphone, label: stream?.getAudioTracks()[0]?.label ?? "" }, ...devices.microphones];
+  const microphones = withOpen(devices.microphones, microphone, stream?.getAudioTracks()[0]);
+  const shown = cameraOf(camera.stream);
+  const cameras = withOpen(devices.cameras, shown, camera.stream?.getVideoTracks()[0]);
   // A browser that lists its own choice of speaker has it first, and the others get one to choose.
   const speakers = devices.speakers.some(({ deviceId }) => deviceId === "default") ? devices.speakers : [{ deviceId: "", label: "System default" }, ...devices.speakers];
   const speaker = speakers.find(({ deviceId }) => deviceId === speakerId)?.deviceId ?? speakers[0]!.deviceId;
@@ -124,8 +218,12 @@ export function HuddlePreview({ room, me, live, onClose }: Props) {
     rememberDevice("speaker", deviceId);
     setSpeakerId(deviceId);
   };
+  const chooseCamera = (deviceId: string) => {
+    rememberDevice("camera", deviceId);
+    void camera.turnOn(deviceId);
+  };
   const join = () => {
-    joinHuddle({ roomId: room.id, muted, microphone: take(), speakerId: speaker });
+    joinHuddle({ roomId: room.id, muted, microphone: take(), camera: camera.take(), speakerId: speaker });
     onClose();
   };
 
@@ -148,35 +246,37 @@ export function HuddlePreview({ room, me, live, onClose }: Props) {
         </DialogTitle>
         <DialogDescription className="leading-[1.65] text-muted-foreground">{description.filter(Boolean).join(" ")}</DialogDescription>
 
-        {/* As wide a picture as a camera's will be, and taller where a narrow phone's wouldn't hold the two. */}
-        <div className="mt-5 grid aspect-[16/9] place-content-center justify-items-center gap-3.5 rounded-xl border bg-surface py-4">
-          <UserAvatar user={me} square className="size-[88px] rounded-2xl upto-480px:size-[72px]" />
-          <button
-            type="button"
-            aria-label={silent ? "Unmute microphone" : "Mute microphone"}
-            disabled={!stream}
-            onClick={() => setMuted(!muted)}
-            className={cn(
-              "grid size-10 cursor-pointer place-items-center rounded-full border touch:size-11 disabled:cursor-default disabled:opacity-50 [&_svg]:size-5",
-              silent ? "bg-background text-foreground enabled:hover:bg-hover" : "border-transparent bg-foreground text-background",
-            )}
-          >
-            {silent ? <MicrophoneMute /> : <Microphone />}
-          </button>
+        {/* As wide as a camera's picture, which fills it while the camera's on, and taller where a narrow phone's wouldn't hold the avatar and the switches. */}
+        <div className={cn("relative mt-5 grid aspect-[16/9] justify-center justify-items-center gap-3.5 overflow-hidden rounded-xl border bg-surface py-4", camera.stream ? "content-end" : "content-center")}>
+          {camera.stream ? <HuddlePicture stream={camera.stream} label="Your camera" mirrored /> : <UserAvatar user={me} square className="size-[88px] rounded-2xl upto-480px:size-[72px]" />}
+          <div className="relative flex gap-2.5">
+            <PreviewSwitch label={silent ? "Unmute microphone" : "Mute microphone"} on={!silent} disabled={!stream} onClick={() => setMuted(!muted)}>
+              {silent ? <MicrophoneMute /> : <Microphone />}
+            </PreviewSwitch>
+            <PreviewSwitch
+              label={camera.stream ? "Turn off camera" : "Turn on camera"}
+              on={camera.stream !== null}
+              onClick={() => (camera.stream ? camera.turnOff() : void camera.turnOn(rememberedDevice("camera")))}
+            >
+              {camera.stream ? <VideoCamera /> : <VideoCameraOff />}
+            </PreviewSwitch>
+          </div>
         </div>
 
-        {stream && (
+        {(stream || camera.stream) && (
           <div className="mt-5 grid gap-3.5">
-            <Field id="huddle_microphone" label="Microphone">
-              <select id="huddle_microphone" value={microphone} onChange={(event) => chooseMicrophone(event.target.value)} className={SELECT}>
-                {microphones.map(({ deviceId, label }, index) => (
-                  <option key={deviceId} value={deviceId}>
-                    {label || `Microphone ${index + 1}`}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            {devices.speakers.length > 0 && (
+            {stream && (
+              <Field id="huddle_microphone" label="Microphone">
+                <select id="huddle_microphone" value={microphone} onChange={(event) => chooseMicrophone(event.target.value)} className={SELECT}>
+                  {microphones.map(({ deviceId, label }, index) => (
+                    <option key={deviceId} value={deviceId}>
+                      {label || `Microphone ${index + 1}`}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            )}
+            {stream && devices.speakers.length > 0 && (
               <Field id="huddle_speaker" label="Speaker">
                 <select id="huddle_speaker" value={speaker} onChange={(event) => chooseSpeaker(event.target.value)} className={SELECT}>
                   {speakers.map(({ deviceId, label }, index) => (
@@ -187,11 +287,27 @@ export function HuddlePreview({ room, me, live, onClose }: Props) {
                 </select>
               </Field>
             )}
+            {camera.stream && (
+              <Field id="huddle_camera" label="Camera">
+                <select id="huddle_camera" value={shown} onChange={(event) => chooseCamera(event.target.value)} className={SELECT}>
+                  {cameras.map(({ deviceId, label }, index) => (
+                    <option key={deviceId} value={deviceId}>
+                      {label || `Camera ${index + 1}`}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            )}
           </div>
         )}
         <p role="status" className="mt-5 leading-[1.65] text-muted-foreground empty:mt-0">
           {stream === undefined ? ASKING_FOR_MICROPHONE : stream === null ? NO_MICROPHONE : null}
         </p>
+        {camera.refused && (
+          <p role="alert" className={cn("leading-[1.65] text-muted-foreground", stream ? "mt-5" : "mt-2.5")}>
+            {NO_CAMERA}
+          </p>
+        )}
 
         <div className="mt-[26px] flex justify-end gap-2.5">
           <button type="button" onClick={onClose} className={cn(OTHER_ACTION, ON_ONE_LINE)}>
