@@ -98,6 +98,14 @@ describe("Someone's profile page", () => {
     expect(mailLink()).toBeNull();
   });
 
+  it("shows someone's @username under their name, if they have one", async () => {
+    const amazing = { ...grace, username: "amazing.grace" };
+    serve(found(amazing));
+    showPage(amazing, { people: new Map([[grace.id, amazing]]) });
+    expect(await heading()).toHaveTextContent("Grace Hopper");
+    expect(screen.getByText("@amazing.grace")).toBeVisible();
+  });
+
   it("goes back home when the app didn't open it, and asks for ids escaped", async () => {
     history.replaceState(null, "", "/users/caf%C3%A9");
     serve(found({ ...grace, id: "café" }));

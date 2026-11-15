@@ -182,12 +182,36 @@ function huddlePageOf(roomSegment: string): WorkspacePage | null {
   return roomId ? { page: "room", roomId, huddle: true } : null;
 }
 
+// This package is typed without a platform's library, and every platform it runs on has these.
+declare const URL: { parse(url: string, base: string): { readonly origin: string; readonly pathname: string; readonly search: string; readonly hash: string } | null };
+declare const URLSearchParams: new (init: string) => { get(name: string): string | null };
+
+/**
+ * The page of the workspace at `origin` that `address` names, its query and fragment included, or "/"
+ * for anything else, as `address` is someone's to make up: another site's, or a page that isn't the
+ * workspace's.
+ */
+export function workspacePathIn(address: string | null, origin: string): string {
+  const url = address === null ? null : URL.parse(address, origin);
+  return url?.origin === origin && workspacePageOf(url.pathname) ? `${url.pathname}${url.search}${url.hash}` : "/";
+}
+
+/** Where someone new who joined with Memberful chooses their picture, name and username, before going on. */
+export const WELCOME_PATH = "/welcome";
+
+/** The welcome page's address for someone new who goes on to `returnPath`, a page of the workspace, as its `return_to` says. */
+export const welcomePath = (returnPath: string) => (returnPath === "/" ? WELCOME_PATH : `${WELCOME_PATH}?return_to=${encodeURIComponent(returnPath)}`);
+
+/** The page of the workspace at `origin` that the welcome page goes on to, as `search`, its address's query, names it. */
+export const pageAfterWelcome = (search: string, origin: string) => workspacePathIn(new URLSearchParams(search).get("return_to"), origin);
+
 /**
  * Whether the app shows a page at `pathname`: sign-in, the page that asks whether to connect an AI
- * app, or one of the workspace's. The Worker answers setup's, the join link's and open sign-up's
- * addresses itself.
+ * app, the welcome page, or one of the workspace's. The Worker answers setup's, the join link's and
+ * open sign-up's addresses itself.
  */
-export const isAppPage = (pathname: string) => pathname === SIGN_IN_PATH || pathname === OUTSIDE_AUTHORIZE_PATH || workspacePageOf(pathname) !== null;
+export const isAppPage = (pathname: string) =>
+  pathname === SIGN_IN_PATH || pathname === OUTSIDE_AUTHORIZE_PATH || pathname === WELCOME_PATH || workspacePageOf(pathname) !== null;
 
 /**
  * What the Worker has the browser fetch with a workspace page, for a browser with a session cookie,

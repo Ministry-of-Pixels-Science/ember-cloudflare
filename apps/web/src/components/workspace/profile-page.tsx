@@ -20,6 +20,7 @@ import { FIELD_INPUT, Field, SubmitButton } from "@/components/field";
 import { useFlash } from "@/components/flash";
 import { LogOut } from "@/components/icons/iconoir";
 import { Input } from "@/components/ui/input";
+import { UsernameField } from "@/components/username-field";
 import { PeopleContext } from "@/hooks/use-directory";
 import { useMounted } from "@/hooks/use-mounted";
 import { usePush } from "@/hooks/use-push";
@@ -54,7 +55,7 @@ interface Props {
   onFailed: (error: unknown) => void;
 }
 
-const FIELDS = ["name", "emailAddress", "bio"] as const;
+const FIELDS = ["name", "username", "emailAddress", "bio"] as const;
 
 /** What the profile says once it has saved a new avatar. */
 export const AVATAR_CHANGED = "It may take up to 30 minutes to change everywhere.";
@@ -66,7 +67,7 @@ type Picture = Pick<Profile, "avatarUrl" | "avatar">;
 type Fields = Record<(typeof FIELDS)[number], string>;
 
 /** A profile in the form. */
-const fieldsOf = ({ name, emailAddress, bio }: Profile): Fields => ({ name, emailAddress: emailAddress ?? "", bio: bio ?? "" });
+const fieldsOf = ({ name, username, emailAddress, bio }: Profile): Fields => ({ name, username: username ?? "", emailAddress: emailAddress ?? "", bio: bio ?? "" });
 
 /**
  * The fields `typed` differently from `saved`, the profile as the page last loaded or saved it, and
@@ -102,16 +103,16 @@ function settled(typed: Fields, sent: Fields, saved: Fields): Fields {
 /**
  * Your profile: how to install Ember, for the browsers that get steps, then your avatar, which a photo
  * picked saves at once, showing it meanwhile, with the notice "It may take up to 30 minutes to change
- * everywhere.", and Remove avatar takes away, then your name, email address, a new password, unless
- * Memberful signs you in without one, your current password while you have one, which changing your
- * email address or password takes, and your
+ * everywhere.", and Remove avatar takes away, then your name, username, email address, a new password,
+ * unless Memberful signs you in without one, your current password while you have one, which changing
+ * your email address or password takes, and your
  * bio, which Save changes saves with the notice "✓", keeping the page, then, while members sign in with
  * Memberful, connecting your Memberful account, or the one you've connected, which Disconnect Memberful
  * unlinks with the notice "Your Memberful account is disconnected.", then, while Ember AI is on, how much @ember thinks and
  * how long it answers you, then your notification level in each of your rooms and DMs, then a sign-in
  * link for you, a new one each time the page loads or saves, and Log out in the top bar. Go Back
- * returns to the page it was opened from. Your avatar, name and bio reach everyone's open pages at
- * once, through the workspace socket, as they reach the rail.
+ * returns to the page it was opened from. Your avatar, name, username and bio reach everyone's open
+ * pages at once, through the workspace socket, as they reach the rail.
  */
 export function ProfilePage({ me, rooms, askForRoom, onSignOut, onFailed }: Props) {
   const [fields, setFields] = useState<Fields | null>(null);
@@ -306,6 +307,7 @@ export function ProfilePage({ me, rooms, askForRoom, onSignOut, onFailed }: Prop
               className={FIELD_INPUT}
             />
           </Field>
+          <UsernameField value={fields?.username ?? ""} onChange={(username) => setFields((fields) => fields && { ...fields, username })} disabled={!fields} />
           <Field id="user_email_address" label="Email address" translation="email_address">
             <Input
               id="user_email_address"

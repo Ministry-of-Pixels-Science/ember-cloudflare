@@ -303,6 +303,7 @@ export function NewDirectDialog({ opener, meId, reloadPeople, askForRoom, onClos
                   <UserAvatar user={person} />
                   <span className="min-w-0 wrap-anywhere">
                     {nameOf(person)}
+                    {person.username && <span className="text-muted-foreground"> @{person.username}</span>}
                     {isAgent(person) && <AgentBadge className="ms-0.5" />}
                   </span>
                 </button>

@@ -50,6 +50,12 @@ lexxy-editor {
   --lexxy-color-canvas: var(--background);
 
   border: 1px solid var(--border);
+  /* As wide as a name and @username side by side, up to 44ch where Lexxy's stops at 20ch, while the editor has room. */
+  max-inline-size: min(44ch, calc(100% - var(--lexxy-prompt-offset-x)));
+
+  &[data-clipped-at-right] {
+    max-inline-size: min(44ch, calc(100% - 1ch));
+  }
 }
 
 /*
@@ -306,6 +312,20 @@ action-text-attachment[content-type~="application/vnd.actiontext.opengraph-embed
   align-items: center;
   column-gap: 1ch;
   display: flex;
+  min-inline-size: 0;
+}
+
+/*
+ * Someone's @username after their name, as their page shows it under theirs, on one line, which a name
+ * too long for both wraps beside, and cut short only past half the line.
+ */
+.autocompletable__username {
+  color: var(--message-muted);
+  flex-shrink: 0;
+  max-inline-size: 50%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* @ember's agent badge after its name, as AgentBadge draws it everywhere else (agent-badge.tsx). */
