@@ -173,9 +173,11 @@ export interface RoomListState {
   list: Sidebar | null;
   /** While a list is on its way, the changes made since it was asked for, which it may not show; otherwise null. */
   pending: SidebarChange[] | null;
+  /** Whether the list that came last may have a room in the wrong place, so it's to be asked for again (`putBackIn`). */
+  askAgain: boolean;
 }
 
-export const NO_ROOM_LIST: RoomListState = { list: null, pending: [] };
+export const NO_ROOM_LIST: RoomListState = { list: null, pending: [], askAgain: false };
 
 /** A change, or the list asked for, arriving, or failing to. */
 export type RoomListAction = SidebarChange | { type: "asked" } | { type: "loaded"; list: Sidebar } | { type: "unanswered" };
@@ -212,16 +214,34 @@ function changed(list: Sidebar, change: SidebarChange): Sidebar {
   }
 }
 
+/**
+ * Whether `changes`, made while `list` was on its way, take someone out of a room it lists and put them
+ * back in, which may leave the room in the wrong place, since the list doesn't say which it shows: the
+ * room where it was before they were taken out, which the changes move last, or where it is since they
+ * were put back, which the changes move past any room they were put in after it.
+ */
+function putBackIn(list: Sidebar, changes: SidebarChange[]): boolean {
+  const listed = new Set(list.rooms.map((room) => room.id));
+  const takenOut = new Set<RoomId>();
+  for (const change of changes) {
+    if (change.type === "gone" && listed.has(change.roomId)) takenOut.add(change.roomId);
+    else if (change.type === "saved" && takenOut.has(change.room.id)) return true;
+  }
+  return false;
+}
+
 export function roomListReducer(state: RoomListState, action: RoomListAction): RoomListState {
   switch (action.type) {
     case "asked":
-      return { ...state, pending: [] };
-    case "loaded":
-      return { list: (state.pending ?? []).reduce(changed, action.list), pending: null };
+      return { ...state, pending: [], askAgain: false };
+    case "loaded": {
+      const pending = state.pending ?? [];
+      return { list: pending.reduce(changed, action.list), pending: null, askAgain: putBackIn(action.list, pending) };
+    }
     // When the first list fails to arrive, there are no rooms to show, rather than a list loading for good.
     case "unanswered":
-      return { list: state.list ?? { rooms: [], favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, suggestions: [], huddles: {} }, pending: null };
+      return { list: state.list ?? { rooms: [], favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, suggestions: [], huddles: {} }, pending: null, askAgain: false };
     default:
-      return { list: state.list && changed(state.list, action), pending: state.pending && [...state.pending, action] };
+      return { ...state, list: state.list && changed(state.list, action), pending: state.pending && [...state.pending, action] };
   }
 }

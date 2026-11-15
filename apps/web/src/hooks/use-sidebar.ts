@@ -73,8 +73,9 @@ const isSame = (you: Me, me: Me) => you.id === me.id && you.name === me.name && 
  * room's page and this does on every page, and, its rooms only, a while after the socket says the shared
  * order has changed, or that someone the people directory lists as removed, banned or suspended is
  * active again, whom the sidebar may suggest a DM with now, and once it says this person has been given
- * another role. `refresh` asks for it again, settling once a list asked for since has come, or failing
- * as that did.
+ * another role. It loads again at once after a list that may have a room in the wrong place, one this
+ * person was taken out of and put back in while the list was on its way. `refresh` asks for it again,
+ * settling once a list asked for since has come, or failing as that did.
  *
  * `onSessionChanged` hears when who the browser's session signs in changes: null once it has expired,
  * whoever another tab signed in as, or `me` as they are now, once they've been made an administrator,
@@ -90,7 +91,7 @@ export function useSidebar(
   onAccountChanged: (account: Account) => void = () => {},
   onGone: (roomId: RoomId) => void = () => {},
 ) {
-  const [{ list }, change] = useReducer(roomListReducer, NO_ROOM_LIST);
+  const [{ list, askAgain }, change] = useReducer(roomListReducer, NO_ROOM_LIST);
   // Whether a list the server sent has come, rather than only the empty one a failed first load leaves.
   const [answered, setAnswered] = useState(false);
   // How many of the workspace socket's frames have said what became of a room or of this person's level
@@ -111,6 +112,10 @@ export function useSidebar(
       }
     });
   });
+  // A list that doesn't come leaves the sidebar as it is, until it loads again.
+  useEffect(() => {
+    if (askAgain) void refresh().catch(() => {});
+  }, [askAgain, refresh]);
   const sessionChanged = useEffectEvent(onSessionChanged);
   const accountChanged = useEffectEvent(onAccountChanged);
   // A failed load leaves the avatars as they are until the next.
