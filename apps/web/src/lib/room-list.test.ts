@@ -1,4 +1,4 @@
-import type { Favorites, LiveHuddle, Room, Sidebar, SidebarRoom, User } from "@ember/protocol";
+import type { Favorites, LiveHuddle, Room, Sidebar, SidebarRoom } from "@ember/protocol";
 import { describe, expect, it } from "vitest";
 import {
   apart,
@@ -7,7 +7,6 @@ import {
   markedUnread,
   NO_ROOM_LIST,
   roomListReducer,
-  suggestedPeople,
   withRoom,
   type DirectSidebarRoom,
   type RoomListAction,
@@ -27,7 +26,7 @@ const direct = (id: string, ...names: string[]): DirectSidebarRoom => ({
 });
 const unstarred: Favorites = { rooms: [], version: 0 };
 /** The sidebar's list of `rooms`, starred as `favorites` says. */
-const sidebar = (rooms: SidebarRoom[], favorites = unstarred): Sidebar => ({ rooms, favorites, sharedOrder: [], invitation: null, suggestions: [], huddles: {} });
+const sidebar = (rooms: SidebarRoom[], favorites = unstarred): Sidebar => ({ rooms, favorites, sharedOrder: [], invitation: null, huddles: {} });
 
 describe("Create an open room", () => {
   it("puts a new room last, as the room someone was put in most recently, and the sidebar below every other room, whatever its name", () => {
@@ -311,22 +310,6 @@ describe("DM order", () => {
     const saved = (minutes: number): Room => ({ id: "d1", kind: "direct", members: [{ id: "ada", name: "Ada" }], activeAt: at(minutes) });
     expect(withRoom(listed, saved(1))).toEqual(listed);
     expect(withRoom(listed, saved(7))).toEqual([activeAt(direct("d1", "Ada"), 7)]);
-  });
-});
-
-describe("Suggested people", () => {
-  const people: User[] = ["Grace", "Linus", "Alan"].map((name) => ({ id: name.toLowerCase(), name }));
-  const many: User[] = Array.from({ length: 20 }, (_, i) => ({ id: `p${i}`, name: `Person ${i}` }));
-
-  it("suggests the people listed but those in your DMs", () => {
-    expect(suggestedPeople(people, [room("r1", "Design")])).toEqual(people);
-    expect(suggestedPeople(people, [room("r1", "Design"), direct("d1", "Ada", "Linus")])).toEqual([people[0], people[2]]);
-  });
-
-  it("suggests as many as there's room for beside the people in your DMs, you included", () => {
-    expect(suggestedPeople(many, [])).toHaveLength(19);
-    expect(suggestedPeople(many, [direct("d1", "Ada")])).toHaveLength(18);
-    expect(suggestedPeople(many, [direct("d1", "Ada", "Grace"), direct("d2", "Ada", "Grace", "Linus")])).toHaveLength(16);
   });
 });
 

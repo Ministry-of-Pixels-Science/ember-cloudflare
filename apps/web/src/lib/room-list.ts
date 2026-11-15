@@ -1,6 +1,5 @@
 import {
   startingInvolvement,
-  suggestedCount,
   type Favorites,
   type Involvement,
   type LiveHuddle,
@@ -9,7 +8,6 @@ import {
   type SharedRoom,
   type Sidebar,
   type SidebarRoom,
-  type User,
 } from "@ember/protocol";
 import { isHidden } from "./involvement";
 
@@ -65,16 +63,6 @@ export function inSidebarOrder<T extends SharedRoom>(rooms: T[], favorites: Room
  */
 export function inDirectOrder<T extends DirectSidebarRoom>(directs: T[]): T[] {
   return directs.toReversed().sort((a, b) => (a.activeAt < b.activeAt ? 1 : a.activeAt > b.activeAt ? -1 : 0));
-}
-
-/**
- * The people the sidebar suggests for DMs, of the ones `suggestions` lists, given someone's `rooms` as
- * they are now: everyone but the people in their DMs, as many as `suggestedCount` allows for them, as
- * the server would list them now, but for the people who've joined since it did.
- */
-export function suggestedPeople(suggestions: User[], rooms: SidebarRoom[]): User[] {
-  const inDirects = new Set(rooms.flatMap((room) => (room.kind === "direct" ? room.members.map((member) => member.id) : [])));
-  return suggestions.filter((person) => !inDirects.has(person.id)).slice(0, suggestedCount(inDirects.size));
 }
 
 /**
@@ -240,7 +228,7 @@ export function roomListReducer(state: RoomListState, action: RoomListAction): R
     }
     // When the first list fails to arrive, there are no rooms to show, rather than a list loading for good.
     case "unanswered":
-      return { list: state.list ?? { rooms: [], favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, suggestions: [], huddles: {} }, pending: null, askAgain: false };
+      return { list: state.list ?? { rooms: [], favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: {} }, pending: null, askAgain: false };
     default:
       return { ...state, list: state.list && changed(state.list, action), pending: state.pending && [...state.pending, action] };
   }

@@ -1,7 +1,6 @@
 import { CloseCode, MAX_LISTED_USERS, type DirectRoom, type RoomId, type Sidebar, type User, type UserId, type WorkspaceServerFrame } from "@ember/protocol";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { RoomEvent } from "../src/room-log";
-import { SUGGESTED_FOR_USER } from "../src/workspace-store";
 import {
   api,
   closeOf,
@@ -40,9 +39,6 @@ const sidebarOf = async (session: Session) => (await (await api("/api/sidebar", 
 async function directsOf(session: Session) {
   return (await sidebarOf(session)).rooms.filter((room) => room.kind === "direct");
 }
-
-/** The names of the people `session`'s sidebar suggests for DMs, in order. */
-const suggestedTo = async (session: Session) => (await sidebarOf(session)).suggestions.map((person) => person.name);
 
 const membershipsOf = (roomId: RoomId) => workspaceSql("SELECT user_id, involvement FROM memberships WHERE room_id = ? ORDER BY user_id", roomId);
 
@@ -245,68 +241,16 @@ describe("DM order", () => {
   });
 });
 
-describe("Suggested people", () => {
-  /** Adds someone active whose account was made at `createdAt`, answering their id. */
-  async function person(name: string, createdAt: string, role = 0): Promise<UserId> {
-    const id = `person-${crypto.randomUUID()}`;
-    await workspaceSql(`INSERT INTO users (id, name, role, status, created_at, updated_at) VALUES (?, ?, ?, 0, ?, ?)`, id, name, role, createdAt, createdAt);
-    return id;
-  }
-
-  /** Adds 25 people, from "p01", the oldest, to "p25", all older than anyone signed in, answering their ids in that order. */
-  async function twentyFive(): Promise<UserId[]> {
-    const ids: UserId[] = [];
-    for (let i = 1; i <= 25; i++) ids.push(await person(`p${String(i).padStart(2, "0")}`, `2026-01-01T00:00:${String(i).padStart(2, "0")}.000Z`));
-    return ids;
-  }
-
-  const names = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => `p${String(from + i).padStart(2, "0")}`);
-
-  it("suggests 19 active people, the oldest accounts first, never you, nor anyone who's left", async () => {
-    const ids = await twentyFive();
+describe("DMs in the sidebar", () => {
+  it("lists only the DMs someone is in, never anyone they could start one with, as the people who join", async () => {
     const ada = await signIn("Ada");
-    expect(await suggestedTo(ada)).toEqual(names(1, 19));
-    await workspaceSql("UPDATE users SET status = 1 WHERE id = ?", ids[4]!);
-    await workspaceSql("UPDATE users SET status = 2 WHERE id = ?", ids[5]!);
-    expect(await suggestedTo(ada)).toEqual([...names(1, 4), ...names(7, 21)]);
-    // The newest come only once there's room for them, and you never do.
-    expect(await suggestedTo(ada)).not.toContain("Ada");
-  });
-
-  it("leaves out everyone you share a DM with, and as many more as there are people in your DMs, you included", async () => {
-    const ids = await twentyFive();
-    const ada = await signIn("Ada");
-    // A DM with yourself takes 18.
-    await startDirect(ada, []);
-    expect(await suggestedTo(ada)).toEqual(names(1, 18));
-    // A DM with one other person takes 17, and leaves them out.
-    await startDirect(ada, [ids[0]!]);
-    expect(await suggestedTo(ada)).toEqual(names(2, 18));
-    // And a group DM leaves out everyone in it.
-    await startDirect(ada, [ids[1]!, ids[2]!]);
-    expect(await suggestedTo(ada)).toEqual(names(4, 18));
-  });
-
-  it("leaves out the people in the DMs someone else started with you", async () => {
-    const ids = await twentyFive();
-    const ada = await signIn("Ada");
-    const grace = await signIn("Grace");
-    await direct(grace, ada);
-    await startDirect(ada, [ids[0]!]);
-    expect(await suggestedTo(ada)).toEqual(names(2, 17));
-    expect(await suggestedTo(grace)).toEqual(names(1, 17));
-  });
-
-  it("suggests no bots, though Campfire does, for their rows among your DMs would look like DMs nobody started", async () => {
-    await twentyFive();
-    await person("Robot", "2025-01-01T00:00:00.000Z", 2);
-    expect(await suggestedTo(await signIn("Ada"))).toEqual(names(1, 19));
-  });
-
-  it("walks people from the oldest account through an index, without sorting everyone", async () => {
-    const plan = (await workspaceSql(`EXPLAIN QUERY PLAN ${SUGGESTED_FOR_USER}`, "user")).map((row) => (row as { detail: string }).detail).join("; ");
-    expect(plan).toContain("SCAN users USING INDEX index_users_on_created_at_and_id");
-    expect(plan).not.toContain("TEMP B-TREE");
+    const [grace, linus] = [await signIn("Grace"), await signIn("Linus")];
+    const sidebar = await sidebarOf(ada);
+    expect(sidebar.rooms.filter((room) => room.kind === "direct")).toEqual([]);
+    expect(Object.keys(sidebar).sort()).toEqual(["favorites", "huddles", "invitation", "rooms", "sharedOrder"]);
+    const room = await direct(grace, ada);
+    expect(await directsOf(ada)).toEqual([listedRoom({ ...room, members: everyone(ada.user, grace.user) })]);
+    expect(await directsOf(linus)).toEqual([]);
   });
 });
 

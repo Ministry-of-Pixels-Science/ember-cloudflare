@@ -8,14 +8,12 @@ import {
   NAVIGATION_SLOTS,
   PASSWORD_RESET_CODE_TRIES,
   RECENT_SEARCHES,
-  SUGGESTED_PEOPLE,
   emailDomainOf,
   isHost,
   isRoomIcon,
   mailboxOf,
   mailboxText,
   parseSearch,
-  suggestedCount,
   type Account,
   type BotChanges,
   type BotRoom,
@@ -522,7 +520,6 @@ export interface SidebarRooms {
   rooms: SidebarRoom[];
   favorites: Favorites;
   sharedOrder: RoomId[];
-  suggestions: User[];
   huddles: Record<RoomId, LiveHuddle>;
   /** The workspace's first room, if they're given the welcome card. */
   invitationRoomId: RoomId | null;
@@ -1509,20 +1506,6 @@ const GRANT_DIRECT = `INSERT INTO memberships (room_id, user_id, involvement, cr
 const DIRECT_WITH_KEY = `SELECT rooms.id AS room_id, ${ACTIVE_AT}, users.id, users.name
   FROM rooms JOIN memberships ON memberships.room_id = rooms.id JOIN users ON users.id = memberships.user_id
   WHERE rooms.direct_key = ? ORDER BY memberships.user_id`;
-
-/**
- * The people the sidebar suggests ?1 start a DM with, before it leaves out as many as their DMs take:
- * the active people with the oldest accounts who share no DM with them, never them. Unlike Campfire's,
- * it suggests no bots, nor @ember and the agents, whose rows among the DMs would look like DMs nobody
- * started. The people in their DMs come from a subquery, and the index on users' age lets it stop at
- * the last one it needs rather than sorting everyone.
- */
-export const SUGGESTED_FOR_USER = `SELECT id, name FROM users
-  WHERE status = ${ACTIVE} AND role <> ${BOT} AND id <> ?1 AND id NOT IN (
-    SELECT members.user_id FROM memberships AS mine JOIN rooms ON rooms.id = mine.room_id
-      JOIN memberships AS members ON members.room_id = mine.room_id
-    WHERE mine.user_id = ?1 AND rooms.kind = 'direct')
-  ORDER BY created_at, id LIMIT ${SUGGESTED_PEOPLE - 1}`;
 
 /**
  * Queues revoking a session's sockets in every room its person is in, the only rooms it can have
@@ -3549,26 +3532,22 @@ export class WorkspaceStore {
 
   /**
    * The rooms someone is in, with their unread marks and the people in their DMs, the ones they've
-   * starred, the people their sidebar suggests for DMs, the huddles going on in their rooms, and the
-   * workspace's first room, if there is one yet and they're given the welcome card: an active
-   * administrator who hasn't dismissed it.
+   * starred, the huddles going on in their rooms, and the workspace's first room, if there is one yet
+   * and they're given the welcome card: an active administrator who hasn't dismissed it.
    */
   async roomsFor(userId: UserId): Promise<SidebarRooms> {
-    const [rows, [original], starred, [user], members, suggested] = (await this.db.batch([
+    const [rows, [original], starred, [user], members] = (await this.db.batch([
       statement(ROOMS_FOR_USER, userId),
       statement(ORIGINAL_ROOM),
       statement(FAVORITES_FOR_USER, userId),
       statement(SIDEBAR_USER, userId),
       statement(DIRECT_MEMBERS_FOR_USER, userId),
-      statement(SUGGESTED_FOR_USER, userId),
-    ])) as [SidebarRow[], Array<{ id: RoomId }>, Array<{ room_id: RoomId }>, Array<{ version: number; invited: number }>, DirectMemberRow[], User[]];
+    ])) as [SidebarRow[], Array<{ id: RoomId }>, Array<{ room_id: RoomId }>, Array<{ version: number; invited: number }>, DirectMemberRow[]];
     const membersByRoom = Map.groupBy(members, (member) => member.room_id);
-    const peopleInDirects = new Set(members.map((member) => member.id)).size;
     return {
       rooms: rows.map((row) => sidebarRoom(row, membersByRoom.get(row.id))),
       favorites: { rooms: starred.map((row) => row.room_id), version: user?.version ?? 0 },
       sharedOrder: sharedOrderOf(rows),
-      suggestions: suggested.slice(0, suggestedCount(peopleInDirects)),
       huddles: liveHuddlesIn(rows),
       invitationRoomId: user?.invited === 1 ? (original?.id ?? null) : null,
     };
