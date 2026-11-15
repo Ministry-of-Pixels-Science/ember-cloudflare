@@ -130,7 +130,6 @@ interface Redirect {
 const NO_ROOMS: SidebarRoom[] = [];
 const NO_FAVORITES: Favorites = { rooms: [], version: 0 };
 const NO_ORDER: RoomId[] = [];
-const NO_PEOPLE: User[] = [];
 
 /** What the page shows while its rooms, or the page itself, load. */
 const LOADING = (
@@ -296,12 +295,6 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
   const favorites = list?.favorites ?? NO_FAVORITES;
   const sharedOrder = list?.sharedOrder ?? NO_ORDER;
   const starred = useMemo(() => new Set(favorites.rooms), [favorites]);
-  // Not anyone the directory has heard is removed or banned since the list loaded.
-  const listedSuggestions = list?.suggestions ?? NO_PEOPLE;
-  const suggestions = useMemo(
-    () => listedSuggestions.filter((person) => (directory.people.get(person.id)?.status ?? "active") === "active"),
-    [listedSuggestions, directory.people],
-  );
 
   // Crossing 900px, as a big phone does on its side, closes the drawer.
   // The wider layout has no drawer, and one left open would be hidden but still dim the page.
@@ -506,8 +499,8 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
   const lastRoom = rooms && lastRoomVisited(rooms);
   const back = lastRoom ? roomPath(lastRoom.id) : "/";
   const select = (roomId: string) => navigate(roomPath(roomId));
-  // A suggestion, or the button on someone's page, starts the DM with its person, or opens the one they
-  // have, and goes there, listing it as the server answers.
+  // The button on someone's page starts the DM with its person, or opens the one they have, and goes
+  // there, listing it as the server answers.
   const startDirectWith = async (person: User) => {
     const answered = askForRoom();
     const mark = pageMark();
@@ -624,7 +617,6 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
       meId={me.id}
       rooms={rooms ?? NO_ROOMS}
       loaded={rooms !== null}
-      suggestions={suggestions}
       favorites={favorites}
       sharedOrder={sharedOrder}
       huddles={huddlesOn ? liveHuddles : NO_HUDDLES}
@@ -632,7 +624,6 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
       unreadOnly={unreadOnly}
       onSelect={select}
       onNewDirect={openNewDirect}
-      onStartDirect={startDirectWith}
       onStarred={starredRooms}
       onSessionChanged={onSessionChanged}
     />

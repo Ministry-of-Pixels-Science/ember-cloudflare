@@ -72,7 +72,7 @@ test.describe("Web app manifest", () => {
       const response = await route.fetch();
       if (!response.ok()) return route.fulfill({ response });
       const sidebar = (await response.json()) as Sidebar;
-      await route.fulfill({ response, json: { ...sidebar, rooms: sidebar.rooms.filter(({ id }) => listed.has(id)), suggestions: [] } });
+      await route.fulfill({ response, json: { ...sidebar, rooms: sidebar.rooms.filter(({ id }) => listed.has(id)) } });
     });
     await keepOtherRoomsOut(page, listed);
     await signInAs(page, maya);

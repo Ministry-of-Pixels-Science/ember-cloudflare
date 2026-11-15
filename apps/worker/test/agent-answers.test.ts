@@ -396,7 +396,7 @@ describe("An AI agent", () => {
     client.close();
   });
 
-  it("answers a mention in a room with no DM, which the asker's sidebar neither lists nor suggests, nor one with @ember", async () => {
+  it("answers a mention in a room with no DM, which the asker's sidebar doesn't list, nor one with @ember", async () => {
     const { ada, general } = await setUp();
     const scout = await makeAgent(ada, SCOUT);
     internet(() => chatAnswer("Sunny."));
@@ -407,7 +407,6 @@ describe("An AI agent", () => {
     await allApplied(general);
     const sidebar = (await (await api("/api/sidebar", { headers: { Cookie: ada.cookie } })).json()) as Sidebar;
     expect(sidebar.rooms.filter(({ kind }) => kind === "direct")).toEqual([]);
-    expect(sidebar.suggestions).toEqual([]);
     client.close();
   });
 

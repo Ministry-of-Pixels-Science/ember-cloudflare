@@ -14,7 +14,6 @@ const ANSWERS: Record<string, () => Response> = {
       favorites: { rooms: [], version: 0 },
       sharedOrder: [],
       invitation: null,
-      suggestions: [],
       huddles: {},
     }),
   "GET /api/users": () => Response.json({ users: [] }),

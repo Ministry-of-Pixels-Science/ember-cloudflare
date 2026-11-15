@@ -10,7 +10,7 @@ const design = { id: "r1", name: "Design", kind: "open", icon: null, unread: fal
 const NOON = "2026-10-15T12:00:00.000Z";
 const general = { id: "r2", name: "general", kind: "open", icon: null, unread: false, involvement: "mentions" } satisfies SidebarRoom;
 /** Ada's sidebar with `rooms`, none of them starred. */
-const unstarred = (rooms: SidebarRoom[]): Sidebar => ({ rooms, favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, suggestions: [], huddles: {} });
+const unstarred = (rooms: SidebarRoom[]): Sidebar => ({ rooms, favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: {} });
 const ember: Account = { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false };
 /** Someone as the directory lists them. */
 const listed = (me: Me, role: DirectoryUser["role"]): DirectoryUser => ({ id: me.id, name: me.name, bio: null, role, status: "active", avatarUrl: `/users/${me.id}/avatar` });
@@ -636,35 +636,17 @@ describe("Shared room order", () => {
   });
 });
 
-describe("Suggested people", () => {
+describe("People", () => {
   const hedy: Me = { id: "u3", name: "Hedy", administrator: false };
   /** A people directory that lists Hedy as `status`. */
   const listingHedy = (status: DirectoryUser["status"]) => ({ people: new Map([[hedy.id, { ...listed(hedy, "member"), status }]]), reload: async () => {}, update: () => {} });
 
-  it.each(["deactivated", "banned", "suspended"] as const)(
-    "loads its rooms again a while after the workspace socket says someone %s is active again, whom it may suggest now",
-    async (status) => {
-      renderHook(() => useSidebar(ada, () => {}, listingHedy(status)));
-      socket().connect();
-      await settle();
-      expect(sidebarRequests()).toHaveLength(2);
-
-      socket().receive({ type: "user.updated", user: listed(hedy, "member") });
-      // Math.random says halfway.
-      await wait(RELOAD_SPREAD_MS / 2 - 1);
-      await settle();
-      expect(sidebarRequests()).toHaveLength(2);
-      await wait(1);
-      await settle();
-      expect(sidebarRequests()).toHaveLength(3);
-    },
-  );
-
-  it("doesn't for someone new, someone changing who was active already, or someone no longer active", async () => {
-    renderHook(() => useSidebar(ada, () => {}, listingHedy("active")));
+  it("doesn't load its rooms again for someone new, someone back, or someone changing, since it lists only DMs someone is in", async () => {
+    renderHook(() => useSidebar(ada, () => {}, listingHedy("suspended")));
     socket().connect();
     await settle();
     socket().receive({ type: "user.updated", user: listed(grace, "member") });
+    socket().receive({ type: "user.updated", user: listed(hedy, "member") });
     socket().receive({ type: "user.updated", user: { ...listed(hedy, "member"), bio: "Inventor" } });
     socket().receive({ type: "user.updated", user: { ...listed(hedy, "member"), status: "banned" } });
     await wait(RELOAD_SPREAD_MS);

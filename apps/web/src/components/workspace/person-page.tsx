@@ -89,7 +89,7 @@ export function PersonPage({ userId, me, onStartDirect, onPersonChanged, reloadP
     return () => void (stopped = true);
   }, [userId, me.administrator, reloads, onMissing, onFailed]);
 
-  // As the sidebar's suggestions do, once the page's guard lets it, which a second click doesn't start again.
+  // Once the page's guard lets it, which a second click doesn't start again.
   const startDirect = () => {
     if (!person || starting) return;
     leave(async () => {

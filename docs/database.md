@@ -335,13 +335,6 @@ Objects, D1 or speed call for something else.
   when they hold a message, and never moved back, so events sent again or late change nothing. Until
   a DM has one, it goes by `created_at`. The sidebar's statement reads the time with each room, so
   listing DMs in order costs nothing more.
-- **Suggestions are one statement.** The people someone has DMs with are left out with a subquery
-  over the memberships of their DMs, rather than a `NOT IN` list of their ids, so it binds one value
-  however many DMs they have, and runs in the batch that reads the rest of the sidebar.
-  `index_users_on_created_at_and_id` (workspace migration 0017) gives it people oldest first, so it
-  stops at the nineteenth it can suggest rather than sorting everyone. The index leaves status out,
-  since SQLite would otherwise read every active person through it, as New room's list does, rather
-  than reading the table straight through.
 - **Rooms send the Workspace their change logs.** Unread marks are the Workspace's and messages
   their rooms', so a room logs each new message in `room_events`, in the batch that stores it, and
   each time someone opens it in a shown tab, then sends the Workspace its oldest events, up to 50 a

@@ -20,8 +20,8 @@ const DEPLOY_SPREAD_MS = [2_000, 10_000] as const;
 
 /**
  * How long, at most, a tab waits to load its sidebar again once an administrator has put the rooms in
- * order for everyone, or someone is active again, each tab waiting a while at random, so that every tab
- * in the workspace doesn't ask the Workspace at once.
+ * order for everyone, each tab waiting a while at random, so that every tab in the workspace doesn't ask
+ * the Workspace at once.
  */
 export const RELOAD_SPREAD_MS = 5_000;
 
@@ -71,11 +71,10 @@ const isSame = (you: Me, me: Me) => you.id === me.id && you.name === me.name && 
  * in any of them. It loads again when the tab is shown after more than a minute hidden too, as
  * `refresh-room:visible` reloads it (Campfire's users/sidebar_helper.rb), which Campfire does on a
  * room's page and this does on every page, and, its rooms only, a while after the socket says the shared
- * order has changed, or that someone the people directory lists as removed, banned or suspended is
- * active again, whom the sidebar may suggest a DM with now, and once it says this person has been given
- * another role. It loads again at once after a list that may have a room in the wrong place, one this
- * person was taken out of and put back in while the list was on its way. `refresh` asks for it again,
- * settling once a list asked for since has come, or failing as that did.
+ * order has changed, and once it says this person has been given another role. It loads again at once
+ * after a list that may have a room in the wrong place, one this person was taken out of and put back
+ * in while the list was on its way. `refresh` asks for it again, settling once a list asked for since
+ * has come, or failing as that did.
  *
  * `onSessionChanged` hears when who the browser's session signs in changes: null once it has expired,
  * whoever another tab signed in as, or `me` as they are now, once they've been made an administrator,
@@ -122,9 +121,6 @@ export function useSidebar(
   const reloadPeople = useEffectEvent(() => void directory.reload().catch(() => {}));
   const gone = useEffectEvent(onGone);
   const isSomeoneElse = useEffectEvent((user: User) => user.id !== me.id);
-  // Whether `user`, active now, is someone the directory lists as removed, banned or suspended, rather
-  // than someone new, whom it doesn't list yet.
-  const isBack = useEffectEvent((user: DirectoryUser) => user.status === "active" && (directory.people.get(user.id)?.status ?? "active") !== "active");
   // Who the session signs in as last heard, ahead of `me` until the page takes the change: two changes
   // can come before it takes the first.
   const heard = useRef(me);
@@ -147,7 +143,7 @@ export function useSidebar(
     // A session that has expired goes to sign in. Otherwise a list that doesn't come leaves the sidebar
     // as it is, until it loads again.
     const reloadRooms = () => void refresh().catch((error) => !closed && isSignedOut(error) && sessionChanged(null));
-    // The load the shared order or someone back waits for, which loading everything again makes needless.
+    // The load the shared order waits for, which loading everything again makes needless.
     let waiting: ReturnType<typeof setTimeout> | undefined;
     const reload = () => {
       clearTimeout(waiting);
@@ -201,9 +197,6 @@ export function useSidebar(
             toldOf.you = true;
             // Only administrators are given the welcome card with their rooms, so a new role loads them again.
             if ((frame.user.role === "administrator") !== heard.current.administrator) reloadRooms();
-          } else if (isBack(frame.user)) {
-            // The list suggests only people active when it loaded, until it loads again.
-            reloadRoomsSoon();
           }
           return changed(frame.user);
         case "room.involvement":

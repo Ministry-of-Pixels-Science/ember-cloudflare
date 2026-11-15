@@ -5,7 +5,6 @@ import type { ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AccountContext } from "@/hooks/use-account";
 import { PeopleContext } from "@/hooks/use-directory";
-import { guardLeaving } from "@/hooks/use-route";
 import { Sidebar } from "./sidebar";
 
 const rooms = [
@@ -36,12 +35,10 @@ function renderSidebar(props: Partial<Props> = {}, account = EMBER, people: read
     sharedOrder: [],
     huddles: {},
     loaded: true,
-    suggestions: [],
     currentRoomId: null,
     unreadOnly: false,
     onSelect: vi.fn(),
     onNewDirect: vi.fn(),
-    onStartDirect: vi.fn(async () => true),
     onStarred: vi.fn(),
     onSessionChanged: vi.fn(),
     ...props,
@@ -63,9 +60,6 @@ const [ada, grace, linus, alan, edsger, barbara]: User[] = ["Ada", "Grace", "Lin
 const at = (minutes: number) => new Date(Date.UTC(2026, 9, 15, 12, minutes)).toISOString();
 /** A DM between `members`, as the sidebar lists it to Ada, who's always in it, last active `activeAt`. */
 const direct = (id: string, members: User[], unread = false, activeAt = at(0)): SidebarRoom => ({ id, kind: "direct", members, activeAt, unread, involvement: "everything" });
-
-/** The rows suggesting people to start a DM with, top to bottom. */
-const suggestionRows = () => within(screen.getByRole("region", { name: "DMs" })).queryAllByRole("button", { name: /^Start a direct message with / });
 
 /** The DM rows, top to bottom. */
 const directRows = () => within(screen.getByRole("region", { name: "DMs" })).queryAllByRole("link", { name: /^Direct message with / });
@@ -157,16 +151,16 @@ describe("Unread rooms", () => {
 describe("Activity filter", () => {
   const marked = [{ ...rooms[0]!, unread: true }, rooms[1]!, { id: "design", name: "design", kind: "open" as const, icon: null, unread: true, involvement: "mentions" as const }];
 
-  it("shows only the rows marked unread, without the people suggested for DMs", () => {
-    const { rerender } = renderSidebar({ rooms: marked, suggestions: [grace!], unreadOnly: true });
+  it("shows only the rows marked unread", () => {
+    const { rerender } = renderSidebar({ rooms: [...marked, direct("d1", [ada!, grace!], true), direct("d2", [ada!, linus!])], unreadOnly: true });
     expect(listed()).toEqual(["#general", "#design"]);
-    expect(suggestionRows()).toEqual([]);
+    expect(directRows()).toHaveLength(1);
     expect(screen.getByRole("heading", { name: "DMs" })).toBeInTheDocument();
     expect(screen.queryByText("You’re all caught up. No unread conversations.")).not.toBeInTheDocument();
 
     rerender({ unreadOnly: false });
     expect(listed()).toEqual(["#general", "#random", "#design"]);
-    expect(suggestionRows()).toHaveLength(1);
+    expect(directRows()).toHaveLength(2);
   });
 
   it("leaves out the room the tab shows, which is never marked", () => {
@@ -612,8 +606,8 @@ describe("Group DMs and DM names", () => {
     render(
       <PeopleContext value={new Map([[renamed.id, renamed]])}>
         <Sidebar
-          {...{ workspaceName: "Ember", meId: ada!.id, loaded: true, suggestions: [], favorites: unstarred, sharedOrder: [], huddles: {}, currentRoomId: null, unreadOnly: false }}
-          {...{ onSelect: vi.fn(), onNewDirect: vi.fn(), onStartDirect: vi.fn(), onStarred: vi.fn(), onSessionChanged: vi.fn() }}
+          {...{ workspaceName: "Ember", meId: ada!.id, loaded: true, favorites: unstarred, sharedOrder: [], huddles: {}, currentRoomId: null, unreadOnly: false }}
+          {...{ onSelect: vi.fn(), onNewDirect: vi.fn(), onStarred: vi.fn(), onSessionChanged: vi.fn() }}
           rooms={[direct("d1", [ada!, grace!])]}
         />
       </PeopleContext>,
@@ -653,12 +647,12 @@ describe("Conversations sidebar", () => {
 });
 
 describe("Conversations sidebar", () => {
-  it("says it found no conversations once the list has come with nothing in it, nor anyone to suggest", () => {
+  it("says it found no conversations once the list has come with nothing in it", () => {
     const { rerender } = renderSidebar({ rooms: [], loaded: false });
     expect(screen.queryByText("No conversations found.")).not.toBeInTheDocument();
     rerender({ loaded: true });
     expect(screen.getByText("No conversations found.")).toHaveClass("text-[13px]", "text-muted-foreground");
-    rerender({ suggestions: [grace!] });
+    rerender({ rooms: [direct("d1", [ada!, grace!])] });
     expect(screen.queryByText("No conversations found.")).not.toBeInTheDocument();
   });
 });
@@ -673,58 +667,12 @@ describe("DM order", () => {
   });
 });
 
-describe("Suggested people", () => {
-  it("suggests people for DMs after the DMs, by avatar and name, saying to screen readers that it starts one", () => {
-    renderSidebar({ rooms: [...rooms, direct("d1", [ada!, grace!])], suggestions: [linus!, alan!] });
-    expect(suggestionRows().map((row) => row.textContent)).toEqual(["Start a direct message with Linus", "Start a direct message with Alan"]);
-    expect(suggestionRows()[0]).toHaveAccessibleName("Start a direct message with Linus");
-    expect(directRows()[0]!.compareDocumentPosition(suggestionRows()[0]!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
-    expect([...suggestionRows()[0]!.querySelectorAll("img")].map((img) => img.getAttribute("class"))).toEqual([expect.stringContaining("size-6")]);
-  });
-
-  it("leaves out the people in your DMs, suggesting one fewer for each, as soon as a DM lists them", () => {
-    const many: User[] = Array.from({ length: 20 }, (_, i) => ({ id: `p${i}`, name: `Person ${i}` }));
-    const { rerender } = renderSidebar({ suggestions: many });
-    expect(suggestionRows()).toHaveLength(19);
-    // Ada and Person 0 are in DMs now, leaving room for 17.
-    rerender({ rooms: [...rooms, direct("d1", [ada!, many[0]!])] });
-    expect(suggestionRows().map((row) => row.textContent)).toEqual(many.slice(1, 18).map(({ name }) => `Start a direct message with ${name}`));
-  });
-
-  it("starts a DM with someone suggested, only once while it starts", async () => {
-    let started = (_: boolean) => {};
-    const onStartDirect = vi.fn(() => new Promise<boolean>((resolve) => (started = resolve)));
-    renderSidebar({ suggestions: [grace!], onStartDirect });
-    const suggestion = suggestionRows()[0]!;
-    await userEvent.click(suggestion);
-    expect(onStartDirect).toHaveBeenCalledExactlyOnceWith(grace);
-    expect(suggestion).toHaveAttribute("aria-disabled", "true");
-    await userEvent.click(suggestion);
-    expect(onStartDirect).toHaveBeenCalledOnce();
-
-    // One that didn't start can be tried again.
-    await act(async () => started(false));
-    expect(suggestion).not.toHaveAttribute("aria-disabled");
-    await userEvent.click(suggestion);
-    expect(onStartDirect).toHaveBeenCalledTimes(2);
-  });
-
-  it("asks before a page with changes to lose is left for the DM, starting it only once the page lets it", async () => {
-    let proceed = () => {};
-    const release = guardLeaving((_, go) => {
-      proceed = () => void go();
-      return true;
-    });
-    try {
-      const { onStartDirect } = renderSidebar({ suggestions: [grace!] });
-      await userEvent.click(suggestionRows()[0]!);
-      expect(onStartDirect).not.toHaveBeenCalled();
-      expect(suggestionRows()[0]).not.toHaveAttribute("aria-disabled");
-      await act(async () => proceed());
-      expect(onStartDirect).toHaveBeenCalledExactlyOnceWith(grace);
-    } finally {
-      release();
-    }
+describe("DMs", () => {
+  it("lists only the DMs you're in, with nobody else to start one with, however many people there are", () => {
+    renderSidebar({ rooms: [...rooms, direct("d1", [ada!, grace!])] }, EMBER, [linus!, alan!].map((person) => ({ ...person, bio: null, role: "member", status: "active", avatarUrl: `/users/${person.id}/avatar` })));
+    const dms = screen.getByRole("region", { name: "DMs" });
+    expect(within(dms).getAllByRole("link").map((link) => link.getAttribute("aria-label") ?? link.textContent)).toEqual(["New direct message", "Direct message with Grace"]);
+    expect(within(dms).queryAllByRole("button")).toEqual([]);
   });
 });
 
