@@ -712,8 +712,8 @@ has, and they share the answer's limit of tokens, so a model that spends them al
 short as any other answer is. Claude, GPT and Grok, the models the models file lists, are given the
 search, with nothing to turn on; Workers AI's models aren't, nor is a model kept from before Ember
 offered its own, or a test question, and a model that stops taking the tool is asked
-again without it: one refused only once it has searched answers without it in the tokens, and with the
-web searches and pages, the answer has left. Each call has the model read the conversation again, so an answer that searches costs
+again without it: one refused only once it has searched answers without it, told what its searches
+found, in the tokens, and with the web searches and pages, the answer has left. Each call has the model read the conversation again, so an answer that searches costs
 that many more tokens read. A picture or a link that only a search found shows as a link, as the rule
 above has it, since the card and the preview are only of addresses in the messages @ember read with
 the question.
@@ -938,7 +938,9 @@ allowed.
   which agent wants to use which app, the tool, and everything it would be called with, as JSON.
   **Allow once** runs that call and no other, and **Deny** tells the model it wasn't allowed; either
   is for whoever asked the agent or an administrator, and the card then says who answered. The answer
-  goes on from there, and waits again at the next call, up to five calls an answer. A call nobody
+  goes on from there, and waits again at the next call, up to five calls an answer. A model whose
+  provider then won't go on from a call is asked once more without the tools, told what each call came
+  to, so that its answer still says what a call did. A call nobody
   answers in 15 minutes isn't run: its card says so in place of its buttons, and Ember forgets the
   answer that waited. A call with more than 3,000 characters to show is never asked for,
   so nobody allows what they couldn't read. As it runs a call, Ember asks the server for the tool

@@ -1038,6 +1038,25 @@ describe("Removing an app Ember is signed in to", () => {
     expect(revocations()).toEqual([{ form: { token: "access-1", token_type_hint: "access_token" }, authorization: `Basic ${btoa("ember-registered:s3cret")}`, redirect: "manual", timed: true }]);
   });
 
+  it("proves itself with a client ID and secret a header has to encode, each encoded as OAuth has it, the same at every request, so the service reads them as they are", async () => {
+    const administrator = await setUp();
+    const client = { id: "urn:ember:tracker", secret: "s3cret+of/the%client=" };
+    Object.assign(auth, { revokes: true, registers: false, expiresIn: 30, client });
+    const app = await signedInBy(await finish(administrator, comeBack(await sentTo(await begin(administrator, { ...TRACKER_APP, clientId: client.id, clientSecret: client.secret })))));
+    expect((await readAgain(administrator, app.id)).status).toBe(200);
+    expect(await removed(await disconnect(administrator, app.id))).toEqual({ revoked: true });
+
+    const proven = `Basic ${btoa("urn%3Aember%3Atracker:s3cret%2Bof%2Fthe%25client%3D")}`;
+    const toService = asked.filter(({ url }) => url === `${AUTH}/token` || url === `${AUTH}/revoke`);
+    expect(toService.map(({ url, form, authorization }) => [url.slice(AUTH.length), form!.grant_type ?? form!.token_type_hint, authorization])).toEqual([
+      ["/token", "authorization_code", proven],
+      ["/token", "refresh_token", proven],
+      ["/revoke", "refresh_token", proven],
+      ["/revoke", "access_token", proven],
+    ]);
+    expect([auth.access, auth.refresh]).toEqual([null, null]);
+  });
+
   it("removes the app all the same where the service doesn't take the sign-in back, or doesn't say how, which it answers", async () => {
     const administrator = await setUp();
     vi.spyOn(console, "error").mockImplementation(() => {});

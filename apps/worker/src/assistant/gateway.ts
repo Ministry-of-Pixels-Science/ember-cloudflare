@@ -14,7 +14,22 @@ import {
 import type { Env } from "../env";
 import { isLoopback } from "../loopback";
 import { isMessages, isObject, isResponses } from "./formats";
-import { decided, goingOn, resultsOf, TOOL_CALLS_PER_ANSWER, toolCallsIn, ToolError, toolsIn, withRoom, writtenIn, type EmberTool, type Round, type ToolResult } from "./tool-calls";
+import {
+  decided,
+  goingOn,
+  resultsOf,
+  TOOL_CALLS_PER_ANSWER,
+  toolCallsIn,
+  ToolError,
+  toolsIn,
+  whatCallsCameTo,
+  withRoom,
+  writtenIn,
+  type CallMade,
+  type EmberTool,
+  type Round,
+  type ToolResult,
+} from "./tool-calls";
 
 export { isObject };
 
@@ -236,8 +251,9 @@ export interface Answered {
  * allows the call or doesn't: the model and format it's asked in, the question, as it was asked, without
  * its tools, which its room gives it again, the request the model answered `body` to, with its calls,
  * what those before the one that waits came to, and how far the answer had got: the calls it had made,
- * the tokens it had left, what Messages' model had said in the turns before, and what Grok's searches
- * of the web with Ember's own tool had found.
+ * the tokens it had left, what Messages' model had said in the turns before, what Grok's searches
+ * of the web with Ember's own tool had found, and, where it was kept, what each call of the rounds
+ * before came to.
  */
 export interface PausedAnswer {
   model: string;
@@ -250,6 +266,7 @@ export interface PausedAnswer {
   tokensLeft: number;
   saidBefore: unknown[];
   searches?: WebSearches;
+  made?: CallMade[];
 }
 
 /** What an answer's searches of the web with Ember's own tool have come to: the pages each found, and why one was refused, if one was. */
@@ -276,8 +293,9 @@ type Asked = Answered | GatewayRefusal | Asking;
  * without the one for reading pages, which AI Gateway may not have for every model, then without them,
  * told it can't use them, and last without the tools Ember runs, which every model Ember gives them
  * takes as far as its provider says. One refused only once it has called one of those isn't asked again
- * here: `askOnce` has it answer without them in what's left of the answer's tokens. None of the
- * question's tools may ask first: nothing here waits for a call to be allowed (`askWaiting`).
+ * here: `askOnce` has it answer without them, told what its calls came to, in what's left of the
+ * answer's tokens. None of the question's tools may ask first: nothing here waits for a call to be
+ * allowed (`askWaiting`).
  */
 export async function ask(env: Env, gateway: Gateway, question: Question, timeoutMs: number): Promise<Answered | GatewayRefusal> {
   return unasked(await askWaiting(env, gateway, question, timeoutMs));
@@ -361,7 +379,8 @@ export async function thinkingLevelsOf(env: Env, gateway: Gateway, question: Que
  * as many calls as an answer may make, and then told to answer. All its turns share the answer's tokens,
  * and its provider's tools the uses an answer allows, and one that calls a tool with too few tokens left
  * to go on took every token it could. One that's refused going on from a call answers without Ember's
- * tools (`withoutTools`). None of the question's tools may ask first, as for `ask`.
+ * tools, told what its calls came to (`withoutTools`). None of the question's tools may ask first, as
+ * for `ask`.
  */
 export async function askOnce(env: Env, gateway: Gateway, question: Question, signal: AbortSignal): Promise<Answered | GatewayRefusal> {
   return unasked(await answering(env, gateway, question, signal));
@@ -381,13 +400,14 @@ async function answering(env: Env, gateway: Gateway, question: Question, signal:
   let request = from?.request ?? requestOf(gateway, question);
   let tokensLeft = from?.tokensLeft ?? question.maxTokens;
   let called = from?.called ?? 0;
+  const made = [...(from?.made ?? [])];
   let round = from && { body: from.body, done: from.results };
   for (;;) {
     if (!round) {
       const turn = await turnOf(env, gateway, question, request, tokensLeft, signal);
       if ("refused" in turn) {
         if (!(called > 0 && turn.refused.wrongFormat)) return turn.refused;
-        const unaided = await withoutTools(env, gateway, question, request, turn.tokensLeft, turn.refused, signal);
+        const unaided = await withoutTools(env, gateway, question, request, made, turn.tokensLeft, turn.refused, signal);
         return web ? web.sourced(unaided) : unaided;
       }
       tokensLeft = turn.tokensLeft;
@@ -403,9 +423,10 @@ async function answering(env: Env, gateway: Gateway, question: Question, signal:
     const { results, asks } = await resultsOf(tools, calls, TOOL_CALLS_PER_ANSWER - called, round.done);
     if (asks) {
       const { tools: _, ...asked } = question;
-      return { asks, paused: { model: gateway.model, format, question: asked, request, body, results, called, tokensLeft, saidBefore, ...(web && { searches: web.searches() }) } };
+      return { asks, paused: { model: gateway.model, format, question: asked, request, body, results, called, tokensLeft, saidBefore, made, ...(web && { searches: web.searches() }) } };
     }
     called += calls.length;
+    made.push(...calls.map(({ name, input }, index) => ({ name, input, text: results[index]!.text, failed: results[index]!.failed })));
     request = withRoom(format, goingOn(format, sparing(format, request, body), body, results), tokensLeft, called >= TOOL_CALLS_PER_ANSWER);
     saidBefore.push(...listOf(body.content));
     round = undefined;
@@ -460,22 +481,26 @@ const whatWasFound = (result: (Source & { text: string })[]) =>
 /**
  * What the model `gateway` names answers `question` without Ember's tools, once it was `refused` going on
  * from a call of one, as a request it can't take. It took the question with everything else it asks, so
- * that's asked as it was, and only once more, with what the answer has left: `tokensLeft` of its tokens,
- * and of its provider's tools the uses `request`, the one refused, left them. `ask` asking it again other
- * ways would spend the answer's tokens and calls over, and lose it thinking and the web for nothing.
+ * that's asked as it was, with what each call its answer `made` came to after the conversation, as text,
+ * since those calls happened all the same, and only once more, with what the answer has left:
+ * `tokensLeft` of its tokens, and of its provider's tools the uses `request`, the one refused, left them.
+ * `ask` asking it again other ways would spend the answer's tokens and calls over, and lose it thinking
+ * and the web for nothing.
  */
 async function withoutTools(
   env: Env,
   gateway: Gateway,
   question: Question,
   request: Record<string, unknown>,
+  made: readonly CallMade[],
   tokensLeft: number,
   refused: GatewayRefusal,
   signal: AbortSignal,
 ): Promise<Answered | GatewayRefusal> {
   console.error(`Asking ${gateway.model} again without Ember's tools, as it was refused going on from a call of one: ${refused.refusal}`);
+  const turns: Turn[] = [...question.turns, { role: "user", text: whatCallsCameTo(made) }];
   // Ember's own tool for searching the web, in Chat Completions, is one of the tools it runs too.
-  const asked = { ...question, tools: [], maxTokens: tokensLeft, ...(gateway.format === "chat" && { webTools: [] }) };
+  const asked = { ...question, turns, tools: [], maxTokens: tokensLeft, ...(gateway.format === "chat" && { webTools: [] }) };
   const turn = await turnOf(env, gateway, asked, withUsesOf(gateway.format, requestOf(gateway, asked), request), tokensLeft, signal);
   if (!("refused" in turn)) return answeredIn(gateway.format, turn.body);
   const { wrongFormat: _, ...unanswered } = turn.refused;

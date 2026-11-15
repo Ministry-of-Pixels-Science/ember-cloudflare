@@ -10,6 +10,7 @@ import {
   RegistrationRejectedError,
   selectClientAuthMethod,
   StreamableHTTPClientTransport,
+  type AddClientAuthentication,
   type OAuthClientMetadata,
   type OAuthClientProvider,
   type OAuthDiscoveryState,
@@ -149,6 +150,7 @@ export async function finishSignIn(url: string, signIn: SignIn, code: string, is
       codeVerifier,
       redirectUri: redirectUrl,
       resource,
+      addClientAuthentication: provenAs(client),
       fetchFn: guarded(address, held, send).send,
     });
     const { codeVerifier: _, scopeAsked, ...kept } = signIn;
@@ -174,6 +176,7 @@ export async function refreshSignIn(url: string, signIn: SignIn, send: Send = fe
       clientInformation: client,
       refreshToken: tokens.refresh,
       resource,
+      addClientAuthentication: provenAs(client),
       fetchFn: guarded(address, held, send).send,
     });
     const refreshed = signedIn(signIn, fresh, address);
@@ -222,11 +225,27 @@ interface Revocation {
   token_endpoint_auth_methods_supported?: string[];
 }
 
-/** Has a request to an authorization server say it's from `client`, by `method`: its secret in a header or the form, or its ID alone. */
+/**
+ * Has a request to an authorization server say it's from `client`, by `method`: its secret in a header
+ * or the form, or its ID alone. In the header, the ID and the secret are each percent-encoded first, as
+ * RFC 6749 (2.3.1) has it, so that the service reads a `:`, `+` or `%` in either as it is, while the
+ * letters, digits and `-_.~` most are made of go as they are.
+ */
 function asClient(client: StoredOAuthClientInformation, method: ReturnType<typeof selectClientAuthMethod>, headers: Headers, form: URLSearchParams): void {
-  if (method === "client_secret_basic" && client.client_secret !== undefined) return headers.set("Authorization", `Basic ${btoa(`${client.client_id}:${client.client_secret}`)}`);
+  if (method === "client_secret_basic" && client.client_secret !== undefined) {
+    return headers.set("Authorization", `Basic ${btoa(`${encodeURIComponent(client.client_id)}:${encodeURIComponent(client.client_secret)}`)}`);
+  }
   form.set("client_id", client.client_id);
   if (method === "client_secret_post" && client.client_secret !== undefined) form.set("client_secret", client.client_secret);
+}
+
+/**
+ * What has the protocol's client say a request for tokens is from `client` as Ember's requests to take
+ * them back do (`asClient`), by the method it would pick itself, of those the authorization server's
+ * description lists.
+ */
+function provenAs(client: StoredOAuthClientInformation): AddClientAuthentication {
+  return (headers, form, _url, metadata) => asClient(client, selectClientAuthMethod(client, metadata?.token_endpoint_auth_methods_supported ?? []), headers, form);
 }
 
 /** What an authorization server answers once a sign-in is over: the token to get another with is no good, or Ember isn't its client any more. */

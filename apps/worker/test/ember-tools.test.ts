@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NOTES, ROOM_MESSAGES_READ } from "../src/assistant/answers";
 import { ask as askModel, askOnce, askWaiting, goOn, type Asking, type Gateway, type PausedAnswer, type Question } from "../src/assistant/gateway";
 import { MAX_FOUND_LENGTH, MESSAGES_FOUND } from "../src/assistant/room-search";
-import { CALL_DECLINED, decided, goingOn, NO_CALLS_LEFT, resultsOf, TOOL_CALLS_PER_ANSWER, toolCallsIn, toolsIn, ToolError, withRoom, type EmberTool } from "../src/assistant/tool-calls";
+import { CALL_DECLINED, CALLS_MADE, decided, goingOn, NO_CALLS_LEFT, resultsOf, TOOL_CALLS_PER_ANSWER, toolCallsIn, toolsIn, ToolError, withRoom, type EmberTool } from "../src/assistant/tool-calls";
 import type { Env } from "../src/env";
 import { answerWithKeptModel, api, connect, cookieOf, createRoom, freshDeploy, post, roomSql, shown, workspaceSql, type Client, type Session } from "./support";
 
@@ -304,7 +304,12 @@ describe("A tool Ember runs", () => {
       expect(asked).toHaveLength(4);
       const last = asked.at(-1)!.body;
       expect(last).not.toHaveProperty("tools");
-      expect(last).toMatchObject({ max_completion_tokens: question.maxTokens - 50, messages: asked[0]!.body.messages });
+      expect(last).toMatchObject({ max_completion_tokens: question.maxTokens - 50 });
+      // What its search found comes after the conversation, as it can't search now.
+      expect(last.messages).toEqual([
+        ...asked[0]!.body.messages!,
+        { role: "user", content: `${CALLS_MADE}\n\nCall 1: web_search with {"query":"launch"}\n1. Launch day\n${page.url}\nThe launch is on March 3.` },
+      ]);
     });
 
     it("leaves a model refused going on from a call the searches and tokens its turns didn't use, as it's asked again without Ember's tools", async () => {
@@ -326,7 +331,8 @@ describe("A tool Ember runs", () => {
       const last = asked.at(-1)!.body;
       expect(asked).toHaveLength(4);
       expect((last.tools as Array<{ name: string; max_uses?: number }>).map(({ name, max_uses }) => [name, max_uses])).toEqual([["web_search", 3], ["web_fetch", 3]]);
-      expect(last).toMatchObject({ max_tokens: question.maxTokens - 90, messages: asked[0]!.body.messages });
+      expect(last).toMatchObject({ max_tokens: question.maxTokens - 90 });
+      expect(last.messages).toEqual([{ role: "user", content: `when is the launch?\n\n${CALLS_MADE}\n\nCall 1: search_messages with {"words":"launch"}\nNothing.` }]);
       expect(last).not.toHaveProperty("tool_choice");
 
       // GPT, whose searches are capped by the request, is left those it didn't make.
@@ -367,7 +373,7 @@ describe("A tool Ember runs", () => {
     ]);
   });
 
-  it("is left out for the rest of an answer whose model is refused going on from a call, which is asked once more, as it was, in the tokens the answer has left", async () => {
+  it("is left out for the rest of an answer whose model is refused going on from a call, which is asked once more, as it was but for what the call came to, in the tokens the answer has left", async () => {
     const { general, inGeneral } = await setUp(CLAUDE);
     const logged = vi.spyOn(console, "error").mockImplementation(() => {});
     const goesOn = ({ body }: Asked) => JSON.stringify(body.messages).includes("tool_result");
@@ -381,7 +387,11 @@ describe("A tool Ember runs", () => {
       [true, true, maxTokensAt(DEFAULT_LEVELS) - 300],
       [false, true, maxTokensAt(DEFAULT_LEVELS) - 300],
     ]);
-    expect(answers()[2]!.body.messages).toEqual(answers()[0]!.body.messages);
+    // ...with what its call came to after the conversation.
+    const [first, refused, again] = answers().map(({ body }) => body.messages as Array<{ role: string; content: unknown }>);
+    const [{ content: found }] = refused!.at(-1)!.content as [{ content: string }];
+    const lastTurn = first!.at(-1) as { role: string; content: string };
+    expect(again).toEqual([...first!.slice(0, -1), { ...lastTurn, content: `${lastTurn.content}\n\n${CALLS_MADE}\n\nCall 1: search_messages with {"words":"launch"}\n${found}` }]);
     expect(logged).toHaveBeenCalledWith(expect.stringContaining("again without Ember's tools, as it was refused going on from a call of one"));
 
     // Refused without them too, it isn't asked another way.
@@ -536,6 +546,46 @@ describe("An answer that waits at a call", () => {
     // The model is still given Ember's tool for searching the web as it goes on, and wasn't asked to search again.
     expect(asked.map(({ url }) => new URL(url).pathname.split("/ai/")[1])).toEqual(["v1/chat/completions", "websearch/", "v1/chat/completions"]);
     expect((asked[2]!.body.tools as Array<{ function: { name: string } }>).map(({ function: { name } }) => name)).toEqual(["web_search", "look", "send"]);
+  });
+
+  it("tells a model refused going on once a call is allowed what every call of its answer did, as it's asked again without the tools, so that it doesn't answer as if they hadn't", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    // An app that fails a call may say nothing of why, as Ember tells a model then.
+    const close: EmberTool = { name: "close", description: "Closes the issue.", takes: { type: "object" }, run: () => Promise.reject(new ToolError("(The tool answered with nothing.)")) };
+    const given = [...tools, close];
+    const use = (id: string, name: string, input: unknown) => ({ type: "tool_use", id, name, input });
+    const turn = (content: unknown[], stop_reason = "tool_use") => ({ type: "message", role: "assistant", content, stop_reason, usage: { input_tokens: 1_000, output_tokens: 100 } });
+    const answers = [
+      () => Response.json(turn([use("call_1", "look", {}), use("call_2", "close", { issue: 42 })])),
+      () => Response.json(turn([use("call_3", "send", { to: "ada" })])),
+      () => Response.json({ type: "error", error: { type: "invalid_request_error", message: "messages.4: unexpected `tool_result`" } }, { status: 400 }),
+      () => Response.json(turn([{ type: "text", text: "I've told Ada the launch is Friday." }], "end_turn")),
+    ];
+    refusing = () => answers.shift()!();
+    const gateway = gatewayFor(CLAUDE, "anthropic");
+
+    const waiting = waitingIn(await askWaiting(bindings, gateway, { ...question, tools: given }, 5_000));
+    expect(waiting.asks).toEqual({ id: "call_3", name: "send", input: { to: "ada" } });
+    expect(await goOn(bindings, gateway, given, kept(waiting.paused), true, 5_000)).toMatchObject({ text: "I've told Ada the launch is Friday." });
+    expect(sent).toEqual([{ to: "ada" }]);
+
+    // Asked once more, it reads the conversation as it was asked, then what each call came to, those before the answer waited too, and which failed.
+    expect(asked).toHaveLength(4);
+    const last = asked.at(-1)!.body;
+    expect(last).not.toHaveProperty("tools");
+    expect(last).toMatchObject({ max_tokens: 800 });
+    expect(last.messages).toEqual([
+      {
+        role: "user",
+        content: [
+          "tell ada when the launch is",
+          CALLS_MADE,
+          "Call 1: look with {}\nLaunch is Friday.",
+          'Call 2: close with {"issue":42}, which failed\n(The tool answered with nothing.)',
+          'Call 3: send with {"to":"ada"}\nSent 1',
+        ].join("\n\n"),
+      },
+    ]);
   });
 
   it("is only for an answer something waits for: asking a model any other way throws at a tool that asks first", async () => {
