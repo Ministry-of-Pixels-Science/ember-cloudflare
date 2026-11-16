@@ -337,6 +337,29 @@ describe("Rooms with a huddle", () => {
     expect(random()).toHaveAccessibleDescription(HELP);
     expect(listed()).toEqual(["#general", "#random"]);
   });
+
+  it("ends a DM's row with it too, before its unread dot, and says who's in its huddle", () => {
+    const withGrace = direct("d1", [ada!, grace!], true);
+    const { rerender } = renderSidebar({ rooms: [...rooms, withGrace], huddles: { d1: huddleOf(grace!, ada!) } }, EMBER, everyone);
+    const row = () => directRows()[0]!;
+    const [its, words, dot] = Array.from(row().children).slice(-3);
+    expect(its).toBe(mark(row()));
+    expect(its).toHaveAttribute("title", "Grace and you are in the huddle");
+    expect(its).toHaveClass("shrink-0", "text-positive");
+    expect(faces(row())).toEqual(["/users/u2/avatar", "/users/u1/avatar"]);
+    expect(its!.querySelector("svg")).toHaveClass("iconoir-headset", "size-3.5");
+    expect(within(its as HTMLElement).getByText("2")).toHaveClass("tabular-nums");
+    expect(words).not.toBeVisible();
+    expect(dot).toHaveClass("size-[7px]", "rounded-full");
+    expect(row()).toHaveAccessibleDescription("Grace and you are in the huddle Unread");
+
+    // The row is as it was once the huddle has ended.
+    rerender({ rooms: [...rooms, withGrace], huddles: {} });
+    expect(mark(row())).toBeNull();
+    expect(row()).toHaveAccessibleDescription("Unread");
+    rerender({ rooms: [...rooms, { ...withGrace, unread: false }], huddles: {} });
+    expect(row()).not.toHaveAttribute("aria-describedby");
+  });
 });
 
 describe("Reorder starred rooms", () => {

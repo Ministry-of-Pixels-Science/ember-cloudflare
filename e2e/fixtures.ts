@@ -247,13 +247,18 @@ export async function isolateRoom(page: Page, room: TestRoom, { joinCode, huddle
 /** Which of the workspace socket's frames reach the page. */
 export type Passes = (frame: WorkspaceServerFrame) => boolean;
 
+/** Tells a page `frame` on the workspace socket it has open, as the Workspace does. */
+export type Tells = (frame: WorkspaceServerFrame) => void;
+
 /**
  * Shows `page` the workspace as `change` makes it wherever the server says what it is, its socket's
  * welcome included, without changing the test server's, which every other test shows. Its socket takes
  * over from any the page routed before, such as `isolateRoom`'s, so it passes on just what `passes` does.
+ * Answers how to tell the page something more on that socket, once it's open, as the Workspace would.
  */
-export async function changeTheWorkspace(page: Page, change: (account: Account) => Account, passes: Passes = () => true): Promise<void> {
+export async function changeTheWorkspace(page: Page, change: (account: Account) => Account, passes: Passes = () => true): Promise<Tells> {
   const changed = <T extends { account: Account }>(body: T): T => ({ ...body, account: change(body.account) });
+  let socket: WebSocketRoute | undefined;
   for (const path of ["**/api/bootstrap", "**/api/account"]) {
     await page.route(path, async (route) => {
       const response = await route.fetch();
@@ -262,12 +267,14 @@ export async function changeTheWorkspace(page: Page, change: (account: Account) 
     });
   }
   await page.routeWebSocket(WORKSPACE_SOCKET, (ws) => {
+    socket = ws;
     const server = ws.connectToServer();
     server.onMessage((message) => {
       const frame = JSON.parse(String(message));
       if (passes(frame)) ws.send(JSON.stringify("account" in frame ? changed(frame) : frame));
     });
   });
+  return (frame) => socket!.send(JSON.stringify(frame));
 }
 
 /**

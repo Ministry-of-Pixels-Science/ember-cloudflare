@@ -938,6 +938,11 @@ export async function dismissInvitation(): Promise<void> {
   await request("/api/sidebar/invitation", { method: "DELETE" });
 }
 
+/** Stops an invitation into room `roomId`'s huddle ringing in every tab this person has open, as joining from it or declining it does. */
+export async function answerHuddleInvitation(roomId: RoomId): Promise<void> {
+  await request(`/api/rooms/${encodeURIComponent(roomId)}/huddle/invitation`, { method: "DELETE" });
+}
+
 /** A copy of the people directory, and the ETag the server sent it with. */
 export interface DirectoryCopy {
   directory: Directory;

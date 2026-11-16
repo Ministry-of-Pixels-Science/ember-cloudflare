@@ -112,6 +112,7 @@ export function RoomView({ room, messageId, threadId, replyId, invitation, onDis
         <RoomHeader
           room={room}
           name={name}
+          meId={me.id}
           present={state.present}
           status={state.status}
           offline={state.offline}

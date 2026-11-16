@@ -144,6 +144,9 @@ export const MAX_HUDDLE_CAMERAS = 25;
 /** The most screens people share in a huddle at once, as in Slack's. */
 export const MAX_HUDDLE_SCREENS = 2;
 
+/** The most people one `huddle.invite` invites: as many as a huddle takes. */
+export const MAX_HUDDLE_INVITED = MAX_HUDDLE_PEOPLE;
+
 /** What a huddle closes a socket with, besides the codes a room closes one with (`CloseCode`). None is one to connect again after. */
 export const HuddleCloseCode = {
   /** The huddle has as many people as one takes. */
@@ -250,6 +253,14 @@ export type HuddleClientFrame =
   | { type: "huddle.answer"; kind: HuddleTrackKind; sdp: string }
   /** The person has muted their microphone, or unmuted it. */
   | { type: "huddle.mute"; muted: boolean }
+  /**
+   * Invites people into the huddle, each named once: it rings for each of them wherever they have Ember
+   * open, with who invites them, for them to join or decline. Whoever starts a huddle in a direct
+   * message invites everyone else in it. The room leaves out whoever is in the huddle already, and the
+   * Workspace whoever isn't in the room, or has turned its notifications off, so nobody hears of a
+   * room they aren't in.
+   */
+  | { type: "huddle.invite"; userIds: UserId[] }
   | { type: "ping" };
 
 /** What a tab hears on its huddle's socket. */
@@ -298,7 +309,8 @@ export type HuddleServerFrame =
    * `huddle.listen` or `huddle.answer` the room has let go of the tab's receiving connection, so the tab
    * starts a fresh one. After a failed `huddle.publish` it publishes again, from a new sending
    * connection, unless the room `refused`: it won't publish that however often it's asked, as it won't
-   * one camera or one screen more than a huddle shows, and `message` tells the tab's person why.
+   * one camera or one screen more than a huddle shows, and `message` tells the tab's person why. After
+   * a failed `huddle.invite` nobody was invited, which `message` tells them too.
    */
   | { type: "error"; message: string; failed?: HuddleClientFrame["type"]; kind?: HuddleTrackKind; refused?: true }
   | { type: "pong" };
@@ -328,6 +340,12 @@ export const SCREENS_OFF = "Screen sharing is turned off for huddles here.";
 
 /** Why the room won't show someone's screen while as many people share theirs as a huddle shows. */
 export const SCREENS_FULL = `${MAX_HUDDLE_SCREENS} people are sharing their screens in this huddle, which is as many as one shows. You can share yours once one of them stops.`;
+
+/** Why nobody someone invited into a huddle was: the room couldn't have them told. */
+export const NOBODY_INVITED = "Ember couldn't invite anyone to the huddle just now.";
+
+/** Why the room invites nobody more for someone who has invited people as often as a tab may in a minute. */
+export const INVITED_TOO_OFTEN = "You've invited people to this huddle a lot in the last minute. Wait a moment before inviting anyone else.";
 
 /** The most characters a session description can have: one for a tab hearing a full huddle is a fraction of this. */
 export const MAX_SDP_LENGTH = 500_000;
@@ -363,6 +381,12 @@ const mostWatched = (kind: HuddleTrackKind) => (kind === "screen" ? MAX_HUDDLE_S
 function watchOf(value: unknown, most: number): UserId[] | null {
   if (value === undefined) return [];
   if (!Array.isArray(value) || value.length > most || !value.every(isUserId)) return null;
+  return new Set(value).size === value.length ? value : null;
+}
+
+/** Who a `huddle.invite` invites, at least one of them and `MAX_HUDDLE_INVITED` at most, each named once, or null when they can't be that. */
+function invitedOf(value: unknown): UserId[] | null {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_HUDDLE_INVITED || !value.every(isUserId)) return null;
   return new Set(value).size === value.length ? value : null;
 }
 
@@ -434,6 +458,10 @@ export function parseHuddleClientFrame(raw: string): HuddleClientFrame | null {
     }
     case "huddle.mute":
       return typeof frame.muted === "boolean" ? { type: "huddle.mute", muted: frame.muted } : null;
+    case "huddle.invite": {
+      const userIds = invitedOf(frame.userIds);
+      return userIds !== null ? { type: "huddle.invite", userIds } : null;
+    }
     case "ping":
       return { type: "ping" };
     default:

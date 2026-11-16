@@ -39,7 +39,7 @@ interface Sound {
   load(): Promise<void>;
 }
 
-function sound(name: string, url: string): Sound {
+export function sound(name: string, url: string): Sound {
   const audio = document.createElement("audio");
   audio.dataset.huddleSound = name;
   return {

@@ -1734,6 +1734,15 @@ export type WorkspaceServerFrame =
    * the huddle or not, as people join it and leave, and to whoever a change puts in a room with one going on.
    */
   | { type: "room.huddle"; roomId: RoomId; huddle: LiveHuddle | null }
+  /**
+   * Someone in the huddle of a room of theirs, `by`, invites them into it, which rings in every tab they
+   * have open, for them to join from or decline, until they answer it in one, the huddle is over, or
+   * half a minute has passed. Sent only to the people invited, each of whom is in the room and hears
+   * its @mentions of them or more.
+   */
+  | { type: "huddle.invited"; roomId: RoomId; by: UserId }
+  /** They've answered an invitation into a room's huddle, joining from it or declining it, in this tab or another, so it rings in none of them from now on. */
+  | { type: "huddle.answered"; roomId: RoomId }
   /** They've starred or unstarred a room, in this tab or another: their stars as they are now. */
   | { type: "favorites.changed"; favorites: Favorites }
   /** They've given a room of theirs another notification level, in this tab or another. */

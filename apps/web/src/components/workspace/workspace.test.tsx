@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { CloseCode, startingInvolvement, type Account, type Bot, type DirectoryUser, type DirectRoom, type Me, type Message, type Room, type RoomId, type RoomSettings, type SharedRoom, type SidebarRoom, type TimelinePage, type WorkspaceServerFrame, type WorkspaceSettings } from "@ember/protocol";
+import { ASSISTANT_ID, CloseCode, startingInvolvement, type Account, type Bot, type DirectoryUser, type DirectRoom, type Me, type Message, type Room, type RoomId, type RoomSettings, type SharedRoom, type SidebarRoom, type TimelinePage, type WorkspaceServerFrame, type WorkspaceSettings } from "@ember/protocol";
 import type { AgentSettings, AvailableAgent } from "@ember/protocol/agents";
 import { THINKING_LEVELS, type AssistantSettings } from "@ember/protocol/assistant";
 import { CAMERAS_OFF, SCREENS_OFF } from "@ember/protocol/huddles";
@@ -11,6 +11,8 @@ import { SHIPPED_MODELS } from "@/hooks/use-offered-models";
 import { PushContext } from "@/hooks/use-push";
 import { navigate } from "@/hooks/use-route";
 import { joinHuddle } from "@/lib/huddle";
+import { INVITATION_RINGS_MS } from "@/lib/huddle-invitations";
+import { ringForHuddle } from "@/lib/huddle-ring";
 import { endHuddle, joinedHuddle, showHuddle, tellOfHuddle, type HuddleControls } from "@/lib/huddle-store";
 import { loadPage } from "@/lib/page";
 import { badgeTheApp } from "@/test-badge";
@@ -21,6 +23,8 @@ import { Workspace, loadPageAhead } from "./workspace";
 vi.mock("@/lib/page", () => ({ loadPage: vi.fn() }));
 // A huddle's own tests join one. Here joining shows the tab as in the huddle, as a test has it.
 vi.mock("@/lib/huddle", () => ({ joinHuddle: vi.fn() }));
+// An invitation's ring has its own tests. Here the tests say whether the page rang.
+vi.mock("@/lib/huddle-ring", () => ({ ringForHuddle: vi.fn(() => () => {}) }));
 
 const ada: Me = { id: "u1", name: "Ada", administrator: false };
 const rooms: SharedRoom[] = [
@@ -31,6 +35,9 @@ const rooms: SharedRoom[] = [
 const NOON = "2026-10-15T12:00:00.000Z";
 /** Ada's DM with Grace. */
 const withGrace: DirectRoom = { id: "d1", kind: "direct", members: [{ id: ada.id, name: ada.name }, { id: "u2", name: "Grace" }], activeAt: "2026-10-15T12:00:00.000Z" };
+/** Her DM with herself, and the one with @ember, the AI assistant: neither has anyone to huddle with. */
+const withHerself: DirectRoom = { id: "d0", kind: "direct", members: [{ id: ada.id, name: ada.name }], activeAt: "2026-10-15T12:00:00.000Z" };
+const withEmber: DirectRoom = { id: "d9", kind: "direct", members: [{ id: ada.id, name: ada.name }, { id: ASSISTANT_ID, name: "Ember" }], activeAt: "2026-10-15T12:00:00.000Z" };
 /**
  * The sidebar's list of `listed`, read and at the level each starts at unless it says otherwise, with the
  * rooms starred in `favorites`, and the ones the shared order ranks in `sharedOrder`.
@@ -2440,7 +2447,7 @@ describe("Conversations drawer on phones", () => {
 
 describe("Huddles", () => {
   const HUDDLES_ON: Account = { ...workspaceSettings.account, huddles: true };
-  const preview = () => screen.queryByRole("dialog", { name: /huddle in/ });
+  const preview = () => screen.queryByRole("dialog", { name: /huddle (in|with)/ });
   /** The tab's huddle where it shows, opened over the page or minimized to its bar. */
   const shown = () => screen.queryByRole("region", { name: /^Huddle/ });
   const opened = () => (shown()?.id === "huddle" ? shown() : null);
@@ -2496,10 +2503,24 @@ describe("Huddles", () => {
     expect(inSidebar("general")).toBeNull();
   });
 
-  it("has none in a DM", async () => {
+  it("starts a DM's huddle with the other person in it, whom the huddle is told to invite", async () => {
     serveRooms(roomList([...rooms, withGrace]));
-    showWorkspace("/rooms/d1", ada, HUDDLES_ON);
+    const { user } = showWorkspace("/rooms/d1", ada, HUDDLES_ON);
     expect(await roomHeading()).toHaveTextContent("Grace");
+    await user.click(screen.getByRole("button", { name: "Start huddle" }));
+    expect(await screen.findByRole("dialog", { name: "Start a huddle with Grace" })).toHaveAccessibleDescription("Grace is invited once it starts.");
+    await user.click(screen.getByRole("button", { name: "Start Huddle" }));
+    expect(joinHuddle).toHaveBeenCalledExactlyOnceWith({ roomId: "d1", muted: false, microphone: null, camera: null, speakerId: "", invite: ["u2"] });
+    expect(opened()).toHaveAccessibleName("Huddle with Grace");
+  });
+
+  it("has no huddle button in a DM with nobody to huddle with, their own or one with an AI agent alone", async () => {
+    serveRooms(roomList([...rooms, withHerself, withEmber]));
+    showWorkspace("/rooms/d0", ada, HUDDLES_ON);
+    expect(await roomHeading()).toHaveTextContent("Ada");
+    expect(screen.queryByRole("button", { name: /huddle/i })).not.toBeInTheDocument();
+    act(() => navigate("/rooms/d9"));
+    await waitFor(async () => expect(await roomHeading()).toHaveTextContent("Ember"));
     expect(screen.queryByRole("button", { name: /huddle/i })).not.toBeInTheDocument();
   });
 
@@ -2515,7 +2536,7 @@ describe("Huddles", () => {
     expect(screen.getByRole("main").closest("[inert]")).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "Start Huddle" }));
-    expect(joinHuddle).toHaveBeenCalledExactlyOnceWith({ roomId: "general", muted: false, microphone: null, camera: null, speakerId: "" });
+    expect(joinHuddle).toHaveBeenCalledExactlyOnceWith({ roomId: "general", muted: false, microphone: null, camera: null, speakerId: "", invite: [] });
     expect(preview()).not.toBeInTheDocument();
     expect(opened()).toHaveAccessibleName("Huddle in general");
     expect(within(opened()!).getByRole("list", { name: "In the huddle" })).toHaveTextContent("Ada (you)");
@@ -2649,8 +2670,15 @@ describe("Huddles", () => {
     expect(preview()).not.toBeInTheDocument();
   });
 
-  it("opens the huddle the tab is in at its link, over its room, and only shows the room at a DM's", async () => {
+  it("opens the preview from the link of a DM's huddle too", async () => {
     serveRooms(roomList([...rooms, withGrace]));
+    showWorkspace("/rooms/d1/huddle", ada, HUDDLES_ON);
+    expect(await screen.findByRole("dialog", { name: "Start a huddle with Grace" })).toBeVisible();
+    expect(location.pathname).toBe("/rooms/d1");
+  });
+
+  it("opens the huddle the tab is in at its link, over its room, and only shows the room at the link of a DM with nobody to huddle with", async () => {
+    serveRooms(roomList([...rooms, withHerself, withEmber]));
     showWorkspace("/rooms/general", ada, HUDDLES_ON);
     await roomHeading();
     join("random");
@@ -2661,10 +2689,17 @@ describe("Huddles", () => {
     await waitFor(() => expect(opened()).toHaveAccessibleName("Huddle in random"));
     expect(preview()).not.toBeInTheDocument();
 
-    act(() => navigate("/rooms/d1/huddle"));
-    expect(await roomHeading()).toHaveTextContent("Grace");
-    await waitFor(() => expect(location.pathname).toBe("/rooms/d1"));
+    act(() => navigate("/rooms/d0/huddle"));
+    expect(await roomHeading()).toHaveTextContent("Ada");
+    await waitFor(() => expect(location.pathname).toBe("/rooms/d0"));
     expect(bar()).toHaveAccessibleName("Huddle in random");
+    expect(preview()).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    // Nor at the link of one with a bot alone, which joins no huddle.
+    act(() => navigate("/rooms/d9/huddle"));
+    await waitFor(async () => expect(await roomHeading()).toHaveTextContent("Ember"));
+    await waitFor(() => expect(location.pathname).toBe("/rooms/d9"));
     expect(preview()).not.toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
@@ -2696,16 +2731,28 @@ describe("Huddles", () => {
     expect(preview()).not.toBeInTheDocument();
   });
 
-  it("leaves the huddle's keys alone where there's no huddle to start: with huddles off, in a DM, and off a room's page", async () => {
+  it("starts a DM's huddle on Ctrl+Alt+Shift+H too", async () => {
     serveRooms(roomList([...rooms, withGrace]));
+    showWorkspace("/rooms/d1", ada, HUDDLES_ON);
+    expect(await roomHeading()).toHaveTextContent("Grace");
+    expect(fireEvent.keyDown(document.body, { key: "H", code: "KeyH", ctrlKey: true, altKey: true, shiftKey: true })).toBe(false);
+    expect(await screen.findByRole("dialog", { name: "Start a huddle with Grace" })).toBeVisible();
+  });
+
+  it("leaves the huddle's keys alone where there's no huddle to start: with huddles off, in a DM with nobody to huddle with, and off a room's page", async () => {
+    serveRooms(roomList([...rooms, withHerself, withEmber]));
     const toggle = () => fireEvent.keyDown(document.body, { key: "H", code: "KeyH", ctrlKey: true, altKey: true, shiftKey: true });
     const off = showWorkspace("/rooms/general");
     await roomHeading();
     expect(toggle()).toBe(true);
     off.unmount();
 
-    showWorkspace("/rooms/d1", ada, HUDDLES_ON);
-    expect(await roomHeading()).toHaveTextContent("Grace");
+    showWorkspace("/rooms/d0", ada, HUDDLES_ON);
+    expect(await roomHeading()).toHaveTextContent("Ada");
+    expect(toggle()).toBe(true);
+    // A bot joins no huddle, so a DM with one alone has nobody to huddle with either.
+    act(() => navigate("/rooms/d9"));
+    await waitFor(async () => expect(await roomHeading()).toHaveTextContent("Ember"));
     expect(toggle()).toBe(true);
     act(() => navigate("/searches"));
     expect(toggle()).toBe(true);
@@ -2839,5 +2886,166 @@ describe("Huddles", () => {
     join("general");
     unmount();
     expect(controls.leave).toHaveBeenCalledTimes(1);
+  });
+
+  describe("An invitation into one", () => {
+    /** The huddle Grace has started in her DM with Ada. */
+    const GOING = { startedAt: "2026-11-16T09:00:00.000Z", userIds: ["u2"] };
+    const INVITED: WorkspaceServerFrame = { type: "huddle.invited", roomId: "d1", by: "u2" };
+    const invitation = () => screen.queryByRole("group", { name: /invites you to a huddle/ });
+    /** How many times the page has told the Workspace that this person answered the invitation into `roomId`'s huddle. */
+    const answers = (roomId: string) => vi.mocked(fetch).mock.calls.filter(([input, init]) => String(input) === `/api/rooms/${roomId}/huddle/invitation` && init?.method === "DELETE").length;
+    /** The workspace on general's page, with Ada's DM with Grace among her rooms, where huddles are on unless `account` has them off. */
+    async function withDirect(account = HUDDLES_ON) {
+      serveRooms(roomList([...rooms, withGrace]));
+      const workspace = showWorkspace("/rooms/general", ada, account);
+      await roomHeading();
+      return workspace;
+    }
+
+    beforeEach(() => void vi.mocked(ringForHuddle).mockClear());
+    afterEach(() => void vi.useRealTimers());
+
+    it("says who invites, and rings, as the workspace socket brings it, over whatever page shows", async () => {
+      await withDirect();
+      expect(ringForHuddle).not.toHaveBeenCalled();
+      await workspaceSends(INVITED);
+      expect(await screen.findByRole("group", { name: "Grace invites you to a huddle" })).toBeVisible();
+      expect(ringForHuddle).toHaveBeenCalledTimes(1);
+      expect(await roomHeading()).toHaveTextContent("general");
+    });
+
+    it("opens the huddle's preview on Join, on the page that shows, and tells the Workspace it's answered", async () => {
+      const { user } = await withDirect();
+      await workspaceSends({ type: "room.huddle", roomId: "d1", huddle: GOING });
+      await workspaceSends(INVITED);
+      await user.click(within(await screen.findByRole("group", { name: "Grace invites you to a huddle" })).getByRole("button", { name: "Join" }));
+      expect(await screen.findByRole("dialog", { name: "Join the huddle with Grace" })).toHaveAccessibleDescription("1 person is in it now.");
+      expect(invitation()).not.toBeInTheDocument();
+      expect(answers("d1")).toBe(1);
+      expect(location.pathname).toBe("/rooms/general");
+      // Joining goes by the preview, so the tab is in no huddle yet.
+      expect(joinHuddle).not.toHaveBeenCalled();
+    });
+
+    it("goes on Decline, which tells the Workspace it's answered and opens nothing", async () => {
+      const { user } = await withDirect();
+      await workspaceSends(INVITED);
+      await user.click(within(await screen.findByRole("group", { name: "Grace invites you to a huddle" })).getByRole("button", { name: "Decline" }));
+      expect(invitation()).not.toBeInTheDocument();
+      expect(answers("d1")).toBe(1);
+      expect(preview()).not.toBeInTheDocument();
+      expect(joinHuddle).not.toHaveBeenCalled();
+    });
+
+    it("goes from this tab though the Workspace couldn't be told it's answered, of which nothing is said, and goes to sign in when that finds the session gone", async () => {
+      const { onSessionChanged, user } = await withDirect();
+      let answer = (_: Response) => {};
+      const served = vi.mocked(fetch).getMockImplementation()!;
+      vi.mocked(fetch).mockImplementation((input, init) => (init?.method === "DELETE" ? new Promise((resolve) => (answer = resolve)) : served(input, init)));
+      const decline = async () => user.click(within(await screen.findByRole("group", { name: "Grace invites you to a huddle" })).getByRole("button", { name: "Decline" }));
+
+      await workspaceSends(INVITED);
+      await decline();
+      await act(async () => answer(Response.json({ error: "Workspace unavailable" }, { status: 503 })));
+      expect(invitation()).not.toBeInTheDocument();
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+      expect(onSessionChanged).not.toHaveBeenCalled();
+
+      await workspaceSends(INVITED);
+      await decline();
+      await act(async () => answer(Response.json({ error: "Not signed in" }, { status: 401 })));
+      expect(onSessionChanged).toHaveBeenCalledExactlyOnceWith(null);
+    });
+
+    it("goes once another of this person's tabs has answered it, of which this one tells the Workspace nothing", async () => {
+      await withDirect();
+      await workspaceSends(INVITED);
+      expect(await screen.findByRole("group", { name: "Grace invites you to a huddle" })).toBeVisible();
+      await workspaceSends({ type: "huddle.answered", roomId: "d1" });
+      expect(invitation()).not.toBeInTheDocument();
+      expect(answers("d1")).toBe(0);
+    });
+
+    it("goes once its huddle is over, and once this person is in it on another device", async () => {
+      await withDirect();
+      await workspaceSends(INVITED);
+      await workspaceSends({ type: "room.huddle", roomId: "d1", huddle: GOING });
+      expect(invitation()).toBeInTheDocument();
+      await workspaceSends({ type: "room.huddle", roomId: "d1", huddle: null });
+      expect(invitation()).not.toBeInTheDocument();
+
+      await workspaceSends({ type: "room.huddle", roomId: "d1", huddle: GOING });
+      await workspaceSends(INVITED);
+      expect(invitation()).toBeInTheDocument();
+      await workspaceSends({ type: "room.huddle", roomId: "d1", huddle: { ...GOING, userIds: ["u2", "u1"] } });
+      expect(invitation()).not.toBeInTheDocument();
+      expect(answers("d1")).toBe(0);
+    });
+
+    it("goes once this tab is in its huddle, however it joined", async () => {
+      await withDirect();
+      await workspaceSends(INVITED);
+      expect(invitation()).toBeInTheDocument();
+      join("d1");
+      expect(invitation()).not.toBeInTheDocument();
+    });
+
+    it("goes with the room, once that's no longer this person's", async () => {
+      await withDirect();
+      await workspaceSends(INVITED);
+      expect(invitation()).toBeInTheDocument();
+      await workspaceSends({ type: "room.gone", roomId: "d1" });
+      expect(invitation()).not.toBeInTheDocument();
+    });
+
+    it("gives up once it has rung for half a minute, unanswered, and tells the Workspace nothing", async () => {
+      await withDirect();
+      await workspaceSends({ type: "room.huddle", roomId: "d1", huddle: GOING });
+      // The clock too, by which the invitation knows when it came.
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+      act(() => WorkspaceSocket.last!.onmessage?.({ data: JSON.stringify(INVITED) }));
+      act(() => void vi.advanceTimersByTime(INVITATION_RINGS_MS - 1));
+      expect(invitation()).toBeInTheDocument();
+      act(() => void vi.advanceTimersByTime(1));
+      expect(invitation()).not.toBeInTheDocument();
+      expect(answers("d1")).toBe(0);
+    });
+
+    it("shows without its ring to someone in a huddle already", async () => {
+      await withDirect();
+      join("general");
+      await workspaceSends(INVITED);
+      expect(invitation()).toBeInTheDocument();
+      expect(ringForHuddle).not.toHaveBeenCalled();
+    });
+
+    it("shows without its ring to someone in a huddle on another device, and rings once they've left that one", async () => {
+      await withDirect();
+      await workspaceSends({ type: "room.huddle", roomId: "general", huddle: { ...GOING, userIds: ["u1"] } });
+      await workspaceSends(INVITED);
+      expect(invitation()).toBeInTheDocument();
+      expect(ringForHuddle).not.toHaveBeenCalled();
+      await workspaceSends({ type: "room.huddle", roomId: "general", huddle: null });
+      expect(invitation()).toBeInTheDocument();
+      expect(ringForHuddle).toHaveBeenCalledTimes(1);
+    });
+
+    it("shows nothing while huddles are off, and keeps nothing for when they're on again", async () => {
+      const { showAccount } = await withDirect(workspaceSettings.account);
+      await workspaceSends(INVITED);
+      expect(invitation()).not.toBeInTheDocument();
+      expect(ringForHuddle).not.toHaveBeenCalled();
+      showAccount(HUDDLES_ON);
+      expect(invitation()).not.toBeInTheDocument();
+
+      // One that rings as huddles are turned off is over too.
+      await workspaceSends(INVITED);
+      expect(invitation()).toBeInTheDocument();
+      showAccount(workspaceSettings.account);
+      expect(invitation()).not.toBeInTheDocument();
+      showAccount(HUDDLES_ON);
+      expect(invitation()).not.toBeInTheDocument();
+    });
   });
 });
