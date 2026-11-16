@@ -99,7 +99,6 @@ import {
   signsUpOpenly,
   signsUpWithEmailDomain,
   startingInvolvement,
-  suggestedCount,
   TAGLINE_TOO_LONG,
   TURNSTILE_FAILED,
   TURNSTILE_SECRET_KEY_REFUSED,
@@ -239,6 +238,34 @@ describe("Catch up after a reconnect", () => {
   });
 });
 
+describe("Clicks on a card's buttons", () => {
+  it("takes a click by its id, its message and its button, in its block if it has one, with its value if it has one", () => {
+    const click = { type: "card.click", clickId: "c1", messageId: "m1", actionId: "approve" };
+    expect(parse(click)).toEqual(click);
+    expect(parse({ ...click, blockId: "deploy-42", value: '{"build":42}', extra: 1 })).toEqual({ ...click, blockId: "deploy-42", value: '{"build":42}' });
+    expect(parse({ ...click, value: "" })).toEqual({ ...click, value: "" });
+    const longest = { actionId: "x".repeat(255), blockId: "x".repeat(255), value: "x".repeat(2000) };
+    expect(parse({ ...click, ...longest })).toEqual({ ...click, ...longest });
+    const wrongs = [
+      { clickId: "" },
+      { clickId: 1 },
+      { messageId: undefined },
+      { actionId: "" },
+      { actionId: "x".repeat(256) },
+      { actionId: 7 },
+      { blockId: "" },
+      { blockId: null },
+      { blockId: "x".repeat(256) },
+      { value: null },
+      { value: 42 },
+      { value: "x".repeat(2001) },
+    ];
+    for (const wrong of wrongs) {
+      expect(parse({ ...click, ...wrong }), JSON.stringify(wrong).slice(0, 40)).toBeNull();
+    }
+  });
+});
+
 describe("Presence", () => {
   it("takes whether a tab is shown, as a boolean", () => {
     expect(parse({ type: "presence.visible", visible: false })).toEqual({ type: "presence.visible", visible: false });
@@ -271,7 +298,7 @@ describe("One live connection per tab outside the open room", () => {
     const welcome: WorkspaceServerFrame = {
       type: "welcome",
       you: { id: "u1", name: "Ada", administrator: true },
-      account: { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false },
+      account: { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true },
     };
     expect(parseServerFrame<WorkspaceServerFrame>(JSON.stringify(welcome))).toEqual(welcome);
     expect(parseServerFrame<WorkspaceServerFrame>('{"type":7}')).toBeNull();
@@ -408,16 +435,6 @@ describe("Start or reopen a direct message", () => {
       expect(parseNewDirect(body), JSON.stringify(body).slice(0, 40)).toBe(refused);
     }
     expect(parseNewDirect({ userIds: tooMany.slice(1) })).not.toBeTypeOf("string");
-  });
-});
-
-describe("Suggested people", () => {
-  it("suggests 20 people less those in your DMs, you included, and one more", () => {
-    expect(suggestedCount(0)).toBe(19);
-    expect(suggestedCount(1)).toBe(18);
-    expect(suggestedCount(2)).toBe(17);
-    expect(suggestedCount(19)).toBe(0);
-    expect(suggestedCount(25)).toBe(0);
   });
 });
 
@@ -664,6 +681,22 @@ describe("Only administrators create rooms (setting)", () => {
       settings: { restrictRoomCreation: false, hideTranslationButtons: true },
     });
     expect(parseAccountChanges({ settings: { restrictRoomCreation: "true" } })).toBe("Must be admin to create new rooms must be true or false");
+  });
+});
+
+describe("Cameras in huddles (setting)", () => {
+  it("takes Cameras as true or false, beside the other settings", () => {
+    expect(parseAccountChanges({ settings: { huddleCameras: false } })).toEqual({ settings: { huddleCameras: false } });
+    expect(parseAccountChanges({ settings: { huddleCameras: true, restrictRoomCreation: true } })).toEqual({ settings: { huddleCameras: true, restrictRoomCreation: true } });
+    expect(parseAccountChanges({ settings: { huddleCameras: "off" } })).toBe("Cameras must be true or false");
+  });
+});
+
+describe("Screen sharing in huddles (setting)", () => {
+  it("takes Screen sharing as true or false, beside the other settings", () => {
+    expect(parseAccountChanges({ settings: { huddleScreens: false } })).toEqual({ settings: { huddleScreens: false } });
+    expect(parseAccountChanges({ settings: { huddleScreens: true, huddleCameras: false } })).toEqual({ settings: { huddleScreens: true, huddleCameras: false } });
+    expect(parseAccountChanges({ settings: { huddleScreens: 0 } })).toBe("Screen sharing must be true or false");
   });
 });
 

@@ -12,8 +12,9 @@ import { pushEndpoint } from "@/lib/push";
 // before connects their Memberful account to it, with their password, as changing their email address
 // takes it, and signs in with Memberful from then on. Once one is connected, it names the account, and
 // Disconnect Memberful, with their password again, unlinks it and ends their other sessions, as a new
-// password does, while they have a password and an email address to sign in with instead. Boxed as
-// workspace settings' Memberful section is.
+// password does, while they have a password and an email address to sign in with instead. Someone who
+// joined with Memberful has no password, and is given none while Memberful signs them in, so theirs
+// stays connected. Boxed as workspace settings' Memberful section is.
 
 interface Props {
   /** The Memberful account you've connected, as Memberful describes it, or null while you haven't. */
@@ -135,10 +136,8 @@ export function MemberfulConnection({ connected, membersOnly, hasPassword, hasEm
               {passwordField("memberful-disconnection-help")}
               <SubmitButton disabled={busy}>Disconnect Memberful</SubmitButton>
             </form>
-          ) : hasPassword ? (
-            <p>Add your email address above to disconnect it, so that you can still sign in with your password.</p>
           ) : (
-            <p>Set a password above to disconnect it, so that you can still sign in.</p>
+            hasPassword && <p>Add your email address above to disconnect it, so that you can still sign in with your password.</p>
           )}
         </>
       ) : (

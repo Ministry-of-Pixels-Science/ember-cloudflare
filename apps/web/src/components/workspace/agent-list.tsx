@@ -1,12 +1,13 @@
 import { useContext, useEffect, useMemo, useState } from "react";
 import { ASSISTANT_ID, ASSISTANT_NAME, type DirectoryUser } from "@ember/protocol";
-import { AGENTS_FORBIDDEN, AGENTS_FULL, MAX_AGENTS, type Agent } from "@ember/protocol/agents";
+import { AGENTS_FORBIDDEN, AGENTS_FULL, EMBER_DOES, MAX_AGENTS, type Agent } from "@ember/protocol/agents";
 import { ASSISTANT_OFF, modelName, type AssistantSettings } from "@ember/protocol/assistant";
 import { useFlash } from "@/components/flash";
 import { EditPencil, Plus } from "@/components/icons/iconoir";
 import { PageLink } from "@/components/page-link";
 import { PeopleContext, type People } from "@/hooks/use-directory";
 import { agentSettingsPath, navigate, NEW_AGENT_PATH, WORKSPACE_SETTINGS_PATH } from "@/hooks/use-route";
+import { DMS_ONLY, EVERY_ROOM, KEPT_FOR } from "@/lib/agents";
 import { ApiError, fetchAgents, isSignedOut } from "@/lib/api";
 import { byName } from "@/lib/people";
 import { cn } from "@/lib/utils";
@@ -17,8 +18,9 @@ import { UserAvatar } from "./user-avatar";
 
 // The Agents card on the AI assistant tab, for administrators while Ember AI is on: New agent, then
 // @ember, built in, and each agent made, by name, with what it does, its model, whether it searches the
-// web, and its rooms, each with a link to its page. An agent deleted or renamed elsewhere leaves or is
-// renamed here as soon as the people directory hears of it, as the Chat bots page's bots do.
+// web, whether it's kept for administrators, and its rooms, each with a link to its page. An agent
+// deleted or renamed elsewhere leaves or is renamed here as soon as the people directory hears of it, as
+// the Chat bots page's bots do.
 
 const NOTE = "text-[0.8em] text-muted-foreground max-md:text-[12px]";
 
@@ -26,7 +28,7 @@ const NOTE = "text-[0.8em] text-muted-foreground max-md:text-[12px]";
 export const AGENTS_PATH = workspaceSectionPath("assistant-settings");
 
 /** Whether `error` says Ember AI is off. */
-const isOff = (error: unknown) => error instanceof ApiError && error.status === 409 && error.message === ASSISTANT_OFF;
+export const isOff = (error: unknown) => error instanceof ApiError && error.status === 409 && error.message === ASSISTANT_OFF;
 
 /**
  * Sends anyone but an administrator away from the agents' pages to workspace settings, as the bot pages
@@ -51,9 +53,6 @@ export function useAgentsOnly(onFailed: (error: unknown) => void) {
 /** What the card says of agents. */
 export const AGENTS_EXPLAINED = `People mention an agent by name, and it answers following the instructions you gave it, on the model you chose for it. You can make up to ${MAX_AGENTS}.`;
 
-/** What @ember's row says it does. */
-export const EMBER_DOES = "Answers anything people ask.";
-
 /** What a row says of an agent that searches the web. */
 export const SEARCHES_THE_WEB = "Searches the web";
 
@@ -62,10 +61,16 @@ const ROOMS_NAMED = 3;
 
 /** What a row says of an agent's rooms: every open room, new ones too, or the ones it's kept to, or else that only its DMs reach it. */
 export function roomsOf(rooms: Agent["rooms"]): string {
-  if (rooms === null) return "Every open room";
-  if (rooms.length === 0) return "Direct messages only";
+  if (rooms === null) return EVERY_ROOM;
+  if (rooms.length === 0) return DMS_ONLY;
   const names = rooms.map(({ name }) => name);
   return names.length > ROOMS_NAMED ? `${names.slice(0, ROOMS_NAMED).join(", ")} and ${names.length - ROOMS_NAMED} more` : names.join(", ");
+}
+
+/** What a row says of who can ask an agent, and where: its rooms, after Admins only for one kept for administrators, or that only their DMs reach it. */
+export function reachOf({ access, rooms }: Pick<Agent, "access" | "rooms">): string[] {
+  if (access === "admin-dms") return [KEPT_FOR[access]];
+  return access === "admins" ? [KEPT_FOR[access], roomsOf(rooms)] : [roomsOf(rooms)];
 }
 
 interface Row {
@@ -91,7 +96,7 @@ const listedNow = (agents: Agent[], people: People) =>
 const agentRow = (agent: Agent, people: People): Row => ({
   user: people.get(agent.id) ?? agent,
   description: agent.description,
-  details: [agent.modelName, ...(agent.webTools.includes("search") ? [SEARCHES_THE_WEB] : []), roomsOf(agent.rooms)],
+  details: [agent.modelName, ...(agent.webTools.includes("search") ? [SEARCHES_THE_WEB] : []), ...reachOf(agent)],
   builtIn: false,
 });
 

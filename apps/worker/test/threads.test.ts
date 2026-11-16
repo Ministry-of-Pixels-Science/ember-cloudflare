@@ -27,6 +27,7 @@ import {
   signIn,
   startUpload,
   workspaceSql,
+  workspaceStub,
   type Client,
   type PushBrowser,
   type Session,
@@ -484,8 +485,9 @@ describe("Bots in threads", () => {
     const parent = await post(client, `<p>${mention(bot)} release notes</p>`);
     const asked = await reply(client, parent, `<p>${mention(bot)} build it</p>`);
     await vi.waitFor(() => expect(delivered.size).toBe(2));
-    expect(delivered.get(parent.id)!.room.path).toBe(botMessagesPath(general, bot.key));
-    expect(delivered.get(asked.id)!.room.path).toBe(botMessagesPath(general, bot.key, parent.id));
+    const { key } = (await workspaceStub().botWebhook(general, bot.id))!;
+    expect(delivered.get(parent.id)!.room.path).toBe(botMessagesPath(general, key));
+    expect(delivered.get(asked.id)!.room.path).toBe(botMessagesPath(general, key, parent.id));
 
     const posted = await api(delivered.get(asked.id)!.room.path, { method: "POST", body: "Built" });
     expect(posted.status).toBe(201);

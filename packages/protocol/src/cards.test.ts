@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MAX_CARDS, parseCards, type CardAddress } from "./cards";
+import { MAX_ACTION_ID_LENGTH, MAX_ACTION_VALUE_LENGTH, MAX_CARDS, parseCards, parseParts, type CardAddress } from "./cards";
 import { MAX_MESSAGE_HTML_LENGTH } from "./index";
 
 /** Keeps https addresses on example.com, as the room's rule keeps addresses on named hosts. */
@@ -181,6 +181,55 @@ describe("Bot cards", () => {
     ]);
     expect(asked.link!.sort()).toEqual(["https://example.com/ada", "https://example.com/book", "https://example.com/open", "https://example.com/status"]);
     expect(asked.picture!.sort()).toEqual(["ada", "chart", "dot", "e", "hero", "icon", "thumb", "up"].map((name) => `https://example.com/${name}.png`));
+  });
+
+  it("keeps a button that acts, by what a click tells its bot, and a button with an address as a link, or not at all", () => {
+    const button = (action: unknown, rest: Record<string, unknown> = {}) => ({ text: "Approve", action, ...rest });
+    const parts = [
+      {
+        kind: "buttons",
+        buttons: [
+          button({ id: "approve", blockId: "deploy", value: '{"build":42}', extra: true }, { style: "primary", extra: true }),
+          button({ id: "reject" }),
+          button({ id: "open" }, { href: "https://example.com/open" }),
+          button({ id: "elsewhere" }, { href: "https://elsewhere.test/open" }),
+          button({ id: "" }),
+          button({ id: 7 }),
+          button({ blockId: "deploy", value: "nameless" }),
+          button("approve"),
+          button({ id: "x".repeat(MAX_ACTION_ID_LENGTH + 1) }),
+          button({ id: "long", blockId: "x".repeat(MAX_ACTION_ID_LENGTH + 1), value: "x".repeat(MAX_ACTION_VALUE_LENGTH + 1) }),
+          button({ id: "most", blockId: "x".repeat(MAX_ACTION_ID_LENGTH), value: "x".repeat(MAX_ACTION_VALUE_LENGTH) }),
+          { action: { id: "untitled" } },
+        ],
+      },
+      { kind: "section", html: "<p>Deploy?</p>", button: button({ id: "approve", value: "" }) },
+      { kind: "tiles", tiles: [{ buttons: [button({ id: "book" })] }] },
+      { kind: "buttons", buttons: [button({ id: "tool:close_issue", value: "{}", appId: "app-1" }), button({ id: "tool:close_issue", appId: 7 })] },
+    ];
+    const kept = [
+      {
+        kind: "buttons",
+        buttons: [
+          { text: "Approve", action: { id: "approve", blockId: "deploy", value: '{"build":42}' }, style: "primary" },
+          { text: "Approve", action: { id: "reject" } },
+          { text: "Approve", href: "https://example.com/open" },
+          { text: "Approve", action: { id: "long" } },
+          { text: "Approve", action: { id: "most", blockId: "x".repeat(MAX_ACTION_ID_LENGTH), value: "x".repeat(MAX_ACTION_VALUE_LENGTH) } },
+        ],
+      },
+      { kind: "section", html: "<p>Deploy?</p>", button: { text: "Approve", action: { id: "approve", value: "" } } },
+      { kind: "tiles", tiles: [{ buttons: [{ text: "Approve", action: { id: "book" } }] }] },
+      // The app whose tool a button on a tool's card calls stays with it.
+      { kind: "buttons", buttons: [{ text: "Approve", action: { id: "tool:close_issue", value: "{}", appId: "app-1" } }, { text: "Approve", action: { id: "tool:close_issue" } }] },
+    ];
+    expect(parseCards([{ source: "blocks", parts }], address)).toEqual([{ source: "blocks", parts: kept }]);
+    expect(parseParts(parts, address)).toEqual(kept);
+    // Where a click has nowhere to go, only the link is left, and a small card of nothing else goes.
+    expect(parseParts(parts, address, false)).toEqual([
+      { kind: "buttons", buttons: [{ text: "Approve", href: "https://example.com/open" }] },
+      { kind: "section", html: "<p>Deploy?</p>" },
+    ]);
   });
 
   it("keeps up to a message's cards", () => {

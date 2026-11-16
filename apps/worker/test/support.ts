@@ -20,7 +20,8 @@ import {
   type UserId,
   type WorkspaceServerFrame,
 } from "@ember/protocol";
-import { applyD1Migrations, reset, runInDurableObject, type D1Migration } from "cloudflare:test";
+import type { ModelFormat, ThinkingLevel } from "@ember/protocol/assistant";
+import { applyD1Migrations, evictDurableObject, reset, runInDurableObject, type D1Migration } from "cloudflare:test";
 import { env, exports } from "cloudflare:workers";
 import { expect, vi } from "vitest";
 import { ADDRESS_HEADER, AUTHORIZED_AT_HEADER, BANNED_HEADER, ROOM_HEADER, SESSION_HEADER, USER_HEADER, type ChatRoom } from "../src/chat-room";
@@ -282,6 +283,58 @@ export async function roomSql(room: string, query: string, ...params: Array<stri
 
 /** Runs SQL against the Workspace's tables, whichever backend this suite is using. */
 export const workspaceSql = (query: string, ...params: Array<string | number>) => tablesSql(workspaceStub(), query, ...params);
+
+/** Has the Workspace read what's stored afresh, as it does once it starts again, whether or not it's running now. */
+async function restartWorkspace(): Promise<void> {
+  // On D1 what's stored changes without the Workspace, which then needn't be running to be stopped.
+  await runInDurableObject(workspaceStub(), () => {});
+  await evictDurableObject(workspaceStub());
+}
+
+/**
+ * A model kept before Ember stopped offering it, as a copy set up then keeps it: its ID, its name, the
+ * format Cloudflare's REST API took it in, and the levels of thinking it took its test question at.
+ */
+export interface KeptModel {
+  id: string;
+  name: string;
+  format: ModelFormat;
+  thinkingLevels: readonly ThinkingLevel[];
+}
+
+/**
+ * Has Ember AI, which is on, answer everyone with `model`, which Ember no longer offers, as a copy set
+ * up before Ember stopped offering it does, with it and `others` the models people can pick, as the
+ * Workspace finds when it next opens.
+ */
+export async function answerWithKeptModel(model: KeptModel, ...others: KeptModel[]): Promise<void> {
+  const models = [model, ...others].map(({ thinkingLevels, ...kept }) => ({ ...kept, thinking_levels: thinkingLevels }));
+  await workspaceSql(
+    "UPDATE accounts SET settings = json_set(settings, '$.assistant.model', ?, '$.assistant.format', ?, '$.assistant.models', json(?))",
+    model.id,
+    model.format,
+    JSON.stringify(models),
+  );
+  await restartWorkspace();
+}
+
+/**
+ * Adds `models`, which Ember no longer offers, to those people can pick, after the others, as a copy set
+ * up before Ember stopped offering them has them, as the Workspace finds when it next opens.
+ */
+export async function addKeptModels(...models: KeptModel[]): Promise<void> {
+  const [{ settings }] = (await workspaceSql("SELECT settings FROM accounts")) as [{ settings: string }];
+  const others = (JSON.parse(settings) as { assistant: { models: unknown[] } }).assistant.models;
+  const kept = models.map(({ thinkingLevels, ...model }) => ({ ...model, thinking_levels: thinkingLevels }));
+  await workspaceSql("UPDATE accounts SET settings = json_set(settings, '$.assistant.models', json(?))", JSON.stringify([...others, ...kept]));
+  await restartWorkspace();
+}
+
+/** Has the agent `agentId` answer with `model`, which Ember no longer offers, as an agent made before Ember stopped offering it does. */
+export async function agentWithKeptModel(agentId: UserId, { id, name, format, thinkingLevels }: KeptModel): Promise<void> {
+  await workspaceSql("UPDATE agents SET model = ?, model_name = ?, format = ?, thinking_levels = ? WHERE user_id = ?", id, name, format, JSON.stringify(thinkingLevels), agentId);
+  await restartWorkspace();
+}
 
 /** Runs SQL against the search index's tables, which it keeps in its own storage on either backend. */
 export const searchSql = (query: string, ...params: Array<string | number>) => objectSql(searchIndexStub(), query, ...params);

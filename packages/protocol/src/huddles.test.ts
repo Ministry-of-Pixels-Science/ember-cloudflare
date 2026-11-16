@@ -1,6 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { APP_ID_REFUSED, APP_SECRET_REFUSED, appIdOf, appSecretOf, HuddleCloseCode, huddleSocketQuery, MAX_HUDDLE_PEOPLE, MAX_SDP_LENGTH, parseHuddleClientFrame, parseHuddleSocketParams, parseHuddlesSetup } from "./huddles";
-import { CloseCode } from "./index";
+import {
+  APP_ID_REFUSED,
+  APP_SECRET_REFUSED,
+  appIdOf,
+  appSecretOf,
+  HuddleCloseCode,
+  huddleSocketQuery,
+  MAX_HUDDLE_CAMERAS,
+  MAX_HUDDLE_PEOPLE,
+  MAX_HUDDLE_SCREENS,
+  MAX_SDP_LENGTH,
+  parseHuddleClientFrame,
+  parseHuddleSocketParams,
+  parseHuddlesSetup,
+} from "./huddles";
+import { CloseCode, MAX_ID_LENGTH } from "./index";
 
 const APP_ID = "2a95132c15732412d22c1476fa83f27a";
 const APP_SECRET = "66bcf64aa8907b9f9d90ac17746a77ce394c393b92b3916633dc02846e608ad4";
@@ -33,8 +47,10 @@ describe("a huddle's socket", () => {
   const read = (frame: unknown) => parseHuddleClientFrame(JSON.stringify(frame));
   const SDP = "v=0\r\no=- 46117317 2 IN IP4 127.0.0.1\r\ns=-\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n";
 
-  it("reads what a tab publishes: its offer, and the track each of its media sections carries", () => {
+  it("reads what a tab publishes: its offer, and the track its media section carries, a microphone's, a camera's or a screen's", () => {
     expect(read({ type: "huddle.publish", sdp: SDP, tracks: [{ mid: "0", kind: "audio" }] })).toEqual({ type: "huddle.publish", sdp: SDP, tracks: [{ mid: "0", kind: "audio" }] });
+    expect(read({ type: "huddle.publish", sdp: SDP, tracks: [{ mid: "0", kind: "video" }] })).toEqual({ type: "huddle.publish", sdp: SDP, tracks: [{ mid: "0", kind: "video" }] });
+    expect(read({ type: "huddle.publish", sdp: SDP, tracks: [{ mid: "0", kind: "screen" }] })).toEqual({ type: "huddle.publish", sdp: SDP, tracks: [{ mid: "0", kind: "screen" }] });
     // Only what the room reads is kept.
     expect(read({ type: "huddle.publish", sdp: SDP, tracks: [{ mid: "sdparta_0", kind: "audio", trackName: "theirs" }], sessionId: "theirs" })).toEqual({
       type: "huddle.publish",
@@ -55,36 +71,76 @@ describe("a huddle's socket", () => {
       [null],
       ["0"],
       [{ mid: "0" }],
-      [{ mid: "0", kind: "video" }],
+      [{ mid: "0", kind: "slides" }],
       [{ mid: 0, kind: "audio" }],
       [{ mid: "", kind: "audio" }],
       // The SFU reads a track's name after a #, which would name a transceiver the tab didn't make.
       [{ mid: "#audio", kind: "audio" }],
       [{ mid: "0 1", kind: "audio" }],
       [{ mid: "m".repeat(33), kind: "audio" }],
-      // Two tracks can't share a media section, and a tab has one microphone to publish.
+      // A connection sends the one track: the microphone, the camera and the screen each go on their own.
       [{ mid: "0", kind: "audio" }, { mid: "0", kind: "audio" }],
       [{ mid: "0", kind: "audio" }, { mid: "1", kind: "audio" }],
+      [{ mid: "0", kind: "audio" }, { mid: "1", kind: "video" }],
+      [{ mid: "0", kind: "video" }, { mid: "1", kind: "screen" }],
     ];
     for (const tracks of refused) expect(publish({ tracks }), JSON.stringify(tracks)).toBeNull();
   });
 
-  it("reads the rest of what a tab sends", () => {
-    expect(read({ type: "huddle.connected", sessionId: "theirs" })).toEqual({ type: "huddle.connected" });
-    expect(read({ type: "huddle.listen" })).toEqual({ type: "huddle.listen" });
-    expect(read({ type: "huddle.listen", fresh: true })).toEqual({ type: "huddle.listen", fresh: true });
-    expect(read({ type: "huddle.answer", sdp: SDP })).toEqual({ type: "huddle.answer", sdp: SDP });
+  it("reads the rest of what a tab sends, each frame about a connection saying which pair it's of", () => {
+    expect(read({ type: "huddle.connected", kind: "audio", sessionId: "theirs" })).toEqual({ type: "huddle.connected", kind: "audio" });
+    expect(read({ type: "huddle.connected", kind: "video" })).toEqual({ type: "huddle.connected", kind: "video" });
+    expect(read({ type: "huddle.connected", kind: "screen" })).toEqual({ type: "huddle.connected", kind: "screen" });
+    expect(read({ type: "huddle.unpublish", kind: "video" })).toEqual({ type: "huddle.unpublish", kind: "video" });
+    expect(read({ type: "huddle.unpublish", kind: "screen" })).toEqual({ type: "huddle.unpublish", kind: "screen" });
+    expect(read({ type: "huddle.listen", kind: "audio" })).toEqual({ type: "huddle.listen", kind: "audio" });
+    expect(read({ type: "huddle.listen", kind: "audio", fresh: true })).toEqual({ type: "huddle.listen", kind: "audio", fresh: true });
+    expect(read({ type: "huddle.answer", kind: "video", sdp: SDP })).toEqual({ type: "huddle.answer", kind: "video", sdp: SDP });
+    expect(read({ type: "huddle.answer", kind: "screen", sdp: SDP })).toEqual({ type: "huddle.answer", kind: "screen", sdp: SDP });
     expect(read({ type: "huddle.mute", muted: true })).toEqual({ type: "huddle.mute", muted: true });
     expect(read({ type: "huddle.mute", muted: false })).toEqual({ type: "huddle.mute", muted: false });
     expect(read({ type: "ping", at: 1 })).toEqual({ type: "ping" });
+  });
+
+  it("takes a frame that names no pair, as a tab from before there were cameras sends them, to be about the voices'", () => {
+    expect(read({ type: "huddle.connected" })).toEqual({ type: "huddle.connected", kind: "audio" });
+    expect(read({ type: "huddle.listen" })).toEqual({ type: "huddle.listen", kind: "audio" });
+    expect(read({ type: "huddle.listen", fresh: true })).toEqual({ type: "huddle.listen", kind: "audio", fresh: true });
+    expect(read({ type: "huddle.answer", sdp: SDP })).toEqual({ type: "huddle.answer", kind: "audio", sdp: SDP });
+  });
+
+  it("reads whose cameras a tab asks to see, which is nobody's unless it names them", () => {
+    expect(read({ type: "huddle.listen", kind: "video", fresh: true, watch: ["ada", "grace"] })).toEqual({ type: "huddle.listen", kind: "video", fresh: true, watch: ["ada", "grace"] });
+    expect(read({ type: "huddle.listen", kind: "video" })).toEqual({ type: "huddle.listen", kind: "video", watch: [] });
+    expect(read({ type: "huddle.listen", kind: "video", watch: [] })).toEqual({ type: "huddle.listen", kind: "video", watch: [] });
+    // Voices aren't asked for by name: a tab hears everyone.
+    expect(read({ type: "huddle.listen", kind: "audio", watch: ["ada"] })).toEqual({ type: "huddle.listen", kind: "audio" });
+    const everyCamera = Array.from({ length: MAX_HUDDLE_CAMERAS }, (_, index) => `user-${index}`);
+    expect(read({ type: "huddle.listen", kind: "video", watch: everyCamera })).toEqual({ type: "huddle.listen", kind: "video", watch: everyCamera });
+    for (const watch of ["ada", [7], [""], [null], ["ada", "ada"], ["u".repeat(MAX_ID_LENGTH + 1)], [...everyCamera, "one-more"]]) {
+      expect(read({ type: "huddle.listen", kind: "video", watch }), JSON.stringify(watch).slice(0, 40)).toBeNull();
+    }
+  });
+
+  it("reads whose screens a tab asks to see, as many as a huddle shows, which is nobody's unless it names them", () => {
+    expect(read({ type: "huddle.listen", kind: "screen", fresh: true, watch: ["ada", "grace"] })).toEqual({ type: "huddle.listen", kind: "screen", fresh: true, watch: ["ada", "grace"] });
+    expect(read({ type: "huddle.listen", kind: "screen" })).toEqual({ type: "huddle.listen", kind: "screen", watch: [] });
+    for (const watch of ["ada", [7], ["ada", "ada"], ["ada", "grace", "linus"]]) {
+      expect(read({ type: "huddle.listen", kind: "screen", watch }), JSON.stringify(watch)).toBeNull();
+    }
   });
 
   it("refuses anything else", () => {
     for (const frame of [
       { type: "huddle.listen", fresh: false },
       { type: "huddle.listen", fresh: "yes" },
+      { type: "huddle.listen", kind: "slides" },
+      { type: "huddle.connected", kind: "slides" },
+      { type: "huddle.connected", kind: null },
+      { type: "huddle.unpublish", kind: 7 },
       { type: "huddle.answer" },
       { type: "huddle.answer", sdp: "" },
+      { type: "huddle.answer", kind: "both", sdp: SDP },
       { type: "huddle.mute" },
       { type: "huddle.mute", muted: "true" },
       { type: "huddle.leave" },
@@ -116,5 +172,7 @@ describe("a huddle's socket", () => {
     expect(HuddleCloseCode).toEqual({ Full: 4005, Off: 4006, Moved: 4007 });
     expect(Object.values(CloseCode).filter((code) => (Object.values(HuddleCloseCode) as number[]).includes(code))).toEqual([]);
     expect(MAX_HUDDLE_PEOPLE).toBe(50);
+    expect(MAX_HUDDLE_CAMERAS).toBe(25);
+    expect(MAX_HUDDLE_SCREENS).toBe(2);
   });
 });

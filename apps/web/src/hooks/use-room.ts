@@ -57,11 +57,11 @@ export interface RoomFrames {
 }
 
 /**
- * What can be done to a room's messages over `send`. Unlike new messages, these aren't kept to send later,
+ * What can be done to a room's messages over `frames`. Unlike new messages, these aren't kept to send later,
  * so `warn` says when one couldn't go. An edit longer than the room takes isn't sent either, so its editor
  * keeps it.
  */
-export function messageActionsOf(send: RoomFrames["send"], warn: (message: string) => void): MessageActions {
+export function messageActionsOf({ send, listen }: RoomFrames, warn: (message: string) => void): MessageActions {
   const sendOrWarn = (frame: ClientFrame) => {
     const sent = send(frame);
     if (!sent) warn("Not connected. Try again once you're reconnected.");
@@ -76,6 +76,24 @@ export function messageActionsOf(send: RoomFrames["send"], warn: (message: strin
     remove: (messageId) => sendOrWarn({ type: "message.delete", messageId }),
     boost: (messageId, content) => sendOrWarn({ type: "boost.create", messageId, content }),
     unboost: (boostId) => sendOrWarn({ type: "boost.delete", boostId }),
+    click: (messageId, { id: actionId, blockId, value }) => {
+      const clickId = crypto.randomUUID();
+      const button = { actionId, ...(blockId !== undefined && { blockId }), ...(value !== undefined && { value }) };
+      if (!sendOrWarn({ type: "card.click", clickId, messageId, ...button })) return Promise.resolve(false);
+      return new Promise((resolve) => {
+        const answered = (went: boolean) => {
+          stop();
+          resolve(went);
+        };
+        // The room answers once the bot has, or says why it didn't, which the timeline shows. A room that
+        // lets the page in again has lost the click's answer, if not the click.
+        const stop = listen((frame) => {
+          if (frame.type === "card.clicked" && frame.clickId === clickId) answered(true);
+          else if (frame.type === "error" && frame.clickId === clickId) answered(false);
+          else if (frame.type === "welcome" || frame.type === "resumed") answered(false);
+        });
+      });
+    },
   };
 }
 
@@ -369,7 +387,7 @@ export function useRoom(roomId: string, me: User, onSessionChanged: (me: Me | nu
     [send, state.messages, state.hasNewer, state.loadingPage],
   );
 
-  const messageActions = useMemo(() => messageActionsOf(send, warn), [send, warn]);
+  const messageActions = useMemo(() => messageActionsOf(frames, warn), [frames, warn]);
 
   const dismissNotice = useCallback(() => dispatch({ type: "dismiss-notice" }), []);
 

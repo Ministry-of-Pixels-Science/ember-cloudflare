@@ -1,7 +1,7 @@
 import type { Card, CardPart } from "@ember/protocol";
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { dateTimeLabel } from "@/lib/messages";
 import { marksFor } from "@/lib/search";
 import { BotCards } from "./bot-card";
@@ -91,6 +91,52 @@ describe("Bot cards", () => {
     expect(screen.getByRole("link", { name: "Approve" })).toHaveClass("bg-primary");
     expect(screen.getByRole("link", { name: "Roll back" })).toHaveClass("bg-negative-button", "text-white");
     expect(screen.getByRole("link", { name: "Details" })).toHaveClass("border", "bg-background");
+  });
+
+  it("draws a button that acts as a button, which tells its bot when it's clicked and waits until the room says it's answered", async () => {
+    const user = userEvent.setup();
+    let answer = (_went: boolean) => {};
+    const onAction = vi.fn(() => new Promise<boolean>((resolve) => (answer = resolve)));
+    const approve = { id: "approve", blockId: "deploy-42", value: '{"build":42}' };
+    const cards = [
+      card([
+        {
+          kind: "buttons",
+          buttons: [
+            { text: "Approve", action: approve, style: "primary" },
+            { text: "Reject", action: { id: "reject" }, style: "danger" },
+            { text: "Logs", href: "https://example.com/logs" },
+          ],
+        },
+        { kind: "section", html: "<p>Nightly</p>", button: { text: "Run", action: { id: "run" } } },
+        { kind: "tiles", tiles: [{ title: "Build", buttons: [{ text: "Retry", action: { id: "retry" } }] }] },
+      ]),
+    ];
+    render(<BotCards cards={cards} onAction={onAction} />);
+    expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual(["Approve", "Reject", "Run", "Retry"]);
+    expect(screen.getByRole("link", { name: "Logs" })).toHaveAttribute("href", "https://example.com/logs");
+    const button = screen.getByRole("button", { name: "Approve" });
+    expect(button).toHaveClass("bg-primary");
+    expect(button).toHaveAttribute("type", "button");
+    expect(screen.getByRole("button", { name: "Reject" })).toHaveClass("bg-negative-button", "text-white");
+
+    await user.click(button);
+    expect(onAction).toHaveBeenCalledExactlyOnceWith(approve);
+    // Until its bot answers, it can't be clicked again, though the others can.
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByRole("button", { name: "Reject" })).toBeEnabled();
+    await user.click(button);
+    expect(onAction).toHaveBeenCalledOnce();
+
+    await act(async () => answer(true));
+    expect(button).toBeEnabled();
+    expect(button).not.toHaveAttribute("aria-busy");
+  });
+
+  it("disables a button that acts where a click has nowhere to go, as in a preview", () => {
+    show(card([{ kind: "buttons", buttons: [{ text: "Approve", action: { id: "approve" } }] }]));
+    expect(screen.getByRole("button", { name: "Approve" })).toBeDisabled();
   });
 
   it("leaves out links, images and icons on the page's own host, keeping their text", () => {

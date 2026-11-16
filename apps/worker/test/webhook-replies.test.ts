@@ -1,7 +1,7 @@
 import { MAX_MESSAGE_HTML_LENGTH } from "@ember/protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { contentTypeOf, replyFileOf } from "../src/bots/mime";
-import { DELIVERY_DEADLINE_MS, MAX_FILE_REPLY_BYTES, postWebhook, WebhookError, type Delivered, type Keep, type Timeouts } from "../src/bots/webhooks";
+import { DELIVERY_DEADLINE_MS, MAX_FILE_REPLY_BYTES, postClick, postWebhook, WebhookError, type Delivered, type Keep, type Timeouts } from "../src/bots/webhooks";
 import recorded from "./fixtures/webhook_cases.json";
 import answers from "./fixtures/webhook_expected.json";
 
@@ -329,6 +329,45 @@ describe("Webhook replies", () => {
       new WebhookError("R2 is unavailable"),
     );
     await vi.waitFor(() => expect(cancelled).toBe(true));
+  });
+});
+
+describe("Answers to a click", () => {
+  /** What a click's delivery to a webhook that `send` stands in for comes to. */
+  const clicked = (send: typeof fetch) => postClick("https://bots.example.com/hook", "{}", keepBytes, { send });
+  const answering = (body: BodyInit | null, init?: ResponseInit) => (async () => new Response(body, init)) as typeof fetch;
+  const json = { headers: { "Content-Type": "application/json; charset=utf-8" } };
+
+  it("reads a 200's JSON as a payload for the card, which a message's delivery keeps as a file", async () => {
+    const payload = '{"text":"Approved"}';
+    expect(await clicked(answering(payload, json))).toEqual({ status: 200, answer: { payload } });
+    expect(await deliveredTo(answering(payload, json))).toEqual({ status: 200, reply: { file: { filename: "attachment.json", contentType: "application/json" }, kept: new TextEncoder().encode(payload) } });
+  });
+
+  it("reads anything else as a message's delivery does: text, a file, or nothing", async () => {
+    expect(await clicked(answering("On it.", { headers: { "Content-Type": "text/plain" } }))).toEqual({ status: 200, answer: { text: "On it." } });
+    expect(await clicked(answering("GIF89a", { headers: { "Content-Type": "image/gif" } }))).toEqual({
+      status: 200,
+      answer: { file: { filename: "attachment.gif", contentType: "image/gif" }, kept: new TextEncoder().encode("GIF89a") },
+    });
+    expect(await clicked(answering(null, { status: 204 }))).toEqual({ status: 204, answer: null });
+    // An error's JSON is no payload.
+    expect(await clicked(answering('{"text":"no"}', { status: 500, ...json }))).toEqual({ status: 500, answer: null });
+  });
+
+  it("fails a payload longer than a message's markup can be", async () => {
+    await expect(clicked(answering(`{"text":"${"x".repeat(MAX_MESSAGE_HTML_LENGTH)}"}`, json))).rejects.toThrow(new WebhookError("the reply is longer than a message can be"));
+  });
+
+  it("says nothing for the bot when its webhook doesn't answer in time, where a message's delivery has it say it failed", async () => {
+    vi.useFakeTimers();
+    const never = (async (_input: URL, init: RequestInit) => {
+      await answeredAfter(120_000, init.signal!);
+      return new Response(null);
+    }) as typeof fetch;
+    const delivered = clicked(never);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(await delivered).toEqual({ status: null, answer: null });
   });
 });
 

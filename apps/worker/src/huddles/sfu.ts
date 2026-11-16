@@ -22,6 +22,12 @@ const MAX_LOGGED_CODE_LENGTH = 40;
 /** A Realtime SFU app's keys: its ID and its secret, as Cloudflare's dashboard shows them when the app is made. */
 export type SfuApp = HuddlesSetup;
 
+/** The app huddles run through as the Workspace tells a room of it: its keys, and whether cameras may go on in a huddle, and screens be shared. */
+export interface HuddleApp extends SfuApp {
+  cameras: boolean;
+  screens: boolean;
+}
+
 /** Where the SFU's API is: the browser tests' stand-in, which `REALTIME_SFU_URL` names at a loopback address, or Cloudflare's own. */
 function sfuApiOf(env: Env): string {
   const standIn = URL.parse(env.REALTIME_SFU_URL?.trim() ?? "");

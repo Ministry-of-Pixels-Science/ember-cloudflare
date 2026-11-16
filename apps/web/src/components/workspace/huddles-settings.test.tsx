@@ -1,10 +1,12 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { WorkspaceSettings } from "@ember/protocol";
+import type { AccountSettings, WorkspaceSettings } from "@ember/protocol";
 import { HUDDLES_FORBIDDEN } from "@ember/protocol/huddles";
+import { AccountContext, useAccount } from "@/hooks/use-account";
 import { ApiError } from "@/lib/api";
-import { CONFIRM_STOP_HUDDLES, HUDDLES_EXPLAINED, HuddlesSettings } from "./huddles-settings";
+import { CAMERAS_EXPLAINED, CONFIRM_STOP_HUDDLES, HUDDLES_EXPLAINED, HuddlesSettings, HuddleSwitches, SCREENS_EXPLAINED } from "./huddles-settings";
 
 const APP_ID = "2a95132c15732412d22c1476fa83f27a";
 
@@ -94,5 +96,70 @@ describe("Set up huddles", () => {
     expect(onStopped).not.toHaveBeenCalled();
     expect(huddlesSwitch()).toBeChecked();
     expect(huddlesSwitch()).toBeEnabled();
+  });
+});
+
+describe.each([
+  { title: "Cameras", other: "Screen sharing", setting: "huddleCameras", explained: CAMERAS_EXPLAINED, says: "People can turn their camera on in a huddle." },
+  { title: "Screen sharing", other: "Cameras", setting: "huddleScreens", explained: SCREENS_EXPLAINED, says: "People can share their screen in a huddle, from a computer." },
+] as const)("$title in huddles", ({ title, other, setting, explained, says }) => {
+  /** The workspace as it is where people may do that in huddles, or may not. */
+  function Workspace({ on, children }: { on: boolean; children: ReactNode }) {
+    return <AccountContext value={{ ...useAccount(), [setting]: on }}>{children}</AccountContext>;
+  }
+
+  /** The card of what people may do in a huddle, for a workspace where this is as `on` says, with what its switches saved and the calls that settle each save. */
+  function showSwitches(on = true) {
+    const settled: Array<() => void> = [];
+    const saveSwitch = vi.fn((_: AccountSettings, done: () => void) => void settled.push(done));
+    const card = (shown: boolean) => (
+      <Workspace on={shown}>
+        <HuddleSwitches saveSwitch={saveSwitch} />
+      </Workspace>
+    );
+    const { rerender } = render(card(on));
+    return { saveSwitch, settled, user: userEvent.setup(), show: (shown: boolean) => rerender(card(shown)) };
+  }
+
+  const row = () => screen.getByRole("region", { name: title });
+  const itsSwitch = () => within(row()).getByRole("switch", { name: title });
+  const theOther = () => screen.getByRole("switch", { name: other });
+
+  it("says what its switch lets people do, which is on until an administrator turns it off", () => {
+    showSwitches();
+    expect(within(row()).getByRole("heading", { level: 2, name: title })).toBeVisible();
+    expect(row()).toHaveTextContent(explained);
+    expect(explained).toBe(says);
+    expect(itsSwitch()).toBeChecked();
+    expect(itsSwitch()).toHaveAccessibleDescription(explained);
+  });
+
+  it("saves its switch at once, staying where it was moved to until that's saved, and moved no further meanwhile, which leaves the other switch be", async () => {
+    const { saveSwitch, settled, user, show } = showSwitches();
+    await user.click(itsSwitch());
+    expect(saveSwitch.mock.calls.map(([settings]) => settings)).toEqual([{ [setting]: false }]);
+    expect(itsSwitch()).not.toBeChecked();
+    expect(theOther()).toBeChecked();
+    await user.click(itsSwitch());
+    expect(saveSwitch).toHaveBeenCalledOnce();
+    expect(itsSwitch()).not.toBeChecked();
+
+    // Saved, it's as the workspace says, which by then says it's off.
+    show(false);
+    act(() => settled[0]!());
+    expect(itsSwitch()).not.toBeChecked();
+    await user.click(itsSwitch());
+    expect(saveSwitch.mock.calls.map(([settings]) => settings)).toEqual([{ [setting]: false }, { [setting]: true }]);
+    expect(itsSwitch()).toBeChecked();
+    expect(theOther()).toBeChecked();
+  });
+
+  it("goes back to where it was when saving it fails", async () => {
+    const { settled, user } = showSwitches();
+    await user.click(itsSwitch());
+    expect(itsSwitch()).not.toBeChecked();
+    // The page's alerts say why, and the workspace still says it's on.
+    act(() => settled[0]!());
+    expect(itsSwitch()).toBeChecked();
   });
 });

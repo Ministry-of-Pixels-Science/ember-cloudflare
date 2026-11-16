@@ -14,8 +14,9 @@ import {
   type AgentSettings,
   type AgentTrial,
   type AgentTrialAnswer,
+  type AvailableAgents,
 } from "@ember/protocol/agents";
-import { ASSISTANT_OFF, isXaiModel, modelName, searchFormatOf, WEB_TOOLS_IN, type ModelFormat } from "@ember/protocol/assistant";
+import { ASSISTANT_OFF, formatOf, MODEL_REFUSED, modelName, webToolsOf, type ModelFormat, type OfferedModel, type WebTool } from "@ember/protocol/assistant";
 import { prepareBody } from "@ember/richtext";
 import { credentialsOf } from "../auth";
 import { userFormOf, userFormPhoto } from "../avatars";
@@ -26,17 +27,20 @@ import { notFound } from "../error-pages";
 import { anyOtherPage, formAnswer } from "../pages";
 import { asksModel, workspace, type AgentTrialAccess, type AskedModel } from "../workspace";
 import { answerOf, questionFor, waitFor } from "./answers";
-import { askInTurn, formatsFor, type Answered, type Gateway, type GatewayRefusal } from "./gateway";
-import { administratorOf, greetingFrom, searchedBy, TEST_QUESTION, testedLevelsOf, WEB_TEST_QUESTION } from "./settings";
+import { ask, type Answered, type Gateway, type GatewayRefusal } from "./gateway";
+import { TEST_QUESTION, testedLevelsOf } from "./model-tests";
+import { modelsFileOf, offeredModel, searchingFormatOf } from "./offered";
+import { administratorOf, greetingFrom, searchedBy, WEB_TEST_QUESTION } from "./settings";
 
 // AI agents, as administrators make, change and delete them beside @ember on the AI assistant tab of
 // workspace settings, each with its own instructions and the model it answers with, which Ember AI asks
-// AI Gateway for. They answer JSON for the tab and each agent's page.
+// AI Gateway for. They answer JSON for the tab and each agent's page, and for Available Agents, which
+// lists everyone the agents they can ask.
 
 const problem = (status: number, message: string) => Response.json({ error: message }, { status });
 
 const NOT_SIGNED_IN = "Not signed in";
-/** What's said of agents is for administrators, which no cache should keep. */
+/** What's said of agents depends on who asks, which no cache should keep. */
 const PRIVATE = { "Cache-Control": "no-store" };
 
 /** Why Search the web didn't turn on for an agent whose model, called `name`, answered without searching. */
@@ -77,6 +81,17 @@ export async function listAgents(request: Request, env: Env): Promise<Response> 
   return Response.json({ agents } satisfies Agents, { headers: PRIVATE });
 }
 
+/**
+ * `GET /api/agents`: the agents whoever asks can ask, as Available Agents lists them, @ember first, each
+ * with what it does and the rooms they share. None while Ember AI is off.
+ */
+export async function listAvailableAgents(request: Request, env: Env): Promise<Response> {
+  const credentials = await credentialsOf(request, env);
+  const agents = credentials && (await workspace(env).availableAgents(credentials));
+  if (!agents) return problem(401, NOT_SIGNED_IN);
+  return Response.json({ agents } satisfies AvailableAgents, { headers: PRIVATE });
+}
+
 /** `GET /api/account/agents/:id`: agent `id`, as its page shows it. */
 export async function showAgent(request: Request, env: Env, agentId: UserId): Promise<Response> {
   const credentials = await credentialsOf(request, env);
@@ -84,9 +99,9 @@ export async function showAgent(request: Request, env: Env, agentId: UserId): Pr
 }
 
 /**
- * `POST /api/account/agents`, `{ name, description, instructions, promptTemplate?, model, modelName?,
- * thinking, length, webSearch, rooms }`: makes an agent, once its model has answered a test question
- * through Ember AI's account, and searched the web, if it's to, answering 201 with the agent as its page
+ * `POST /api/account/agents`, `{ name, description, instructions, promptTemplate?, model, thinking,
+ * length, webSearch, access?, rooms }`: makes an agent with a model Ember offers, once that has answered a test
+ * question through Ember AI's account, and searched the web, if it's to, answering 201 with the agent as its page
  * shows it. With an avatar, it's a form whose `user` part is that JSON and whose `avatar` and `variant`
  * parts are the picture, as a bot's is. Someone who isn't an administrator hears so before anything they
  * sent is read, and a field that can't be what it's for, or that AI Gateway refuses, is refused on that
@@ -103,7 +118,9 @@ export async function createAgent(request: Request, env: Env): Promise<Response>
   const ember = workspace(env);
   const gateway = await ember.agentGateway(credentials, agent.name);
   if (!gateway || typeof gateway === "string") return agentAnswer(gateway);
-  const asked = await askedModel(env, gateway, agent.name, { model: agent.model, modelName: agent.modelName ?? modelName(agent.model) }, agent.webSearch);
+  const offered = await offeredModel(env, agent.model, gateway);
+  if (!offered) return formAnswer({ error: MODEL_REFUSED, field: "model" }, 422);
+  const asked = await askedModel(env, gateway, agent.name, { offered }, agent.webSearch);
   if (asked instanceof Response) return asked;
   const avatar = await userFormPhoto(env, sent.photo);
   if (avatar && "error" in avatar) return formAnswer({ error: avatar.error, field: "avatar" }, avatar.status);
@@ -113,10 +130,11 @@ export async function createAgent(request: Request, env: Env): Promise<Response>
 /**
  * `PATCH /api/account/agents/:id`, with any of what `POST /api/account/agents` takes: changes agent `id`,
  * answering it as its page then shows it, with a new avatar as `createAgent` takes one. Its model answers
- * the test question first when it's another, and searches the web when Search the web is to be on and
- * wasn't, or it's another model, though a name someone has is refused before it's asked. As there,
- * someone who isn't an administrator hears so first, then that Ember AI is off, then an agent there
- * isn't isn't found, before anything that was sent is read.
+ * the test question first when it's another, which has to be one Ember offers (`offeredModel`), though
+ * the one it has needn't be, and searches the web when Search the web is to be on and wasn't, or it's
+ * another model, though a name someone has is refused before it's asked. As there, someone who isn't an administrator
+ * hears so first, then that Ember AI is off, then an agent there isn't isn't found, before anything that
+ * was sent is read.
  */
 export async function changeAgent(request: Request, env: Env, agentId: UserId): Promise<Response> {
   const credentials = await credentialsOf(request, env);
@@ -128,15 +146,14 @@ export async function changeAgent(request: Request, env: Env, agentId: UserId): 
   if ("error" in sent) return formAnswer({ error: sent.error, field: "avatar" }, sent.status);
   const changes = parseAgentChanges(sent.fields);
   if ("error" in changes) return formAnswer(changes, 422);
+  const another = changes.model !== undefined && changes.model !== found.model ? changes.model : null;
   let asked: AskedModel | null = null;
   if (asksModel(found, changes)) {
     const gateway = await ember.agentGateway(credentials, changes.name ?? found.name, agentId);
     if (!gateway || typeof gateway === "string") return agentAnswer(gateway);
-    const model =
-      changes.model === undefined || changes.model === found.model
-        ? { ...found, modelName: changes.modelName ?? found.modelName }
-        : { model: changes.model, modelName: changes.modelName ?? modelName(changes.model) };
-    const answered = await askedModel(env, gateway, changes.name ?? found.name, model, changes.webSearch ?? found.webTools.length > 0);
+    const offered = another === null ? null : await offeredModel(env, another, gateway);
+    if (another !== null && !offered) return formAnswer({ error: MODEL_REFUSED, field: "model" }, 422);
+    const answered = await askedModel(env, gateway, changes.name ?? found.name, offered ? { offered } : found, changes.webSearch ?? found.webTools.length > 0);
     if (answered instanceof Response) return answered;
     asked = answered;
   }
@@ -146,14 +163,14 @@ export async function changeAgent(request: Request, env: Env, agentId: UserId): 
 }
 
 /**
- * `POST /api/account/agents/trials`, `{ name, instructions, promptTemplate?, model, modelName?, thinking,
- * length, webSearch, question }`, and `POST /api/account/agents/:id/trials` for agent `id`: Try it,
- * which asks the agent, as its page sets it up, saved or not, the administrator's question, as if they'd
- * written it to the agent directly, through Ember AI's account, answering what it said, as a message of
- * its would show it, but for a preview of its first link, and how long its model took. Nobody else sees
- * either, and nothing is saved. A saved agent with the same model answers in the format, and with the
- * web tools, its tests found, and any other is asked in each format in turn (`formatsFor`), but for Grok
- * searching the web, which only xAI's own Responses lets it do (`triedAnswer`). As with
+ * `POST /api/account/agents/trials`, `{ name, instructions, promptTemplate?, model, thinking, length,
+ * webSearch, question }`, and `POST /api/account/agents/:id/trials` for agent `id`: Try it, which asks
+ * the agent, as its page sets it up, saved or not, the administrator's question, as if they'd written it
+ * to the agent directly, through Ember AI's account, answering what it said, as a message of its would
+ * show it, but for a preview of its first link, and how long its model took. Nobody else sees either,
+ * and nothing is saved. A saved agent with the same model answers in the format, and with the web tools,
+ * its tests found, but for one that searches the web in another format, as Grok saved in xAI's own
+ * Responses does in Chat Completions now, and any other model, which has to be one Ember offers, in the format Ember asks it in (`triedAnswer`). As with
  * changing an agent, someone who isn't an administrator hears so first, then that Ember AI is off, then
  * that the agent isn't there, before anything that was sent is read, and a field that can't be what it's
  * for, or that AI Gateway refuses, is refused on that field, as Search the web is for a model that can't
@@ -166,13 +183,15 @@ export async function tryAgent(request: Request, env: Env, agentId: UserId | nul
   if (!access || typeof access === "string") return agentAnswer(access);
   const trial = parseAgentTrial(await jsonBodyOf(request));
   if ("error" in trial) return formAnswer(trial, 422);
+  const known = access.saved?.model === trial.model ? access.saved : null;
+  const offered = known ? null : await offeredModel(env, trial.model, access.through);
+  if (!known && !offered) return formAnswer({ error: MODEL_REFUSED, field: "model" }, 422);
   const startedAt = Date.now();
-  const answered = await triedAnswer(env, access, trial);
-  if ("refusal" in answered) return refused(answered, answered.closed && trial.webSearch ? "webSearch" : "model");
+  const answered = await triedAnswer(env, access, trial, offered);
+  if ("refusal" in answered) return refused(answered, "model");
   const ms = Date.now() - startedAt;
-  if (trial.webSearch && WEB_TOOLS_IN[answered.format].length === 0) {
-    const name = trial.modelName ?? (access.saved?.model === trial.model ? access.saved.modelName : modelName(trial.model));
-    return formAnswer({ error: agentCannotSearchWith(name), field: "webSearch" }, 422);
+  if (trial.webSearch && answered.webTools.length === 0) {
+    return formAnswer({ error: agentCannotSearchWith(known?.modelName ?? offered?.name ?? modelName(trial.model)), field: "webSearch" }, 422);
   }
   const text = answered.cut ? `${answered.text}\n\n…` : answered.text;
   const { markup, cards } = answerOf(text, answered.sources, [trial.question], access.addresses, trial.name);
@@ -183,19 +202,36 @@ export async function tryAgent(request: Request, env: Env, agentId: UserId | nul
 /**
  * What the agent `trial` sets up answers its question, asked through `access` as a direct message from
  * the administrator who tries it, in the format of the agent as it's saved, while it has the same model,
- * or else in each in turn, and the format it took it in, or why it didn't answer. Grok searches the web
- * only in xAI's own Responses, so while it's to, it's asked there alone.
+ * or else the one Ember offers the model in, `offered`, at the levels of thinking Cloudflare's model
+ * search lists for one of Workers AI's, and what it may do on the web there, or why it didn't answer.
+ * One that searches the web in another format while it's to is asked there, as a Grok saved in xAI's own
+ * Responses is in Chat Completions, and one of Workers AI's saved before Ember gave them its tool for
+ * searching the web is in Workers AI's format.
  */
-async function triedAnswer(env: Env, { asker, through, community, saved }: AgentTrialAccess, trial: AgentTrial): Promise<(Answered & { format: ModelFormat }) | GatewayRefusal> {
+async function triedAnswer(
+  env: Env,
+  { asker, through, community, saved }: AgentTrialAccess,
+  trial: AgentTrial,
+  offered: OfferedModel | null,
+): Promise<(Answered & { webTools: readonly WebTool[] }) | GatewayRefusal> {
   const known = saved?.model === trial.model ? saved : null;
   const answerer = { id: saved?.id ?? null, name: trial.name, instructions: trial.instructions, promptTemplate: trial.promptTemplate ?? null };
   const where = { community, roomName: null, inThread: false };
   const levels = { thinking: trial.thinking, length: trial.length };
-  const webToolsIn = (format: ModelFormat) => (!trial.webSearch ? [] : known && known.webTools.length > 0 ? known.webTools : WEB_TOOLS_IN[format]);
-  const questionIn = (format: ModelFormat) => questionFor(answerer, [{ creator: asker, plainText: trial.question }], asker, where, levels, new Date(), webToolsIn(format));
-  const formats: ModelFormat[] = trial.webSearch && isXaiModel(trial.model) ? ["xai"] : known ? [known.format] : formatsFor(trial.model);
-  const thinkingLevels = known?.thinkingLevels ?? undefined;
-  return askInTurn(env, { ...through, model: trial.model, thinkingLevels }, formats, questionIn, waitFor(questionIn(formats[0]!)));
+  const savedIn = known?.format ?? offered?.format ?? formatOf(trial.model);
+  const searchIn = trial.webSearch ? await searchingFormatOf(env, through, trial.model, savedIn) : null;
+  const format: ModelFormat = searchIn ?? savedIn;
+  const file = (await modelsFileOf(env)).models;
+  const may = searchIn ? webToolsOf(trial.model, searchIn, file) : [];
+  // What its tests found, while it's asked as it's saved, of what it may do on the web still, as it is in a room.
+  const kept = known && known.webTools.length > 0 && format === known.format ? known.webTools.filter((tool) => webToolsOf(trial.model, format, file).includes(tool)) : null;
+  const webTools = !trial.webSearch ? [] : (kept ?? may);
+  // One kept from before in another format is asked in Workers AI's at the levels the model search lists.
+  const listed = offered ?? (known && format !== known.format ? await offeredModel(env, trial.model, through) : null);
+  const thinkingLevels = (known && format === known.format ? known.thinkingLevels : listed?.thinkingLevels) ?? undefined;
+  const question = questionFor(answerer, [{ creator: asker, plainText: trial.question }], asker, where, levels, new Date(), webTools);
+  const answered = await ask(env, { ...through, model: trial.model, format, thinkingLevels }, question, waitFor(question));
+  return "refusal" in answered ? answered : { ...answered, webTools };
 }
 
 /** `DELETE /api/account/agents/:id/avatar`: takes away the avatar agent `id` was given, answering it as its page then shows it. */
@@ -213,45 +249,52 @@ export async function deleteAgent(request: Request, env: Env, agentId: UserId): 
 }
 
 /**
- * What asking `model`, called `modelName`, through Ember AI's gateway finds for the agent called `name`:
- * the format it takes the test question in and the levels of thinking it takes, unless that's known
- * already, and, while it's to search the web (`webSearch`), what it may do there, in the format it
- * searches in, which it's asked in from then on, as Grok is in xAI's own Responses (`searchFormatOf`),
- * with the levels of thinking it takes there, or else why it can't, on the field it's about.
+ * What asking a model through Ember AI's gateway finds for the agent called `name`: the format it takes
+ * the test question in and the levels of thinking it takes, unless that's `known` already, as it is for
+ * the model an agent has, or else for one Ember `offered`, in the format Ember offers it in, at the
+ * levels Cloudflare's model search lists for one of Workers AI's, and, while it's to search the web
+ * (`webSearch`), what it may do there, in the format it searches in, which it's asked in from then on, as
+ * one of Workers AI's kept in Chat Completions is in theirs (`searchingFormatOf`), with the levels of thinking it takes there, or else
+ * why it can't, on the field it's about.
  */
 async function askedModel(
   env: Env,
   gateway: Gateway,
   name: string,
-  known: { model: string; modelName: string } | Pick<AgentSettings, "model" | "modelName" | "format" | "thinkingLevels">,
+  known: { offered: OfferedModel } | Pick<AgentSettings, "model" | "modelName" | "format" | "thinkingLevels">,
   webSearch: boolean,
 ): Promise<AskedModel | Response> {
-  const { model, modelName } = known;
+  const { model, modelName } = "offered" in known ? { model: known.offered.id, modelName: known.offered.name } : known;
   const through = { accountId: gateway.accountId, apiToken: gateway.apiToken };
-  let tested = "format" in known ? { format: known.format, thinkingLevels: known.thinkingLevels } : null;
-  if (tested === null) {
-    const answered = await greetingFrom(env, { ...through, model }, testQuestionFor(name));
+  let tested: Pick<AgentSettings, "format" | "thinkingLevels">;
+  if ("offered" in known) {
+    const answered = await greetingFrom(env, { ...through, model }, testQuestionFor(name), known.offered.format, known.offered.thinkingLevels);
     if ("refusal" in answered) return refused(answered, "model");
     tested = answered;
-  }
+  } else tested = { format: known.format, thinkingLevels: known.thinkingLevels };
   const { format, thinkingLevels } = tested;
   if (!webSearch) return { model, modelName, format, thinkingLevels, webTools: [], through };
-  const searchFormat = searchFormatOf(model, format);
+  const searchFormat = await searchingFormatOf(env, through, model, format);
   if (!searchFormat) return formAnswer({ error: agentCannotSearchWith(modelName), field: "webSearch" }, 422);
   const searched = await searchedBy(env, { ...through, model, format: searchFormat, name: modelName }, webTestQuestionFor(name), agentAnsweredUnsearched);
   if ("refusal" in searched) return refused(searched, "webSearch");
-  // The levels of thinking it took in another format needn't be the ones it takes in this.
-  const levels = searchFormat === format ? thinkingLevels : await testedLevelsOf(env, { ...through, model, format: searchFormat }, testQuestionFor(name));
+  // The levels of thinking it took in another format needn't be the ones it takes in this, which Cloudflare's model search lists for one of Workers AI's.
+  const levels =
+    searchFormat === format
+      ? thinkingLevels
+      : searchFormat === "workers"
+        ? ((await offeredModel(env, model, through))?.thinkingLevels ?? null)
+        : await testedLevelsOf(env, { ...through, model, format: searchFormat }, testQuestionFor(name));
   return { model, modelName, format: searchFormat, thinkingLevels: levels, webTools: searched.webTools, through };
 }
 
 /**
  * What to answer when the model didn't answer its test question: why, on `about`, the field of the
- * agent's page for the test it failed, when it's the model's doing, or AI Gateway's xAI endpoint's, where
- * Grok searches, and not Ember AI's API token or account's, which Ember AI's card changes, or AI Gateway's.
+ * agent's page for the test it failed, when it's the model's doing, and not Ember AI's API token or
+ * account's, which Ember AI's card changes, or AI Gateway's.
  */
-const refused = ({ refusal, reason, field, status, closed }: GatewayRefusal, about: "model" | "webSearch") =>
-  formAnswer({ error: refusal, ...((field === "model" || reason === "model" || closed) && { field: about }) }, status);
+const refused = ({ refusal, reason, field, status }: GatewayRefusal, about: "model" | "webSearch") =>
+  formAnswer({ error: refusal, ...((field === "model" || reason === "model") && { field: about }) }, status);
 
 /** What a request about an agent answers: the agent as its page then shows it, with `status`, or why it was refused. */
 function agentAnswer(

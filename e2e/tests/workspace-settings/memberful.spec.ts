@@ -1,13 +1,15 @@
-import { MEMBERFUL_SIGN_IN_PROBLEMS, type Account, type WorkspaceSettings } from "@ember/protocol";
+import { MEMBERFUL_CALLBACK_PATH, MEMBERFUL_SIGN_IN_PROBLEMS, MEMBERFUL_WEBHOOK_PATH, type Account, type WorkspaceSettings } from "@ember/protocol";
+import { MEMBERFUL_API_KEY_UNKNOWN, MEMBERFUL_CLIENT_UNKNOWN } from "@ember/protocol/memberful";
 import type { APIRequestContext, Page } from "@playwright/test";
 import { expect, test } from "../../fixtures";
 import { administratorSession, cookieHeader, logOut, SAME_ORIGIN, signInAsAdministrator, useOwnAddress } from "../../fixtures";
+import { MEMBERFUL_KEYS, MEMBERFUL_SITE } from "../../projects/workspace-settings";
 import { sendWebhook, startFakeMemberful, type FakeMember, type FakeMemberful } from "./fake-memberful";
 
-// Signing in with Memberful, at a Memberful site of the specs' own (fake-memberful.ts), whose address
-// the second test server's MEMBERFUL_URL names, with its keys. Each spec turns Memberful on, members only
-// unless it says, and off again after, since Members only turns the join link off for the specs that
-// follow.
+// Signing in with Memberful, at a Memberful site of the specs' own (fake-memberful.ts), whose address and
+// keys the first spec gives Ember in Set up Memberful, and the others as it saves them. Each spec turns
+// Memberful on, members only unless it says, and off again after, since Members only turns the join link
+// off for the specs that follow.
 
 let site: FakeMemberful;
 
@@ -19,8 +21,24 @@ test.afterAll(() => site.close());
 
 test.afterEach(({ request }) => turnMemberful(request, false));
 
-/** Turns Memberful on, members only unless `membersOnly` is false, or off, which turns Members only off too, as the administrator. */
+/** Memberful as the administrator's settings show it. */
+async function memberfulOf(request: APIRequestContext): Promise<WorkspaceSettings> {
+  const administrator = await administratorSession(request);
+  const response = await request.get("/api/account", { headers: { Cookie: cookieHeader(administrator) } });
+  return (await response.json()) as WorkspaceSettings;
+}
+
+/** Gives Ember the site's address and keys, as Set up Memberful saves them, as the administrator. Giving them again changes nothing. */
+async function giveKeys(request: APIRequestContext): Promise<void> {
+  const administrator = await administratorSession(request);
+  const keys = { site: MEMBERFUL_SITE, ...MEMBERFUL_KEYS };
+  const response = await request.put("/api/account/memberful_keys", { data: keys, headers: { Cookie: cookieHeader(administrator), ...SAME_ORIGIN } });
+  expect(response.status(), await response.text()).toBe(200);
+}
+
+/** Turns Memberful on, members only unless `membersOnly` is false, with the site's keys, or off, which turns Members only off too, as the administrator. */
 async function turnMemberful(request: APIRequestContext, on: boolean, { membersOnly = true } = {}): Promise<void> {
+  if (on) await giveKeys(request);
   const administrator = await administratorSession(request);
   const settings = on ? { memberfulJoin: true, memberfulSignIn: membersOnly } : { memberfulJoin: false };
   const response = await request.patch("/api/account", { data: { settings }, headers: { Cookie: cookieHeader(administrator), ...SAME_ORIGIN } });
@@ -31,9 +49,7 @@ async function turnMemberful(request: APIRequestContext, on: boolean, { membersO
 
 /** The join link's address, which only works while Memberful isn't members only. */
 async function joinPath(request: APIRequestContext): Promise<string> {
-  const administrator = await administratorSession(request);
-  const response = await request.get("/api/account", { headers: { Cookie: cookieHeader(administrator) } });
-  return `/join/${((await response.json()) as WorkspaceSettings).joinCode}`;
+  return `/join/${(await memberfulOf(request)).joinCode}`;
 }
 
 /** Someone who joins with a password, as everyone did before Memberful was members only. */
@@ -69,6 +85,60 @@ const memberfulSection = (page: Page) => page.getByRole("region", { name: "Membe
 /** A name no earlier run of a server kept between runs has used. */
 const nameFor = (name: string) => `${name} ${crypto.randomUUID().slice(0, 8)}`;
 
+test.describe("Set up Memberful", () => {
+  test("the administrator turns Memberful on, which sets it up first with the site's address and its custom app's and webhook's keys, once Memberful takes them", async ({
+    page,
+    request,
+    baseURL,
+  }) => {
+    test.skip((await memberfulOf(request)).memberfulKeys !== null, "An earlier run of this server gave Ember the site's keys, so the switch turns Memberful on at once");
+    await useOwnAddress(page);
+    await page.goto("/account/edit#membership-settings");
+    await signInAsAdministrator(page);
+    const memberful = page.getByRole("switch", { name: "Memberful", exact: true });
+    await memberful.click();
+    const setup = page.getByRole("dialog", { name: "Set up Memberful" });
+    // Ember's addresses, to give Memberful's custom app and webhook.
+    await expect(setup.getByRole("listitem").nth(1)).toContainText(`${baseURL}${MEMBERFUL_CALLBACK_PATH}`);
+    await expect(setup.getByRole("listitem").nth(2)).toContainText(`${baseURL}${MEMBERFUL_WEBHOOK_PATH}`);
+    // A site's name alone is its address at memberful.com, where the steps link to its admin's forms for the app and the webhook.
+    const address = setup.getByLabel("Address", { exact: true });
+    await address.fill("fernwood");
+    await expect(setup.getByRole("link", { name: "create a new app for Ember" })).toHaveAttribute("href", "https://fernwood.memberful.com/admin/settings/custom_applications/new");
+    await expect(setup.getByRole("link", { name: "Settings → Webhooks → Create webhook" })).toHaveAttribute("href", "https://fernwood.memberful.com/admin/settings/webhooks/new");
+    // Nothing links while what's typed can't be a site's address, though Chrome reads one with a space as a host, nor at
+    // a site that isn't at memberful.com, as the specs' own isn't.
+    await address.fill("fern wood");
+    await expect(setup.getByRole("link")).toHaveCount(0);
+    await address.fill(MEMBERFUL_SITE);
+    await expect(setup.getByRole("link")).toHaveCount(0);
+    await setup.getByLabel("API Key", { exact: true }).fill("not-the-apps-api-key");
+    await setup.getByLabel("OAuth Identifier", { exact: true }).fill(MEMBERFUL_KEYS.clientId);
+    await setup.getByLabel("OAuth Secret", { exact: true }).fill("not-the-apps-secret");
+    await setup.getByLabel("Secret key", { exact: true }).fill(MEMBERFUL_KEYS.webhookSecret);
+    const save = setup.getByRole("button", { name: "Save" });
+    await save.click();
+    // Memberful's admin API doesn't take the API key, and then its token endpoint doesn't know the app with that secret.
+    await expect(setup.getByRole("alert")).toHaveText(MEMBERFUL_API_KEY_UNKNOWN);
+    await setup.getByLabel("API Key", { exact: true }).fill(MEMBERFUL_KEYS.apiKey);
+    await save.click();
+    await expect(setup.getByRole("alert")).toHaveText(MEMBERFUL_CLIENT_UNKNOWN);
+    await setup.getByLabel("OAuth Secret", { exact: true }).fill(MEMBERFUL_KEYS.clientSecret);
+    await save.click();
+
+    const done = page.getByRole("dialog", { name: "Memberful is set up" });
+    await expect(done).toContainText(`members of ${MEMBERFUL_SITE} join and sign in with their Memberful account`);
+    await done.getByRole("button", { name: "Done" }).click();
+    await expect(memberful).toBeChecked();
+    await expect(memberfulSection(page)).toContainText(`Members of ${MEMBERFUL_SITE} join and sign in with their Memberful account.`);
+    await expect(memberfulSection(page).getByRole("button", { name: "Change keys" })).toBeVisible();
+    // Ember keeps the secrets to itself.
+    const settings = await memberfulOf(request);
+    expect(settings).toMatchObject({ memberfulSite: MEMBERFUL_SITE, memberfulWebhooks: true, memberfulKeys: "saved" });
+    for (const secret of [MEMBERFUL_KEYS.clientSecret, MEMBERFUL_KEYS.apiKey, MEMBERFUL_KEYS.webhookSecret]) expect(JSON.stringify(settings)).not.toContain(secret);
+  });
+});
+
 test.describe("Sign in with Memberful", () => {
   test("a member of the Memberful site signs in as someone new, and as themselves from then on", async ({ page, request }) => {
     const member = site.add(nameFor("Grace"));
@@ -79,9 +149,10 @@ test.describe("Sign in with Memberful", () => {
     // Back on the page they were sent to sign in from.
     await expect(page.getByLabel("Name", { exact: true })).toHaveValue(member.fullName);
     await expect(page.getByLabel("Email address")).toHaveValue(member.email);
-    // Their profile names the account, which they can't disconnect until they have a password to sign in with.
+    // Their profile names the account, which is how they sign in, so it offers them no password, and nothing to disconnect.
     await expect(memberfulSection(page)).toContainText(`Connected to Memberful as ${member.fullName} (${member.email}), so you sign in with it.`);
-    await expect(memberfulSection(page)).toContainText("Set a password above to disconnect it, so that you can still sign in.");
+    await expect(page.getByLabel("New password")).toHaveCount(0);
+    await expect(memberfulSection(page).getByRole("button", { name: "Disconnect Memberful" })).toHaveCount(0);
 
     await logOut(page);
     await signInWithMemberful(page, member);
@@ -120,7 +191,8 @@ test.describe("Sign in with Memberful", () => {
 });
 
 test.describe("Ways to join", () => {
-  test("the administrator turns Memberful on beside the join link, then makes it members only once they confirm, which turns the join link off", async ({ page }) => {
+  test("the administrator turns Memberful on beside the join link, then makes it members only once they confirm, which turns the join link off", async ({ page, request }) => {
+    await giveKeys(request);
     await useOwnAddress(page);
     await page.goto("/account/edit#membership-settings");
     await signInAsAdministrator(page);

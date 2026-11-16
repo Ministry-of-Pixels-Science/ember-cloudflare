@@ -25,9 +25,10 @@ import {
   type SidebarRoom,
   type WorkspaceSettings,
 } from "@ember/protocol";
-import { ASSISTANT_MODELS, TOP_LEVELS, modelName, type AssistantChanges, type AssistantSettings, type NewAssistantModel } from "@ember/protocol/assistant";
+import { formatOf, TOP_LEVELS, modelName, type AssistantChanges, type AssistantSettings, type NewAssistantModel } from "@ember/protocol/assistant";
 import type { Agent, Agents } from "@ember/protocol/agents";
 import type { HuddlesSetup } from "@ember/protocol/huddles";
+import type { MemberfulKeysChange, MemberfulSaved } from "@ember/protocol/memberful";
 import { FlashProvider } from "@/components/flash";
 import { Sheet } from "@/components/ui/sheet";
 import { AccountContext } from "@/hooks/use-account";
@@ -49,6 +50,7 @@ import {
   HOW_TO_ADD_THE_WORKFLOW,
 } from "./ember-version";
 import { AGENTS_ANSWER, ASSISTANT_EXPLAINED } from "./assistant-settings";
+import { CONFIRM_STOP_OUTSIDE_AI } from "./outside-ai-settings";
 import { CONFIRM_REMOVE } from "./people-list";
 import { workspaceSectionPath, type WorkspaceSection } from "./settings-navigation";
 import { CHANGES_SAVED } from "./settings-page";
@@ -62,14 +64,17 @@ vi.mock("@/lib/previews", () => ({
 const JOIN_CODE = "aB3d-Ef5h-iJ7k";
 const NEW_JOIN_CODE = "Zy9x-Wv8u-Ts7r";
 const asAdministrator: WorkspaceSettings = {
-  account: { name: "Analytical Engines", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false },
+  account: { name: "Analytical Engines", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true },
   joinCode: JOIN_CODE,
   canAdminister: true,
   memberfulSite: null,
   memberfulWebhooks: false,
+  memberfulKeys: null,
+  memberfulSiteKept: null,
   turnstile: null,
   assistant: null,
   huddles: null,
+  outsideAi: false,
   cloudflareAccountId: null,
   email: { provider: "cloudflare", resendKey: null, cloudflare: true, from: null },
   invitations: [],
@@ -102,11 +107,11 @@ const asLinus: Me = { id: linus.id, name: linus.name, administrator: false };
 
 /** A room shared by name, as the sidebar lists it. */
 const shared = (id: string, name: string): SidebarRoom => ({ id, name, kind: id.startsWith("secret") ? "closed" : "open", icon: null, unread: false, involvement: "mentions" });
-/** Ada's rooms, in the order she joined them, as her sidebar lists them, with a DM, which isn't put in order. */
+/** Ada's rooms, in the order she was put in them, as her sidebar lists them, with a DM, which isn't put in order. */
 const adasRooms: SidebarRoom[] = [
+  shared("secret", "Design"),
   shared("general", "general"),
   shared("random", "random"),
-  shared("secret", "Design"),
   { id: "dm", kind: "direct", members: [asAda, { id: grace.id, name: grace.name }], activeAt: "2026-10-16T12:00:00.000Z", unread: false, involvement: "everything" },
 ];
 
@@ -143,12 +148,13 @@ const RECAP: Agent = {
   model: "anthropic/claude-sonnet-5.5",
   modelName: "Claude Sonnet 5.5",
   webTools: [],
+  access: "everyone",
   rooms: null,
 };
 
 /** Answers the page's requests as the server would for `settings`, or as `answers` says. */
 function serve(settings: WorkspaceSettings, { saved, regenerated, roleChanged, removed, ordered, logoSaved }: Answers = {}) {
-  let { account, emailDomains: keptDomains, email, turnstile, assistant, huddles } = settings;
+  let { account, emailDomains: keptDomains, email, turnstile, assistant, huddles, outsideAi } = settings;
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const request = `${init?.method ?? "GET"} ${String(input)}`;
     const person = request.match(/^PATCH \/api\/account\/users\/(.+)$/);
@@ -160,7 +166,7 @@ function serve(settings: WorkspaceSettings, { saved, regenerated, roleChanged, r
     if (removing) return removed ? removed() : Response.json({ user: { ...everyone.find((user) => user.id === removing[1]), status: "deactivated" } });
     switch (request) {
       case "GET /api/account":
-        return Response.json({ ...settings, account, emailDomains: keptDomains, email, turnstile, assistant, huddles });
+        return Response.json({ ...settings, account, emailDomains: keptDomains, email, turnstile, assistant, huddles, outsideAi });
       case "PATCH /api/account": {
         if (saved) return saved();
         const {
@@ -182,6 +188,8 @@ function serve(settings: WorkspaceSettings, { saved, regenerated, roleChanged, r
           tagline,
           hideTranslationButtons: changed?.hideTranslationButtons ?? account.hideTranslationButtons,
           restrictRoomCreation: changed?.restrictRoomCreation ?? account.restrictRoomCreation,
+          huddleCameras: changed?.huddleCameras ?? account.huddleCameras,
+          huddleScreens: changed?.huddleScreens ?? account.huddleScreens,
           customDomain,
           joinLink: changed?.joinLink ?? account.joinLink,
           openSignUp: changed?.openSignUp ?? account.openSignUp,
@@ -214,13 +222,13 @@ function serve(settings: WorkspaceSettings, { saved, regenerated, roleChanged, r
         turnstile = null;
         return Response.json({ turnstile });
       case "PUT /api/account/assistant": {
-        const { accountId, model, modelName: name } = JSON.parse(String(init?.body)) as AssistantSetup;
+        const { accountId, model } = JSON.parse(String(init?.body)) as AssistantSetup;
         assistant = {
           accountId,
           model,
-          models: [{ id: model, name: name ?? modelName(model), format: "chat" }],
+          models: [{ id: model, name: modelName(model), format: formatOf(model) }],
           most: assistant?.most ?? TOP_LEVELS,
-          webTools: null,
+          webTools: [],
           instructions: assistant?.instructions ?? "",
           promptTemplate: assistant?.promptTemplate ?? null,
           avatarUrl: assistant?.avatarUrl ?? EMBER_FLAME,
@@ -233,11 +241,9 @@ function serve(settings: WorkspaceSettings, { saved, regenerated, roleChanged, r
         assistant = assistant && { ...assistant, model: model ?? assistant.model, most: { ...assistant.most, ...levels } };
         return Response.json({ assistant });
       }
-      case "POST /api/account/assistant/catalog":
-        return Response.json({ models: ASSISTANT_MODELS, refusal: null });
       case "POST /api/account/assistant/models": {
-        const { model, modelName: name } = JSON.parse(String(init?.body)) as NewAssistantModel;
-        assistant = assistant && { ...assistant, models: [...assistant.models, { id: model, name: name ?? modelName(model), format: "chat" }] };
+        const { model } = JSON.parse(String(init?.body)) as NewAssistantModel;
+        assistant = assistant && { ...assistant, models: [...assistant.models, { id: model, name: modelName(model), format: formatOf(model) }] };
         return Response.json({ assistant, greeting: "Hi there!" });
       }
       case "DELETE /api/account/assistant/models": {
@@ -250,6 +256,15 @@ function serve(settings: WorkspaceSettings, { saved, regenerated, roleChanged, r
         return Response.json({ assistant });
       case "GET /api/account/agents":
         return Response.json({ agents: [RECAP] } satisfies Agents);
+      case "GET /api/account/apps":
+        return Response.json({ apps: [{ id: "0mgk3x2a9b4c70", name: "Linear", url: "https://mcp.linear.example/mcp", toolCount: 23, setAside: 0, signInEnded: false, wantsAccess: false }] });
+      case "PUT /api/account/outside_ai":
+        ({ on: outsideAi } = JSON.parse(String(init?.body)) as { on: boolean });
+        return Response.json({ on: outsideAi });
+      case "PUT /api/account/memberful_keys": {
+        const { site } = JSON.parse(String(init?.body)) as MemberfulKeysChange;
+        return Response.json({ memberfulSite: site, memberfulWebhooks: true, memberfulKeys: "saved", memberfulSiteKept: settings.memberfulSiteKept } satisfies MemberfulSaved);
+      }
       case "PUT /api/account/huddles":
         huddles = { appId: (JSON.parse(String(init?.body)) as HuddlesSetup).appId };
         return Response.json({ huddles });
@@ -466,8 +481,10 @@ describe("Community settings page", () => {
 describe("Version", () => {
   /** Ember 0.2's page on GitHub, with its notes. */
   const NOTES = "https://github.com/NYLLON-SOFTWARE/ember-cloudflare/releases/tag/v0.2.0";
+  /** The time the tests run at: noon, so that a minute before it or after it is the same day, whenever they're run. */
+  const NOW = new Date("2026-10-12T12:00:00");
   /** When GitHub named the newest release to the Worker, just now, and what the card says of it. */
-  const CHECKED_AT = new Date().toISOString();
+  const CHECKED_AT = NOW.toISOString();
   const LAST_CHECKED = `Last checked today at ${timeLabel(new Date(CHECKED_AT))}.`;
   const card = () => screen.findByRole("region", { name: /^Ember \d(?!.* is out to try$)/ });
   /** The box under it that offers a beta to try, apart from it. */
@@ -481,6 +498,12 @@ describe("Version", () => {
     newestBeta: null,
     copy,
   });
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+  });
+  afterEach(() => vi.useRealTimers());
+
   /** The card's links, by name, which each open in a new tab. */
   function linksIn(shown: HTMLElement): Record<string, string | null> {
     const links = within(shown).getAllByRole("link");
@@ -1125,14 +1148,49 @@ describe("Custom domain", () => {
 
 describe("Sign in with Memberful", () => {
   const SITE = "https://example.memberful.com";
-  const withKeys: WorkspaceSettings = { ...asAdministrator, memberfulSite: SITE };
+  const withKeys: WorkspaceSettings = { ...asAdministrator, memberfulSite: SITE, memberfulWebhooks: true, memberfulKeys: "saved" };
   /** `settings` with Memberful on, and members only if `membersOnly`. */
   const withMemberful = (settings: WorkspaceSettings, membersOnly = false): WorkspaceSettings => ({
     ...settings,
     account: { ...settings.account, memberfulJoin: true, memberfulSignIn: membersOnly },
   });
+  /** A Memberful site's keys, as an administrator copies them from Memberful's dashboard. */
+  const KEYS: MemberfulKeysChange = {
+    site: SITE,
+    clientId: "5vmrRcXKRn7bLuK4uTbGqDV5",
+    clientSecret: "Vfa9uQGvqQp4DXsNgcR8Lk2y",
+    apiKey: "K3w9mZsQp7vLx2Nc8RfT4yHb",
+    webhookSecret: "a91c6e7f0b2d4e58b3f6a1c9d0e7b2f4",
+  };
+  /** What the card says of Memberful while it has the site's keys. */
+  const LETS_MEMBERS_IN = `Members of ${SITE} join and sign in with their Memberful account. Turned off, it lets nobody new join, but those who did keep signing in with it. A member whose membership lapses is signed out until it's renewed.`;
+  /** And while it hasn't, and is off. */
+  const SETS_UP_FIRST = "Members of a Memberful site join and sign in with their Memberful account. Turning this on sets up Memberful first.";
   const memberfulSwitch = () => screen.findByRole("switch", { name: "Memberful" });
   const membersOnlySwitch = () => screen.queryByRole("switch", { name: "Members only" });
+  const memberfulCard = () => screen.getByRole("region", { name: "Memberful" });
+  /** What the page gave Ember of Memberful's keys, in order. */
+  const keysGiven = () =>
+    vi
+      .mocked(fetch)
+      .mock.calls.filter(([input, init]) => `${init?.method} ${String(input)}` === "PUT /api/account/memberful_keys")
+      .map(([, init]) => JSON.parse(String(init?.body)) as unknown);
+  /** Gives Set up Memberful `KEYS`, in place of the site it starts from, and saves them, answering what it says then. */
+  async function setUp(user: ReturnType<typeof userEvent.setup>) {
+    const setup = await screen.findByRole("dialog", { name: "Set up Memberful" });
+    const site = within(setup).getByRole("textbox", { name: "Address" });
+    await user.clear(site);
+    await user.type(site, KEYS.site);
+    for (const [name, key] of [
+      ["API Key", KEYS.apiKey],
+      ["OAuth Identifier", KEYS.clientId],
+      ["OAuth Secret", KEYS.clientSecret],
+      ["Secret key", KEYS.webhookSecret],
+    ] as const)
+      await user.type(within(setup).getByRole("textbox", { name }), key);
+    await user.click(within(setup).getByRole("button", { name: "Save" }));
+    return screen.findByRole("dialog", { name: "Memberful is set up" });
+  }
   showingSection("membership-settings");
 
   it("gives administrators a Memberful card among the ways to join, after the join link, that's only its switch and what it does while it's off", async () => {
@@ -1145,69 +1203,98 @@ describe("Sign in with Memberful", () => {
     const on = within(section).getByRole("switch", { name: "Memberful" });
     expect(on).not.toBeChecked();
     expect(on).toBeEnabled();
-    expect(on).toHaveAccessibleDescription("Members of a Memberful site join and sign in with their Memberful account.");
+    expect(on).toHaveAccessibleDescription(SETS_UP_FIRST);
     expect(within(section).queryByRole("list")).not.toBeInTheDocument();
+    expect(within(section).queryByRole("button")).not.toBeInTheDocument();
     expect(section).not.toHaveTextContent("MEMBERFUL_URL");
   });
 
-  it("shows the steps to get the keys when it's turned on before the deployment has them, saving nothing, and hides them when it's turned off", async () => {
+  it("opens Set up Memberful when it's turned on before Ember has the keys, then turns it on once Memberful has taken them", async () => {
+    const { onAccountChanged, user } = showPage();
+    const on = await memberfulSwitch();
+    await user.click(on);
+    // Nothing's saved, and the switch stays off, until the keys are kept.
+    expect(await screen.findByRole("dialog", { name: "Set up Memberful" })).toBeInTheDocument();
+    expect(on).not.toBeChecked();
+    expect(saved()).toEqual([]);
+
+    const done = await setUp(user);
+    expect(keysGiven()).toEqual([KEYS]);
+    await waitFor(() => expect(onAccountChanged).toHaveBeenLastCalledWith({ ...asAdministrator.account, memberfulJoin: true }));
+    expect(saved()).toEqual([{ settings: { memberfulJoin: true } }]);
+    await user.click(within(done).getByRole("button", { name: "Done" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(on).toBeChecked();
+    expect(on).toHaveAccessibleDescription(LETS_MEMBERS_IN);
+    expect(memberfulCard()).toHaveTextContent(
+      `Memberful sends people back to ${location.origin}/auth/memberful/callback, the OAuth Redirect URL of its custom app, and its webhook to ${location.origin}/webhooks/memberful. If Ember's address changes, change both there too.`,
+    );
+    expect(within(memberfulCard()).getByRole("button", { name: "Change keys" })).toBeInTheDocument();
+    expect(membersOnlySwitch()).not.toBeChecked();
+    expect(memberfulCard()).not.toHaveTextContent("MEMBERFUL_URL");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("leaves it off when Set up Memberful is cancelled", async () => {
     const { user } = showPage();
     const on = await memberfulSwitch();
     await user.click(on);
-    expect(on).toBeChecked();
-    expect(on).toHaveAccessibleDescription("Memberful can't be turned on until this deployment has your Memberful site's keys. These steps give it them.");
-    const steps = screen.getByRole("list", { name: "Steps to let Memberful members sign in" });
-    expect(within(steps).getAllByRole("listitem")).toHaveLength(4);
-    // Memberful's custom app sends people back to Ember's address.
-    expect(steps).toHaveTextContent(`OAuth redirect URL ${location.origin}/auth/memberful/callback`);
-    expect(steps).toHaveTextContent("MEMBERFUL_URL");
-    expect(steps).toHaveTextContent("Reload this page, and turn on Memberful again.");
-    expect(within(steps).getByRole("link", { name: "Open the Cloudflare dashboard" })).toHaveAttribute("target", "_blank");
-    expect(membersOnlySwitch()).not.toBeInTheDocument();
-
-    await user.click(on);
+    await user.click(within(await screen.findByRole("dialog", { name: "Set up Memberful" })).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(on).not.toBeChecked();
-    expect(on).toHaveAccessibleDescription("Members of a Memberful site join and sign in with their Memberful account.");
-    expect(screen.queryByRole("list", { name: "Steps to let Memberful members sign in" })).not.toBeInTheDocument();
     expect(saved()).toEqual([]);
+    expect(keysGiven()).toEqual([]);
   });
 
-  it("hides the steps to get the keys while Open sets it aside", async () => {
+  it("can't be turned on, or set up, while Open sets it aside", async () => {
     serve({ ...asAdministrator, account: { ...asAdministrator.account, openSignUp: true } });
     showPage();
     const on = await memberfulSwitch();
     expect(on).toBeDisabled();
     expect(on).toHaveAccessibleDescription("Set aside while Open lets anyone join.");
-    expect(screen.queryByRole("list", { name: "Steps to let Memberful members sign in" })).not.toBeInTheDocument();
+    expect(within(memberfulCard()).queryByRole("button")).not.toBeInTheDocument();
   });
 
-  it("lets an administrator turn it on once the deployment has the keys, without asking, saved at once with no notice, keeping the other ways", async () => {
+  it("lets an administrator turn it on once Ember has the keys, without asking, saved at once with no notice, keeping the other ways", async () => {
     serve(withKeys);
     const confirm = vi.spyOn(window, "confirm");
     const { onAccountChanged, user } = showPage();
     const on = await memberfulSwitch();
     expect(on).not.toBeChecked();
-    expect(on).toHaveAccessibleDescription(
-      `Members of ${SITE} join and sign in with their Memberful account. Turned off, it lets nobody new join, but those who did keep signing in with it.`,
-    );
+    expect(on).toHaveAccessibleDescription(LETS_MEMBERS_IN);
     // What it takes waits until it's on.
-    const section = screen.getByRole("region", { name: "Memberful" });
+    const section = memberfulCard();
     expect(section).not.toHaveTextContent("Memberful sends people back to");
-    expect(within(section).queryByRole("list")).not.toBeInTheDocument();
+    expect(within(section).queryByRole("button")).not.toBeInTheDocument();
     expect(membersOnlySwitch()).not.toBeInTheDocument();
 
     await user.click(on);
     expect(confirm).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(on).toBeChecked();
     await waitFor(() => expect(onAccountChanged).toHaveBeenLastCalledWith({ ...asAdministrator.account, memberfulJoin: true }));
     expect(saved()).toEqual([{ settings: { memberfulJoin: true } }]);
     expect(section).toHaveTextContent(`Memberful sends people back to ${location.origin}/auth/memberful/callback`);
-    expect(screen.queryByRole("list", { name: "Steps to let Memberful members sign in" })).not.toBeInTheDocument();
     // Everyone else keeps joining as they did.
     expect(await joinLink()).toBeInTheDocument();
     expect(await screen.findByRole("switch", { name: "Open" })).toBeEnabled();
     expect(membersOnlySwitch()).not.toBeChecked();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("changes the keys with Change keys, which starts Set up Memberful from the site, leaving it on", async () => {
+    serve(withMemberful(withKeys));
+    const { user } = showPage();
+    const on = await memberfulSwitch();
+    await user.click(within(memberfulCard()).getByRole("button", { name: "Change keys" }));
+    const setup = await screen.findByRole("dialog", { name: "Set up Memberful" });
+    expect(within(setup).getByRole("textbox", { name: "Address" })).toHaveValue(SITE);
+    expect(within(setup).getByRole("textbox", { name: "OAuth Identifier" })).toHaveValue("");
+
+    await user.click(within(await setUp(user)).getByRole("button", { name: "Done" }));
+    expect(keysGiven()).toEqual([KEYS]);
+    expect(saved()).toEqual([]);
+    expect(on).toBeChecked();
   });
 
   it("makes it members only once they confirm, saved at once with no notice, which turns the join link off and greys out Open", async () => {
@@ -1272,7 +1359,7 @@ describe("Sign in with Memberful", () => {
     expect(on).toBeChecked();
     expect(saved()).toEqual([{ settings: { memberfulJoin: true } }]);
 
-    answer(Response.json({ error: "Memberful needs MEMBERFUL_URL, MEMBERFUL_CLIENT_ID and MEMBERFUL_CLIENT_SECRET set first" }, { status: 422 }));
+    answer(Response.json({ error: "Set up Memberful first, which gives Ember your Memberful site's keys." }, { status: 422 }));
     await waitFor(() => expect(onFailed).toHaveBeenCalledWith(expect.objectContaining({ status: 422 })));
     expect(on).not.toBeChecked();
   });
@@ -1300,21 +1387,62 @@ describe("Sign in with Memberful", () => {
     expect(saved()).toEqual([{ settings: { memberfulJoin: true } }, { settings: { memberfulSignIn: true } }, { settings: { memberfulJoin: false } }]);
   });
 
-  it("keeps the switch to turn it off once the deployment has lost the keys, saying nobody can sign in with Memberful", async () => {
+  it("says nobody can sign in with Memberful while it's on without the keys, which Set up Memberful gives it again", async () => {
     serve(withMemberful(asAdministrator, true));
     const { user } = showPage();
     const on = await memberfulSwitch();
     expect(on).toBeChecked();
-    expect(on).toHaveAccessibleDescription("It's on, but this deployment no longer has its Memberful keys, so nobody can sign in with Memberful.");
+    expect(on).toHaveAccessibleDescription("It's on, but Ember no longer has your Memberful site's keys, so nobody can sign in with Memberful until it's set up again.");
     expect(membersOnlySwitch()).not.toBeInTheDocument();
-    expect(screen.getByRole("list", { name: "Steps to let Memberful members sign in" })).toBeInTheDocument();
 
+    await user.click(within(memberfulCard()).getByRole("button", { name: "Set up Memberful" }));
+    await user.click(within(await setUp(user)).getByRole("button", { name: "Done" }));
+    expect(keysGiven()).toEqual([KEYS]);
+    // It was on already.
+    expect(saved()).toEqual([]);
+    expect(on).toHaveAccessibleDescription(LETS_MEMBERS_IN);
+    expect(membersOnlySwitch()).toBeChecked();
+  });
+
+  it("keeps the switch to turn it off while it's on without the keys", async () => {
+    serve(withMemberful(asAdministrator, true));
+    const { user } = showPage();
+    const on = await memberfulSwitch();
     await user.click(on);
     expect(saved()).toEqual([{ settings: { memberfulJoin: false } }]);
-    await waitFor(() => expect(on).toHaveAccessibleDescription("Members of a Memberful site join and sign in with their Memberful account."));
+    await waitFor(() => expect(on).toHaveAccessibleDescription(SETS_UP_FIRST));
     expect(on).not.toBeChecked();
-    expect(screen.queryByRole("list", { name: "Steps to let Memberful members sign in" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(within(memberfulCard()).queryByRole("button")).not.toBeInTheDocument();
     expect(await joinLink()).toBeInTheDocument();
+  });
+
+  it("says the deployment's secrets give the keys, with nothing to set up, and how to hear Memberful's webhooks while they lack what that takes", async () => {
+    serve(withMemberful({ ...withKeys, memberfulKeys: "secret", memberfulWebhooks: false }));
+    showPage();
+    expect(await memberfulSwitch()).toBeChecked();
+    const card = memberfulCard();
+    expect(card).toHaveTextContent("The site and its keys are this Worker's secrets, MEMBERFUL_URL and the rest.");
+    const steps = within(card).getByRole("list", { name: "Steps to sign out members whose membership lapses" });
+    expect(steps).toHaveTextContent(
+      `In Memberful, go to Settings → Webhooks → Create webhook. Name it Ember, paste ${location.origin}/webhooks/memberful as the Endpoint URL, and select every event under Member, Order, Subscription, and Plan. Download isn't needed.`,
+    );
+    // Straight to Memberful's form for a new webhook, at the deployment's site.
+    const form = within(steps).getByRole("link", { name: "Settings → Webhooks → Create webhook" });
+    expect(form).toHaveAttribute("href", `${SITE}/admin/settings/webhooks/new`);
+    expect(form).toHaveAttribute("target", "_blank");
+    expect(steps).toHaveTextContent("MEMBERFUL_WEBHOOK_SECRET");
+    expect(within(steps).getByRole("link", { name: "Open the Cloudflare dashboard" })).toHaveAttribute("target", "_blank");
+    expect(within(card).queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("names the webhook's form without linking to it while the deployment's site is at a domain of its own, where Memberful may not serve its admin", async () => {
+    serve(withMemberful({ ...withKeys, memberfulSite: "https://members.example.com", memberfulKeys: "secret", memberfulWebhooks: false }));
+    showPage();
+    expect(await memberfulSwitch()).toBeChecked();
+    const steps = within(memberfulCard()).getByRole("list", { name: "Steps to sign out members whose membership lapses" });
+    expect(steps).toHaveTextContent("In Memberful, go to Settings → Webhooks → Create webhook.");
+    expect(within(steps).getAllByRole("link")).toEqual([within(steps).getByRole("link", { name: "Open the Cloudflare dashboard" })]);
   });
 
   it("follows the workspace socket, for a switch moved in another tab", async () => {
@@ -1325,6 +1453,28 @@ describe("Sign in with Memberful", () => {
     expect(on).toBeChecked();
     expect(membersOnlySwitch()).toBeChecked();
     expect(screen.queryByRole("textbox", { name: "Share to invite more people" })).not.toBeInTheDocument();
+  });
+
+  it("hears of the keys given in another tab as Memberful's turned on there, rather than saying Ember has none", async () => {
+    showPage();
+    const on = await memberfulSwitch();
+    expect(on).toHaveAccessibleDescription(SETS_UP_FIRST);
+    const loads = () => vi.mocked(fetch).mock.calls.filter(([input, init]) => `${init?.method ?? "GET"} ${String(input)}` === "GET /api/account").length;
+    expect(loads()).toBe(1);
+
+    serve(withMemberful(withKeys));
+    act(() => workspaceSays({ ...asAdministrator.account, memberfulJoin: true }));
+    expect(on).toBeChecked();
+    await waitFor(() => expect(on).toHaveAccessibleDescription(LETS_MEMBERS_IN));
+    expect(within(memberfulCard()).getByRole("button", { name: "Change keys" })).toBeInTheDocument();
+    expect(loads()).toBe(2);
+    expect(saved()).toEqual([]);
+
+    // Turned off and on again there, it's known already.
+    act(() => workspaceSays(asAdministrator.account));
+    act(() => workspaceSays({ ...asAdministrator.account, memberfulJoin: true }));
+    expect(on).toHaveAccessibleDescription(LETS_MEMBERS_IN);
+    expect(loads()).toBe(2);
   });
 
   it("isn't shown to members, who see the join link is off while Memberful is members only", async () => {
@@ -1349,7 +1499,7 @@ describe("Sign in with Memberful", () => {
 describe("Ways to join", () => {
   showingSection("membership-settings");
   const SITE = "https://example.memberful.com";
-  const withKeys: WorkspaceSettings = { ...asAdministrator, memberfulSite: SITE };
+  const withKeys: WorkspaceSettings = { ...asAdministrator, memberfulSite: SITE, memberfulWebhooks: true, memberfulKeys: "saved" };
   const withAccount = (settings: WorkspaceSettings, changes: Partial<Account>): WorkspaceSettings => ({ ...settings, account: { ...settings.account, ...changes } });
   const way = (name: string) => screen.findByRole("switch", { name });
   const signUpLink = () => screen.queryByRole("textbox", { name: "Share so anyone can sign up" });
@@ -1951,13 +2101,13 @@ describe("Check that people are people with Cloudflare Turnstile", () => {
 
 describe("Ember AI", () => {
   showingSection("assistant-settings");
-  /** Ember AI on GLM-4.7 Flash, the only model people can pick. */
+  /** Ember AI on Claude Haiku 5.5, the only model people can pick. */
   const ON: AssistantSettings = {
     accountId: "0123456789abcdef0123456789abcdef",
-    model: "@cf/zai-org/glm-4.7-flash",
-    models: [{ id: "@cf/zai-org/glm-4.7-flash", name: "GLM-4.7 Flash", format: "chat" }],
+    model: "anthropic/claude-haiku-5.5",
+    models: [{ id: "anthropic/claude-haiku-5.5", name: "Claude Haiku 5.5", format: "anthropic" }],
     most: TOP_LEVELS,
-    webTools: null,
+    webTools: [],
     instructions: "",
     promptTemplate: null,
     avatarUrl: EMBER_FLAME,
@@ -1977,7 +2127,7 @@ describe("Ember AI", () => {
     await user.type(await screen.findByRole("textbox", { name: "Account ID" }), "0123456789abcdef0123456789abcdef");
     await user.type(screen.getByRole("textbox", { name: "API token" }), "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-Ab");
     await user.click(screen.getByRole("button", { name: "Continue" }));
-    await user.selectOptions(await screen.findByRole("combobox", { name: "Model" }), "Claude Haiku 5.5");
+    await user.selectOptions(await screen.findByRole("combobox", { name: "Model" }), "anthropic/claude-haiku-5.5");
     await user.click(screen.getByRole("button", { name: "Save" }));
     expect(await screen.findByText("Hello, team!")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Done" }));
@@ -1988,10 +2138,16 @@ describe("Ember AI", () => {
     // @ember, on the model it saved, then the agents.
     await waitFor(() => expect(within(agentsCard()!).getAllByRole("listitem")).toHaveLength(2));
     const [ember, recap] = within(agentsCard()!).getAllByRole("listitem");
-    expect(ember).toHaveTextContent("Claude Haiku 5.5 · Every open room");
+    expect(ember).toHaveTextContent("Claude Haiku 5.5 · Every room");
     expect(within(ember!).getByRole("link", { name: "Edit Ember" })).toHaveAttribute("href", "/account/agents/ember/edit");
     expect(within(recap!).getByRole("link", { name: "Edit Recap" })).toHaveAttribute("href", `/account/agents/${RECAP.id}/edit`);
     expect(within(agentsCard()!).getByRole("link", { name: "New agent" })).toHaveAttribute("href", "/account/agents/new");
+
+    // Then the apps connected, under the agents.
+    const appsCard = await screen.findByRole("region", { name: "Apps" });
+    expect(agentsCard()!.compareDocumentPosition(appsCard) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(await within(appsCard).findByRole("link", { name: "Edit Linear" })).toHaveAttribute("href", "/account/apps/0mgk3x2a9b4c70/edit");
+    expect(within(appsCard).getByRole("link", { name: "Connect an app" })).toHaveAttribute("href", "/account/apps/new");
 
     await user.click(within(card).getByRole("button", { name: "Change" }));
     expect(await screen.findByRole("textbox", { name: "Account ID" })).toHaveValue("0123456789abcdef0123456789abcdef");
@@ -2030,12 +2186,53 @@ describe("Ember AI", () => {
   });
 });
 
+describe("Outside AI", () => {
+  showingSection("assistant-settings");
+  const card = () => screen.findByRole("region", { name: "Outside AI" });
+
+  it("gives administrators the Outside AI card, whether or not Ember AI is on, whose switch lets AI apps connect", async () => {
+    const { user } = showPage();
+    const outsideSwitch = within(await card()).getByRole("switch", { name: "Let AI apps connect to Ember" });
+    expect(outsideSwitch).not.toBeChecked();
+
+    await user.click(outsideSwitch);
+
+    await waitFor(() => expect(outsideSwitch).toBeChecked());
+    expect(fetch).toHaveBeenCalledWith("/api/account/outside_ai", expect.objectContaining({ method: "PUT", body: JSON.stringify({ on: true }) }));
+    expect(await card()).toHaveTextContent(`${location.origin}/mcp`);
+  });
+
+  it("shows it on once it's on, and off again once an administrator agrees to disconnect every app", async () => {
+    serve({ ...asAdministrator, outsideAi: true });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const { user } = showPage();
+    const outsideSwitch = within(await card()).getByRole("switch", { name: "Let AI apps connect to Ember" });
+    expect(outsideSwitch).toBeChecked();
+
+    await user.click(outsideSwitch);
+
+    await waitFor(() => expect(outsideSwitch).not.toBeChecked());
+    expect(confirm).toHaveBeenCalledExactlyOnceWith(CONFIRM_STOP_OUTSIDE_AI);
+    expect(await card()).not.toHaveTextContent("/mcp");
+  });
+
+  it("isn't shown to members", async () => {
+    serve(asMember);
+    showPage(asLinus);
+    expect(await screen.findByText("Community admins manage the AI assistant.")).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Outside AI" })).not.toBeInTheDocument();
+  });
+});
+
 describe("Set up huddles", () => {
   showingSection("huddles-settings");
   /** A Realtime SFU app's keys, as an administrator copies them from Cloudflare's dashboard. */
   const APP = { appId: "2a95132c15732412d22c1476fa83f27a", appSecret: "66bcf64aa8907b9f9d90ac17746a77ce394c393b92b3916633dc02846e608ad4" };
   /** The Huddles tab's card, by its title. */
   const huddlesCard = () => within(screen.getByRole("region", { name: "Huddles" })).findByRole("region", { name: "Audio and video chat" });
+  /** The card under it, which says whether cameras may go on in a huddle, and after that, whether screens may be shared. */
+  const camerasCard = () => within(screen.getByRole("region", { name: "Huddles" })).queryByRole("region", { name: "Cameras" });
+  const screensRow = () => within(screen.getByRole("region", { name: "Huddles" })).queryByRole("region", { name: "Screen sharing" });
 
   it("gives administrators the Huddles tab's card, whose switch sets up huddles with an SFU app's keys", async () => {
     const { user } = showPage();
@@ -2043,6 +2240,8 @@ describe("Set up huddles", () => {
     expect(card).toHaveTextContent("Huddles let people in a room talk to each other live.");
     const huddlesSwitch = within(card).getByRole("switch", { name: "Audio and video chat" });
     expect(huddlesSwitch).not.toBeChecked();
+    // What people may do in a huddle waits for huddles.
+    expect(camerasCard()).not.toBeInTheDocument();
 
     await user.click(huddlesSwitch);
     const setup = await screen.findByRole("dialog", { name: "Set up huddles" });
@@ -2055,6 +2254,7 @@ describe("Set up huddles", () => {
     expect(card).toHaveTextContent(`Huddles run through the Realtime SFU app ${APP.appId} in your Cloudflare account.`);
     expect(huddlesSwitch).toBeChecked();
     expect(fetch).toHaveBeenCalledWith("/api/account/huddles", expect.objectContaining({ method: "PUT", body: JSON.stringify(APP) }));
+    expect(camerasCard()).toBeInTheDocument();
 
     await user.click(within(card).getByRole("button", { name: "Change keys" }));
     expect(await screen.findByRole("textbox", { name: "App ID" })).toHaveValue(APP.appId);
@@ -2083,6 +2283,61 @@ describe("Set up huddles", () => {
     expect(within(card).getByRole("switch", { name: "Audio and video chat" })).toBeEnabled();
     expect(card).toHaveTextContent("Huddles let people in a room talk to each other live.");
     expect(fetch).toHaveBeenCalledWith("/api/account/huddles", expect.objectContaining({ method: "DELETE" }));
+    expect(camerasCard()).not.toBeInTheDocument();
+  });
+
+  it("gives administrators a Cameras card under it while huddles are on, whose switch keeps huddles to voices, saved at once with no notice", async () => {
+    serve({ ...asAdministrator, huddles: { appId: APP.appId } });
+    const { onAccountChanged, user } = showPage();
+    await huddlesCard();
+    const cameras = camerasCard()!;
+    expect(cameras).toHaveTextContent("People can turn their camera on in a huddle.");
+    const camerasSwitch = within(cameras).getByRole("switch", { name: "Cameras" });
+    expect(camerasSwitch).toBeChecked();
+
+    await user.click(camerasSwitch);
+    expect(camerasSwitch).not.toBeChecked();
+    await waitFor(() => expect(onAccountChanged).toHaveBeenLastCalledWith({ ...asAdministrator.account, huddleCameras: false }));
+    await user.click(camerasSwitch);
+    await waitFor(() => expect(onAccountChanged).toHaveBeenLastCalledWith(asAdministrator.account));
+    expect(camerasSwitch).toBeChecked();
+    expect(saved()).toEqual([{ settings: { huddleCameras: false } }, { settings: { huddleCameras: true } }]);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("follows the workspace socket, for a Cameras switch moved in another tab", async () => {
+    serve({ ...asAdministrator, huddles: { appId: APP.appId } });
+    showPage();
+    await huddlesCard();
+    const camerasSwitch = within(camerasCard()!).getByRole("switch", { name: "Cameras" });
+    act(() => workspaceSays({ ...asAdministrator.account, huddleCameras: false }));
+    expect(camerasSwitch).not.toBeChecked();
+  });
+
+  it("has Screen sharing under Cameras in that card, whose switch keeps people from sharing their screens, saved at once with no notice, and follows the workspace socket", async () => {
+    serve({ ...asAdministrator, huddles: { appId: APP.appId } });
+    const { onAccountChanged, user } = showPage();
+    await huddlesCard();
+    const screens = screensRow()!;
+    expect(camerasCard()!.compareDocumentPosition(screens) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screens.parentElement).toBe(camerasCard()!.parentElement);
+    expect(screens).toHaveTextContent("People can share their screen in a huddle, from a computer.");
+    const screensSwitch = within(screens).getByRole("switch", { name: "Screen sharing" });
+    expect(screensSwitch).toBeChecked();
+
+    await user.click(screensSwitch);
+    expect(screensSwitch).not.toBeChecked();
+    await waitFor(() => expect(onAccountChanged).toHaveBeenLastCalledWith({ ...asAdministrator.account, huddleScreens: false }));
+    expect(within(camerasCard()!).getByRole("switch", { name: "Cameras" })).toBeChecked();
+    await user.click(screensSwitch);
+    await waitFor(() => expect(onAccountChanged).toHaveBeenLastCalledWith(asAdministrator.account));
+    expect(screensSwitch).toBeChecked();
+    expect(saved()).toEqual([{ settings: { huddleScreens: false } }, { settings: { huddleScreens: true } }]);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    // Moved in another tab.
+    act(() => workspaceSays({ ...asAdministrator.account, huddleScreens: false }));
+    expect(screensSwitch).not.toBeChecked();
   });
 
   it("keeps the card out of Rooms and permissions, where it was", async () => {
@@ -2100,6 +2355,8 @@ describe("Set up huddles", () => {
     showPage(asLinus);
     expect(await screen.findByText("Community admins manage huddles.")).toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "Audio and video chat" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Cameras" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Screen sharing" })).not.toBeInTheDocument();
   });
 });
 
@@ -2307,12 +2564,15 @@ describe("Shared room order", () => {
   /** Moves `name`'s row with Alt and an arrow. */
   const altArrow = (name: string, key: "ArrowUp" | "ArrowDown") => fireEvent.keyDown(orderRow(name), { key, altKey: true });
 
-  it("lists an administrator's rooms but their DMs, the ones the shared order ranks first, in its order, then the rest by name", async () => {
+  it("lists an administrator's rooms but their DMs, the ones the shared order ranks first, in its order, then the rest in the order they were put in them", async () => {
     showPage();
     await screen.findByRole("list", { name: "Room order" });
     expect(ordered()).toEqual(["Design", "general", "random"]);
     act(() => sidebarSays(adasRooms, ["random", "general"]));
     expect(ordered()).toEqual(["random", "general", "Design"]);
+    // Whatever their names, as a room she's just been put in comes last.
+    act(() => sidebarSays([...adasRooms, shared("annex", "Annex")], ["random"]));
+    expect(ordered()).toEqual(["random", "Design", "general", "Annex"]);
 
     expect(screen.getByText(HELP)).toBeInTheDocument();
     for (const row of orderRows()) {
@@ -2417,7 +2677,7 @@ describe("Shared room order", () => {
     expect(button("Save order")).toBeEnabled();
 
     fireEvent.click(button("Cancel"));
-    expect(ordered()).toEqual(["general", "Ops", "random"]);
+    expect(ordered()).toEqual(["general", "random", "Ops"]);
     act(() => sidebarSays(adasRooms, ["random", "secret"]));
     expect(ordered()).toEqual(["random", "Design", "general"]);
   });
@@ -2943,16 +3203,19 @@ describe("Remove someone from the workspace", () => {
 describe("Memberful memberships", () => {
   showingSection("membership-settings");
   const SITE = "https://example.memberful.com";
-  const withKeys: WorkspaceSettings = { ...asAdministrator, memberfulSite: SITE };
+  // The deployment's secrets, which can lack what hearing Memberful's webhooks takes, as Set up Memberful's keys can't.
+  const withKeys: WorkspaceSettings = { ...asAdministrator, memberfulSite: SITE, memberfulKeys: "secret" };
   const webhookSteps = () => screen.queryByRole("list", { name: "Steps to sign out members whose membership lapses" });
   const lapsed = listed("u7", "Sam Lapsed", "member", "suspended");
 
-  it("says how to hear Memberful's webhooks in the steps to get the keys", async () => {
+  it("has Set up Memberful ask for the webhook that says when a membership lapses, with Ember's address for it", async () => {
     const { user } = showPage();
     await user.click(await screen.findByRole("switch", { name: "Memberful" }));
-    const steps = screen.getByRole("list", { name: "Steps to let Memberful members sign in" });
-    expect(steps).toHaveTextContent(`order events to ${location.origin}/webhooks/memberful.`);
-    expect(steps).toHaveTextContent("the webhook's secret key as MEMBERFUL_WEBHOOK_SECRET, and the custom app's API key as MEMBERFUL_API_KEY");
+    const [, , webhook] = within(await screen.findByRole("list", { name: "Steps to set up Memberful" })).getAllByRole("listitem");
+    expect(webhook).toHaveTextContent(`paste this as the Endpoint URL:${location.origin}/webhooks/memberful`);
+    expect(webhook).toHaveTextContent("Select every event under Member, Order, Subscription, and Plan.");
+    expect(within(webhook!).getByRole("textbox", { name: "Secret key" })).toBeInTheDocument();
+    expect(within(webhook!).getByRole("button", { name: "Copy the Endpoint URL" })).toBeInTheDocument();
     expect(webhookSteps()).not.toBeInTheDocument();
   });
 
@@ -2965,8 +3228,8 @@ describe("Memberful memberships", () => {
     await user.click(on);
     const steps = webhookSteps()!;
     expect(within(steps).getAllByRole("listitem")).toHaveLength(2);
-    expect(steps).toHaveTextContent(`order events to ${location.origin}/webhooks/memberful.`);
-    expect(steps).toHaveTextContent("Give this Worker two more secrets: the webhook's secret key as MEMBERFUL_WEBHOOK_SECRET, and the custom app's API key as MEMBERFUL_API_KEY.");
+    expect(steps).toHaveTextContent(`paste ${location.origin}/webhooks/memberful as the Endpoint URL`);
+    expect(steps).toHaveTextContent("Give this Worker two more secrets: the webhook's secret key as MEMBERFUL_WEBHOOK_SECRET, and the custom app's API Key as MEMBERFUL_API_KEY.");
     expect(within(steps).getByRole("link", { name: "Open the Cloudflare dashboard" })).toHaveAttribute("target", "_blank");
     expect(screen.getByText(/stays signed in where they are/)).toBeInTheDocument();
   });

@@ -1,17 +1,19 @@
+import type { Directory, WorkspaceSettings } from "@ember/protocol";
 import type { AgentAnswer, Agents, NewAgent } from "@ember/protocol/agents";
 import { CARDS_PROMPT } from "@ember/protocol/prompts";
 import type { APIRequestContext, Locator, Page } from "@playwright/test";
-import { administratorSession, cookieHeader, editorField, expect, SAME_ORIGIN, signInAsAdministrator, test, useOwnAddress } from "../../fixtures";
+import { administratorSession, cookieHeader, editorField, expect, newAddress, SAME_ORIGIN, signInAsAdministrator, test, useOwnAddress } from "../../fixtures";
 import { AI_GATEWAY_ACCOUNT } from "../../projects/workspace-settings";
-import { CARD_HEADER, CARD_LINK, CARD_QUESTION, CARDED, HELLO, startFakeGateway, XAI_PATH, type FakeGateway } from "./fake-gateway";
+import { ANTHROPIC_PATH, CARD_HEADER, CARD_LINK, CARD_QUESTION, CARDED, CHAT_COMPLETIONS_PATH, HELLO, startFakeGateway, type FakeGateway } from "./fake-gateway";
 
 // The AI assistant tab's Agents card, New agent and an agent's page, with Try it, an agent answering a
-// mention, and its badge and profile, on the second test server, through the AI Gateway this spec fakes.
+// mention, its badge and profile, the agents kept for administrators, and the sidebar's Available
+// Agents, on the second test server, through the AI Gateway this spec fakes.
 // Each test starts with Ember AI on Claude Sonnet 5.5, and leaves the workspace as a new one is: no
 // agents, and Ember AI off.
 
 const SONNET = "anthropic/claude-sonnet-5.5";
-/** xAI's Grok, which Ember asks through AI Gateway's xAI endpoint, where it can search the web. */
+/** xAI's Grok, which Ember asks through Cloudflare's REST API, and through AI Gateway's xAI endpoint to search the web. */
 const GROK = "xai/grok-4.7";
 
 let gateway: FakeGateway;
@@ -37,13 +39,13 @@ test.afterEach(async ({ request }) => {
 /** The administrator's session's headers, for the API. */
 const asAdministrator = async (request: APIRequestContext) => ({ Cookie: cookieHeader(await administratorSession(request)), ...SAME_ORIGIN });
 
-/** Makes the agent called `name` through the API, as New agent would, on Claude Sonnet 5.5, or as `on` says, off the web, in every open room. */
-async function makeAgent(request: APIRequestContext, name: string, on = { model: SONNET, modelName: "Claude Sonnet 5.5" }) {
+/** Makes the agent called `name` through the API, as New agent would, on Claude Sonnet 5.5, or `model`, off the web, in every open room. */
+async function makeAgent(request: APIRequestContext, name: string, model = SONNET) {
   const agent: NewAgent = {
     name,
     description: "Sums up threads into decisions and to-dos.",
     instructions: "Sum up the conversation so far as decisions and to-dos.",
-    ...on,
+    model,
     thinking: "low",
     length: "medium",
     webSearch: false,
@@ -68,6 +70,12 @@ const namesIn = (card: Locator) => card.getByRole("listitem").locator("strong");
 /** The row of the agent called `name` in `card`. */
 const rowOf = (card: Locator, name: string) => card.getByRole("listitem").filter({ has: card.page().locator("strong").getByText(name, { exact: true }) });
 
+/** The sidebar's Available Agents row on `page`, and the list it opens. */
+const availableAgents = (page: Page) => ({
+  row: page.getByRole("complementary", { name: "Conversations" }).getByRole("button", { name: /^Available Agents/ }),
+  list: page.getByRole("dialog", { name: "Available Agents" }),
+});
+
 test.describe("Agents", () => {
   test("the administrator makes an agent on New agent, trying it first, and it answers a mention in a room", async ({ page }) => {
     const card = await openAgents(page);
@@ -91,13 +99,13 @@ test.describe("Agents", () => {
     await expect(tryIt).toContainText(HELLO);
     await expect(tryIt).toContainText(/Answered in [\d.]+ seconds\./);
     const tried = gateway.asked.at(-1)!;
-    expect(tried).toMatchObject({ path: `/accounts/${AI_GATEWAY_ACCOUNT.accountId}/ai/v1/messages`, body: { model: SONNET } });
+    expect(tried).toMatchObject({ path: ANTHROPIC_PATH, body: { model: "claude-sonnet-5-5" } });
     expect(tried.body.system).toMatch(/^You are Recap, an AI agent in the team chat "[^"]+"\. [^\n]+\n\nSum up the conversation so far as decisions and to-dos\.\n\nWrite in Markdown\.[\s\S]+\n\nYou're asked in a direct message\./);
 
     // Making it asks its model a test question, then goes back to the tab, which lists it.
     await page.getByRole("button", { name: "Create agent" }).click();
     await expect(namesIn(card)).toHaveText(["Ember", "Recap"]);
-    await expect(rowOf(card, "Recap")).toContainText("Sums up threads into decisions and to-dos.Claude Sonnet 5.5 · Every open room");
+    await expect(rowOf(card, "Recap")).toContainText("Sums up threads into decisions and to-dos.Claude Sonnet 5.5 · Every room");
 
     // It's in every open room, where someone mentions it.
     await page.goto("/");
@@ -143,7 +151,7 @@ test.describe("Agents", () => {
     searching();
     await expect(rowOf(card, "Scout")).toContainText("Looks up what's new on the web.Claude Sonnet 5.5 · Searches the web · general");
     expect(gateway.asked.at(-1)).toMatchObject({
-      path: `/accounts/${AI_GATEWAY_ACCOUNT.accountId}/ai/v1/messages`,
+      path: ANTHROPIC_PATH,
       body: { tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 5 }, { type: "web_fetch_20250910", name: "web_fetch", max_uses: 3 }] },
     });
 
@@ -163,23 +171,31 @@ test.describe("Agents", () => {
     expect(gone!.status()).toBe(404);
   });
 
-  test("an agent on Grok searches the web through AI Gateway's xAI endpoint, once the administrator turns Search the web on", async ({ page, request }) => {
-    await makeAgent(request, "Scout", { model: GROK, modelName: "Grok 4.7" });
-    // Its test question went to xAI's own Responses there, with the API token in AI Gateway's own header alone.
-    const throughXai = { path: XAI_PATH, authorization: undefined, aigAuthorization: `Bearer ${AI_GATEWAY_ACCOUNT.apiToken}` };
-    expect(gateway.asked.at(-1)).toMatchObject({ ...throughXai, body: { model: "grok-4.7", store: false } });
+  test("an agent on Grok searches the web with Ember's own tool, once the administrator turns Search the web on", async ({ page, request }) => {
+    await makeAgent(request, "Scout", GROK);
+    // Its test question went to Cloudflare's REST API, in Chat Completions, as AI Gateway's credits pay for Grok there.
+    const throughRest = { path: CHAT_COMPLETIONS_PATH, authorization: `Bearer ${AI_GATEWAY_ACCOUNT.apiToken}` };
+    expect(gateway.asked.at(-1)).toMatchObject({ ...throughRest, body: { model: GROK } });
     const card = await openAgents(page);
     await card.getByRole("link", { name: "Edit Scout" }).click();
 
     const webSearch = page.getByRole("switch", { name: "Search the web" });
     await webSearch.click();
-    // xAI's web search is the only tool for the web it's given, so it doesn't read pages of its own.
+    // Ember's own tool only searches, so it doesn't read pages of its own.
     await expect(webSearch).toHaveAccessibleDescription(
       "Scout searches the web when a question needs it, at most 5 times an answer, and lists the pages it used under its answer. AI Gateway's credits pay for each search.",
     );
     await page.getByRole("button", { name: "Save changes" }).click();
     await expect(rowOf(card, "Scout")).toContainText("Grok 4.7 · Searches the web");
-    expect(gateway.asked.at(-1)).toMatchObject({ ...throughXai, body: { model: "grok-4.7", tools: [{ type: "web_search" }], max_turns: 5, parallel_tool_calls: false, store: false } });
+    // It's still asked there, given Ember's tool, which Ember runs with Cloudflare's Web Search API through the same gateway.
+    const searched = gateway.asked.filter(({ body }) => "tools" in body).at(-1);
+    expect(searched).toMatchObject({ ...throughRest, body: { model: GROK, tools: [{ type: "function", function: { name: "web_search" } }] } });
+    expect(gateway.asked.findLast(({ path }) => path === `/accounts/${AI_GATEWAY_ACCOUNT.accountId}/ai/websearch/`)).toMatchObject({
+      ...throughRest,
+      path: `/accounts/${AI_GATEWAY_ACCOUNT.accountId}/ai/websearch/`,
+      body: { options: { gateway: { id: "default" } } },
+    });
+    expect(gateway.asked.some(({ path }) => path.includes("/grok/"))).toBe(false);
   });
 
   test("the administrator modifies what Ember adds around an agent's instructions, with caution, which Ember keeps until Use Ember's own puts its own back", async ({ page, request }) => {
@@ -279,5 +295,100 @@ test.describe("Agents", () => {
     await expect(profile.getByRole("button", { name: "Ping Recap" })).toBeVisible();
     // Its instructions are for administrators, on its settings page.
     await expect(profile).not.toContainText("Sum up the conversation so far");
+  });
+
+  test("the administrator keeps an agent for administrators, then to their own DMs, and Available Agents lists each person the agents they can ask", async ({ page, request, browser, baseURL }) => {
+    await makeAgent(request, "Recap");
+    const herald = await makeAgent(request, "Herald");
+    const card = await openAgents(page);
+
+    // Admins only, on its page, leaves it in its rooms.
+    await card.getByRole("link", { name: "Edit Herald" }).click();
+    const adminsOnly = page.getByRole("switch", { name: "Admins only" });
+    await adminsOnly.click();
+    await expect(adminsOnly).toHaveAccessibleDescription("Only administrators can ask Herald. Everyone else sees its answers in its rooms, but it doesn't answer them.");
+    await page.getByRole("button", { name: "Save changes" }).click();
+    await expect(rowOf(card, "Herald")).toContainText("Claude Sonnet 5.5 · Admins only · Every room");
+
+    // Grace, who joins Ember with the join link, is listed the agents anyone can ask.
+    const headers = await asAdministrator(request);
+    const { joinCode } = (await (await request.get("/api/account", { headers })).json()) as WorkspaceSettings;
+    const context = await browser.newContext({ baseURL, ignoreHTTPSErrors: true });
+    try {
+      const asGrace = { "CF-Connecting-IP": newAddress(), ...SAME_ORIGIN };
+      const joined = await context.request.post(`/api/join/${joinCode}`, {
+        data: { name: `Grace ${crypto.randomUUID().slice(0, 8)}`, emailAddress: `${crypto.randomUUID()}@example.com`, password: "compiler error" },
+        headers: asGrace,
+      });
+      expect(joined.status(), await joined.text()).toBe(201);
+      const grace = await context.newPage();
+      await useOwnAddress(grace);
+      await grace.goto("/");
+      const hers = availableAgents(grace);
+      await expect(hers.row).toHaveAccessibleName("Available Agents, 2 to ask");
+      await hers.row.click();
+      await expect(hers.list.getByRole("tab")).toHaveText(["Ember", "Recap"]);
+      await hers.list.getByRole("tab", { name: "Recap" }).click();
+      await expect(hers.list.getByRole("tabpanel")).toContainText("Sums up threads into decisions and to-dos.");
+      await expect(hers.list.getByRole("tabpanel")).toContainText("Type @Recap in a room it's in, or message it directly.");
+      await expect(hers.list.getByRole("region", { name: "Available in" })).toHaveText(/Every room$/);
+      await grace.keyboard.press("Escape");
+      await expect(hers.row).toBeFocused();
+      // Herald's page says who can ask it, in place of the button that starts a DM with it.
+      await grace.goto(`/users/${herald.id}`);
+      await expect(grace.getByRole("main")).toContainText("Only administrators can ask Herald.");
+      await expect(grace.getByRole("button", { name: "Ping Herald" })).toHaveCount(0);
+
+      // The administrator is listed it too, marked, with a link to its page.
+      await page.goto("/");
+      const theirs = availableAgents(page);
+      await expect(theirs.row).toHaveAccessibleName("Available Agents, 3 to ask");
+      await theirs.row.click();
+      await expect(theirs.list.getByRole("tab")).toHaveText(["Ember", "Herald", "Recap"]);
+      await theirs.list.getByRole("tab", { name: "Herald" }).click();
+      await expect(theirs.list.getByRole("tabpanel").getByRole("heading", { level: 3 })).toHaveText("Herald");
+      await expect(theirs.list.getByRole("tabpanel")).toContainText("Admins only");
+      await theirs.list.getByRole("link", { name: "Edit" }).click();
+      await expect(page.getByRole("heading", { level: 1, name: "Edit Herald" })).toBeVisible();
+      await expect(theirs.list).toBeHidden();
+
+      // Only available in admin DMs takes it out of every room, and holds Admins only on.
+      await page.getByRole("switch", { name: "Only available in admin DMs" }).click();
+      await expect(page.getByRole("switch", { name: "Admins only" })).toBeDisabled();
+      await expect(page.getByRole("switch", { name: "Admins only" })).toBeChecked();
+      for (const rooms of ["Every room", "Only the rooms I choose"]) {
+        await expect(page.getByRole("radio", { name: rooms })).toBeDisabled();
+        await expect(page.getByRole("radio", { name: rooms })).not.toBeChecked();
+      }
+      await page.getByRole("button", { name: "Save changes" }).click();
+      await expect(rowOf(card, "Herald")).toContainText("Claude Sonnet 5.5 · Admin DMs only");
+
+      // Nobody else can see it: Grace's people directory no longer lists it, and its page is gone for her.
+      const directory = (await (await context.request.get("/api/users", { headers: asGrace })).json()) as Directory;
+      expect(directory.users.map(({ name }) => name)).not.toContain("Herald");
+      expect((await context.request.get(`/api/users/${herald.id}`, { headers: asGrace })).status()).toBe(404);
+      await grace.goto("/");
+      await expect(hers.row).toHaveAccessibleName("Available Agents, 2 to ask");
+
+      // The administrator messages it from the list, and it answers there.
+      await page.goto("/");
+      await theirs.row.click();
+      await theirs.list.getByRole("tab", { name: "Herald" }).click();
+      await expect(theirs.list.getByRole("tabpanel")).toContainText("Admin DMs only");
+      await expect(theirs.list.getByRole("tabpanel")).toContainText("Message it directly. It isn't in any room, and only administrators can see it.");
+      await expect(theirs.list.getByRole("region", { name: "Available in" })).toHaveText(/Direct messages only$/);
+      await theirs.list.getByRole("button", { name: "Message Herald" }).click();
+      await expect(page.getByRole("heading", { level: 1 })).toHaveText("Direct message with Herald");
+      await expect(theirs.list).toBeHidden();
+      const composer = editorField(page, "Write a message");
+      await expect(composer).toBeFocused();
+      await composer.pressSequentially(`What's new? ${crypto.randomUUID().slice(0, 8)}`);
+      await composer.press("Enter");
+      const answer = page.getByRole("article").last();
+      await expect(answer).toContainText(HELLO);
+      await expect(answer.getByRole("heading", { level: 3 })).toHaveText(/^Herald Agent/);
+    } finally {
+      await context.close();
+    }
   });
 });

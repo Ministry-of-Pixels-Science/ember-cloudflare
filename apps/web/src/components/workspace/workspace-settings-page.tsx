@@ -16,6 +16,7 @@ import {
   type SidebarRoom,
   type WorkspaceSettings,
 } from "@ember/protocol";
+import type { MemberfulSaved } from "@ember/protocol/memberful";
 import { AccountLogo, STOCK_LOGO } from "@/components/account-logo";
 import { FIELD_INPUT, Field, SubmitButton } from "@/components/field";
 import { useFlash } from "@/components/flash";
@@ -35,16 +36,19 @@ import { logoVariantsOf } from "@/lib/previews";
 import { apart } from "@/lib/room-list";
 import { cn } from "@/lib/utils";
 import { AgentList } from "./agent-list";
+import { AppList } from "./app-list";
 import { AssistantSettings } from "./assistant-settings";
 import { AssistantSetup } from "./assistant-setup";
 import { CustomDomainSettings } from "./custom-domain-settings";
 import { EmberVersion } from "./ember-version";
 import { EmailSettings, sendsEmail } from "./email-settings";
 import { EmailSetup } from "./email-setup";
-import { HuddlesSettings } from "./huddles-settings";
+import { HuddlesSettings, HuddleSwitches } from "./huddles-settings";
 import { HuddlesSetup } from "./huddles-setup";
 import { InviteByEmail } from "./invite-by-email";
 import { InviteLink } from "./invite-link";
+import { MemberfulSetup } from "./memberful-setup";
+import { OutsideAiSettings } from "./outside-ai-settings";
 import { PeopleList } from "./people-list";
 import { PicturePicker } from "./picture-picker";
 import { RoomOrder } from "./room-order";
@@ -106,9 +110,10 @@ interface Props {
  * - Domain settings: for administrators, the custom domain Ember answers at.
  * - AI assistant: for administrators, whether Ember's AI agents run on models through Cloudflare AI
  *   Gateway, which Set up Ember AI connects, and while they do, the agents, @ember first, each linking to
- *   its page, and New agent.
+ *   its page, and New agent. Then whether AI apps, such as Claude, may connect to Ember as the people in
+ *   it (Outside AI).
  * - Huddles: for administrators, whether huddles are on, through the Realtime SFU app whose keys Set up
- *   huddles takes.
+ *   huddles takes, and while they are, whether people may turn their cameras on in them.
  */
 export function WorkspaceSettingsPage({
   me,
@@ -143,6 +148,8 @@ export function WorkspaceSettingsPage({
   // Set up email, while it's open, with what to go on to once it closes with Ember able to send email.
   const [emailSetup, setEmailSetup] = useState<{ then?: () => void } | null>(null);
   const [settingUpTurnstile, setSettingUpTurnstile] = useState(false);
+  // Set up Memberful, while it's open, with what to go on to once it has kept the keys.
+  const [memberfulSetup, setMemberfulSetup] = useState<{ then?: () => void } | null>(null);
   const [settingUpAssistant, setSettingUpAssistant] = useState(false);
   const [settingUpHuddles, setSettingUpHuddles] = useState(false);
   const account = useAccount();
@@ -193,6 +200,23 @@ export function WorkspaceSettingsPage({
     );
     return () => void (stopped = true);
   }, [administrator, askForAccount, onJoinCodeChanged, onFailed]);
+
+  // Memberful turned on elsewhere, by an administrator who gave Set up Memberful the keys there, which
+  // this page hasn't heard of: Memberful's settings are loaded again, rather than the card saying Ember
+  // has no keys.
+  const memberfulOn = account.memberfulJoin;
+  const memberfulWasOn = useRef(memberfulOn);
+  const memberfulUnknown = settings?.memberfulSite === null;
+  useEffect(() => {
+    const turnedOn = memberfulOn && !memberfulWasOn.current;
+    memberfulWasOn.current = memberfulOn;
+    if (!turnedOn || !memberfulUnknown) return;
+    fetchWorkspaceSettings().then(
+      ({ memberfulSite, memberfulWebhooks, memberfulKeys, memberfulSiteKept }) =>
+        mounted.current && setSettings((settings) => settings && { ...settings, memberfulSite, memberfulWebhooks, memberfulKeys, memberfulSiteKept }),
+      (error: unknown) => (mounted.current || isSignedOut(error)) && onFailed(error),
+    );
+  }, [memberfulOn, memberfulUnknown, mounted, onFailed]);
 
   // The name, the tagline and, if it was moved, the translation buttons' switch, sent together.
   const save = (event: FormEvent) => {
@@ -307,8 +331,12 @@ export function WorkspaceSettingsPage({
   const setUpEmail = (then?: () => void) => setEmailSetup({ then });
   /** Shows where Ember's Turnstile keys come from as Set up Turnstile, or turning Turnstile off, changes it, which only workspace settings shows. */
   const showTurnstile = (turnstile: WorkspaceSettings["turnstile"]) => setSettings((settings) => settings && { ...settings, turnstile });
+  /** Shows Memberful as Set up Memberful keeps its keys, which only workspace settings shows. */
+  const showMemberful = (memberful: MemberfulSaved) => setSettings((settings) => settings && { ...settings, ...memberful });
   /** Shows Ember AI as Set up Ember AI, or turning it off, changes it, which only workspace settings shows. */
   const showAssistant = (assistant: WorkspaceSettings["assistant"]) => setSettings((settings) => settings && { ...settings, assistant });
+  /** Shows whether AI apps may connect, as the Outside AI card's switch changes it. */
+  const showOutsideAi = (outsideAi: boolean) => setSettings((settings) => settings && { ...settings, outsideAi });
   /** Shows huddles as Set up huddles, or turning them off, changes them, which only workspace settings shows. */
   const showHuddles = (huddles: WorkspaceSettings["huddles"]) => setSettings((settings) => settings && { ...settings, huddles });
 
@@ -498,8 +526,20 @@ export function WorkspaceSettingsPage({
                   saveEmailDomains={saveEmailDomains}
                   onSetUpEmail={setUpEmail}
                   onSetUpTurnstile={() => setSettingUpTurnstile(true)}
+                  onSetUpMemberful={(then) => setMemberfulSetup({ then })}
                   joinLink={settings.joinCode !== null && <InviteLink joinCode={settings.joinCode} onRegenerate={regenerate} regenerating={regenerating} />}
                 />
+                {memberfulSetup && (
+                  <MemberfulSetup
+                    memberful={settings}
+                    onSaved={(memberful) => {
+                      showMemberful(memberful);
+                      memberfulSetup.then?.();
+                    }}
+                    onClose={() => setMemberfulSetup(null)}
+                    onFailed={onFailed}
+                  />
+                )}
                 <InviteByEmail
                   invitations={settings.invitations}
                   emails={sendsEmail(settings.email)}
@@ -581,6 +621,8 @@ export function WorkspaceSettingsPage({
                 onFailed={onFailed}
               />
               {settings.assistant && <AgentList assistant={settings.assistant} onFailed={onFailed} />}
+              {settings.assistant && <AppList onFailed={onFailed} />}
+              <OutsideAiSettings on={settings.outsideAi} onChanged={showOutsideAi} onFailed={onFailed} />
               {settingUpAssistant && (
                 <AssistantSetup
                   assistant={settings.assistant}
@@ -603,6 +645,7 @@ export function WorkspaceSettingsPage({
           (settings.canAdminister ? (
             <>
               <HuddlesSettings huddles={settings.huddles} onSetUp={() => setSettingUpHuddles(true)} onStopped={() => showHuddles(null)} onFailed={onFailed} />
+              {settings.huddles !== null && <HuddleSwitches saveSwitch={saveSwitch} />}
               {settingUpHuddles && (
                 <HuddlesSetup
                   huddles={settings.huddles}

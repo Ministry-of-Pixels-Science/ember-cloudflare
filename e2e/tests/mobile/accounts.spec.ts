@@ -1,7 +1,8 @@
 import type { Locator, Page } from "@playwright/test";
 import type { BotAnswer, Bots, BotSettings } from "@ember/protocol";
 import type { AgentAnswer, Agents, AgentSettings, AgentTrialAnswer } from "@ember/protocol/agents";
-import { THINKING_LEVELS, TOP_LEVELS, type AssistantCatalog, type AssistantSettings } from "@ember/protocol/assistant";
+import type { AgentTools } from "@ember/protocol/apps";
+import { THINKING_LEVELS, TOP_LEVELS, type AssistantSettings } from "@ember/protocol/assistant";
 import { AGENT_TEMPLATE } from "@ember/protocol/prompts";
 import { changeTheWorkspace, fakeTurnstile, isolateRoom, listing, openRoom, signInAs, signInAsAdministrator, TURNSTILE_WIDGET, useOwnAddress, type Passes } from "../../fixtures";
 import { auditScreen, settle } from "./audits";
@@ -95,7 +96,7 @@ test("an administrator's Huddles tab and Set up huddles, with a key refused, fit
   await screenIsFine({ denseTargets: [SWITCHES] });
 });
 
-test("an administrator's Huddles tab, naming the app huddles run through, fits the phone", async ({ page, screenIsFine }) => {
+test("an administrator's Huddles tab, naming the app huddles run through, and its card of Cameras and Screen sharing under that, fit the phone", async ({ page, screenIsFine }) => {
   await useOwnAddress(page);
   // The settings as they are once an app's keys are given, without giving the test server any, which every other test shows.
   await page.route("**/api/account", async (route) => {
@@ -108,6 +109,16 @@ test("an administrator's Huddles tab, naming the app huddles run through, fits t
   const card = page.getByRole("region", { name: "Audio and video chat", exact: true });
   await card.getByRole("button", { name: "Change keys" }).scrollIntoViewIfNeeded();
   await expect(card.getByRole("switch", { name: "Audio and video chat" })).toBeChecked();
+  await screenIsFine({ denseTargets: [SWITCHES] });
+
+  // What people may do in a huddle comes with huddles: turn their camera on and share their screen, which are both on.
+  const cameras = page.getByRole("region", { name: "Cameras", exact: true });
+  const screens = page.getByRole("region", { name: "Screen sharing", exact: true });
+  await screens.getByRole("switch", { name: "Screen sharing" }).scrollIntoViewIfNeeded();
+  await expect(cameras.getByRole("switch", { name: "Cameras" })).toBeChecked();
+  await expect(cameras).toContainText("People can turn their camera on in a huddle.");
+  await expect(screens.getByRole("switch", { name: "Screen sharing" })).toBeChecked();
+  await expect(screens).toContainText("People can share their screen in a huddle, from a computer.");
   await screenIsFine({ denseTargets: [SWITCHES] });
 });
 
@@ -264,23 +275,13 @@ test("a bot's settings fit the phone", async ({ page, screenIsFine }) => {
 const ASSISTANT: AssistantSettings = {
   accountId: "0123456789abcdef0123456789abcdef",
   model: "anthropic/claude-sonnet-5.5",
-  models: [{ id: "anthropic/claude-sonnet-5.5", name: "Claude Sonnet 5.5", format: "messages" }],
+  models: [{ id: "anthropic/claude-sonnet-5.5", name: "Claude Sonnet 5.5", format: "anthropic" }],
   most: TOP_LEVELS,
   webTools: [],
   instructions: "",
   promptTemplate: null,
   avatarUrl: "/assistant-avatar.svg",
   avatar: false,
-};
-
-/** Cloudflare's catalog, as the Worker lists it, with what other companies' models cost. */
-const CATALOG: AssistantCatalog = {
-  models: [
-    { id: "@cf/zai-org/glm-4.7-flash", name: "GLM-4.7 Flash", format: "chat" },
-    { id: "anthropic/claude-sonnet-5.5", name: "Claude Sonnet 5.5", format: "messages", price: { input: 3, output: 15 } },
-    { id: "openai/gpt-6.1-sol", name: "GPT-6.1 Sol", format: "responses", price: { input: 2, output: 10 } },
-  ],
-  refusal: null,
 };
 
 /**
@@ -299,10 +300,11 @@ const AGENT: AgentSettings = {
   model: "anthropic/claude-sonnet-5.5",
   modelName: "Claude Sonnet 5.5",
   webTools: ["search", "read"],
+  access: "everyone",
   rooms: [1, 2, 3, 4].map((n) => ({ id: `0mgk3x2a9b4c5${n}`, name: `${LONG_NAME}-${n}` })),
   instructions: "You sum up conversations for the team.\n\nList the decisions made, then the questions still open, then the to-dos, each with who took it on.",
   promptTemplate: `${AGENT_TEMPLATE}\n\nSign off as ${LONG_NAME}.`,
-  format: "messages",
+  format: "anthropic",
   levels: { thinking: "medium", length: "long" },
   thinkingLevels: [...THINKING_LEVELS],
   avatar: true,
@@ -313,6 +315,21 @@ const AGENT: AgentSettings = {
 /** What Try it's model says. */
 const TRIED: AgentTrialAnswer = { body: `<p>Two decisions so far, and one to-do for ${LONG_NAME}.</p>`, cards: [], ms: 2345 };
 
+/** The tools an agent's page offers: an app named as long as names go, with a tool named as long as the protocol takes, one picked, which can be always allowed, one set aside, and one its app says nothing of. */
+const TOOLS: AgentTools = {
+  apps: [
+    {
+      id: "0mgk3x2a9b4c70",
+      name: LONG_NAME,
+      tools: [
+        { name: "search_issues", title: "Search issues", description: "Finds issues by their words, in every project the token can read.", fingerprint: "f-search", picked: true, changed: false, alwaysAllowed: false },
+        { name: `create_${"issue_".repeat(20)}now`, title: null, description: "Opens an issue.", fingerprint: "f-create", picked: false, changed: true, alwaysAllowed: false },
+        { name: "close_issue", title: null, description: "", fingerprint: "f-close", picked: false, changed: false, alwaysAllowed: false },
+      ],
+    },
+  ],
+};
+
 /** Shows `page` Ember AI on, with `AGENT` its only agent, without turning on the test server's, which would put @ember in every other test's rooms. */
 async function showTheAgents(page: Page): Promise<void> {
   await page.route("**/api/account", async (route) => {
@@ -322,8 +339,8 @@ async function showTheAgents(page: Page): Promise<void> {
   });
   await page.route("**/api/account/agents", (route) => route.fulfill({ json: { agents: [AGENT] } satisfies Agents }));
   await page.route(`**/api/account/agents/${AGENT.id}`, (route) => route.fulfill({ json: { agent: AGENT } satisfies AgentAnswer }));
-  await page.route("**/api/account/assistant/catalog", (route) => route.fulfill({ json: CATALOG }));
   await page.route("**/api/account/agents/trials", (route) => route.fulfill({ json: TRIED }));
+  await page.route("**/api/account/agents/*/tools", (route) => route.fulfill({ json: TOOLS }));
 }
 
 /** Scrolls to each of the agent's page's cards in turn, which fit the phone. */
@@ -343,8 +360,8 @@ async function modifyingFits(scope: Page | Locator, screenIsFine: (options?: { d
   }
 }
 
-async function eachCardFits(page: Page, screenIsFine: (options?: { denseTargets?: string[] }) => Promise<void>) {
-  for (const name of ["Instructions", "How it answers", "Search the web", "Rooms", "Try it"]) {
+async function eachCardFits(page: Page, screenIsFine: (options?: { denseTargets?: string[] }) => Promise<void>, saved = false) {
+  for (const name of ["Instructions", "How it answers", "Search the web", "Rooms", "Try it", ...(saved ? ["Tools"] : [])]) {
     await page.getByRole("region", { name, exact: true }).scrollIntoViewIfNeeded();
     await screenIsFine({ denseTargets: [SWITCHES] });
   }
@@ -391,7 +408,7 @@ test("an agent's settings fit the phone, with what Ember adds around its instruc
   await expect(page.getByRole("button", { name: "Remove avatar" })).toBeVisible();
   await screenIsFine({ denseTargets: [SWITCHES] });
   await modifyingFits(page, screenIsFine, true);
-  await eachCardFits(page, screenIsFine);
+  await eachCardFits(page, screenIsFine, true);
   await page.getByRole("button", { name: `Delete ${LONG_NAME}` }).scrollIntoViewIfNeeded();
   await screenIsFine({ denseTargets: [SWITCHES] });
 });
@@ -409,6 +426,11 @@ test("@ember's page fits the phone", async ({ page, screenIsFine }) => {
     await ember.getByRole("heading", { name: heading, exact: true }).scrollIntoViewIfNeeded();
     await screenIsFine({ denseTargets: [SWITCHES] });
   }
+  const tools = page.getByRole("region", { name: "Tools", exact: true });
+  await expect(tools.getByRole("checkbox")).toHaveCount(4);
+  await expect(tools.getByRole("checkbox", { name: "Always allow search_issues" })).toBeVisible();
+  await tools.scrollIntoViewIfNeeded();
+  await screenIsFine({ denseTargets: [SWITCHES] });
 });
 
 test("your profile, opened from the rail, fits the phone with Log out in the top bar and a translation button by each field", async ({ page, room, session, screenIsFine }) => {

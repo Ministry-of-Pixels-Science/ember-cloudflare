@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Sheet } from "@/components/ui/sheet";
 import { PeopleContext, type People } from "@/hooks/use-directory";
 import { guardLeaving, navigate } from "@/hooks/use-route";
-import { CONFIRM_BAN, CONFIRM_UNBAN, PersonPage } from "./person-page";
+import { adminsOnlyAsk, CONFIRM_BAN, CONFIRM_UNBAN, PersonPage } from "./person-page";
 
 const ada: Me = { id: "u1", name: "Ada Lovelace", administrator: false };
 const grace: Person = { id: "u2", name: "Grace Hopper", bio: "Wrote the first compiler", role: "member", status: "active", avatarUrl: "/users/t2/avatar?v=1" };
@@ -341,6 +341,31 @@ describe("A bot's profile", () => {
       expect(screen.getByText("Sums up long threads")).toBeVisible();
       expect(screen.getByText("Recap is no longer on this account")).toBeVisible();
       expect(directButton("Recap")).toBeNull();
+    });
+
+    it("says only administrators can ask one kept for them, in place of the DM button, which an administrator has", async () => {
+      const kept: Person = { ...recap, adminsOnly: true };
+      const { onStartDirect, become, user } = showAgent(HAIKU, {}, kept);
+      expect(await heading()).toHaveTextContent(/^Recap$/);
+      expect(screen.getByText(adminsOnlyAsk("Recap"))).toBeVisible();
+      expect(directButton("Recap")).toBeNull();
+
+      become(administrator);
+      await waitFor(() => expect(directButton("Recap")).toBeVisible());
+      expect(screen.queryByText(adminsOnlyAsk("Recap"))).toBeNull();
+      await user.click(directButton("Recap")!);
+      expect(onStartDirect).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: recap.id }));
+    });
+
+    it("has the DM button again once the directory says anyone can ask one that was kept for administrators", async () => {
+      const kept: Person = { ...recap, adminsOnly: true };
+      const { list } = showAgent(HAIKU, { people: new Map([[kept.id, kept]]) }, kept);
+      expect(await screen.findByText(adminsOnlyAsk("Recap"))).toBeVisible();
+
+      // The directory's entry leaves out that it's kept, which what the page was answered mustn't put back.
+      list(new Map([[recap.id, recap]]));
+      await waitFor(() => expect(directButton("Recap")).toBeVisible());
+      expect(screen.queryByText(adminsOnlyAsk("Recap"))).toBeNull();
     });
 
     it("badges an agent the people directory lists, deleted ones too, with only their avatar, as a bot's page", async () => {

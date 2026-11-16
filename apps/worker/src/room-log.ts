@@ -11,8 +11,9 @@ export interface RoomEvent {
   /** Its place in the room's log, whose numbers only grow. */
   seq: number;
   /**
-   * A new message, a bot's reply to a webhook delivery, which is a new message that's never delivered to
-   * bots' webhooks in turn, or someone opening the room in a shown tab.
+   * A new message, a reply, which is a new message that's never delivered to bots' webhooks in turn, nor
+   * answered by @ember or an agent, as a bot's to a webhook delivery is, and what an AI app sends as the
+   * person who connected it, or someone opening the room in a shown tab.
    */
   kind: "message" | "reply" | "read";
   /** Who wrote the message, or read the room. */

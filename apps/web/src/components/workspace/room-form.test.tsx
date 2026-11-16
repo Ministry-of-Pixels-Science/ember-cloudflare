@@ -150,7 +150,7 @@ describe("Room settings page", () => {
 
 describe("Translation buttons", () => {
   it("has a translation button by the room's name once an administrator shows them", () => {
-    renderForm({}, ({ children }) => <AccountContext value={{ name: "Ember", tagline: "", hideTranslationButtons: false, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false }}>{children}</AccountContext>);
+    renderForm({}, ({ children }) => <AccountContext value={{ name: "Ember", tagline: "", hideTranslationButtons: false, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true }}>{children}</AccountContext>);
     expect(screen.getByText("Translate")).toBeInTheDocument();
     expect(screen.getByText(TRANSLATIONS.room_name[0][1])).toBeInTheDocument();
   });

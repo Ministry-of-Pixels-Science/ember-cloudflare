@@ -21,7 +21,7 @@ async function canSee(request: APIRequestContext, session: Session, roomId: stri
 }
 
 test.describe("Create an open room", () => {
-  test("makes an open room from Rooms and permissions, opens it, and lets everyone in", async ({ members, request }) => {
+  test("makes an open room from Rooms and permissions, opens it, lists it below every other room, and lets everyone in", async ({ members, request }) => {
     const ada = await members.signIn("Ada");
     const rail = ada.page.getByRole("navigation", { name: "Workspace" });
     await expect(rail.getByRole("link", { name: "Home", exact: true })).toHaveAttribute("aria-current", "page");
@@ -44,6 +44,8 @@ test.describe("Create an open room", () => {
     await roomName.press("Enter");
     await expect(ada.page.getByRole("heading", { level: 1, name, exact: true })).toBeVisible();
     await expect(ada.page.getByRole("region", { name: "Rooms" }).getByRole("link", { name })).toHaveAttribute("aria-current", "page");
+    // Below general and random, though its name comes first.
+    await expect(ada.page.getByRole("region", { name: "Rooms" }).getByRole("link")).toHaveText(["#general", "#random", `#${name}`]);
     await ada.connected();
     expect(await canSee(request, await createSession(request, "Grace"), roomIdOf(ada))).toBe(true);
   });

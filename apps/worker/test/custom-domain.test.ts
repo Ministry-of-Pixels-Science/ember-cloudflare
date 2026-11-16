@@ -31,7 +31,7 @@ const DEPLOYED = "ember.kro.workers.dev";
 const CHROME_ON_A_MAC = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
 
 /** A new workspace as pages show it, with the custom domain `customDomain`. */
-const withDomain = (customDomain: string | null): Account => ({ name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false });
+const withDomain = (customDomain: string | null): Account => ({ name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true });
 
 /** Sets Ember up with Ada as its administrator, signed in. */
 async function setUp(): Promise<Session> {

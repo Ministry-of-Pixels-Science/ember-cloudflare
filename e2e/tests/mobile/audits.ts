@@ -89,20 +89,27 @@ function runAudits({ insets, denseTargets }: { insets: SafeArea; denseTargets: s
     return result;
   };
 
-  /** The nearest container that can scroll `element` along an axis right now: an ancestor, or the page. */
-  const scrollerOf = (element: Element, axis: "x" | "y"): Element | null => {
+  /** The containers that can scroll `element` along an axis right now, from the nearest out: its ancestors, and the page. */
+  const scrollersOf = (element: Element, axis: "x" | "y"): Element[] => {
     const [overflow, size, client] = axis === "y" ? (["overflowY", "scrollHeight", "clientHeight"] as const) : (["overflowX", "scrollWidth", "clientWidth"] as const);
+    const scrollers: Element[] = [];
     for (let node = element; node.parentElement; ) {
       // The page's scroll doesn't move anything fixed in place, such as a drawer.
-      if (getComputedStyle(node).position === "fixed") return null;
+      if (getComputedStyle(node).position === "fixed") break;
       node = node.parentElement;
       const scrolls = node[size] > node[client] + TOLERANCE;
       // A modal dialog stops the page scrolling by hiding the body's overflow.
-      if (node === document.scrollingElement) return scrolls && getComputedStyle(document.body)[overflow] !== "hidden" ? node : null;
-      if (scrolls && /auto|scroll/.test(getComputedStyle(node)[overflow])) return node;
+      if (node === document.scrollingElement) {
+        if (scrolls && getComputedStyle(document.body)[overflow] !== "hidden") scrollers.push(node);
+        break;
+      }
+      if (scrolls && /auto|scroll/.test(getComputedStyle(node)[overflow])) scrollers.push(node);
     }
-    return null;
+    return scrollers;
   };
+
+  /** The nearest container that can scroll `element` along an axis right now: an ancestor, or the page. */
+  const scrollerOf = (element: Element, axis: "x" | "y"): Element | null => scrollersOf(element, axis)[0] ?? null;
 
   /** The part of `box` that is painted, after clipping by overflow containers and the screen. */
   const paintedPart = (box: Box, clipping: Element[]): Box | null => {
@@ -329,12 +336,14 @@ function runAudits({ insets, denseTargets }: { insets: SafeArea; denseTargets: s
     if (isBehindModal(element)) return;
     const painted = paintedPart(box, clipping);
     if (!painted) return;
-    const [x, y] = [scrollerOf(element, "x"), scrollerOf(element, "y")];
+    // A list that scrolls inside a page that scrolls is moved by both.
+    const [x, y] = [scrollersOf(element, "x"), scrollersOf(element, "y")];
+    const sum = (amounts: number[]) => amounts.reduce((total, amount) => total + amount, 0);
     const room = {
-      left: x ? x.scrollLeft : 0,
-      top: y ? y.scrollTop : 0,
-      right: x ? x.scrollWidth - x.clientWidth - x.scrollLeft : 0,
-      bottom: y ? y.scrollHeight - y.clientHeight - y.scrollTop : 0,
+      left: sum(x.map((scroller) => scroller.scrollLeft)),
+      top: sum(y.map((scroller) => scroller.scrollTop)),
+      right: sum(x.map((scroller) => scroller.scrollWidth - scroller.clientWidth - scroller.scrollLeft)),
+      bottom: sum(y.map((scroller) => scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop)),
     };
     const outside = [
       painted.left < safe.left - TOLERANCE && box.left + room.left < safe.left - TOLERANCE && `left inset (${px(insets.left)})`,

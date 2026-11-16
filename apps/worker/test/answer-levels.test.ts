@@ -18,10 +18,10 @@ import { api, cookieOf, freshDeploy, shown, WITH_THE_FLAME, workspaceSql, type S
 // How much @ember thinks and how long it answers: the most of each, which administrators set on the
 // Ember AI card for anyone's questions, and each person's own levels, which they pick on their profile.
 
-const SETUP = { accountId: "0123456789abcdef0123456789abcdef", apiToken: "an-api-token-with-workers-ai-read_0123456", model: "@cf/zai-org/glm-4.7-flash" };
+const SETUP = { accountId: "0123456789abcdef0123456789abcdef", apiToken: "an-api-token-with-ai-gateway-run_0123456", model: "anthropic/claude-haiku-5.5" };
 
 /** The models people can pick once Ember AI is on: its own, alone, which took its test question at each level of thinking. */
-const MODELS: AssistantModel[] = [{ id: SETUP.model, name: "GLM-4.7 Flash", format: "chat", thinkingLevels: [...THINKING_LEVELS] }];
+const MODELS: AssistantModel[] = [{ id: SETUP.model, name: "Claude Haiku 5.5", format: "anthropic", thinkingLevels: [...THINKING_LEVELS] }];
 
 /** @ember's answers to someone at `levels`, under `most`, as their profile shows them, who leaves their model to administrators. */
 const yours = (levels: AnswerLevels, most: AnswerLevels): YourAssistant => ({ levels, most, model: null, defaultModel: SETUP.model, models: MODELS });
@@ -46,7 +46,7 @@ async function joinAsGrace(): Promise<Session> {
 /** Turns Ember AI on as `administrator`, its model saying hello to the test question. */
 async function turnOn(administrator: Session): Promise<void> {
   const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
-    Response.json({ object: "chat.completion", choices: [{ index: 0, message: { role: "assistant", content: "Hello, team!" }, finish_reason: "stop" }] }),
+    Response.json({ type: "message", role: "assistant", content: [{ type: "text", text: "Hello, team!" }], stop_reason: "end_turn" }),
   );
   const response = await api("/api/account/assistant", { method: "PUT", headers: as(administrator), body: JSON.stringify(SETUP) });
   expect(response.status, await response.clone().text()).toBe(200);
@@ -86,7 +86,7 @@ describe("The most @ember thinks and writes", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("Cache-Control")).toBe("no-store");
     const most: AnswerLevels = { thinking: "medium", length: "long" };
-    expect(await response.json()).toEqual({ assistant: { accountId: SETUP.accountId, model: SETUP.model, models: MODELS, most, webTools: null, instructions: "", promptTemplate: null, ...WITH_THE_FLAME } } satisfies AssistantChanged);
+    expect(await response.json()).toEqual({ assistant: { accountId: SETUP.accountId, model: SETUP.model, models: MODELS, most, webTools: [], instructions: "", promptTemplate: null, ...WITH_THE_FLAME } } satisfies AssistantChanged);
     expect(await mostShown(ada)).toEqual(most);
     expect(await (await limit(ada, { length: "short" })).json()).toMatchObject({ assistant: { most: { thinking: "medium", length: "short" } } });
     const [{ settings }] = (await workspaceSql("SELECT settings FROM accounts")) as [{ settings: string }];

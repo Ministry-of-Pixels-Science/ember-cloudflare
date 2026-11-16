@@ -57,12 +57,14 @@ interface Props {
   onSetUpEmail: (then?: () => void) => void;
   /** Opens Set up Turnstile, whose check lifts the limits that stand in for it. */
   onSetUpTurnstile: () => void;
+  /** Opens Set up Memberful, calling `then`, if given, once it has kept the keys. */
+  onSetUpMemberful: (then?: () => void) => void;
   /** The join link, with its buttons, which its card shows while it's on. */
   joinLink: ReactNode;
 }
 
 /** Who can join, for administrators: a card for each way, with its switch, and its settings while it's on. */
-export function WaysToJoin({ settings, saveSwitch, saveEmailDomains, onSetUpEmail, onSetUpTurnstile, joinLink }: Props) {
+export function WaysToJoin({ settings, saveSwitch, saveEmailDomains, onSetUpEmail, onSetUpTurnstile, onSetUpMemberful, joinLink }: Props) {
   const account = useAccount();
   // The domains Email domain keeps, which the workspace shows only while it's on: as it last showed them,
   // saved here or in another tab, or else as the page loaded them. Set as it renders, rather than after,
@@ -148,6 +150,8 @@ export function WaysToJoin({ settings, saveSwitch, saveEmailDomains, onSetUpEmai
       <MemberfulSettings
         site={settings.memberfulSite}
         webhooks={settings.memberfulWebhooks}
+        keys={settings.memberfulKeys}
+        onSetUp={onSetUpMemberful}
         checked={memberful}
         onCheckedChange={switchTo("memberfulJoin")}
         membersOnly={membersOnly}

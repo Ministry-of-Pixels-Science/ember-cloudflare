@@ -45,7 +45,7 @@ export type CardPart =
   | { kind: "header"; text: string }
   /** Rich text. */
   | { kind: "text"; html: string }
-  /** A section block: its rich text over its fields, two to a row, with a thumbnail or a link button at their right. */
+  /** A section block: its rich text over its fields, two to a row, with a thumbnail or a button at their right. */
   | { kind: "section"; html?: string; fields?: CardField[]; thumb?: CardImage; button?: CardButton }
   | { kind: "fields"; fields: CardField[] }
   /** An image, under its title. */
@@ -75,12 +75,34 @@ export interface CardImage {
   alt: string;
 }
 
-/** A link drawn as a button, filled for `primary` and red for `danger`. */
+/**
+ * A button, filled for `primary` and red for `danger`: a link, with `href`, or one that acts, with `action`,
+ * whose click the room reports to the bot that posted it. A button with both is a link.
+ */
 export interface CardButton {
   text: string;
-  href: string;
+  href?: string;
+  action?: CardAction;
   style?: "primary" | "danger";
 }
+
+/**
+ * What a button that acts tells its bot when it's clicked, as a Block Kit button's `action_id` and `value`
+ * do, and its block's `block_id`: `id` names the button, which a click finds by it and `blockId`. On the
+ * card a connected app's tool answered with, a button calls a tool of that app, `appId`, which only
+ * the room writes there.
+ */
+export interface CardAction {
+  id: string;
+  blockId?: string;
+  value?: string;
+  appId?: string;
+}
+
+/** The longest `action_id` and `block_id` Slack takes. */
+export const MAX_ACTION_ID_LENGTH = 255;
+/** The longest `value` Slack takes on a button. */
+export const MAX_ACTION_VALUE_LENGTH = 2000;
 
 /** Rich text or an image in a context row. */
 export type CardContextItem = { html: string } | { image: CardImage };
@@ -93,7 +115,7 @@ export interface CardColumn {
 
 /**
  * A card block's small card: an image across its top, an icon beside its title and subtitle in plain text, its
- * body and subtext in rich text, and up to three link buttons.
+ * body and subtext in rich text, and up to three buttons.
  */
 export interface CardTile {
   hero?: CardImage;
@@ -127,12 +149,13 @@ export function parseCards(value: unknown, address: CardAddress): Card[] {
 /**
  * The parts `value` lists as a card keeps them: those that are well formed and not too long, of kinds it
  * knows, with the addresses `address` keeps. A bot's translator keeps the same, so that a part the room
- * would leave out can't take the place of what the card shows without it.
+ * would leave out can't take the place of what the card shows without it. Without `acting`, it leaves out
+ * the buttons that act, as a card does whose clicks have nowhere to go.
  */
-export function parseParts(value: unknown, address: CardAddress): CardPart[] {
+export function parseParts(value: unknown, address: CardAddress, acting = true): CardPart[] {
   return listOf(value)
     .slice(0, MAX_PARTS)
-    .flatMap((part) => parsePart(part, address) ?? []);
+    .flatMap((part) => parsePart(part, address, acting) ?? []);
 }
 
 /** Whether parts show anything more than rules. */
@@ -149,7 +172,7 @@ function parseCard(value: unknown, address: CardAddress): Card | null {
   return { source: "attachment", ...(color && { color }), ...(pretext && { pretext }), ...(thumb && { thumb }), parts };
 }
 
-function parsePart(value: unknown, address: CardAddress): CardPart | null {
+function parsePart(value: unknown, address: CardAddress, acting: boolean): CardPart | null {
   if (!isRecord(value)) return null;
   switch (value.kind) {
     case "author": {
@@ -173,7 +196,7 @@ function parsePart(value: unknown, address: CardAddress): CardPart | null {
       const fields = itemsOf(value.fields, fieldOf);
       if (html === undefined && fields.length === 0) return null;
       const thumb = imageOf(value.thumb, address);
-      const button = buttonOf(value.button, address);
+      const button = buttonOf(value.button, address, acting);
       return { kind: "section", ...(html && { html }), ...(fields.length > 0 && { fields }), ...(thumb && { thumb }), ...(button && { button }) };
     }
     case "fields": {
@@ -192,7 +215,7 @@ function parsePart(value: unknown, address: CardAddress): CardPart | null {
     case "divider":
       return { kind: "divider" };
     case "buttons": {
-      const buttons = itemsOf(value.buttons, (button) => buttonOf(button, address));
+      const buttons = itemsOf(value.buttons, (button) => buttonOf(button, address, acting));
       return buttons.length === 0 ? null : { kind: "buttons", buttons };
     }
     case "table": {
@@ -200,7 +223,7 @@ function parsePart(value: unknown, address: CardAddress): CardPart | null {
       return rows.length === 0 ? null : { kind: "table", rows, columns: listOf(value.columns).slice(0, MAX_COLUMNS).map(columnOf) };
     }
     case "tiles": {
-      const tiles = itemsOf(value.tiles, (tile) => tileOf(tile, address));
+      const tiles = itemsOf(value.tiles, (tile) => tileOf(tile, address, acting));
       return tiles.length === 0 ? null : { kind: "tiles", tiles };
     }
     case "footer": {
@@ -222,14 +245,30 @@ function fieldOf(value: unknown): CardField | null {
   return { ...(title && { title }), html: html ?? "", short: value.short === true };
 }
 
-function buttonOf(value: unknown, address: CardAddress): CardButton | undefined {
+/** A button that links where `address` keeps, or, without an address, with `acting`, one that acts. */
+function buttonOf(value: unknown, address: CardAddress, acting: boolean): CardButton | undefined {
   if (!isRecord(value)) return undefined;
   const text = textOf(value.text);
   const href = urlOf(value.href, address, "link");
-  if (text === undefined || href === undefined) return undefined;
+  const action = value.href === undefined && acting ? actionOf(value.action) : undefined;
+  if (text === undefined || (href === undefined && action === undefined)) return undefined;
   const style = value.style === "primary" || value.style === "danger" ? value.style : undefined;
-  return { text, href, ...(style && { style }) };
+  return { text, ...(href !== undefined && { href }), ...(action && { action }), ...(style && { style }) };
 }
+
+function actionOf(value: unknown): CardAction | undefined {
+  if (!isRecord(value) || !isActionId(value.id)) return undefined;
+  const blockId = isActionId(value.blockId) ? value.blockId : undefined;
+  const actionValue = isActionValue(value.value) ? value.value : undefined;
+  const appId = isActionId(value.appId) ? value.appId : undefined;
+  return { id: value.id, ...(blockId !== undefined && { blockId }), ...(actionValue !== undefined && { value: actionValue }), ...(appId !== undefined && { appId }) };
+}
+
+/** Whether `value` can name a button that acts, or its block: text, some but not too much. */
+export const isActionId = (value: unknown): value is string => typeof value === "string" && value !== "" && value.length <= MAX_ACTION_ID_LENGTH;
+
+/** Whether `value` can be what a button that acts tells its bot: text, but not too much. */
+export const isActionValue = (value: unknown): value is string => typeof value === "string" && value.length <= MAX_ACTION_VALUE_LENGTH;
 
 function imageOf(value: unknown, address: CardAddress): CardImage | undefined {
   if (!isRecord(value)) return undefined;
@@ -258,7 +297,7 @@ function columnOf(value: unknown): CardColumn {
   return { align, wrap: isRecord(value) && value.wrap === true };
 }
 
-function tileOf(value: unknown, address: CardAddress): CardTile | null {
+function tileOf(value: unknown, address: CardAddress, acting: boolean): CardTile | null {
   if (!isRecord(value)) return null;
   const hero = imageOf(value.hero, address);
   const icon = imageOf(value.icon, address);
@@ -266,7 +305,7 @@ function tileOf(value: unknown, address: CardAddress): CardTile | null {
   const subtitle = textOf(value.subtitle);
   const body = htmlOf(value.body);
   const subtext = htmlOf(value.subtext);
-  const buttons = itemsOf(value.buttons, (button) => buttonOf(button, address)).slice(0, MAX_TILE_BUTTONS);
+  const buttons = itemsOf(value.buttons, (button) => buttonOf(button, address, acting)).slice(0, MAX_TILE_BUTTONS);
   const tile: CardTile = {
     ...(hero && { hero }),
     ...(icon && { icon }),

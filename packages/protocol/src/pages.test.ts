@@ -4,7 +4,7 @@ import { huddlePath, isAppPage, MAX_ID_LENGTH, threadPath, TRANSFER_PATH, transf
 describe("Error pages", () => {
   it("names the pages the app shows, for the Worker to serve the app at", () => {
     const pages = ["/", "/rooms", "/rooms/general", "/rooms/caf%C3%A9", "/rooms/opens/general", "/rooms/directs/ada-grace", "/rooms/opens/new", "/rooms/closeds/new"];
-    for (const path of [...pages, "/rooms/opens/general/edit", "/account/edit", "/account/custom_styles/edit", "/session/new"]) expect(isAppPage(path), path).toBe(true);
+    for (const path of [...pages, "/rooms/opens/general/edit", "/account/edit", "/account/custom_styles/edit", "/session/new", "/oauth/authorize"]) expect(isAppPage(path), path).toBe(true);
     expect(workspacePageOf("/rooms/caf%C3%A9")).toEqual({ page: "room", roomId: "café" });
   });
 
@@ -142,6 +142,22 @@ describe("Add and edit a bot", () => {
     for (const path of ["/account/bots/new/", "/account/bots/%FF/edit", "/account/bots/0mgk3x2a9b4c5e/edit/extra", "/account/bots/0mgk3x2a9b4c5e/key"]) {
       expect(workspacePageOf(path), path).toBeNull();
     }
+  });
+});
+
+describe("Connect an app and a connected app's page", () => {
+  it("shows Connect an app at `/account/apps/new`, and a connected app's page at `/account/apps/<id>/edit`", () => {
+    expect(workspacePageOf("/account/apps/new")).toEqual({ page: "new-app" });
+    expect(workspacePageOf("/account/apps/0mgk3x2a9b4c5e/edit")).toEqual({ page: "app-settings", appId: "0mgk3x2a9b4c5e" });
+    for (const path of ["/account/apps", "/account/apps/new/", "/account/apps/%FF/edit", "/account/apps/0mgk3x2a9b4c5e", "/account/apps/0mgk3x2a9b4c5e/edit/extra"]) {
+      expect(workspacePageOf(path)).toBeNull();
+    }
+  });
+
+  it("shows where an app's sign-in comes back to at `/account/apps/signed-in`", () => {
+    expect(workspacePageOf("/account/apps/signed-in")).toEqual({ page: "app-signed-in" });
+    expect(workspacePageOf("/account/apps/signed-in/")).toBeNull();
+    expect(workspacePageOf("/account/apps/signed-in/edit")).toEqual({ page: "app-settings", appId: "signed-in" });
   });
 });
 

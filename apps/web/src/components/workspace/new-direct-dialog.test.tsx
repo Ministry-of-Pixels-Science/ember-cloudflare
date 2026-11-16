@@ -1,11 +1,11 @@
-import type { DirectoryUser, DirectRoom } from "@ember/protocol";
+import type { DirectoryUser, DirectRoom, Me } from "@ember/protocol";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PeopleContext, type People } from "@/hooks/use-directory";
 import { guardLeaving } from "@/hooks/use-route";
 import type { RoomAnswer } from "@/lib/room-list";
-import { NewDirectDialog } from "./new-direct-dialog";
+import { NewDirectDialog, startedWithout } from "./new-direct-dialog";
 
 /** Someone in the people directory, active unless `status` says otherwise. */
 const person = (id: string, name: string, status: DirectoryUser["status"] = "active"): DirectoryUser => ({
@@ -33,11 +33,14 @@ interface Options {
   reloadPeople?: () => Promise<void>;
   /** Puts the link that opened it in the page. */
   opener?: boolean;
+  /** Whether Ada is an administrator, which she isn't by default. */
+  administrator?: boolean;
 }
 
 /** New direct message as Ada opens it, over a page with the drawer's toggle in its header. */
-function showDialog({ people = everyone, reloadPeople = vi.fn(async () => {}), opener = true }: Options = {}) {
-  const [onClose, onFailed, onAnswered] = [vi.fn(), vi.fn(), vi.fn()];
+function showDialog({ people = everyone, reloadPeople = vi.fn(async () => {}), opener = true, administrator = false }: Options = {}) {
+  const me: Me = { id: ada.id, name: ada.name, administrator };
+  const [onClose, onLeftOut, onFailed, onAnswered] = [vi.fn(), vi.fn(), vi.fn(), vi.fn()];
   const askForRoom = vi.fn(() => (answer: RoomAnswer) => onAnswered(answer));
   render(
     <>
@@ -50,11 +53,11 @@ function showDialog({ people = everyone, reloadPeople = vi.fn(async () => {}), o
   const link = opener ? screen.getByRole("link", { name: "DMs" }) : null;
   const dialog = (people: DirectoryUser[]) => (
     <PeopleContext value={directory(people)}>
-      <NewDirectDialog opener={link} meId={ada.id} reloadPeople={reloadPeople} askForRoom={askForRoom} onClose={onClose} onFailed={onFailed} />
+      <NewDirectDialog opener={link} me={me} reloadPeople={reloadPeople} askForRoom={askForRoom} onClose={onClose} onLeftOut={onLeftOut} onFailed={onFailed} />
     </PeopleContext>
   );
   const { rerender } = render(dialog(people));
-  return { onClose, onFailed, askForRoom, onAnswered, rerender: (people: DirectoryUser[]) => rerender(dialog(people)), user: userEvent.setup() };
+  return { onClose, onLeftOut, onFailed, askForRoom, onAnswered, rerender: (people: DirectoryUser[]) => rerender(dialog(people)), user: userEvent.setup() };
 }
 
 const search = () => screen.getByRole("combobox", { name: "Search people" });
@@ -112,6 +115,54 @@ describe("Where bots show up", () => {
     showDialog({ people: [...everyone, ...bots] });
     await waitFor(() => expect(listed()).toEqual(["Ada Byron", "alan Turing", "Barbara Liskov", "Build Bot", "Grace Hopper", "Linus Torvalds", "Recap Agent"]));
     expect(within(option("Recap Agent")).getByText("Agent")).toHaveAttribute("data-slot", "badge");
+  });
+});
+
+describe("AI agents only administrators can ask", () => {
+  const agents = [
+    { ...person("b2", "Recap"), role: "bot" as const, agent: true as const },
+    { ...person("b3", "Herald"), role: "bot" as const, agent: true as const, adminsOnly: true as const },
+  ];
+
+  it("leaves them out for anyone else, as a DM with one wouldn't start", async () => {
+    const { user } = showDialog({ people: [...everyone, ...agents] });
+    await waitFor(() => expect(listed()).toContain("Recap Agent"));
+    expect(listed()).not.toContain("Herald Agent");
+    await user.type(search(), "herald");
+    expect(listed()).toEqual([]);
+    expect(status()).toHaveTextContent("No people found. Try another name.");
+  });
+
+  it("lists them for an administrator", async () => {
+    const { user } = showDialog({ people: [...everyone, ...agents], administrator: true });
+    await user.type(search(), "herald");
+    expect(listed()).toEqual(["Herald Agent"]);
+  });
+
+  it("says which of them the DM started without, as one only available in admin DMs is left out of a DM with anyone else", async () => {
+    const [recap, herald] = agents;
+    const { answer } = holdStart();
+    const { user, onLeftOut, onClose } = showDialog({ people: [...everyone, ...agents], administrator: true });
+    for (const name of ["Herald Agent", "Grace Hopper"]) await user.click(option(name));
+    await user.click(start());
+    await answer(Response.json({ room: directWith("d1", [grace]) }, { status: 201 }));
+    expect(onLeftOut).toHaveBeenCalledExactlyOnceWith([herald]);
+    expect(location.pathname).toBe("/rooms/d1");
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+
+    expect(startedWithout(["Herald"])).toBe("Herald is only for DMs between administrators, so this DM is without it.");
+    expect(startedWithout(["Herald", recap!.name])).toBe("Herald and Recap are only for DMs between administrators, so this DM is without them.");
+  });
+
+  it("says nothing of a DM that starts with everyone picked", async () => {
+    const [, herald] = agents;
+    const { answer } = holdStart();
+    const { user, onLeftOut, onClose } = showDialog({ people: [...everyone, ...agents], administrator: true });
+    await user.click(option("Herald Agent"));
+    await user.click(start());
+    await answer(Response.json({ room: directWith("d2", [herald!]) }, { status: 201 }));
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+    expect(onLeftOut).not.toHaveBeenCalled();
   });
 });
 

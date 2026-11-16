@@ -28,25 +28,30 @@
   // included, so each answer carries Campfire's headers and old browsers get the upgrade page;
   // the Worker answers /api/*, /up, the setup and join pages, the web app manifest
   // (/webmanifest.json) and QR codes (/qr_code/<id>) itself, and fetches the app's page for the
-  // addresses the app shows a page at. Anything else is a static file or Campfire's 404 page.
+  // addresses the app shows a page at. Anything else is a static file or Campfire's 404 page. One is
+  // /app-version.json, which every open page asks for each minute to tell whether Ember has been
+  // updated, so it goes without the Worker, as the static files do.
   "assets": {
     "directory": "apps/web/dist",
     "binding": "ASSETS",
     "not_found_handling": "404-page",
-    "run_worker_first": ["/*", "!/assets/*", "!/browsers/*", "!/globe.svg", "!/logos/*", "!/lucide/*", "!/iconoir/*", "!/screenshots/*", "!/shortcuts/*", "!/ember-icon.png", "!/assistant-avatar.svg", "!/robots.txt"]
+    "run_worker_first": ["/*", "!/assets/*", "!/app-version.json", "!/browsers/*", "!/globe.svg", "!/logos/*", "!/lucide/*", "!/iconoir/*", "!/screenshots/*", "!/shortcuts/*", "!/ember-icon.png", "!/assistant-avatar.svg", "!/robots.txt"]
   },
 
   // One ChatRoom object per room, which owns its sockets, presence and (by default) its messages,
   // one Workspace object for what the rooms share, one SearchIndex object for every room's messages'
-  // text, and short-lived PasswordHasher and Unfurler objects, which have the CPU time a password's
-  // hash and a link's preview take.
+  // text, and short-lived PasswordHasher, Unfurler, AppConnector and OutsideAi objects, which have the
+  // CPU time a password's hash, a link's preview, reading a connected app's answers and answering an AI
+  // app that's connected to Ember take.
   "durable_objects": {
     "bindings": [
       { "name": "CHAT_ROOM", "class_name": "ChatRoom" },
       { "name": "WORKSPACE", "class_name": "Workspace" },
       { "name": "PASSWORD_HASHER", "class_name": "PasswordHasher" },
       { "name": "UNFURLER", "class_name": "Unfurler" },
-      { "name": "SEARCH_INDEX", "class_name": "SearchIndex" }
+      { "name": "SEARCH_INDEX", "class_name": "SearchIndex" },
+      { "name": "APP_CONNECTOR", "class_name": "AppConnector" },
+      { "name": "OUTSIDE_AI", "class_name": "OutsideAi" }
     ]
   },
   "migrations": [
@@ -54,7 +59,9 @@
     { "tag": "v2", "new_sqlite_classes": ["Workspace"] },
     { "tag": "v3", "new_sqlite_classes": ["PasswordHasher"] },
     { "tag": "v4", "new_sqlite_classes": ["Unfurler"] },
-    { "tag": "v5", "new_sqlite_classes": ["SearchIndex"] }
+    { "tag": "v5", "new_sqlite_classes": ["SearchIndex"] },
+    { "tag": "v6", "new_sqlite_classes": ["AppConnector"] },
+    { "tag": "v7", "new_sqlite_classes": ["OutsideAi"] }
   ],
 
   // The files people upload to rooms. Deploying binds the account's bucket of this name, and creates

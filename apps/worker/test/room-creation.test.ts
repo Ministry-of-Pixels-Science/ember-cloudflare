@@ -54,7 +54,7 @@ describe("Only administrators create rooms (setting)", () => {
     const administrator = await setUp();
     const grace = await signIn("Grace");
     const sockets = [await openWorkspaceSocket(administrator), await openWorkspaceSocket(grace)];
-    const restricted: Account = { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: true, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false };
+    const restricted: Account = { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: true, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true };
 
     const response = await restrict(administrator, true);
     expect(response.status).toBe(200);

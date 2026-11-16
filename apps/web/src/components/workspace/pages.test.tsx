@@ -1,9 +1,11 @@
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { startingInvolvement, type Me, type SharedRoom } from "@ember/protocol";
+import { startingInvolvement, type Me, type Profile, type SharedRoom } from "@ember/protocol";
 import { PUSH_ON } from "@/test-push";
 
 const ada: Me = { id: "u1", name: "Ada", administrator: false };
+// All of it, as the profile page reads every part once it loads.
+const adasProfile: Profile = { name: "Ada", emailAddress: "ada@example.com", bio: null, avatarUrl: "/users/u1/avatar?v=1", avatar: false, password: true, membershipNeeded: false, memberful: null, assistant: null, apps: [], outsideAi: null };
 const random: SharedRoom = { id: "random", name: "random", kind: "open", icon: null };
 const ANSWERS: Record<string, () => Response> = {
   "GET /api/sidebar": () =>
@@ -12,12 +14,11 @@ const ANSWERS: Record<string, () => Response> = {
       favorites: { rooms: [], version: 0 },
       sharedOrder: [],
       invitation: null,
-      suggestions: [],
       huddles: {},
     }),
   "GET /api/users": () => Response.json({ users: [] }),
   "GET /api/searches?q=": () => Response.json({ search: null, matches: [], next: null, rooms: [], recent: [] }),
-  "GET /api/users/me/profile": () => Response.json({ profile: { name: "Ada", emailAddress: "ada@example.com", bio: null } }),
+  "GET /api/users/me/profile": () => Response.json({ profile: adasProfile }),
 };
 
 /** A socket that never connects: these tests are about the pages around the rooms. */

@@ -29,13 +29,14 @@ import { CHROME_MAC, SAFARI_MAC } from "@/test-platforms";
 import { PUSH_ON } from "@/test-push";
 import { DEFAULT_MODEL_EXPLAINED } from "./answer-levels";
 import { AVATAR_CHANGED, ProfilePage } from "./profile-page";
+import { NOTHING_CONNECTED } from "./your-outside-ai";
 
 vi.mock("@/lib/previews", () => ({ avatarVariantOf: vi.fn(async () => new Blob(["variant"], { type: "image/webp" })) }));
 
 const ada = { id: "u1", name: "Ada Lovelace", administrator: false };
 /** Ada's avatar as the profile loads it: her initials, until she uploads one. */
 const INITIALS = "/users/t0k3n/avatar?v=1";
-const profile: Profile = { name: "Ada Lovelace", emailAddress: "ada@example.com", bio: "Wrote the first program", avatarUrl: INITIALS, avatar: false, password: true, membershipNeeded: true, memberful: null, assistant: null };
+const profile: Profile = { name: "Ada Lovelace", emailAddress: "ada@example.com", bio: "Wrote the first program", avatarUrl: INITIALS, avatar: false, password: true, membershipNeeded: true, memberful: null, assistant: null, apps: [], outsideAi: null };
 /** Ada's levels of @ember's dials while Ember AI is on: where they start, up to Medium thinking, with the one model people can pick, which she leaves to administrators. */
 const LEVELS: YourAssistant = {
   levels: { thinking: "low", length: "medium" },
@@ -44,7 +45,7 @@ const LEVELS: YourAssistant = {
   defaultModel: "@cf/zai-org/glm-4.7-flash",
   models: [{ id: "@cf/zai-org/glm-4.7-flash", name: "GLM-4.7 Flash", format: "chat" }],
 };
-const account: Account = { name: "Analytical Engines", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false };
+const account: Account = { name: "Analytical Engines", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true };
 /** The sign-in links loading and saving the profile give. */
 const [LOADED_LINK, SAVED_LINK] = ["u1.mgk3x2a9.loaded", "u1.mgk3x2b0.saved"];
 
@@ -183,7 +184,7 @@ describe("Edit your profile", () => {
   });
 
   it("shows no email address or bio as blank fields", async () => {
-    serve({ loaded: () => Response.json({ profile: { name: "Grace Hopper", emailAddress: null, bio: null } }) });
+    serve({ loaded: () => Response.json({ profile: { ...profile, name: "Grace Hopper", emailAddress: null, bio: null } }) });
     showPage();
     await loaded();
     expect(field("Email address")).toHaveValue("");
@@ -473,11 +474,32 @@ describe("Connect Memberful", () => {
     expect(passwordHelp()).toHaveTextContent("Leave blank to keep your current password. A new one disconnects your Memberful account.");
   });
 
-  it("says nothing of a new password disconnecting it to someone without a password, whose first keeps it", async () => {
-    serve({ loaded: () => Response.json({ profile: { ...profile, password: false, memberful: CONNECTED }, transferId: LOADED_LINK } satisfies ProfileAnswer) });
+  it("offers no password to someone without one whom Memberful signs in, whose way in it is, and saves the rest without one", async () => {
+    const theirs = { ...profile, password: false, memberful: CONNECTED };
+    serve({
+      loaded: () => Response.json({ profile: theirs, transferId: LOADED_LINK } satisfies ProfileAnswer),
+      saved: () => Response.json({ profile: { ...theirs, emailAddress: "countess@example.com" }, transferId: SAVED_LINK } satisfies ProfileAnswer),
+    });
+    const { user } = showPage();
+    await loaded();
+    expect(memberful()).toHaveTextContent("Connected to Memberful as Ada Lovelace (ada@example.com), so you sign in with it.");
+    expect(screen.queryByLabelText("New password")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Current password")).not.toBeInTheDocument();
+    expect(within(memberful()!).queryByRole("button", { name: "Disconnect Memberful" })).not.toBeInTheDocument();
+
+    await user.clear(field("Email address"));
+    await user.type(field("Email address"), "countess@example.com");
+    await user.click(saveButton());
+    expect(await screen.findByRole("alert")).toHaveTextContent("Changes saved");
+    expect(saved()).toEqual([{ emailAddress: "countess@example.com" }]);
+    expect(screen.queryByLabelText("New password")).not.toBeInTheDocument();
+  });
+
+  it("offers a first password to someone without one once Memberful doesn't sign them in, as at a deployment without its keys", async () => {
+    serve({ loaded: () => Response.json({ profile: { ...profile, password: false, memberful: null }, transferId: LOADED_LINK } satisfies ProfileAnswer) });
     showPage();
     await loaded();
-    expect(memberful()).toHaveTextContent("Set a password above to disconnect it, so that you can still sign in.");
+    expect(memberful()).toBeNull();
     expect(passwordHelp()).toHaveTextContent("Leave blank to keep signing in without a password.");
     expect(passwordHelp()).not.toHaveTextContent("disconnects");
   });
@@ -947,5 +969,51 @@ describe("Custom CSS", () => {
       expect(field(label)).toHaveValue("difference engine");
       expect(field(label)).not.toHaveAttribute("value");
     }
+  });
+});
+
+describe("AI apps on your profile", () => {
+  const CLAUDE = { id: "0mgk3x2a9b4c70", name: "Claude", comesBackTo: "claude.example", scopes: ["read" as const], connectedAt: "2026-11-14T09:00:00.000Z", usedAt: null };
+
+  it("aren't shown while AI apps can't connect as you", async () => {
+    serve();
+    showPage();
+    await waitFor(() => expect(screen.getByLabelText("Name")).toHaveValue("Ada Lovelace"));
+    expect(screen.queryByRole("heading", { level: 2, name: "AI apps" })).not.toBeInTheDocument();
+  });
+
+  it("lists the AI apps connected as you, as the profile loads them, and as disconnecting one leaves them", async () => {
+    const fetch = serve({ loaded: () => Response.json({ profile: { ...profile, outsideAi: [CLAUDE] }, transferId: LOADED_LINK } satisfies ProfileAnswer) });
+    const { user } = showPage();
+
+    expect(await screen.findByRole("heading", { level: 2, name: "AI apps" })).toBeVisible();
+    fetch.mockImplementationOnce(async () => Response.json({ connections: [] }));
+    await user.click(screen.getByRole("button", { name: "Disconnect Claude" }));
+    expect(await screen.findByText(NOTHING_CONNECTED)).toBeVisible();
+    expect(fetch).toHaveBeenLastCalledWith(`/api/users/me/outside/${CLAUDE.id}`, expect.objectContaining({ method: "DELETE" }));
+    expect(screen.getByRole("heading", { level: 2, name: "AI apps" })).toBeVisible();
+  });
+});
+
+describe("Apps on your profile", () => {
+  const LINEAR = { id: "0mgk3x2a9b4c70", name: "Linear", signedInAt: "2026-11-14T09:00:00.000Z", ended: false, wantsMore: false };
+
+  it("aren't shown while there's no app to sign in to yourself", async () => {
+    serve();
+    showPage();
+    await waitFor(() => expect(screen.getByLabelText("Name")).toHaveValue("Ada Lovelace"));
+    expect(screen.queryByRole("heading", { level: 2, name: "Apps" })).not.toBeInTheDocument();
+  });
+
+  it("lists the apps you can sign in to yourself, as the profile loads them, and as signing out of one leaves them", async () => {
+    const fetch = serve({ loaded: () => Response.json({ profile: { ...profile, apps: [LINEAR] }, transferId: LOADED_LINK } satisfies ProfileAnswer) });
+    const signedOut = { apps: [{ ...LINEAR, signedInAt: null }], revoked: true };
+    const { user } = showPage();
+
+    expect(await screen.findByRole("heading", { level: 2, name: "Apps" })).toBeVisible();
+    fetch.mockImplementationOnce(async () => Response.json(signedOut));
+    await user.click(screen.getByRole("button", { name: "Sign out of Linear" }));
+    expect(await screen.findByRole("button", { name: "Sign in to Linear" })).toBeVisible();
+    expect(fetch).toHaveBeenLastCalledWith(`/api/users/me/apps/${LINEAR.id}/sign-in`, expect.objectContaining({ method: "DELETE" }));
   });
 });

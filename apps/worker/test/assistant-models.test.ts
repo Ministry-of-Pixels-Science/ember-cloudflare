@@ -1,8 +1,6 @@
 import { ASSISTANT_ID, ASSISTANT_NAME, type Me, type Message, type NewWorkspace, type ProfileAnswer, type RoomId, type User, type WorkspaceSettings } from "@ember/protocol";
 import {
-  ACCOUNT_ID_REFUSED,
   ASSISTANT_FORBIDDEN,
-  ASSISTANT_MODELS,
   ASSISTANT_OFF,
   DEFAULT_LEVELS,
   DEFAULT_MODEL_KEPT,
@@ -12,7 +10,6 @@ import {
   MODELS_FULL,
   THINKING_LEVELS,
   TOP_LEVELS,
-  type AssistantCatalog,
   type AssistantModel,
   type AssistantSaved,
   type AssistantSettings,
@@ -22,79 +19,38 @@ import { MENTION_CONTENT_TYPE, mentionSgid } from "@ember/richtext";
 import { evictDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NOTES, PICKED_MODEL_NOTES } from "../src/assistant/answers";
-import { CATALOG_UNANSWERED, KEPT_CATALOG_FRESH_MS } from "../src/assistant/catalog";
-import { API_TOKEN_NEEDED, SETUP_CHANGED } from "../src/assistant/settings";
-import { api, connect, cookieOf, freshDeploy, post, shown, WITH_THE_FLAME, workspaceSql, workspaceStub, type Client, type Session } from "./support";
+import { SETUP_CHANGED } from "../src/assistant/settings";
+import { addKeptModels, api, connect, cookieOf, freshDeploy, post, shown, WITH_THE_FLAME, workspaceSql, workspaceStub, type Client, type KeptModel, type Session } from "./support";
 
-// The models @ember can answer with: the text models Cloudflare's catalog lists, which Set up Ember AI and
-// Add a model list, the ones administrators let people pick on the Ember AI card, the one among them that
-// answers everyone, and the one each person picks on their profile, which @ember answers them with.
+// The models @ember can answer with: those Ember offers, which Set up Ember AI and Add a model list, the
+// ones administrators let people pick on the Ember AI card, which can be ones kept before Ember stopped
+// offering them, the one among them that answers everyone, and the one each person picks on their
+// profile, which @ember answers them with.
 
 const ACCOUNT_ID = "0123456789abcdef0123456789abcdef";
-const API_TOKEN = "an-api-token-with-workers-ai-read_0123456";
+const API_TOKEN = "an-api-token-with-ai-gateway-run_0123456";
 const SETUP = { accountId: ACCOUNT_ID, apiToken: API_TOKEN, model: "anthropic/claude-sonnet-5.5" };
-const CLOUDFLARE_API = `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}`;
+/** Where Cloudflare's REST API takes requests in Chat Completions, as Ember asks a model kept before Ember stopped offering it. */
+const CHAT_COMPLETIONS = `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/ai/v1/chat/completions`;
+/** Where the account's default gateway passes requests on to OpenAI's own Responses, as Ember asks GPT. */
+const OPENAI_ENDPOINT = `https://gateway.ai.cloudflare.com/v1/${ACCOUNT_ID}/default/openai/responses`;
 const HELLO = "Hello, team!";
 
-/** The models people can pick, as Ember AI lists them once they've answered their test questions, which they did at every level of thinking. */
-const CLAUDE: AssistantModel = { id: "anthropic/claude-sonnet-5.5", name: "Claude Sonnet 5.5", format: "messages", thinkingLevels: [...THINKING_LEVELS] };
-const GPT: AssistantModel = { id: "openai/gpt-6.1-sol", name: "GPT-6.1 Sol", format: "responses", thinkingLevels: [...THINKING_LEVELS] };
-const DEEPSEEK: AssistantModel = { id: "deepseek/deepseek-v4-pro", name: "DeepSeek V4 Pro", format: "chat", thinkingLevels: [...THINKING_LEVELS] };
+/**
+ * The models people can pick, as Ember AI lists them once they've answered their test questions, which
+ * they did at every level of thinking, through their providers' endpoints.
+ */
+const CLAUDE: AssistantModel = { id: "anthropic/claude-sonnet-5.5", name: "Claude Sonnet 5.5", format: "anthropic", thinkingLevels: [...THINKING_LEVELS] };
+const HAIKU: AssistantModel = { id: "anthropic/claude-haiku-5.5", name: "Claude Haiku 5.5", format: "anthropic", thinkingLevels: [...THINKING_LEVELS] };
+const GPT: AssistantModel = { id: "openai/gpt-6.1-sol", name: "GPT-6.1 Sol", format: "openai", thinkingLevels: [...THINKING_LEVELS] };
+/** A model Ember no longer offers, kept from before, which Cloudflare's REST API took in Chat Completions. */
+const DEEPSEEK: AssistantModel & KeptModel = { id: "deepseek/deepseek-v4-pro", name: "DeepSeek V4 Pro", format: "chat", thinkingLevels: [...THINKING_LEVELS] };
 
-/** `model` as Cloudflare's catalog lists it, which says nothing of the levels of thinking it takes, as Ember lists one it hasn't asked at each. */
+/** `model` as Ember listed one it hadn't asked at each level of thinking, saying nothing of the levels it takes. */
 const untested = ({ thinkingLevels: _, ...model }: AssistantModel): AssistantModel => model;
 
 /** `model` as the account's settings keep it. */
 const kept = ({ thinkingLevels, ...model }: AssistantModel) => ({ ...model, thinking_levels: thinkingLevels });
-
-/** Rows of Cloudflare's catalog, as its API answers with them, of text models and others, and one twice. */
-const ROWS = [
-  {
-    model_id: "anthropic/claude-sonnet-5.5",
-    provider_id: "anthropic",
-    name: "Claude Sonnet 5.5",
-    task: "Text Generation",
-    request_formats: ["anthropic-messages"],
-    provider_details: [{ id: "anthropic", pricing: { input_tokens: 2, input_cached_tokens: 0.1, input_cache_creation_tokens: 2.5, output_tokens: 10 } }],
-  },
-  { model_id: "@cf/black-forest-labs/flux-2-dev", provider_id: "black-forest-labs", name: "FLUX.2 [dev]", task: "Text-to-Image", request_formats: null, provider_details: null },
-  {
-    model_id: "openai/gpt-6.1-sol",
-    provider_id: "openai",
-    name: "GPT-6.1 Sol",
-    task: "Text Generation",
-    request_formats: ["responses", "chat-completions"],
-    provider_details: [
-      {
-        id: "openai",
-        pricing: { long_context_threshold_tokens: 272_000, short_context_input_tokens: 2, short_context_output_tokens: 10, long_context_input_tokens: 4, long_context_output_tokens: 15 },
-      },
-    ],
-  },
-  // Workers AI's can be named as their IDs end.
-  { model_id: "@cf/zai-org/glm-4.7-flash", provider_id: "zai-org", name: "glm-4.7-flash", task: "Text Generation", request_formats: null, provider_details: null },
-  { model_id: "@cf/cloudflare/clef", provider_id: "cloudflare", name: "Clef", task: "Text Generation", request_formats: ["workers-ai-run"] },
-  {
-    model_id: "deepseek/deepseek-v4-pro",
-    provider_id: "deepseek",
-    name: "DeepSeek V4 Pro",
-    task: "Text Generation",
-    request_formats: ["chat-completions"],
-    provider_details: [{ id: "fireworks", pricing: { input_tokens: 1.74, output_tokens: 3.48, input_cached_tokens: 0.145 } }],
-  },
-  { model_id: "@cf/meta/llama-4-scout-17b-16e-instruct", provider_id: "meta", name: "llama-4-scout-17b-16e-instruct", task: "Text Generation" },
-  { model_id: "anthropic/claude-sonnet-5.5", provider_id: "anthropic", name: "Claude Sonnet 5.5, again", task: "Text Generation", request_formats: ["anthropic-messages"] },
-  { model_id: "not a model", name: "Not a model", task: "Text Generation" },
-];
-
-/** The text models of `ROWS`, as Ember lists them: Workers AI's first, then by name, each once, with what they cost. */
-const LISTED: AssistantModel[] = [
-  { id: "@cf/zai-org/glm-4.7-flash", name: "GLM-4.7 Flash", format: "chat" },
-  { id: "@cf/meta/llama-4-scout-17b-16e-instruct", name: "llama-4-scout-17b-16e-instruct", format: "chat" },
-  { ...untested(CLAUDE), price: { input: 2, output: 10 } },
-  { ...untested(DEEPSEEK), price: { input: 1.74, output: 3.48 } },
-  { ...untested(GPT), price: { input: 2, output: 10 } },
-];
 
 const as = (session?: Session | null): Record<string, string> => (session ? { Cookie: session.cookie } : {});
 
@@ -113,17 +69,13 @@ async function joinAsGrace(): Promise<Session> {
   return { user: shown(((await response.json()) as { user: Me }).user), cookie: cookieOf(response) };
 }
 
-/** A request Cloudflare was sent: how, where, with which API token, and what it asked a model, for one to AI Gateway. */
+/** A request AI Gateway was sent: how, where, with which API token, and what it asked a model. */
 interface Sent {
   method: string;
   url: string;
   authorization: string | null;
   body: Record<string, unknown> | null;
 }
-
-/** A page of Cloudflare's catalog holding `rows`, the `page`th of those with `total` models in all. */
-const catalogPage = (rows: unknown[], page = 1, total = rows.length) =>
-  Response.json({ success: true, errors: [], messages: [], result: rows, result_info: { count: rows.length, page, per_page: 100, total_count: total } });
 
 /** A model's answer saying `text`, in the format `sent` asked in. */
 function answering(text: string): (sent: Sent) => Response {
@@ -138,32 +90,30 @@ function answering(text: string): (sent: Sent) => Response {
 const refusing = (status: number, code: number, message: string) => () => Response.json({ success: false, errors: [{ code, message }], messages: [], result: null }, { status });
 
 /**
- * Stands in for Cloudflare's API, whose catalog answers each page with what `catalog` makes of its
- * number, and whose models answer as `answer` says, saying hello unless it says otherwise. Keeps the
- * requests it's sent, in the order they came.
+ * Stands in for AI Gateway, whose models answer as `answer` says, saying hello unless it says otherwise.
+ * Keeps the requests it's sent, in the order they came.
  */
-function cloudflare({ catalog = () => catalogPage(ROWS), answer = answering(HELLO) }: { catalog?: (page: number) => Response | Promise<Response>; answer?: (sent: Sent) => Response | Promise<Response> } = {}): Sent[] {
+function cloudflare({ answer = answering(HELLO) }: { answer?: (sent: Sent) => Response | Promise<Response> } = {}): Sent[] {
   const requests: Sent[] = [];
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const request = new Request(input, init);
-    const url = new URL(request.url);
     const body = request.method === "GET" ? null : ((await request.json()) as Record<string, unknown>);
     const sent = { method: request.method, url: request.url, authorization: request.headers.get("Authorization"), body };
     requests.push(sent);
-    return url.pathname.endsWith("/ai/catalog/models") ? catalog(Number(url.searchParams.get("page"))) : answer(sent);
+    return answer(sent);
   });
   return requests;
 }
 
 /** Sets Ember AI up as `administrator` with `setup`, as Set up Ember AI does, which has to work. */
 async function turnOn(administrator: Session, setup: unknown = SETUP): Promise<AssistantSaved> {
-  const response = await api("/api/account/assistant", { method: "PUT", headers: as(administrator), body: JSON.stringify(setup) });
+  const response = await setUpAs(administrator, setup);
   expect(response.status, await response.clone().text()).toBe(200);
   return (await response.json()) as AssistantSaved;
 }
 
-/** Lists the models of the account `keys` gives as `session`, as Set up Ember AI and Add a model do. */
-const listModels = (session: Session | null, keys: unknown) => api("/api/account/assistant/catalog", { method: "POST", headers: as(session), body: JSON.stringify(keys) });
+/** Sets Ember AI up as `session` with `setup`, as Set up Ember AI does. */
+const setUpAs = (session: Session | null, setup: unknown) => api("/api/account/assistant", { method: "PUT", headers: as(session), body: JSON.stringify(setup) });
 
 /** Adds a model to those people can pick, as `session`, as Add a model does. */
 const addModel = (session: Session | null, model: unknown) => api("/api/account/assistant/models", { method: "POST", headers: as(session), body: JSON.stringify(model) });
@@ -179,7 +129,7 @@ const pick = (session: Session | null, changes: unknown) => api("/api/users/me/a
 
 /** Adds `model` as `administrator`, which has to work. */
 async function added(administrator: Session, model: AssistantModel): Promise<AssistantSaved> {
-  const response = await addModel(administrator, { model: model.id, modelName: model.name });
+  const response = await addModel(administrator, { model: model.id });
   expect(response.status, await response.clone().text()).toBe(200);
   return (await response.json()) as AssistantSaved;
 }
@@ -218,171 +168,28 @@ const yoursWith = (models: AssistantModel[], model: string | null = null): YourA
 beforeEach(freshDeploy);
 afterEach(() => vi.restoreAllMocks());
 
-describe("Cloudflare's model catalog", () => {
-  it("lists its text models in a format Ember asks in, Workers AI's first, then by name, each once, with what they cost", async () => {
-    const ada = await setUp();
-    const requests = cloudflare();
-
-    const response = await listModels(ada, { accountId: ACCOUNT_ID, apiToken: API_TOKEN });
-    expect(response.status, await response.clone().text()).toBe(200);
-    expect(response.headers.get("Cache-Control")).toBe("no-store");
-    expect(await response.json()).toEqual({ models: LISTED, refusal: null } satisfies AssistantCatalog);
-    expect(requests).toEqual([{ method: "GET", url: `${CLOUDFLARE_API}/ai/catalog/models?page=1&per_page=100`, authorization: `Bearer ${API_TOKEN}`, body: null }]);
-  });
-
-  it("reads each of its pages, with the API token Ember has when none is given", async () => {
-    const ada = await setUp();
-    cloudflare();
-    await turnOn(ada);
-    vi.restoreAllMocks();
-    const requests = cloudflare({ catalog: (page) => (page === 1 ? catalogPage(ROWS.slice(0, 3), 1, 150) : catalogPage(ROWS.slice(3), page, 150)) });
-
-    const response = await listModels(ada, { accountId: ACCOUNT_ID, apiToken: "" });
-    expect(((await response.json()) as AssistantCatalog).models).toEqual(LISTED);
-    expect(requests.map(({ url, authorization }) => [url.slice(CLOUDFLARE_API.length), authorization])).toEqual([
-      ["/ai/catalog/models?page=1&per_page=100", `Bearer ${API_TOKEN}`],
-      ["/ai/catalog/models?page=2&per_page=100", `Bearer ${API_TOKEN}`],
-    ]);
-  });
-
-  it("lists the models Ember knows when it can't be read, saying why", async () => {
-    const ada = await setUp();
-    vi.spyOn(console, "error").mockImplementation(() => {});
-    const listedWith = async (catalog: () => Response | Promise<Response>) => {
-      cloudflare({ catalog });
-      const response = await listModels(ada, { accountId: ACCOUNT_ID, apiToken: API_TOKEN });
-      expect(response.status).toBe(200);
-      const { models, refusal } = (await response.json()) as AssistantCatalog;
-      expect(models).toEqual(ASSISTANT_MODELS);
-      return refusal;
-    };
-
-    expect(await listedWith(refusing(401, 10000, "Authentication error"))).toMatch(/^Cloudflare didn't take that API token for this account\..* Cloudflare says: Authentication error$/);
-    expect(await listedWith(refusing(404, 7003, "Could not route to /client/v4/accounts/…"))).toMatch(/^Cloudflare has no account with that ID/);
-    expect(await listedWith(refusing(500, 1000, "Internal error"))).toBe(CATALOG_UNANSWERED);
-    expect(await listedWith(() => Promise.reject(new TypeError("Network connection lost.")))).toBe(CATALOG_UNANSWERED);
-    expect(await listedWith(() => new Response("Bad gateway", { status: 200 }))).toBe(CATALOG_UNANSWERED);
-    expect(await listedWith(() => catalogPage(ROWS.filter(({ task }) => task !== "Text Generation")))).toBe(CATALOG_UNANSWERED);
-  });
-
-  it("is listed only for administrators, of an account that can be one, before Cloudflare is asked anything", async () => {
-    const ada = await setUp();
-    const grace = await joinAsGrace();
-    const requests = cloudflare();
-
-    expect((await listModels(null, { accountId: ACCOUNT_ID, apiToken: API_TOKEN })).status).toBe(401);
-    expect(await refusalOf(await listModels(grace, { accountId: ACCOUNT_ID, apiToken: API_TOKEN }))).toEqual([403, ASSISTANT_FORBIDDEN]);
-    const refused = await listModels(ada, { accountId: "my-account", apiToken: API_TOKEN });
-    expect(refused.status).toBe(422);
-    expect(await refused.json()).toEqual({ error: ACCOUNT_ID_REFUSED, field: "accountId" });
-    expect(await (await listModels(ada, { accountId: ACCOUNT_ID })).json()).toEqual({ error: API_TOKEN_NEEDED, field: "apiToken" });
-    expect(requests).toEqual([]);
-  });
-});
-
-describe("The copy of the catalog Ember keeps", () => {
-  afterEach(() => vi.useRealTimers());
-
-  /** The catalog as it lists for `administrator` with the API token Ember has, as New agent, an agent's settings and Add a model list it. */
-  const listedWithEmbers = async (administrator: Session) => (await (await listModels(administrator, { accountId: ACCOUNT_ID })).json()) as AssistantCatalog;
-
-  /** What the Workspace keeps of the catalog for `accountId`. */
-  const keptFor = (accountId: string) => workspaceStub().keptCatalog(accountId);
-
-  /** Sets Ember AI up as `administrator`, then stops the clock, which moves only when a test moves it. */
-  async function turnOnAndStopTheClock(administrator: Session): Promise<void> {
-    cloudflare();
-    await turnOn(administrator);
-    vi.restoreAllMocks();
-    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() });
-  }
-
-  it("answers with the last read at once, which is read again for the next listing once it's ten minutes old, without waiting for the read", async () => {
-    const ada = await setUp();
-    await turnOnAndStopTheClock(ada);
-    // Cloudflare's catalog without the models it adds later.
-    let catalog: () => Response | Promise<Response> = () => catalogPage(ROWS.slice(0, 3));
-    const requests = cloudflare({ catalog: () => catalog() });
-    const before = [LISTED[2]!, LISTED[4]!];
-
-    expect(await listedWithEmbers(ada)).toEqual({ models: before, refusal: null });
-    expect(await keptFor(ACCOUNT_ID)).toEqual({ accountId: ACCOUNT_ID, models: before, readAt: Date.now() });
-    // Now with them, held back until the test lets Cloudflare answer.
-    let answer = () => {};
-    const held = new Promise<void>((resolve) => (answer = resolve));
-    catalog = async () => (await held, catalogPage(ROWS));
-    vi.setSystemTime(Date.now() + KEPT_CATALOG_FRESH_MS - 1);
-    expect(await listedWithEmbers(ada)).toEqual({ models: before, refusal: null });
-    expect(requests).toHaveLength(1);
-
-    vi.setSystemTime(Date.now() + 1);
-    expect(await listedWithEmbers(ada)).toEqual({ models: before, refusal: null });
-    await vi.waitFor(() => expect(requests).toHaveLength(2));
-    expect((await keptFor(ACCOUNT_ID))?.models).toEqual(before);
-    answer();
-    await vi.waitFor(async () => expect((await keptFor(ACCOUNT_ID))?.models).toEqual(LISTED));
-    expect(await listedWithEmbers(ada)).toEqual({ models: LISTED, refusal: null });
-    expect(requests).toHaveLength(2);
-  });
-
-  it("stays while the catalog doesn't answer, saying so in the log, and goes once Cloudflare refuses the API token, so the next listing says why", async () => {
-    const ada = await setUp();
-    await turnOnAndStopTheClock(ada);
-    let catalog = () => catalogPage(ROWS);
-    const requests = cloudflare({ catalog: () => catalog() });
-    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
-    const readAgainLogged = (refusal: RegExp) => vi.waitFor(() => expect(errors).toHaveBeenCalledWith(expect.stringMatching(refusal)));
-    expect(await listedWithEmbers(ada)).toEqual({ models: LISTED, refusal: null });
-
-    catalog = refusing(500, 1000, "Internal error");
-    vi.setSystemTime(Date.now() + KEPT_CATALOG_FRESH_MS);
-    expect(await listedWithEmbers(ada)).toEqual({ models: LISTED, refusal: null });
-    await readAgainLogged(new RegExp(`^Cloudflare's model catalog wasn't read again: ${CATALOG_UNANSWERED}$`));
-    expect((await keptFor(ACCOUNT_ID))?.models).toEqual(LISTED);
-
-    catalog = refusing(401, 10000, "Authentication error");
-    expect(await listedWithEmbers(ada)).toEqual({ models: LISTED, refusal: null });
-    await readAgainLogged(/^Cloudflare's model catalog wasn't read again: Cloudflare didn't take that API token/);
-    expect(await keptFor(ACCOUNT_ID)).toBeNull();
-    const { models, refusal } = await listedWithEmbers(ada);
-    expect(models).toEqual(ASSISTANT_MODELS);
-    expect(refusal).toMatch(/^Cloudflare didn't take that API token for this account\./);
-    expect(requests).toHaveLength(4);
-  });
-
-  it("isn't what an API token that's given lists, as Set up Ember AI's does, nor another account, whose catalog it becomes", async () => {
-    const ada = await setUp();
-    await turnOnAndStopTheClock(ada);
-    const requests = cloudflare();
-    const otherAccountId = "fedcba9876543210fedcba9876543210";
-    await listedWithEmbers(ada);
-
-    expect((await listModels(ada, { accountId: ACCOUNT_ID, apiToken: API_TOKEN })).status).toBe(200);
-    expect((await listModels(ada, { accountId: otherAccountId })).status).toBe(200);
-    expect(requests.map(({ url }) => new URL(url).pathname)).toEqual([
-      `/client/v4/accounts/${ACCOUNT_ID}/ai/catalog/models`,
-      `/client/v4/accounts/${ACCOUNT_ID}/ai/catalog/models`,
-      `/client/v4/accounts/${otherAccountId}/ai/catalog/models`,
-    ]);
-    expect(await keptFor(ACCOUNT_ID)).toBeNull();
-    expect(await keptFor(otherAccountId)).toEqual({ accountId: otherAccountId, models: LISTED, readAt: Date.now() });
-  });
-});
-
 describe("The models people can pick", () => {
-  it("start as the one Set up Ember AI chose, by the name it was given, which the account keeps with the format it took", async () => {
+  it("start as the one Set up Ember AI chose, by the name Ember calls it, which the account keeps with the format it took", async () => {
     const ada = await setUp();
     cloudflare();
 
-    const { assistant } = await turnOn(ada, { ...SETUP, model: DEEPSEEK.id, modelName: ` ${DEEPSEEK.name} ` });
-    expect(assistant).toEqual(settingsWith([DEEPSEEK]));
-    expect(await settingsShown(ada)).toEqual(settingsWith([DEEPSEEK]));
-    expect((await storedAssistant())?.models).toEqual([kept(DEEPSEEK)]);
-    // Without a name, a model is called as Ember knows it, or else by its ID.
-    expect((await turnOn(ada)).assistant.models).toEqual([CLAUDE]);
-    expect((await turnOn(ada, { ...SETUP, model: "openai/gpt-5.5" })).assistant.models).toEqual([
-      { id: "openai/gpt-5.5", name: "openai/gpt-5.5", format: "responses", thinkingLevels: [...THINKING_LEVELS] },
-    ]);
+    const { assistant } = await turnOn(ada, { ...SETUP, model: HAIKU.id, modelName: "Haiku" });
+    expect(assistant).toEqual(settingsWith([HAIKU]));
+    expect(await settingsShown(ada)).toEqual(settingsWith([HAIKU]));
+    expect((await storedAssistant())?.models).toEqual([kept(HAIKU)]);
+  });
+
+  it("start as none Ember doesn't offer, which is refused on the model's field before AI Gateway is asked anything", async () => {
+    const ada = await setUp();
+    const requests = cloudflare();
+
+    for (const model of ["openai/gpt-5.5", DEEPSEEK.id, "gpt", 7]) {
+      const response = await setUpAs(ada, { ...SETUP, model });
+      expect(response.status).toBe(422);
+      expect(await response.json()).toEqual({ error: MODEL_REFUSED, field: "model" });
+    }
+    expect(requests).toEqual([]);
+    expect(await settingsShown(ada)).toBeNull();
   });
 
   it("add a model once it answers a test question through Ember AI's account, after the others", async () => {
@@ -391,31 +198,38 @@ describe("The models people can pick", () => {
     await turnOn(ada);
     requests.length = 0;
 
-    const response = await addModel(ada, { model: ` ${GPT.id} `, modelName: GPT.name });
+    const response = await addModel(ada, { model: ` ${GPT.id} `, modelName: "GPT" });
     expect(response.status, await response.clone().text()).toBe(200);
     expect(response.headers.get("Cache-Control")).toBe("no-store");
     expect(await response.json()).toEqual({ assistant: settingsWith([CLAUDE, GPT]), greeting: "Hi, I'm GPT." } satisfies AssistantSaved);
-    // Its test question, and then the same at each level of thinking.
-    expect(requests.map(({ url, authorization, body }) => [url, authorization, body?.model])).toEqual(Array(5).fill([`${CLOUDFLARE_API}/ai/v1/responses`, `Bearer ${API_TOKEN}`, GPT.id]));
+    // Its test question, and then the same at each level of thinking, through the gateway's OpenAI endpoint, as OpenAI names it.
+    expect(requests.map(({ url, authorization, body }) => [url, authorization, body?.model])).toEqual(Array(5).fill([OPENAI_ENDPOINT, null, "gpt-6.1-sol"]));
     const efforts = requests.map(({ body }) => (body?.reasoning as { effort: string } | undefined)?.effort);
     expect([efforts[0], efforts.slice(1).sort()]).toEqual([undefined, ["high", "low", "medium", "none"]]);
     expect((await storedAssistant())?.models).toEqual([kept(CLAUDE), kept(GPT)]);
 
-    // Added again, it stays where it is, with the name it's given now.
-    expect((await added(ada, { ...GPT, name: "GPT Sol" })).assistant.models).toEqual([CLAUDE, { ...GPT, name: "GPT Sol" }]);
+    // Added again, it stays where it is, with the levels of thinking it takes now.
+    vi.restoreAllMocks();
+    cloudflare({ answer: (sent) => ((sent.body?.reasoning as { effort?: string } | undefined)?.effort === "none" ? refusing(400, 2001, "Unsupported effort.")() : answering(HELLO)(sent)) });
+    expect((await added(ada, GPT)).assistant.models).toEqual([CLAUDE, { ...GPT, thinkingLevels: ["low", "medium", "high"] }]);
   });
 
-  it("add no model AI Gateway doesn't take, saying why on the model's field", async () => {
+  it("add no model Ember doesn't offer, before AI Gateway is asked anything, nor one AI Gateway doesn't take, saying why on the model's field", async () => {
     const ada = await setUp();
     cloudflare();
     await turnOn(ada);
     vi.restoreAllMocks();
-    cloudflare({ answer: refusing(400, 2001, "No such model.") });
+    const requests = cloudflare({ answer: refusing(400, 2001, "No such model.") });
 
-    const response = await addModel(ada, { model: "openai/gpt-0" });
+    for (const model of ["openai/gpt-0", DEEPSEEK.id, "gpt-0", 7]) {
+      const response = await addModel(ada, { model });
+      expect(response.status).toBe(422);
+      expect(await response.json()).toEqual({ error: MODEL_REFUSED, field: "model" });
+    }
+    expect(requests).toEqual([]);
+    const response = await addModel(ada, { model: GPT.id });
     expect(response.status).toBe(422);
     expect(await response.json()).toEqual({ error: expect.stringContaining("AI Gateway didn't take that model.") as unknown, field: "model" });
-    expect(await refusalOf(await addModel(ada, { model: "gpt-0" }))).toEqual([422, MODEL_REFUSED]);
     expect((await settingsShown(ada))?.models).toEqual([CLAUDE]);
   });
 
@@ -427,25 +241,25 @@ describe("The models people can pick", () => {
     cloudflare({
       // While GPT answers its test question, Ember AI is turned off and set up again with another API token.
       answer: async (sent) => {
-        if (sent.body?.model === GPT.id) {
+        if (sent.url === OPENAI_ENDPOINT) {
           expect((await api("/api/account/assistant", { method: "DELETE", headers: as(ada) })).status).toBe(200);
-          await turnOn(ada, { ...SETUP, apiToken: `${API_TOKEN}-2`, model: DEEPSEEK.id, modelName: DEEPSEEK.name });
+          await turnOn(ada, { ...SETUP, apiToken: `${API_TOKEN}-2`, model: HAIKU.id });
         }
         return answering(HELLO)(sent);
       },
     });
 
-    expect(await refusalOf(await addModel(ada, { model: GPT.id, modelName: GPT.name }))).toEqual([409, SETUP_CHANGED]);
-    expect((await settingsShown(ada))?.models).toEqual([DEEPSEEK]);
+    expect(await refusalOf(await addModel(ada, { model: GPT.id }))).toEqual([409, SETUP_CHANGED]);
+    expect((await settingsShown(ada))?.models).toEqual([HAIKU]);
   });
 
-  it(`hold at most ${MAX_ASSISTANT_MODELS}`, async () => {
+  it(`hold at most ${MAX_ASSISTANT_MODELS}, counting those kept before Ember stopped offering them`, async () => {
     const ada = await setUp();
     cloudflare();
     await turnOn(ada);
-    for (let n = 1; n < MAX_ASSISTANT_MODELS; n++) await added(ada, { id: `openai/gpt-${n}`, name: `GPT-${n}`, format: "responses" });
+    await addKeptModels(...Array.from({ length: MAX_ASSISTANT_MODELS - 1 }, (_, n): KeptModel => ({ id: `openai/gpt-${n + 1}`, name: `GPT-${n + 1}`, format: "responses", thinkingLevels: [] })));
 
-    const response = await addModel(ada, { model: "openai/gpt-0" });
+    const response = await addModel(ada, { model: GPT.id });
     expect(response.status).toBe(422);
     expect(await response.json()).toEqual({ error: MODELS_FULL, field: "model" });
     expect((await settingsShown(ada))?.models).toHaveLength(MAX_ASSISTANT_MODELS);
@@ -460,8 +274,8 @@ describe("The models people can pick", () => {
     const response = await change(ada, { model: GPT.id, thinking: "medium" });
     expect(response.status, await response.clone().text()).toBe(200);
     expect(await response.json()).toEqual({ assistant: { ...settingsWith([CLAUDE, GPT], GPT.id), most: { thinking: "medium", length: "long" } } });
-    expect(await storedAssistant()).toMatchObject({ model: GPT.id, format: "responses" });
-    expect(await refusalOf(await change(ada, { model: DEEPSEEK.id }))).toEqual([422, MODEL_NOT_LISTED]);
+    expect(await storedAssistant()).toMatchObject({ model: GPT.id, format: "openai" });
+    expect(await refusalOf(await change(ada, { model: HAIKU.id }))).toEqual([422, MODEL_NOT_LISTED]);
     expect(await refusalOf(await change(ada, { model: "gpt" }))).toEqual([422, MODEL_NOT_LISTED]);
     expect((await settingsShown(ada))?.model).toBe(GPT.id);
   });
@@ -471,16 +285,16 @@ describe("The models people can pick", () => {
     cloudflare();
     await turnOn(ada);
     await added(ada, GPT);
-    await added(ada, DEEPSEEK);
+    await added(ada, HAIKU);
 
     const response = await removeModel(ada, GPT.id);
     expect(response.status, await response.clone().text()).toBe(200);
-    expect(await response.json()).toEqual({ assistant: settingsWith([CLAUDE, DEEPSEEK]) });
+    expect(await response.json()).toEqual({ assistant: settingsWith([CLAUDE, HAIKU]) });
     // Removed already, it stays removed.
-    expect(await (await removeModel(ada, GPT.id)).json()).toEqual({ assistant: settingsWith([CLAUDE, DEEPSEEK]) });
+    expect(await (await removeModel(ada, GPT.id)).json()).toEqual({ assistant: settingsWith([CLAUDE, HAIKU]) });
     expect(await refusalOf(await removeModel(ada, CLAUDE.id))).toEqual([409, DEFAULT_MODEL_KEPT]);
     expect(await refusalOf(await removeModel(ada, "claude"))).toEqual([422, MODEL_NOT_LISTED]);
-    expect((await settingsShown(ada))?.models).toEqual([CLAUDE, DEEPSEEK]);
+    expect((await settingsShown(ada))?.models).toEqual([CLAUDE, HAIKU]);
   });
 
   it("have the model Set up Ember AI chooses in place of the one that answered everyone, and keep the others", async () => {
@@ -489,9 +303,9 @@ describe("The models people can pick", () => {
     await turnOn(ada);
     await added(ada, GPT);
 
-    expect((await turnOn(ada, { ...SETUP, model: DEEPSEEK.id, modelName: DEEPSEEK.name })).assistant).toEqual(settingsWith([DEEPSEEK, GPT]));
+    expect((await turnOn(ada, { ...SETUP, model: HAIKU.id })).assistant).toEqual(settingsWith([HAIKU, GPT]));
     // Kept with its new token, or none, it stays where it was.
-    expect((await turnOn(ada, { accountId: ACCOUNT_ID, model: DEEPSEEK.id })).assistant).toEqual(settingsWith([DEEPSEEK, GPT]));
+    expect((await turnOn(ada, { accountId: ACCOUNT_ID, model: HAIKU.id })).assistant).toEqual(settingsWith([HAIKU, GPT]));
     // Chosen from among them, it's there once.
     expect((await turnOn(ada, { ...SETUP, model: GPT.id })).assistant).toEqual(settingsWith([GPT]));
   });
@@ -503,7 +317,7 @@ describe("The models people can pick", () => {
     await added(ada, GPT);
     expect((await api("/api/account/assistant", { method: "DELETE", headers: as(ada) })).status).toBe(200);
 
-    expect((await turnOn(ada, { ...SETUP, model: DEEPSEEK.id, modelName: DEEPSEEK.name })).assistant).toEqual(settingsWith([DEEPSEEK]));
+    expect((await turnOn(ada, { ...SETUP, model: HAIKU.id })).assistant).toEqual(settingsWith([HAIKU]));
   });
 
   it("are the one it answers with, for Ember AI set up before people could pick", async () => {
@@ -516,6 +330,24 @@ describe("The models people can pick", () => {
     // Its own model, which Ember hadn't asked at each level of thinking then.
     expect(await settingsShown(ada)).toEqual(settingsWith([untested(CLAUDE)]));
     expect((await added(ada, GPT)).assistant.models).toEqual([untested(CLAUDE), GPT]);
+  });
+
+  it("keep those kept before Ember stopped offering them, which can answer everyone, until they're removed, when they can't be added again", async () => {
+    const ada = await setUp();
+    const requests = cloudflare();
+    await turnOn(ada);
+    await addKeptModels(DEEPSEEK);
+    expect(await settingsShown(ada)).toEqual(settingsWith([CLAUDE, DEEPSEEK]));
+    requests.length = 0;
+
+    expect(await (await change(ada, { model: DEEPSEEK.id })).json()).toEqual({ assistant: settingsWith([CLAUDE, DEEPSEEK], DEEPSEEK.id) });
+    expect(await storedAssistant()).toMatchObject({ model: DEEPSEEK.id, format: "chat" });
+    // Set up again, Ember AI answers everyone with one Ember offers.
+    expect(await refusalOf(await setUpAs(ada, { accountId: ACCOUNT_ID, model: DEEPSEEK.id }))).toEqual([422, MODEL_REFUSED]);
+    await change(ada, { model: CLAUDE.id });
+    expect(await (await removeModel(ada, DEEPSEEK.id)).json()).toEqual({ assistant: settingsWith([CLAUDE]) });
+    expect(await refusalOf(await addModel(ada, { model: DEEPSEEK.id }))).toEqual([422, MODEL_REFUSED]);
+    expect(requests).toEqual([]);
   });
 
   it("are the administrators' to change, while Ember AI is on", async () => {
@@ -555,7 +387,7 @@ describe("Your model", () => {
     // Each person's is their own.
     expect(await yoursShown(ada)).toEqual(yoursWith([CLAUDE, GPT]));
 
-    expect(await refusalOf(await pick(grace, { model: DEEPSEEK.id }))).toEqual([422, MODEL_NOT_LISTED]);
+    expect(await refusalOf(await pick(grace, { model: HAIKU.id }))).toEqual([422, MODEL_NOT_LISTED]);
     expect(await refusalOf(await pick(grace, { model: 7 }))).toEqual([422, MODEL_NOT_LISTED]);
     expect((await yoursShown(grace))?.model).toBe(GPT.id);
   });
@@ -566,13 +398,13 @@ describe("Your model", () => {
     cloudflare();
     await turnOn(ada);
     await added(ada, GPT);
-    await added(ada, DEEPSEEK);
+    await added(ada, HAIKU);
 
     await pick(grace, { model: GPT.id });
-    expect(await (await pick(grace, { model: null })).json()).toEqual({ assistant: yoursWith([CLAUDE, GPT, DEEPSEEK]) });
+    expect(await (await pick(grace, { model: null })).json()).toEqual({ assistant: yoursWith([CLAUDE, GPT, HAIKU]) });
     expect(await workspaceSql("SELECT assistant_model FROM users WHERE id = ?", grace.user.id)).toEqual([{ assistant_model: null }]);
-    await change(ada, { model: DEEPSEEK.id });
-    expect(await yoursShown(grace)).toEqual({ ...yoursWith([CLAUDE, GPT, DEEPSEEK]), defaultModel: DEEPSEEK.id });
+    await change(ada, { model: HAIKU.id });
+    expect(await yoursShown(grace)).toEqual({ ...yoursWith([CLAUDE, GPT, HAIKU]), defaultModel: HAIKU.id });
   });
 
   it("stays yours once administrators choose it to answer everyone, and once they choose another, as does the one they chose, picked", async () => {
@@ -581,18 +413,18 @@ describe("Your model", () => {
     cloudflare();
     await turnOn(ada);
     await added(ada, GPT);
-    await added(ada, DEEPSEEK);
+    await added(ada, HAIKU);
 
     await pick(grace, { model: GPT.id });
     await change(ada, { model: GPT.id });
-    expect(await yoursShown(grace)).toEqual({ ...yoursWith([CLAUDE, GPT, DEEPSEEK], GPT.id), defaultModel: GPT.id });
-    await change(ada, { model: DEEPSEEK.id });
+    expect(await yoursShown(grace)).toEqual({ ...yoursWith([CLAUDE, GPT, HAIKU], GPT.id), defaultModel: GPT.id });
+    await change(ada, { model: HAIKU.id });
     expect((await yoursShown(grace))?.model).toBe(GPT.id);
 
-    expect(await (await pick(grace, { model: DEEPSEEK.id })).json()).toEqual({ assistant: { ...yoursWith([CLAUDE, GPT, DEEPSEEK], DEEPSEEK.id), defaultModel: DEEPSEEK.id } });
-    expect(await workspaceSql("SELECT assistant_model FROM users WHERE id = ?", grace.user.id)).toEqual([{ assistant_model: DEEPSEEK.id }]);
+    expect(await (await pick(grace, { model: HAIKU.id })).json()).toEqual({ assistant: { ...yoursWith([CLAUDE, GPT, HAIKU], HAIKU.id), defaultModel: HAIKU.id } });
+    expect(await workspaceSql("SELECT assistant_model FROM users WHERE id = ?", grace.user.id)).toEqual([{ assistant_model: HAIKU.id }]);
     await change(ada, { model: CLAUDE.id });
-    expect((await yoursShown(grace))?.model).toBe(DEEPSEEK.id);
+    expect((await yoursShown(grace))?.model).toBe(HAIKU.id);
   });
 
   it("is the one that answers everyone while yours is removed, and yours again once it's added back", async () => {
@@ -632,7 +464,7 @@ describe("@ember's answers", () => {
     }
   }
 
-  /** What @ember answers `person` asking it something in general, and the model it asked. */
+  /** What @ember answers `person` asking it something in general, and the model it asked, as the model's provider names it. */
   async function askedAs(person: Session): Promise<[string, unknown]> {
     const client = await connect(await general(), person);
     const requests = cloudflare({ answer: answering("An answer.") });
@@ -652,11 +484,11 @@ describe("@ember's answers", () => {
     await pick(grace, { model: GPT.id });
     vi.restoreAllMocks();
 
-    expect(await askedAs(grace)).toEqual(["An answer.", GPT.id]);
-    expect(await askedAs(ada)).toEqual(["An answer.", CLAUDE.id]);
+    expect(await askedAs(grace)).toEqual(["An answer.", "gpt-6.1-sol"]);
+    expect(await askedAs(ada)).toEqual(["An answer.", "claude-sonnet-5-5"]);
 
     await removeModel(ada, GPT.id);
-    expect(await askedAs(grace)).toEqual(["An answer.", CLAUDE.id]);
+    expect(await askedAs(grace)).toEqual(["An answer.", "claude-sonnet-5-5"]);
   });
 
   it("come from the model you picked once administrators choose it to answer everyone, and once they choose another", async () => {
@@ -668,13 +500,30 @@ describe("@ember's answers", () => {
     await pick(grace, { model: GPT.id });
     await change(ada, { model: GPT.id });
     vi.restoreAllMocks();
-    expect(await askedAs(grace)).toEqual(["An answer.", GPT.id]);
+    expect(await askedAs(grace)).toEqual(["An answer.", "gpt-6.1-sol"]);
 
     cloudflare();
     await change(ada, { model: CLAUDE.id });
     vi.restoreAllMocks();
-    expect(await askedAs(grace)).toEqual(["An answer.", GPT.id]);
-    expect(await askedAs(ada)).toEqual(["An answer.", CLAUDE.id]);
+    expect(await askedAs(grace)).toEqual(["An answer.", "gpt-6.1-sol"]);
+    expect(await askedAs(ada)).toEqual(["An answer.", "claude-sonnet-5-5"]);
+  });
+
+  it("come from a model kept before Ember stopped offering it as it was kept, through Cloudflare's REST API", async () => {
+    const ada = await setUp();
+    const grace = await joinAsGrace();
+    cloudflare();
+    await turnOn(ada);
+    await addKeptModels(DEEPSEEK);
+    await pick(grace, { model: DEEPSEEK.id });
+    vi.restoreAllMocks();
+
+    const client = await connect(await general(), grace);
+    const requests = cloudflare({ answer: answering("An answer.") });
+    await post(client, `<p>${mention} what's new?</p>`);
+    expect((await nextAnswer(client)).plainText).toBe("An answer.");
+    client.close();
+    expect(requests.map(({ url, authorization, body }) => [url, authorization, body?.model])).toEqual([[CHAT_COMPLETIONS, `Bearer ${API_TOKEN}`, DEEPSEEK.id]]);
   });
 
   it("say you can pick another model when the one you picked can't answer", async () => {

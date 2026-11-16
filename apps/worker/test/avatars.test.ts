@@ -22,7 +22,7 @@ const avatar = (path: string, viewer: Session | null, init: RequestInit = {}) =>
 
 /** The address of an avatar whose token names `userId`, who needn't exist. */
 const avatarPathFor = async (userId: UserId, secret = "test-secret") =>
-  (await directoryOf([{ id: userId, name: "Nobody", bio: null, role: "member", status: "active", updatedAt: "2026-10-14T12:00:00.000Z", agent: false }], secret))[0]!.avatarUrl;
+  (await directoryOf([{ id: userId, name: "Nobody", bio: null, role: "member", status: "active", updatedAt: "2026-10-14T12:00:00.000Z", agent: false, keptFor: null }], secret))[0]!.avatarUrl;
 
 const sha256 = async (text: string) =>
   Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))), (byte) => byte.toString(16).padStart(2, "0")).join("");

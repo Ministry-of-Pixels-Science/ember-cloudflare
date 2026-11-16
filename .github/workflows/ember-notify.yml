@@ -1,0 +1,48 @@
+name: Ember notifications
+
+# Posts this repository's activity in a room of Ember's own Ember, ember.nyllon.com, through the GitHub
+# bot's Slack-compatible webhook, whose address is the EMBER_WEBHOOK secret. Without that secret, as in
+# the copies Deploy to Cloudflare makes, it posts nothing.
+on:
+  push:
+    branches: [main]
+  # pull_request_target, not pull_request, so pull requests from forks have the secret too. It never
+  # checks out their code, and their titles reach the script only as data, through the event's file.
+  pull_request_target:
+    types: [opened, reopened, closed]
+  issues:
+    types: [opened, closed, reopened]
+  release:
+    types: [published]
+  watch:
+    types: [started]
+
+permissions: {}
+
+jobs:
+  notify:
+    if: github.repository == 'NYLLON-SOFTWARE/ember-cloudflare'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post to Ember
+        env:
+          EMBER_WEBHOOK: ${{ secrets.EMBER_WEBHOOK }}
+        run: |
+          if [ -z "$EMBER_WEBHOOK" ]; then echo "No EMBER_WEBHOOK secret, so nothing to post."; exit 0; fi
+          E="$GITHUB_EVENT_PATH"
+          # Slack's escapes for a title or message, so its < > & show as written.
+          ESC='def esc: gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;");'
+          case "$GITHUB_EVENT_NAME" in
+            push)
+              TEXT=$(jq -r "$ESC"'"*\(.pusher.name)* pushed \(.commits | length) commit(s) to `\(.ref | sub("refs/heads/"; ""))`: <\(.compare)|\((.head_commit.message // "") | split("\n")[0] | esc)>"' "$E") ;;
+            pull_request_target)
+              TEXT=$(jq -r "$ESC"'(if .action == "closed" and .pull_request.merged then "merged" else .action end) as $a | "*\(.sender.login)* \($a) PR <\(.pull_request.html_url)|#\(.pull_request.number) \(.pull_request.title | esc)>"' "$E") ;;
+            issues)
+              TEXT=$(jq -r "$ESC"'"*\(.sender.login)* \(.action) issue <\(.issue.html_url)|#\(.issue.number) \(.issue.title | esc)>"' "$E") ;;
+            release)
+              TEXT=$(jq -r "$ESC"'"🚀 *\(.sender.login)* published <\(.release.html_url)|\((.release.name // .release.tag_name) | esc)>"' "$E") ;;
+            watch)
+              TEXT=$(jq -r '"⭐ *\(.sender.login)* starred <\(.repository.html_url)|\(.repository.full_name)> (\(.repository.stargazers_count) stars)"' "$E") ;;
+            *) exit 0 ;;
+          esac
+          jq -n --arg t "$TEXT" '{text: $t}' | curl -sSf -X POST -H 'Content-Type: application/json' --data @- "$EMBER_WEBHOOK"

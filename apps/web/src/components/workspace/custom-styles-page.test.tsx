@@ -10,7 +10,7 @@ import { CustomStylesPage } from "./custom-styles-page";
 import { CHANGES_SAVED } from "./settings-page";
 
 const CSS = ".mb-app { --mb-ink: rebeccapurple; }";
-const styled: Account = { name: "Analytical Engines", tagline: "", hideTranslationButtons: true, customStyles: CSS, restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false };
+const styled: Account = { name: "Analytical Engines", tagline: "", hideTranslationButtons: true, customStyles: CSS, restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true };
 
 /** The icon pickers' catalog: a few icons, with Coffee suggested for a break room. */
 const CATALOG = {

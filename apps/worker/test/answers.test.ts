@@ -1,5 +1,5 @@
 import { ASSISTANT_ID, ASSISTANT_NAME, MAX_MESSAGE_LENGTH, type BotAnswer, type BotSettings, type DirectRoom, type Message, type NewWorkspace, type RoomId, type User } from "@ember/protocol";
-import { DEFAULT_LEVELS, MAX_CONVERSATION_LENGTH, maxTokensAt, TOP_LEVELS, UNTHINKING_TOKENS, type AnswerLevelChanges } from "@ember/protocol/assistant";
+import { DEFAULT_LEVELS, MAX_CONVERSATION_LENGTH, maxTokensAt, THINKING_LEVELS, TOP_LEVELS, UNTHINKING_TOKENS, type AnswerLevelChanges } from "@ember/protocol/assistant";
 import { CARDS_PROMPT } from "@ember/protocol/prompts";
 import { MENTION_CONTENT_TYPE, mentionSgid, OPENGRAPH_EMBED_CONTENT_TYPE, prepareBody } from "@ember/richtext";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -16,35 +16,42 @@ import {
 } from "../src/assistant/answers";
 import { markdownHtml } from "../src/bots/markdown";
 import { keptCards } from "../src/cards";
-import { api, apiWith, connect, cookieOf, freshDeploy, post, roomSql, settle, shown, startDirect, workspaceSql, type Client, type Session } from "./support";
+import { answerWithKeptModel, api, apiWith, connect, cookieOf, freshDeploy, post, roomSql, settle, shown, startDirect, workspaceSql, type Client, type KeptModel, type Session } from "./support";
 
 // What @ember answers when someone asks it something: in the room or thread they asked in, having read
 // the conversation there, as rich text, with the pictures it shows in a card and a preview of its first
 // link, at addresses people wrote there, or a note saying why it can't, and only while Ember AI is on.
 
 const EMBER: User = { id: ASSISTANT_ID, name: ASSISTANT_NAME };
-/** A Workers AI model, which takes Chat Completions, whose turns AI Gateway is sent as they are. */
+/**
+ * One of Workers AI's models, which a copy set up before Ember stopped offering them may answer with,
+ * which takes Chat Completions, through Cloudflare's REST API, whose turns AI Gateway is sent as they are.
+ */
 const MODEL = "@cf/zai-org/glm-4.7-flash";
-/** Anthropic's model, which takes Messages, and OpenAI's, which takes Responses. */
+const GLM: KeptModel = { id: MODEL, name: "GLM-4.7 Flash", format: "chat", thinkingLevels: [...THINKING_LEVELS] };
+/** Anthropic's model, which takes Messages, and OpenAI's, which takes Responses, through their providers' endpoints. */
 const [MESSAGES_MODEL, RESPONSES_MODEL] = ["anthropic/claude-sonnet-5.5", "openai/gpt-6.1-sol"];
-const SETUP = { accountId: "0123456789abcdef0123456789abcdef", apiToken: "an-api-token-with-workers-ai-read_0123456", model: MODEL };
+const SETUP = { accountId: "0123456789abcdef0123456789abcdef", apiToken: "an-api-token-with-ai-gateway-run_0123456" };
 
-/** Sets Ember up with Ada as its administrator, signed in, and Ember AI on with `model`, answering her session and the general room. */
+/**
+ * Sets Ember up with Ada as its administrator, signed in, and Ember AI on with `model`, answering her
+ * session and the general room: GLM, kept from before Ember stopped offering it, unless it's one Ember offers.
+ */
 async function setUp(model = MODEL): Promise<{ ada: Session; general: RoomId }> {
   const response = await api("/api/first_run", { method: "POST", body: JSON.stringify({ name: "Ada Lovelace", emailAddress: "ada@example.com", password: "analytical engine" }) });
   expect(response.status).toBe(201);
   const ada = { user: shown(((await response.json()) as NewWorkspace).user), cookie: cookieOf(response) };
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => answerAt(new Request(input, init).url, "Hello, team!"));
-  const saved = await api("/api/account/assistant", { method: "PUT", headers: { Cookie: ada.cookie }, body: JSON.stringify({ ...SETUP, model }) });
-  expect(saved.status, await saved.clone().text()).toBe(200);
+  await setUpAgain(ada, model === MODEL ? MESSAGES_MODEL : model);
   vi.restoreAllMocks();
+  if (model === MODEL) await answerWithKeptModel(GLM);
   const [{ id: general }] = (await workspaceSql("SELECT id FROM rooms WHERE name = 'general'")) as [{ id: RoomId }];
   return { ada, general };
 }
 
-/** Sets Ember AI up again as `administrator`, with its model, which asks the model its test question at each level of thinking. */
-async function setUpAgain(administrator: Session): Promise<void> {
-  const saved = await api("/api/account/assistant", { method: "PUT", headers: { Cookie: administrator.cookie }, body: JSON.stringify(SETUP) });
+/** Sets Ember AI up as `administrator` with `model`, one Ember offers, which asks the model its test question at each level of thinking. */
+async function setUpAgain(administrator: Session, model: string): Promise<void> {
+  const saved = await api("/api/account/assistant", { method: "PUT", headers: { Cookie: administrator.cookie }, body: JSON.stringify({ ...SETUP, model }) });
   expect(saved.status, await saved.clone().text()).toBe(200);
 }
 
@@ -117,16 +124,16 @@ const PAGE =
   '<meta property="og:url" content="https://example.com/"><meta property="og:title" content="Example"><meta property="og:description" content="An example page."><meta property="og:image" content="https://example.com/card.png">';
 
 /**
- * Stands in for AI Gateway, whose model answers each question with what `answer` makes of it, and for
- * the Internet, where every name is at one public address and http://www.example.com/ has a preview.
- * Keeps the questions, in the order they came.
+ * Stands in for AI Gateway, through Cloudflare's REST API or its endpoints for each provider, whose model
+ * answers each question with what `answer` makes of it, and for the Internet, where every name is at one
+ * public address and http://www.example.com/ has a preview. Keeps the questions, in the order they came.
  */
 function internet(answer: (asked: Asked) => Response | Promise<Response>): Asked[] {
   const questions: Asked[] = [];
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const request = new Request(input, init);
     const url = new URL(request.url);
-    if (url.hostname === "api.cloudflare.com") {
+    if (url.hostname === "api.cloudflare.com" || url.hostname === "gateway.ai.cloudflare.com") {
       const asked = { url: request.url, metadata: request.headers.get("cf-aig-metadata"), body: (await request.json()) as Asked["body"] };
       questions.push(asked);
       return answer(asked);
@@ -445,16 +452,16 @@ describe("@ember", () => {
   });
 
   it("asks a model at the level of thinking it took its test question at nearest the asker's, below it first, and one that took none at no level, in the room the asker's level gives", async () => {
-    const { ada, general } = await setUp();
+    const { ada, general } = await setUp(RESPONSES_MODEL);
     vi.spyOn(console, "log").mockImplementation(() => {});
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     let refused = ["none", "medium"];
-    const questions = internet(({ body }) =>
-      body.reasoning_effort !== undefined && refused.includes(body.reasoning_effort)
-        ? Response.json({ error: { message: `Unsupported value: 'reasoning_effort' does not support '${body.reasoning_effort}' with this model.` } }, { status: 400 })
-        : chatAnswer("Here's the plan."),
+    const questions = internet(({ url, body }) =>
+      body.reasoning !== undefined && refused.includes(body.reasoning.effort)
+        ? Response.json({ error: { message: `Unsupported value: 'reasoning.effort' does not support '${body.reasoning.effort}' with this model.` } }, { status: 400 })
+        : answerAt(url, "Here's the plan."),
     );
-    await setUpAgain(ada);
+    await setUpAgain(ada, RESPONSES_MODEL);
     const client = await connect(general, ada);
 
     for (const thinking of ["off", "medium", "high"] as const) {
@@ -462,15 +469,15 @@ describe("@ember", () => {
       await post(client, `<p>${mention(EMBER)} plan the launch?</p>`);
       await nextAnswer(client);
     }
-    // As xAI refuses each for Grok 4.20 Reasoning.
+    // As a model can refuse each.
     refused = ["none", "low", "medium", "high"];
-    await setUpAgain(ada);
+    await setUpAgain(ada, RESPONSES_MODEL);
     await post(client, `<p>${mention(EMBER)} and the party?</p>`);
     expect(await nextAnswer(client)).toMatchObject({ plainText: "Here's the plan." });
 
     // Past the test question and its levels each time Ember AI was set up.
     const answers = [...questions.slice(5, 8), ...questions.slice(13)];
-    expect(answers.map(({ body }) => [body.reasoning_effort, body.max_completion_tokens])).toEqual([
+    expect(answers.map(({ body }) => [body.reasoning?.effort, body.max_output_tokens])).toEqual([
       ["low", UNTHINKING_TOKENS + 2_000],
       ["low", 16_000 + 2_000],
       ["high", 32_000 + 2_000],

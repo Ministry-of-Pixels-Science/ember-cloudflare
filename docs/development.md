@@ -10,7 +10,7 @@ and how it's tested. The [self-hosting guide](self-hosting.md) covers deploying 
 | Path | Package | What |
 |---|---|---|
 | `apps/web` | `@ember/web` | React + Vite + Tailwind CSS v4 + shadcn/ui. The workspace UI. |
-| `apps/worker` | `@ember/worker` | The Worker (`/api/*`, `/up`, the app's pages with Campfire's headers and error pages, the web app manifest, static assets) and the `ChatRoom`, `Workspace`, `SearchIndex`, `PasswordHasher` and `Unfurler` Durable Objects. |
+| `apps/worker` | `@ember/worker` | The Worker (`/api/*`, `/up`, the app's pages with Campfire's headers and error pages, the web app manifest, static assets) and the `ChatRoom`, `Workspace`, `SearchIndex`, `PasswordHasher`, `Unfurler`, `AppConnector` and `OutsideAi` Durable Objects. |
 | `packages/protocol` | `@ember/protocol` | WebSocket frame types and validation shared by both, and the addresses of the app's pages. |
 | `packages/richtext` | `@ember/richtext` | Message bodies as Campfire's Action Text reads them: sanitizing, plain text, mentions and emoji-only bodies, golden-tested against a corpus of Campfire's Rails outputs. |
 
@@ -80,9 +80,9 @@ pnpm screenshots    # remakes the web app manifest's screenshots
 Before the other suites start, the `first-run` project sets up the test server through the Set up
 Ember page, as its first visitor would. The `workspace-settings` suites, which change the whole
 workspace, get a second server, over HTTPS, which the same first run sets up. Their browsers have a
-made-up microphone, for the huddles spec, whose stand-in for Cloudflare's Realtime SFU
-(`e2e/tests/workspace-settings/fake-sfu.ts`) passes what each browser says on to the others through
-a page of its own, so a huddle there is heard for real.
+made-up microphone, camera and screen to share, for the huddles spec, whose stand-in for Cloudflare's
+Realtime SFU (`e2e/tests/workspace-settings/fake-sfu.ts`) passes what each browser says and shows on
+to the others through a page of its own, so a huddle there is heard and seen for real.
 
 The features suite (`e2e/tests/features/`) has a spec per area of the app. Each test gets rooms of
 its own, and `members.signIn` opens a browser per person, so tests can chat, react and watch

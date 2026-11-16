@@ -101,7 +101,7 @@ test.describe("Shared room order", () => {
       await expect(page).toHaveURL(/\/rooms\/opens\/[^/]+\/edit$/);
       await expect(sidebarRooms(member).first()).toHaveText(`#${second}`, REORDERED);
     } finally {
-      // An empty order leaves every room to go by name again, for the tests that follow.
+      // An empty order leaves every room unranked again, for the tests that follow.
       expect(await send(page, "PUT", "/api/account/room_order", { roomIds: [] })).toBe(200);
     }
     await member.context().close();

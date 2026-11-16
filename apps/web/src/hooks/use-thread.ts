@@ -147,7 +147,7 @@ export function useThread(roomId: string, frames: RoomFrames, status: Connection
    */
   const jump = useCallback((replyId: string | null) => dispatch(replyId === null ? { type: "focus", messageId: null } : { type: "open-at", replyId }), []);
 
-  const messageActions = useMemo(() => messageActionsOf(send, warn), [send, warn]);
+  const messageActions = useMemo(() => messageActionsOf(frames, warn), [frames, warn]);
   const dismissNotice = useCallback(() => dispatch({ type: "dismiss-notice" }), []);
 
   return { state, postReply, postFiles, loadOlder, jump, messageActions, dismissNotice };

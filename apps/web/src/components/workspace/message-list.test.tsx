@@ -87,7 +87,7 @@ const scrollTo = (log: HTMLElement, top: number) => {
 };
 
 const ada: Me = { id: "u1", name: "Ada", administrator: false };
-const actions = { boost: vi.fn(), unboost: vi.fn(), edit: vi.fn(), remove: vi.fn() };
+const actions = { boost: vi.fn(), unboost: vi.fn(), edit: vi.fn(), remove: vi.fn(), click: vi.fn() };
 const editors = { open: vi.fn(), close: vi.fn(), returnFocus: vi.fn(), attach: vi.fn(), reply: vi.fn() };
 
 /** Messages from Ada named m`from` to m`to`. */
@@ -338,7 +338,7 @@ describe("Welcome and invite card", () => {
 
 describe("Sign in with Memberful", () => {
   it("shows no welcome card while Memberful is members only, since its join link is off", () => {
-    const account = { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: true, memberfulSignIn: true, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false };
+    const account = { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: true, memberfulSignIn: true, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true };
     render(<AccountContext value={account}>{list({ messages: [], paged: false }, vi.fn(), { roomId: "general", joinCode: "aB3d-Ef5h-iJ7k" })}</AccountContext>);
     expect(screen.queryByRole("heading", { name: "Welcome to Ember" })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Welcome to #general" })).toBeInTheDocument();
@@ -347,7 +347,7 @@ describe("Sign in with Memberful", () => {
 
 describe("Ways to join", () => {
   it("shows no welcome card while the join link is off, but shows it again once it's on", () => {
-    const account = { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: false, openSignUp: true, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false };
+    const account = { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: false, openSignUp: true, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true };
     const welcome = (joinLink: boolean) => <AccountContext value={{ ...account, joinLink }}>{list({ messages: [], paged: false }, vi.fn(), { roomId: "general", joinCode: "aB3d-Ef5h-iJ7k" })}</AccountContext>;
     const { rerender } = render(welcome(false));
     expect(screen.queryByRole("heading", { name: "Welcome to Ember" })).not.toBeInTheDocument();

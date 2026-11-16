@@ -227,7 +227,7 @@ export function parseTemplate(given: unknown, answererId: UserId | null): { temp
  */
 export function webPromptFor(askerName: string, webTools: readonly WebTool[], webSearchOn: boolean): string {
   if (!webTools.includes("search") && webSearchOn) {
-    return `You can't search the web or open links with the model ${askerName} picked for your answers to them. When they ask you to, say so, and that they can pick one that can, Anthropic's, OpenAI's or xAI's, under Ember AI on their profile.`;
+    return `You can't search the web or open links with the model ${askerName} picked for your answers to them. When they ask you to, say so, and that they can pick one that can under Ember AI on their profile.`;
   }
   if (!webTools.includes("search")) {
     return `You can't search the web or open links. When someone asks you to, say so, and that an administrator can turn on Search the web under ${AI_SETTINGS}.`;

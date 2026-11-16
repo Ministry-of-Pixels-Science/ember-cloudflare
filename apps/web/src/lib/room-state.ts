@@ -477,9 +477,10 @@ function applyFrame(state: RoomState, frame: ServerFrame, now: number): RoomStat
         refusedUnboosts: frame.failed === "boost.delete" ? state.refusedUnboosts + 1 : state.refusedUnboosts,
       };
     }
-    // A thread's, which its own state keeps.
+    // A thread's, which its own state keeps, and a click's answer, which its button waits for.
     case "thread.opened":
     case "thread.history":
+    case "card.clicked":
     case "pong":
       return state;
   }

@@ -39,6 +39,8 @@ import { PicturePicker } from "./picture-picker";
 import { PageHeading, Panel, SettingsPage } from "./settings-page";
 import { SignInLink } from "./sign-in-link";
 import { avatarUrlOf, avatarVersionOf } from "./user-avatar";
+import { YourApps } from "./your-apps";
+import { YourOutsideAi } from "./your-outside-ai";
 
 interface Props {
   me: Me;
@@ -100,8 +102,9 @@ function settled(typed: Fields, sent: Fields, saved: Fields): Fields {
 /**
  * Your profile: how to install Ember, for the browsers that get steps, then your avatar, which a photo
  * picked saves at once, showing it meanwhile, with the notice "It may take up to 30 minutes to change
- * everywhere.", and Remove avatar takes away, then your name, email address, a new password, your
- * current password while you have one, which changing your email address or password takes, and your
+ * everywhere.", and Remove avatar takes away, then your name, email address, a new password, unless
+ * Memberful signs you in without one, your current password while you have one, which changing your
+ * email address or password takes, and your
  * bio, which Save changes saves with the notice "✓", keeping the page, then, while members sign in with
  * Memberful, connecting your Memberful account, or the one you've connected, which Disconnect Memberful
  * unlinks with the notice "Your Memberful account is disconnected.", then, while Ember AI is on, how much @ember thinks and
@@ -133,6 +136,9 @@ export function ProfilePage({ me, rooms, askForRoom, onSignOut, onFailed }: Prop
   const [membershipNeeded, setMembershipNeeded] = useState(true);
   /** Which model @ember answers you with, how much it thinks and how long its answers are, or null while Ember AI is off. */
   const [assistant, setAssistant] = useState<Profile["assistant"]>(null);
+  /** The connected apps you can sign in to yourself, each with your sign-in to it, if you've made one. */
+  const [apps, setApps] = useState<Profile["apps"]>([]);
+  const [outsideAi, setOutsideAi] = useState<Profile["outsideAi"]>(null);
   const [saving, setSaving] = useState(false);
   const passwordInput = useRef<HTMLInputElement>(null);
   const currentPasswordInput = useRef<HTMLInputElement>(null);
@@ -157,6 +163,9 @@ export function ProfilePage({ me, rooms, askForRoom, onSignOut, onFailed }: Prop
         // Only from here and the Ember AI section's own saves, as a save of the profile or a photo can
         // answer after a change there, with your model and levels from before it.
         setAssistant(answer.profile.assistant);
+        // The same goes for the Apps section, which signing out there changes.
+        setApps(answer.profile.apps);
+        setOutsideAi(answer.profile.outsideAi);
       },
       (error: unknown) => {
         // A page left before its profile loads only reports a session that's ended, which goes to sign in.
@@ -256,6 +265,8 @@ export function ProfilePage({ me, rooms, askForRoom, onSignOut, onFailed }: Prop
   // Another tab's change reaches the people directory, whose address is the later one then.
   const listed = avatarUrlOf(people, me);
   const avatarUrl = picture && avatarVersionOf(picture.avatarUrl) >= avatarVersionOf(listed) ? picture.avatarUrl : listed;
+  // Someone Memberful signs in who has no password is given none, as the Worker refuses one: Memberful is their way in.
+  const signsInWithMemberfulAlone = !hasPassword && Boolean(memberful?.connected);
 
   const logOut = (
     <button type="button" onClick={() => leave(onSignOut)} className={HEADER_TEXT_BUTTON}>
@@ -308,27 +319,29 @@ export function ProfilePage({ me, rooms, askForRoom, onSignOut, onFailed }: Prop
               className={FIELD_INPUT}
             />
           </Field>
-          <Field id="user_password" label="New password" translation="update_password">
-            {/* Uncontrolled, so what's typed never reaches its `value` attribute, where custom CSS could read it. */}
-            <Input
-              ref={passwordInput}
-              id="user_password"
-              type="password"
-              autoComplete="new-password"
-              placeholder="Change password"
-              minLength={MIN_PASSWORD_LENGTH}
-              maxLength={MAX_PASSWORD_LENGTH}
-              aria-describedby="profile-password-help"
-              disabled={!fields}
-              className={FIELD_INPUT}
-            />
-            <p id="profile-password-help" className="text-[0.8em] text-muted-foreground">
-              {/* Someone who signed in with Memberful or just a name has no password. */}
-              {fields && !hasPassword ? "Leave blank to keep signing in without a password." : "Leave blank to keep your current password."}
-              {/* As the one it replaces connected it, while it's saved with an email address to sign in by. */}
-              {fields && hasPassword && memberful?.connected && fields.emailAddress.trim() !== "" && " A new one disconnects your Memberful account."}
-            </p>
-          </Field>
+          {!signsInWithMemberfulAlone && (
+            <Field id="user_password" label="New password" translation="update_password">
+              {/* Uncontrolled, so what's typed never reaches its `value` attribute, where custom CSS could read it. */}
+              <Input
+                ref={passwordInput}
+                id="user_password"
+                type="password"
+                autoComplete="new-password"
+                placeholder="Change password"
+                minLength={MIN_PASSWORD_LENGTH}
+                maxLength={MAX_PASSWORD_LENGTH}
+                aria-describedby="profile-password-help"
+                disabled={!fields}
+                className={FIELD_INPUT}
+              />
+              <p id="profile-password-help" className="text-[0.8em] text-muted-foreground">
+                {/* Someone who signed in with just a name has no password, nor has someone who joined with Memberful once it no longer signs them in. */}
+                {fields && !hasPassword ? "Leave blank to keep signing in without a password." : "Leave blank to keep your current password."}
+                {/* As the one it replaces connected it, while it's saved with an email address to sign in by. */}
+                {fields && hasPassword && memberful?.connected && fields.emailAddress.trim() !== "" && " A new one disconnects your Memberful account."}
+              </p>
+            </Field>
+          )}
           {hasPassword && (
             <Field id="user_current_password" label="Current password" translation="password">
               {/* Uncontrolled too, and asked for as sign-in asks for it. */}
@@ -375,6 +388,8 @@ export function ProfilePage({ me, rooms, askForRoom, onSignOut, onFailed }: Prop
           />
         )}
         {assistant && <AnswerLevels assistant={assistant} onChanged={setAssistant} onFailed={onFailed} />}
+        {apps.length > 0 && <YourApps apps={apps} onChanged={setApps} onFailed={onFailed} />}
+        {outsideAi && <YourOutsideAi connections={outsideAi} onChanged={setOutsideAi} onFailed={onFailed} />}
         {rooms && <ConversationNotifications me={me} rooms={rooms} askForRoom={askForRoom} onFailed={onFailed} />}
         {transferId && <SignInLink transferId={transferId} mine />}
       </Panel>

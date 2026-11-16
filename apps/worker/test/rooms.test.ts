@@ -76,11 +76,60 @@ describe("Open rooms everyone is in", () => {
 });
 
 describe("Room addresses", () => {
-  it("lists someone's rooms in the order they were made, for the app to find the oldest and newest", async () => {
+  it("lists someone's rooms in the order they were put in them, for the app to find the first and the latest", async () => {
     const ada = await signIn("Ada");
     const as = { closedTo: [ada.user.id] };
     const [beta, alpha, gamma] = [await createRoom("beta", as), await createRoom("Alpha", as), await createRoom("gamma", as)];
     expect(await listed(ada, gamma.id, alpha.id, beta.id)).toEqual([beta, alpha, gamma].map(listedRoom));
+  });
+});
+
+describe("New rooms go last", () => {
+  /** Changes room `roomId` as `session`'s person, as its settings do. */
+  async function change(roomId: RoomId, session: Session, changes: unknown) {
+    const response = await api(`/api/rooms/${roomId}`, { method: "PATCH", headers: { Cookie: session.cookie }, body: JSON.stringify(changes) });
+    expect(response.status, await response.clone().text()).toBe(200);
+  }
+
+  /** Lets the clock move on, so whoever's put in a room next is put in it later than anyone was before. */
+  const later = () => new Promise((resolve) => setTimeout(resolve, 5));
+
+  it("lists a room made since every other room someone's in after them all, whatever its name", async () => {
+    const ada = await signIn("Ada");
+    const zulu = await createRoom("Zulu");
+    await later();
+    const annex = await createRoom("Annex");
+    expect(await listed(ada, annex.id, zulu.id)).toEqual([zulu, annex].map(listedRoom));
+  });
+
+  it("lists the open rooms someone's put in as they join in the order they were made", async () => {
+    const zulu = await createRoom("Zulu");
+    await later();
+    const annex = await createRoom("Annex");
+    expect(await listed(await signIn("Grace"), annex.id, zulu.id)).toEqual([zulu, annex].map(listedRoom));
+  });
+
+  it("lists a room someone's put in after it was made after the rooms made since, but leaves it in its place for the people in it already", async () => {
+    const [ada, grace] = [await signIn("Ada"), await signIn("Grace")];
+    const earlier = await createRoom("Earlier", { closedTo: [ada.user.id], as: ada });
+    await later();
+    const since = await createRoom("Since", { closedTo: [ada.user.id, grace.user.id], as: ada });
+    await later();
+    await change(earlier.id, ada, { kind: "closed", memberIds: [ada.user.id, grace.user.id] });
+    expect(await listed(grace, earlier.id, since.id)).toEqual([since, earlier].map(listedRoom));
+    expect(await listed(ada, earlier.id, since.id)).toEqual([earlier, since].map(listedRoom));
+  });
+
+  it("lists a private room opened to everyone last for the people it puts in", async () => {
+    const [ada, grace] = [await signIn("Ada"), await signIn("Grace")];
+    const earlier = await createRoom("Earlier", { closedTo: [ada.user.id], as: ada });
+    await later();
+    const since = await createRoom("Since");
+    await later();
+    await change(earlier.id, ada, { kind: "open" });
+    const opened = { ...earlier, kind: "open" as const };
+    expect(await listed(grace, earlier.id, since.id)).toEqual([since, opened].map(listedRoom));
+    expect(await listed(ada, earlier.id, since.id)).toEqual([opened, since].map(listedRoom));
   });
 });
 

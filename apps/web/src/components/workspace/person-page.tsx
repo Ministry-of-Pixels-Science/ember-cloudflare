@@ -8,6 +8,7 @@ import { PeopleContext, useNameOf } from "@/hooks/use-directory";
 import { useMounted } from "@/hooks/use-mounted";
 import { leave, PROFILE_PATH, useBackPath } from "@/hooks/use-route";
 import { useTitle } from "@/hooks/use-title";
+import { asListed, canAsk } from "@/lib/agents";
 import { banPerson, fetchPerson, isSignedOut, unbanPerson } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { AgentBadge, isAgent } from "./agent-badge";
@@ -16,6 +17,9 @@ import { isMissing } from "./room-settings-page";
 import { Panel, SettingsPage } from "./settings-page";
 import { SignInLink } from "./sign-in-link";
 import { UserAvatar } from "./user-avatar";
+
+/** What the page of an AI agent kept for administrators, called `name`, says to anyone else, in place of the button that starts a DM with it. */
+export const adminsOnlyAsk = (name: string) => `Only administrators can ask ${name}.`;
 
 /** What Ban and Remove ban ask first. */
 export const CONFIRM_BAN = "Are you sure you want to ban this user? This will log them out, delete their messages, and block their IP addresses.";
@@ -50,11 +54,11 @@ const DIRECT_BUTTON =
  * button that starts a DM with them, or opens the one you have. Removed people show their name and that
  * they're no longer on this account, and bots their avatar, with the agent badge under an AI agent's
  * and, for an agent an administrator made, what `AboutAgent` says of it, then the DM button while
- * they're active. Administrators get a new sign-in link for anyone active who isn't a bot, themselves
- * included, and Ban for anyone else active or Remove ban for anyone banned. The people directory keeps
- * what it lists of them current. Members suspended for their Memberful membership's lapsing show as
- * removed people do, but to administrators, who see them as banned people, with why they can't sign in,
- * and Ban.
+ * they're active, or, for an agent only administrators can ask, to anyone else, that they can't.
+ * Administrators get a new sign-in link for anyone active who isn't a bot, themselves included, and Ban
+ * for anyone else active or Remove ban for anyone banned. The people directory keeps what it lists of
+ * them current. Members suspended for their Memberful membership's lapsing show as removed people do,
+ * but to administrators, who see them as banned people, with why they can't sign in, and Ban.
  */
 export function PersonPage({ userId, me, onStartDirect, onPersonChanged, reloadPeople, onMissing, onFailed }: Props) {
   const [fetched, setFetched] = useState<PersonAnswer | null>(null);
@@ -65,7 +69,7 @@ export function PersonPage({ userId, me, onStartDirect, onPersonChanged, reloadP
   useLayoutEffect(() => {
     listedNow.current = listed;
   }, [listed]);
-  const person = fetched && { ...fetched.person, ...listed };
+  const person = fetched && (listed ? asListed(fetched.person, listed) : fetched.person);
   const [starting, setStarting] = useState(false);
   const [banning, setBanning] = useState(false);
   // How many times a ban or its lifting has loaded the page again.
@@ -89,7 +93,7 @@ export function PersonPage({ userId, me, onStartDirect, onPersonChanged, reloadP
     return () => void (stopped = true);
   }, [userId, me.administrator, reloads, onMissing, onFailed]);
 
-  // As the sidebar's suggestions do, once the page's guard lets it, which a second click doesn't start again.
+  // Once the page's guard lets it, which a second click doesn't start again.
   const startDirect = () => {
     if (!person || starting) return;
     leave(async () => {
@@ -145,14 +149,16 @@ export function PersonPage({ userId, me, onStartDirect, onPersonChanged, reloadP
             {isAgent(person) && <AgentBadge className="mx-auto" />}
             {fetched?.agent && <AboutAgent name={person.name} agent={fetched.agent} meId={me.id} />}
             {person.role === "bot" ? (
-              person.status === "active" ? (
+              person.status !== "active" ? (
+                <NoLongerHere name={person.name} />
+              ) : canAsk(person, me) ? (
                 // At the page's text size.
                 <button type="button" aria-disabled={starting || undefined} onClick={startDirect} className={cn(DIRECT_BUTTON, "bg-background")}>
                   <ChatLines className="size-[1.3em]" />
                   <span className="sr-only">Ping {person.name}</span>
                 </button>
               ) : (
-                <NoLongerHere name={person.name} />
+                <div className="text-[0.8em] text-muted-foreground">{adminsOnlyAsk(person.name)}</div>
               )
             ) : person.status === "deactivated" || (person.status === "suspended" && !me.administrator) ? (
               <div>

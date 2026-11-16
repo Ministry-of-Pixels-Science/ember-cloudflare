@@ -1,4 +1,4 @@
-import type { Sidebar } from "@ember/protocol";
+import type { Sidebar, SidebarRoom } from "@ember/protocol";
 import { openRoom, signInAs } from "../../fixtures";
 import { settle } from "./audits";
 import { expect, hasDrawerLayout, test } from "./fixtures";
@@ -59,19 +59,24 @@ test.describe("New direct message dialog", () => {
   });
 });
 
-test.describe("Suggested people", () => {
-  test("the people suggested for DMs fit under the DMs, and are easy to tap", async ({ page, room, screenIsFine }) => {
-    // The server's suggestions, the oldest accounts, with only this test's room.
-    await page.route("**/api/sidebar", async (route) => {
-      const { suggestions } = (await (await route.fetch()).json()) as Sidebar;
-      await route.fulfill({ json: { rooms: [{ ...room, kind: "open", icon: null, unread: false, involvement: "mentions" }], favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, suggestions, huddles: {} } satisfies Sidebar });
-    });
+test.describe("DMs in the sidebar", () => {
+  test("the DMs fit under their heading, a long name and all, and are easy to tap", async ({ page, room, session, screenIsFine }) => {
+    // This test's room, and a DM with someone made up, whose row is all that's looked at.
+    const direct: SidebarRoom = {
+      id: `${room.id}-direct`,
+      kind: "direct",
+      members: [session.user, { id: `${session.user.id}-grace`, name: "Grace Brewster Murray Hopper, Rear Admiral" }],
+      activeAt: new Date().toISOString(),
+      unread: false,
+      involvement: "everything",
+    };
+    await page.route("**/api/sidebar", (route) =>
+      route.fulfill({ json: { rooms: [{ ...room, kind: "open", icon: null, unread: false, involvement: "mentions" }, direct], favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: {} } satisfies Sidebar }),
+    );
     await openRoom(page, room);
     if (hasDrawerLayout(page)) await page.getByRole("button", { name: "Open conversations" }).tap();
-    await expect(page.getByRole("region", { name: "DMs" }).getByRole("button", { name: /^Start a direct message with / }).first()).toBeVisible();
+    await expect(page.getByRole("region", { name: "DMs" }).getByRole("link", { name: /^Direct message with / })).toBeVisible();
     await settle(page);
     await screenIsFine();
-    // Lets the test end while the sidebar is loading again.
-    await page.unrouteAll({ behavior: "ignoreErrors" });
   });
 });

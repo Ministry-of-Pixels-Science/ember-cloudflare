@@ -13,7 +13,6 @@ import type {
   RoomChanges,
   RoomId,
   RoomSettings,
-  Sidebar,
   UserId,
 } from "@ember/protocol";
 import { WEBHOOK_URL_REFUSED } from "@ember/protocol/bots";
@@ -457,7 +456,7 @@ describe("Where bots show up", () => {
     expect(await answered<NewRoomForm>(administrator, "/api/rooms/new")).toEqual({ people: [administrator.user, member.user] });
   });
 
-  it("offers an active bot to mention in the rooms it's in until it's deleted, but never suggests a DM with it", async () => {
+  it("offers an active bot to mention in the rooms it's in until it's deleted", async () => {
     const administrator = await setUp();
     const member = await joinAsGrace();
     const secrets = await createRoom("Secrets", { closedTo: [administrator.user.id, member.user.id], as: administrator });
@@ -466,7 +465,6 @@ describe("Where bots show up", () => {
 
     expect(await mentionable(member, general!.id, "bot")).toEqual(["Build Bot"]);
     expect(await mentionable(member, secrets.id, "bot")).toEqual([]);
-    expect((await answered<Sidebar>(member, "/api/sidebar")).suggestions).toEqual([administrator.user]);
 
     expect((await deleteBot(administrator, bot.id)).status).toBe(204);
     expect(await mentionable(member, general!.id, "bot")).toEqual([]);

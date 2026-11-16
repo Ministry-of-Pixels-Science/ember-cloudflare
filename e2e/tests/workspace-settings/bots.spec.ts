@@ -510,13 +510,21 @@ test.describe("Webhooks", () => {
       expect(headers).toMatchObject({ "content-type": "application/json", accept: "*/*", "user-agent": "Ruby" });
       expect(body).not.toMatch(/[<>&]/);
       const payload = JSON.parse(body) as { user: { name: string }; room: { name: string; path: string }; message: { id: string; body: { html: string; plain: string }; path: string } };
-      // The room's address is the bot's own, as its command posts to, and the message's its permalink.
-      const room = new URL(url).pathname;
-      expect(payload).toMatchObject({ user: { name: ADMINISTRATOR.name }, room: { name: "general", path: room }, message: { body: { plain: "Ship it & tell" } } });
+      // The room's address is the one the bot's command posts to, with a key of the webhook's own in
+      // place of the bot's, and the message's is its permalink.
+      const command = new URL(url).pathname;
+      const [room, key] = [command.replace(/\/[^/]+\/messages$/, ""), command.split("/")[3]!];
+      expect(payload).toMatchObject({ user: { name: ADMINISTRATOR.name }, room: { name: "general" }, message: { body: { plain: "Ship it & tell" } } });
+      expect(payload.room.path).toMatch(new RegExp(`^${room}/${key.split("-")[0]}-[0-9a-f]{32}/messages$`));
+      expect(body).not.toContain(key);
       expect(Object.keys(payload)).toEqual(["user", "room", "message"]);
-      expect(payload.message.path).toBe(`${room.replace(/\/[^/]+\/messages$/, "")}/@${payload.message.id}`);
+      expect(payload.message.path).toBe(`${room}/@${payload.message.id}`);
       // The stored rich text, the mention an attachment as Campfire keeps it.
       expect(payload.message.body.html).toMatch(/^<p>Ship it &amp; tell <action-text-attachment [^>]*content-type="application\/vnd\.campfire\.mention"/);
+      // The webhook's key posts in the room as the bot, as the bot's own does.
+      const answer = `Shipped ${tag}`;
+      expect((await page.request.post(new URL(payload.room.path, url).href, { data: answer, headers: FORM })).status()).toBe(201);
+      await expect(page.getByRole("article").filter({ hasText: answer })).toContainText(name);
     } finally {
       await webhook.close();
     }
@@ -555,6 +563,85 @@ test.describe("Webhook replies", () => {
       const reply = page.getByRole("article").filter({ hasText: name }).filter({ has: page.getByRole("img", { name: "attachment.png" }) });
       await expect(reply).toBeVisible();
       expect(await shownPicture(reply.getByRole("img", { name: "attachment.png" }))).toEqual({ type: "image/png", width: 40, height: 20 });
+    } finally {
+      await webhook.close();
+    }
+  });
+});
+
+test.describe("Buttons that act", () => {
+  test("a click on a bot's card's button goes to the bot's webhook, and the card the bot answers takes its place", async ({ page }) => {
+    const tag = crypto.randomUUID().slice(0, 8);
+    const approved = { blocks: [{ type: "section", text: { type: "mrkdwn", text: `*v${tag}* approved` } }] };
+    const webhook = await listenAsWebhook((response) => response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(approved)));
+    try {
+      const name = `Deploy Bot ${tag}`;
+      const url = await openGeneralFor(page, name, webhook.url);
+      const question = `Deploy v${tag} to production?`;
+      const posted = await page.request.post(url.replace(/\/messages$/, "/slack"), {
+        data: {
+          blocks: [
+            { type: "section", text: { type: "plain_text", text: question } },
+            {
+              type: "actions",
+              block_id: `deploy-${tag}`,
+              elements: [
+                { type: "button", text: { type: "plain_text", text: "Approve" }, action_id: "approve", value: tag, style: "primary" },
+                { type: "button", text: { type: "plain_text", text: "Release notes" }, url: "https://example.com/releases" },
+              ],
+            },
+          ],
+        },
+      });
+      expect([posted.status(), await posted.text()]).toEqual([200, "ok"]);
+
+      // The bot's one message, which its name is on, where its card's frame is an article too.
+      const message = page.getByRole("article").filter({ hasText: name });
+      await expect(message).toContainText(question);
+      await expect(message.getByRole("link", { name: "Release notes" })).toHaveAttribute("href", "https://example.com/releases");
+      await message.getByRole("button", { name: "Approve" }).click();
+
+      // The bot's answer takes the card's place, buttons and all, in the message it was.
+      await expect(message).toContainText(`v${tag} approved`);
+      await expect(message).not.toContainText(question);
+      await expect(message.getByRole("button", { name: "Approve" })).toHaveCount(0);
+      await expect(message).toHaveCount(1);
+
+      expect(webhook.received).toHaveLength(1);
+      const payload = JSON.parse(webhook.received[0]!.body) as { type: string; user: { name: string }; actions: unknown[]; response_path: string; message: { id: string } };
+      expect(payload).toMatchObject({
+        type: "block_actions",
+        user: { name: ADMINISTRATOR.name },
+        room: { name: "general" },
+        actions: [{ type: "button", action_id: "approve", block_id: `deploy-${tag}`, value: tag, text: { type: "plain_text", text: "Approve" } }],
+      });
+
+      // Later, the bot puts another card in its place, at the address the click gave it.
+      const live = await page.request.post(new URL(payload.response_path, url).href, { data: { text: `v${tag} is live` } });
+      expect([live.status(), await live.text()]).toEqual([200, "ok"]);
+      await expect(message).toContainText(`v${tag} is live`);
+      await expect(message).not.toContainText(`v${tag} approved`);
+    } finally {
+      await webhook.close();
+    }
+  });
+
+  test("a click a bot's webhook refuses tells whoever clicked, and leaves the card as it was", async ({ page }) => {
+    const webhook = await listenAsWebhook((response) => response.writeHead(500).end());
+    try {
+      const tag = crypto.randomUUID().slice(0, 8);
+      const name = `Deploy Bot ${tag}`;
+      const url = await openGeneralFor(page, name, webhook.url);
+      const posted = await page.request.post(url.replace(/\/messages$/, "/slack"), {
+        data: { blocks: [{ type: "section", text: { type: "plain_text", text: `Roll back v${tag}?` }, accessory: { type: "button", text: { type: "plain_text", text: "Roll back" }, action_id: "rollback", style: "danger" } }] },
+      });
+      expect(posted.status()).toBe(200);
+
+      const button = page.getByRole("article").filter({ hasText: name }).getByRole("button", { name: "Roll back" });
+      await button.click();
+      await expect(page.getByText(`${name} couldn't take that click`)).toBeVisible();
+      await expect(button).toBeEnabled();
+      expect(webhook.received).toHaveLength(1);
     } finally {
       await webhook.close();
     }

@@ -64,7 +64,7 @@ function show(
   m: Message | PendingMessage,
   { me = ada, administrator = false, threaded = false, sent = true, thread = undefined as ThreadPlace | undefined, open = false } = {},
 ) {
-  const actions = { boost: vi.fn(() => sent), unboost: vi.fn(() => sent), edit: vi.fn(() => sent), remove: vi.fn(() => sent) };
+  const actions = { boost: vi.fn(() => sent), unboost: vi.fn(() => sent), edit: vi.fn(() => sent), remove: vi.fn(() => sent), click: vi.fn(() => Promise.resolve(sent)) };
   let setEditing: (editing: boolean) => void = () => {};
   let setMessage: (message: Message | PendingMessage) => void = () => {};
   let setConnections: (update: (connections: number) => number) => void = () => {};
@@ -384,7 +384,7 @@ describe("Message rows", () => {
   it("follows the name of every agent the people directory lists with the badge, deleted ones too, and no other bot's", () => {
     const bot = (id: string, name: string, changes: Partial<DirectoryUser> = {}): DirectoryUser => ({ id, name, bio: null, role: "bot", status: "active", avatarUrl: "", ...changes });
     const authors = [bot("u4", "Recap", { agent: true }), bot("u5", "Scout", { agent: true, status: "deactivated" }), bot("u6", "Build Bot")];
-    const actions = { boost: vi.fn(), unboost: vi.fn(), edit: vi.fn(), remove: vi.fn() };
+    const actions = { boost: vi.fn(), unboost: vi.fn(), edit: vi.fn(), remove: vi.fn(), click: vi.fn() };
     const editors = { open: vi.fn(), close: vi.fn(), returnFocus: vi.fn(), attach: vi.fn(), reply: vi.fn() };
     render(
       <PeopleContext value={new Map(authors.map((author) => [author.id, author]))}>
@@ -405,7 +405,7 @@ describe("Message rows", () => {
 
   it("titles the author with their bio as the people directory lists it, or with just their name", () => {
     const listed = (user: User, name: string, bio: string | null) => [user.id, { ...user, name, bio, role: "member", status: "active", avatarUrl: "" }] as const;
-    const actions = { boost: vi.fn(), unboost: vi.fn(), edit: vi.fn(), remove: vi.fn() };
+    const actions = { boost: vi.fn(), unboost: vi.fn(), edit: vi.fn(), remove: vi.fn(), click: vi.fn() };
     const editors = { open: vi.fn(), close: vi.fn(), returnFocus: vi.fn(), attach: vi.fn(), reply: vi.fn() };
     const by = (creator: User) => message({ id: creator.id, clientMessageId: creator.id, creator });
     render(
@@ -948,7 +948,7 @@ describe("Quote a message", () => {
     const listed = (user: User, name: string) => [user.id, { ...user, name, bio: null, role: "member", status: "active", avatarUrl: "" }] as const;
     const body = `<p>Thanks <action-text-attachment content-type="application/vnd.campfire.mention" sgid="0123456789abcdef"></action-text-attachment>!</p>`;
     const editors = { open: vi.fn(), close: vi.fn(), returnFocus: vi.fn(), attach: vi.fn(), reply: vi.fn() };
-    const actions = { boost: vi.fn(), unboost: vi.fn(), edit: vi.fn(), remove: vi.fn() };
+    const actions = { boost: vi.fn(), unboost: vi.fn(), edit: vi.fn(), remove: vi.fn(), click: vi.fn() };
     render(
       <PeopleContext value={new Map([listed(ada, "Ada King"), listed({ id: "0123456789abcdef", name: "Grace" }, "Grace Hopper")])}>
         <MessageItem message={message({ body, plainText: "Thanks @Grace!" })} me={{ ...grace, administrator: false }} threaded={false} editing={false} actions={actions} editors={editors} />
@@ -1381,7 +1381,7 @@ describe("How mentions look", () => {
 
   /** A message open in its editor, seen by Ada with `people` in the people directory, which has `loaded`. */
   const editing = (m: Message, people: People, loaded = true) => {
-    const actions = { boost: vi.fn(), unboost: vi.fn(), edit: vi.fn(), remove: vi.fn() };
+    const actions = { boost: vi.fn(), unboost: vi.fn(), edit: vi.fn(), remove: vi.fn(), click: vi.fn() };
     const editors = { open: vi.fn(), close: vi.fn(), returnFocus: vi.fn(), attach: vi.fn(), reply: vi.fn() };
     return (
       <PeopleContext value={people}>
@@ -1442,7 +1442,7 @@ describe("Edit your profile", () => {
   it("names the author and whoever reacted as the people directory lists them now, so a rename shows on messages sent before it", () => {
     const listed = (user: User, name: string) => [user.id, { ...user, name, bio: null, role: "member", status: "active", avatarUrl: `/users/${user.id}/avatar` }] as const;
     const m = message({ boosts: [boost("b1", grace, "👍"), boost("b2", { id: "u3", name: "Linus" }, "👍")] });
-    const actions = { boost: vi.fn(), unboost: vi.fn(), edit: vi.fn(), remove: vi.fn() };
+    const actions = { boost: vi.fn(), unboost: vi.fn(), edit: vi.fn(), remove: vi.fn(), click: vi.fn() };
     const editors = { open: vi.fn(), close: vi.fn(), returnFocus: vi.fn(), attach: vi.fn(), reply: vi.fn() };
     render(
       <PeopleContext value={new Map([listed(ada, "Ada King"), listed(grace, "Grace Hopper")])}>

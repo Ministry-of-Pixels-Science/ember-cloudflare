@@ -110,7 +110,7 @@ const WEB_TOOLS_REFUSED =
  * as fit in `MAX_CONVERSATION_LENGTH` characters, the newest first, but for a thread's first message, which
  * comes before them all.
  */
-function readable<T extends ReadMessage>(conversation: T[], inThread: boolean): T[] {
+export function readable<T extends ReadMessage>(conversation: T[], inThread: boolean): T[] {
   const question = conversation.at(-1)!;
   const before = conversation.slice(0, -1);
   const [first, ...replies] = before;
@@ -381,9 +381,12 @@ const YOUR_LEVELS = "Ember AI on your profile";
 export const NOTES: Record<RefusalReason | "unopened token", string> = {
   token: `I can't answer right now: Cloudflare didn't take Ember AI's API token. An administrator can give it another under ${AI_SETTINGS}.`,
   account: `I can't answer right now: Cloudflare can't find Ember AI's account. An administrator can set it up again under ${AI_SETTINGS}.`,
-  credits: "I can't answer right now: the AI Gateway credits that pay for my model have run out. An administrator can top them up in AI Gateway, or choose a Workers AI model.",
+  credits: "I can't answer right now: the AI Gateway credits that pay for my model have run out. An administrator can top them up in AI Gateway.",
   model: `I can't answer right now: AI Gateway didn't take my question for its model. An administrator can choose another model under ${AI_SETTINGS}.`,
+  retired: `I can't answer right now: Cloudflare no longer runs my model. An administrator can choose another model under ${AI_SETTINGS}.`,
   busy: "I can't answer right now: AI Gateway is turning requests away, or a spend limit was reached. Try again later.",
+  neurons:
+    "I can't answer right now: Ember AI's Cloudflare account has used the Neurons Workers AI runs my model on free each day, which start again at midnight UTC. An administrator can move the account to Workers Paid, or have AI Gateway's credits pay for Workers AI, to go on before then.",
   "too long": "I can't answer that here: the conversation is longer than my model reads at once. Try asking in a new thread.",
   unanswered: "I couldn't answer: AI Gateway didn't answer in time. Try again in a moment.",
   nothing: "I couldn't answer: my model answered with nothing. Try asking again.",
@@ -404,4 +407,6 @@ export const AGENT_NOTES: Partial<Record<RefusalReason, string>> = {
 export const PICKED_MODEL_NOTES: Partial<Record<RefusalReason, string>> = {
   credits: `I can't answer right now: the AI Gateway credits that pay for the model you picked have run out. An administrator can top them up in AI Gateway, or you can pick another model under ${YOUR_LEVELS}.`,
   model: `I can't answer right now: AI Gateway didn't take my question for the model you picked. Pick another model under ${YOUR_LEVELS}.`,
+  retired: `I can't answer right now: Cloudflare no longer runs the model you picked. Pick another model under ${YOUR_LEVELS}.`,
+  neurons: `I can't answer right now: Ember AI's Cloudflare account has used the Neurons Workers AI runs the model you picked on free each day, which start again at midnight UTC. Pick a model Workers AI doesn't run under ${YOUR_LEVELS}, or an administrator can move the account to Workers Paid, or have AI Gateway's credits pay for Workers AI.`,
 };

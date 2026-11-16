@@ -14,6 +14,13 @@ export const botMessagesPath = (roomId: RoomId, key: string, threadId?: string) 
 /** Where a bot posts what a Slack incoming webhook is sent to a room, with the bot's key: `/rooms/<room id>/<bot key>/slack`. */
 export const botSlackPath = (roomId: RoomId, key: string) => `/rooms/${encodeURIComponent(roomId)}/${key}/slack`;
 
+/**
+ * Where a bot posts what a Slack incoming webhook is sent to take the place of its message `messageId`, with
+ * the bot's key: `/rooms/<room id>/<bot key>/messages/<message id>/slack`.
+ */
+export const botMessageSlackPath = (roomId: RoomId, key: string, messageId: string) =>
+  `/rooms/${encodeURIComponent(roomId)}/${key}/messages/${encodeURIComponent(messageId)}/slack`;
+
 /** What the bot pages and their API tell anyone but an administrator. */
 export const BOTS_FORBIDDEN = "Only administrators can manage bots";
 

@@ -7,8 +7,6 @@ import { screenshotProjects } from "./projects/screenshots";
 import {
   AI_GATEWAY_ACCOUNT,
   AI_GATEWAY_PORT,
-  MEMBERFUL_KEYS,
-  MEMBERFUL_SITE_PORT,
   RESEND_API_PORT,
   SETTINGS_SERVER_PORT,
   SFU_PORT,
@@ -61,27 +59,25 @@ export default defineConfig<MobileOptions>({
       reuseExistingServer: !process.env.CI,
       timeout: 180_000,
     },
-    // The same build again, over HTTPS, for the workspace-settings projects, with the keys of the
-    // Memberful site the Memberful specs fake, the address of the Resend API the email specs fake,
-    // which Ember sends email with once they give it the API key it takes, as an administrator does in
-    // Set up email, the address of the siteverify the Turnstile spec fakes, which Ember asks about
-    // checks once it's given a widget's keys in Set up Turnstile, the address of the AI Gateway the
-    // Ember AI spec fakes, which Ember asks models through once it's given an account in Set up Ember AI,
-    // the ID of the account Ember is deployed to, as `pnpm run deploy` gives it, which Set up Ember AI
-    // fills in, and the address of the Realtime SFU the huddles spec fakes, which Ember asks to start a
-    // session with an app's keys before it keeps them in Set up huddles, and then to carry what's said in
-    // a huddle. Servers start in turn, so the app is built by then.
+    // The same build again, over HTTPS, for the workspace-settings projects, with the address of the
+    // Resend API the email specs fake, which Ember sends email with once they give it the API key it
+    // takes, as an administrator does in Set up email, the address of the siteverify the Turnstile spec
+    // fakes, which Ember asks about checks once it's given a widget's keys in Set up Turnstile, the
+    // address of the AI Gateway the Ember AI spec fakes, which Ember asks models through once it's
+    // given an account in Set up Ember AI, and which serves the models file too, in place of the one on
+    // Ember's main branch, the ID of the account Ember is deployed to, as `pnpm run deploy` gives it,
+    // which Set up Ember AI fills in, and the address of the Realtime SFU the huddles spec fakes, which
+    // Ember asks to start a session with an app's keys before it keeps them in Set up huddles, and then
+    // to carry what's said in a huddle. Servers start in turn, so the app is built by then.
     {
       command: [
         `node -e "require('node:fs').rmSync('e2e/.wrangler/settings-state', { recursive: true, force: true })"`,
         [
           `pnpm --filter @ember/worker exec wrangler dev -c ../../wrangler.jsonc --ip 127.0.0.1 --port ${SETTINGS_SERVER_PORT} --local-protocol https`,
-          `--var SESSION_SECRET:e2e-only-not-a-secret --var EMBER_SETUP_TOKEN:${SETUP_TOKEN} --var MEMBERFUL_URL:http://127.0.0.1:${MEMBERFUL_SITE_PORT}`,
-          `--var MEMBERFUL_CLIENT_ID:${MEMBERFUL_KEYS.clientId} --var MEMBERFUL_CLIENT_SECRET:${MEMBERFUL_KEYS.clientSecret}`,
-          `--var MEMBERFUL_API_KEY:${MEMBERFUL_KEYS.apiKey} --var MEMBERFUL_WEBHOOK_SECRET:${MEMBERFUL_KEYS.webhookSecret}`,
+          `--var SESSION_SECRET:e2e-only-not-a-secret --var EMBER_SETUP_TOKEN:${SETUP_TOKEN}`,
           `--var RESEND_API_URL:http://127.0.0.1:${RESEND_API_PORT} --var TURNSTILE_SITEVERIFY_URL:http://127.0.0.1:${SITEVERIFY_PORT}`,
           `--var AI_GATEWAY_URL:http://127.0.0.1:${AI_GATEWAY_PORT} --var CLOUDFLARE_ACCOUNT_ID:${AI_GATEWAY_ACCOUNT.accountId}`,
-          `--var REALTIME_SFU_URL:http://127.0.0.1:${SFU_PORT}`,
+          `--var EMBER_MODELS_URL:http://127.0.0.1:${AI_GATEWAY_PORT}/models.json --var REALTIME_SFU_URL:http://127.0.0.1:${SFU_PORT}`,
           "--persist-to ../../e2e/.wrangler/settings-state",
         ].join(" "),
       ].join(" && "),

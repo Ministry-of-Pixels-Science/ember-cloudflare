@@ -1209,6 +1209,60 @@ describe("React to a message", () => {
   });
 });
 
+describe("Click a card's button", () => {
+  const approve = { id: "approve", blockId: "deploy-42", value: '{"build":42}' };
+
+  /** Clicks Approve on m1, answering what the click comes to and the frame it sent, which names the button by its value too. */
+  function clickApprove(result: ReturnType<typeof joinGeneral>["result"]) {
+    let went: Promise<boolean> | undefined;
+    act(() => {
+      went = result.current.messageActions.click("m1", approve);
+    });
+    const [sent] = socket().sentOfType("card.click").slice(-1);
+    expect(sent).toEqual({ type: "card.click", clickId: expect.any(String), messageId: "m1", actionId: "approve", blockId: "deploy-42", value: approve.value });
+    return { went: went!, clickId: (sent as { clickId: string }).clickId };
+  }
+
+  it("sends the click to the room, and waits for the room to say the bot has answered", async () => {
+    const { result } = joinGeneral({ messages: [message("m1")] });
+    const { went, clickId } = clickApprove(result);
+    // Another click's answer isn't this one's.
+    act(() => socket().receive({ type: "card.clicked", clickId: "another" }));
+    let settled = false;
+    void went.then(() => (settled = true));
+    await act(async () => {});
+    expect(settled).toBe(false);
+    act(() => socket().receive({ type: "card.clicked", clickId }));
+    expect(await went).toBe(true);
+    expect(result.current.state.notice).toBeNull();
+  });
+
+  it("shows why a click came to nothing, as the room says", async () => {
+    const { result } = joinGeneral({ messages: [message("m1")] });
+    const { went, clickId } = clickApprove(result);
+    act(() => socket().receive({ type: "error", message: "Deploy Bot didn't answer in time", clickId, failed: "card.click" }));
+    expect(await went).toBe(false);
+    expect(result.current.state.notice).toBe("Deploy Bot didn't answer in time");
+  });
+
+  it("stops waiting once the room lets the page in again, which loses the click's answer", async () => {
+    const { result } = joinGeneral({ messages: [message("m1")] });
+    const { went } = clickApprove(result);
+    act(() => socket().receive({ type: "resumed", you: ada, messages: [], deletedIds: [], present: [ada], seq: 0 }));
+    expect(await went).toBe(false);
+  });
+
+  it("says a click made while the room is away didn't go", async () => {
+    const { result } = joinGeneral({ connect: false });
+    let went: Promise<boolean> | undefined;
+    act(() => {
+      went = result.current.messageActions.click("m1", approve);
+    });
+    expect(await went).toBe(false);
+    expect(result.current.state.notice).toBe("Not connected. Try again once you're reconnected.");
+  });
+});
+
 describe("Take back a reaction", () => {
   it("sends the removal to the room and drops the reaction when the room confirms", () => {
     const boost = { id: "b1", messageId: "m1", booster: ada, content: "🎉", createdAt: "" };

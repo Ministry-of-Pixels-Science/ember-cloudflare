@@ -109,7 +109,7 @@ describe("Installer-protected setup link", () => {
 
 describe("Upload an avatar", () => {
   it("changes your avatar with a form of the photo and its variant, and removes it", async () => {
-    const answer = { profile: { name: "Ada", emailAddress: null, bio: null, avatarUrl: "/users/t/avatar", avatar: true, password: false, membershipNeeded: true, memberful: null, assistant: null }, transferId: "u1.t" } satisfies ProfileAnswer;
+    const answer = { profile: { name: "Ada", emailAddress: null, bio: null, avatarUrl: "/users/t/avatar", avatar: true, password: false, membershipNeeded: true, memberful: null, assistant: null, apps: [], outsideAi: null }, transferId: "u1.t" } satisfies ProfileAnswer;
     const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => Response.json(answer));
     const file = new File(["ada"], "ada.jpg", { type: "image/jpeg" });
     expect(await changeAvatar({ file, variant: new Blob(["variant"], { type: "image/webp" }) })).toEqual(answer);
@@ -156,7 +156,7 @@ describe("One live connection per tab outside the open room", () => {
 });
 
 describe("Live sidebar updates", () => {
-  const sidebar: Sidebar = { rooms: [{ id: "r1", name: "Design", kind: "open", icon: null, unread: false, involvement: "mentions" }], favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, suggestions: [], huddles: {} };
+  const sidebar: Sidebar = { rooms: [{ id: "r1", name: "Design", kind: "open", icon: null, unread: false, involvement: "mentions" }], favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: {} };
 
   it("keeps the sidebar's ETag, and names it to keep the copy while it's current", async () => {
     const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(Response.json(sidebar, { headers: { ETag: 'W/"abc"' } }));

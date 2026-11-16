@@ -22,6 +22,8 @@ const backend = (name: "do-sqlite" | "d1") => ({
           SESSION_SECRET: "test-secret",
           STORAGE_BACKEND: name,
           EMBER_GUEST_SIGN_IN: "true",
+          // No models file but the one Ember shipped with, unless a test serves one (assistant/offered.ts).
+          EMBER_MODELS_URL: "",
           // The deploy's setup token, which test/support.ts's `api` sends to set Ember up.
           EMBER_SETUP_TOKEN: "fedcba9876543210".repeat(4),
           // The test keys the recorded push was signed with (test/fixtures/README.md), so push is on

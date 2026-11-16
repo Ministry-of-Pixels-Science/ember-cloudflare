@@ -23,6 +23,7 @@ import {
   NAME_RESERVED,
   NO_EMAIL_DOMAINS,
   PASSWORD_RESET_PATH,
+  PASSWORD_WITH_MEMBERFUL,
   isPasswordTooLong,
   isReservedName,
   isRoomId,
@@ -78,6 +79,7 @@ import {
   type WorkspaceSettings,
 } from "@ember/protocol";
 import { agentsName } from "@ember/protocol/agents";
+import { OUTSIDE_AUTHORIZE_PATH } from "@ember/protocol/outside";
 import { mentionPromptItem } from "@ember/richtext";
 import { isAccountLogoPath, showAccountLogo, storeLogo } from "./account-logo";
 import {
@@ -95,7 +97,26 @@ import {
   tokenDigest,
 } from "./auth";
 import { directoryOf } from "./avatar-tokens";
-import { agentPage, changeAgent, createAgent, deleteAgent, listAgents, removeAgentAvatar, showAgent, tryAgent } from "./assistant/agents";
+import {
+  appPage,
+  beginAppSignIn,
+  beginNewAppSignIn,
+  beginOwnAppSignIn,
+  changeApp,
+  clientDocument,
+  connectApp,
+  disconnectApp,
+  finishAppSignIn,
+  listApps,
+  pickAgentTools,
+  readAppTools,
+  showAgentTools,
+  showApp,
+  signOutOfApp,
+} from "./apps/api";
+import { answerOutsideAsk, changeOutsideAi, describeOutsideAsk, disconnectOutside, isOutsideRegistration, outsideAction, outsideConnectPage } from "./outside/api";
+import { CLIENT_DOCUMENT_PATH } from "./apps/oauth";
+import { agentPage, changeAgent, createAgent, deleteAgent, listAgents, listAvailableAgents, removeAgentAvatar, showAgent, tryAgent } from "./assistant/agents";
 import {
   addAssistantModel,
   changeAssistantAvatar,
@@ -104,7 +125,7 @@ import {
   changeYourAssistant,
   deployedAccountIdOf,
   forgetAssistant,
-  listAssistantModels,
+  listOfferedModels,
   removeAssistantAvatar,
   removeAssistantModel,
   saveAssistant,
@@ -130,8 +151,17 @@ import { invite, lookUpEmailLink, resendInvitation, revokeInvitation } from "./i
 import { askForEmailLink, emailSignUpPage, invitationPage, join, joinCodeOf, joinPage, joinWithEmailLink, signUp, signUpPage } from "./join";
 import { checkResendApiKey } from "./mail";
 import { manifest, manifestFormatOf } from "./manifest";
-import { finishMemberfulSignIn, memberfulConnectionFor, memberfulRefusal, memberfulWebhook, memberfulWebhooksOf, startMemberfulSignIn } from "./memberful";
-import { memberfulKeysOf } from "./memberful-api";
+import {
+  finishMemberfulSignIn,
+  memberfulConnectionFor,
+  memberfulRefusal,
+  memberfulSiteFor,
+  memberfulWebhook,
+  saveMemberfulKeys,
+  startMemberfulSignIn,
+  withDeployedMemberful,
+} from "./memberful";
+import { deployedMemberfulOf } from "./memberful-api";
 import { anyOtherPage, formAnswer } from "./pages";
 import { askForPasswordReset, passwordResetPage, resetPasswordWithCode } from "./password-resets";
 import { DUMMY_DIGEST, passwordHasher } from "./passwords";
@@ -154,6 +184,8 @@ import { platformOf } from "./user-agent";
 import { versionOf } from "./version";
 import { ACCOUNT_BEFORE_SETUP, CREDENTIALS_HEADER, workspace, type YourProfile } from "./workspace";
 
+export { AppConnector } from "./apps/connector";
+export { OutsideAi } from "./outside/endpoint";
 export { ChatRoom } from "./chat-room";
 export { PasswordHasher } from "./passwords";
 export { SearchIndex } from "./search-index";
@@ -244,7 +276,7 @@ async function signInGuest(given: unknown, request: Request, env: Env): Promise<
 async function bootstrap(request: Request, env: Env): Promise<Response> {
   const token = sessionToken(request);
   const [{ account, user, signInWithMemberful, passwordResetCodes, turnstileSiteKey }, push] = await Promise.all([
-    workspace(env).bootstrap(token ? await credentialsFor(token, request, env) : null, memberfulKeysOf(env)?.site ?? null, deployedAddressOf(request)),
+    workspace(env).bootstrap(token ? await credentialsFor(token, request, env) : null, deployedMemberfulOf(env)?.site ?? null, deployedAddressOf(request)),
     webPush(env),
   ]);
   const body: Bootstrap = {
@@ -278,10 +310,10 @@ async function me(request: Request, env: Env): Promise<Response> {
 
 /**
  * Workspace settings, which anyone signed in may see, read-only unless they're an administrator, with
- * the Memberful site whose members can sign in, once the deployment has its keys, whether it hears the
- * site's webhooks, where Turnstile's keys come from, the deployment's taking the place of any an
- * administrator gave, and, for administrators, the Cloudflare account Ember is deployed to. They hold
- * the join code, which no cache should keep, as the sidebar's invitation does.
+ * the Memberful site whose members can sign in, and whether Ember hears its webhooks, and where
+ * Turnstile's keys come from, the deployment's keys taking the place of any an administrator gave, and,
+ * for administrators, the Cloudflare account Ember is deployed to. They hold the join code, which no
+ * cache should keep, as the sidebar's invitation does.
  */
 async function workspaceSettings(request: Request, env: Env): Promise<Response> {
   const credentials = await credentialsOf(request, env);
@@ -289,12 +321,10 @@ async function workspaceSettings(request: Request, env: Env): Promise<Response> 
   if (!settings) return problem(401, "Not signed in");
   if (settings === "not set up") return problem(404, "Ember isn't set up yet");
   const deployment = {
-    memberfulSite: memberfulKeysOf(env)?.site ?? null,
-    memberfulWebhooks: memberfulWebhooksOf(env) !== null,
     turnstile: turnstileOf(env, settings.turnstile),
     cloudflareAccountId: settings.canAdminister ? deployedAccountIdOf(env) : null,
   };
-  return json({ ...settings, ...deployment } satisfies WorkspaceSettings, { headers: { "Cache-Control": "no-store" } });
+  return json({ ...withDeployedMemberful(env, settings), ...deployment } satisfies WorkspaceSettings, { headers: { "Cache-Control": "no-store" } });
 }
 
 /** Where Turnstile's keys come from: the deployment's secrets, which take the place of any others, or else `saved`, as the Workspace has those an administrator gave. */
@@ -402,7 +432,7 @@ async function regenerateJoinCode(request: Request, env: Env): Promise<Response>
  * Changes the workspace, as its settings save it. Someone who isn't an administrator hears so before
  * anything they sent is checked. Ember's address can only be the one the request came to, or a custom
  * domain or where a deploy puts Ember while it reaches Ember (`addressRefusal`), Memberful, or its
- * Members only, can only be turned on with the deployment's Memberful keys, and Email domain only with a
+ * Members only, can only be turned on once Ember has Memberful's keys, and Email domain only with a
  * domain to let in, while Ember can send email. Turning any of them off always works.
  */
 async function changeAccount(request: Request, env: Env): Promise<Response> {
@@ -410,7 +440,7 @@ async function changeAccount(request: Request, env: Env): Promise<Response> {
   if (!credentials) return problem(401, "Not signed in");
   const changes = parseAccountChanges(await jsonBodyOf(request));
   const refusal =
-    typeof changes === "string" ? changes : ((await addressRefusal(changes.customDomain, request, env, credentials)) ?? memberfulRefusal(changes.settings, env));
+    typeof changes === "string" ? changes : ((await addressRefusal(changes.customDomain, request, env, credentials)) ?? (await memberfulRefusal(changes.settings, env)));
   // Changes that are refused change nothing, but who's asking is still checked first.
   const account = await workspace(env).changeAccount(credentials, typeof changes === "string" || refusal ? {} : changes, urlOf(request).host);
   if (!account) return problem(401, "Not signed in");
@@ -594,12 +624,13 @@ async function unbanPerson(request: Request, env: Env, userId: UserId): Promise<
 
 /**
  * Your profile as its page shows it, with a new sign-in link for you, as each of Campfire's profile
- * pages has (users/profiles/_transfer.html.erb), and where you stand with Memberful, at the site the
- * deployment's keys name. No cache should keep it, since it holds your email address and the link.
+ * pages has (users/profiles/_transfer.html.erb), and where you stand with Memberful, at `site`, the one
+ * Ember has the keys of, if it has any. No cache should keep it, since it holds your email address and
+ * the link.
  */
-async function profileAnswer({ transfer, profile, memberful }: YourProfile, env: Env): Promise<Response> {
+async function profileAnswer({ transfer, profile, memberful }: YourProfile, env: Env, site: string | null): Promise<Response> {
   const transferId = await newTransferId(transfer, env.SESSION_SECRET, Date.now());
-  const answer = { ...profile, memberful: memberfulStatusOf(memberful, memberfulKeysOf(env)?.site ?? null) };
+  const answer = { ...profile, memberful: memberfulStatusOf(memberful, site) };
   return json({ profile: answer, transferId } satisfies ProfileAnswer, { headers: { "Cache-Control": "no-store" } });
 }
 
@@ -620,8 +651,9 @@ function memberfulStatusOf(memberful: YourProfile["memberful"], site: string | n
 /** Your profile, for its page. */
 async function profile(request: Request, env: Env): Promise<Response> {
   const credentials = await credentialsOf(request, env);
-  const yours = credentials && (await workspace(env).profile(credentials));
-  return yours ? profileAnswer(yours, env) : problem(401, "Not signed in");
+  if (!credentials) return problem(401, "Not signed in");
+  const [yours, site] = await Promise.all([workspace(env).profile(credentials), memberfulSiteFor(env)]);
+  return yours ? profileAnswer(yours, env, site) : problem(401, "Not signed in");
 }
 
 /**
@@ -630,8 +662,11 @@ async function profile(request: Request, env: Env): Promise<Response> {
  * takes is refused (422). An email address someone else has is refused. Changing your email address or
  * password, while you have one, takes your current password too, so that holding your session isn't
  * enough to take your account: it's checked as sign-in checks a password, counting against the same
- * limit (429), and refused (422) when it's missing or wrong. A new password ends your other sessions,
- * keeping this browser's push subscription at `pushSubscriptionEndpoint` and forgetting the rest.
+ * limit (429), and refused (422) when it's missing or wrong. Someone without a password whom Memberful
+ * signs in, as it does while Ember has the keys to the site they're linked at, is refused a
+ * first one (422), for the same reason: it would be a way in that holding their session was enough to
+ * make. A new password ends your other sessions, keeping this browser's push subscription at
+ * `pushSubscriptionEndpoint` and forgetting the rest.
  */
 async function changeProfile(request: Request, env: Env): Promise<Response> {
   const credentials = await credentialsOf(request, env);
@@ -639,9 +674,11 @@ async function changeProfile(request: Request, env: Env): Promise<Response> {
   const changes = parseProfileChanges(await jsonBodyOf(request));
   if (typeof changes === "string") return problem(422, changes);
   const { password, currentPassword, pushSubscriptionEndpoint, ...rest } = changes;
-  const check = await workspace(env).profileCheck(credentials, request.headers.get("CF-Connecting-IP") ?? "unknown", rest.emailAddress, Boolean(password));
+  const memberfulSite = await memberfulSiteFor(env);
+  const check = await workspace(env).profileCheck(credentials, request.headers.get("CF-Connecting-IP") ?? "unknown", rest.emailAddress, Boolean(password), memberfulSite);
   if (!check) return problem(401, "Not signed in");
   if (check === "limited") return problem(429, SIGN_IN_LIMITED);
+  if (check === "memberful") return problem(422, PASSWORD_WITH_MEMBERFUL);
   const checked = check.passwordDigest;
   if (checked !== null) {
     if (!currentPassword) return problem(422, CURRENT_PASSWORD_NEEDED);
@@ -649,13 +686,14 @@ async function changeProfile(request: Request, env: Env): Promise<Response> {
     if (isPasswordTooLong(currentPassword) || !(await passwordHasher(env).verify(currentPassword, checked)).matches) return problem(422, CURRENT_PASSWORD_WRONG);
   }
   const passwordDigest = password ? await passwordHasher(env).hash(password) : null;
-  const yours = await workspace(env).changeProfile(credentials, rest, passwordDigest, checked, pushSubscriptionEndpoint || null);
+  const yours = await workspace(env).changeProfile(credentials, rest, passwordDigest, checked, pushSubscriptionEndpoint || null, memberfulSite);
   if (!yours) return problem(401, "Not signed in");
+  if (yours === "memberful") return problem(422, PASSWORD_WITH_MEMBERFUL);
   if (yours === "email address taken") return problem(422, "That email address has an account already");
   if (yours === "name reserved") return problem(422, NAME_RESERVED);
   if (yours === "agent's name") return problem(422, agentsName(rest.name!));
   if (yours === "password needed") return problem(422, currentPassword ? CURRENT_PASSWORD_WRONG : CURRENT_PASSWORD_NEEDED);
-  return profileAnswer(yours, env);
+  return profileAnswer(yours, env, memberfulSite);
 }
 
 /**
@@ -663,14 +701,14 @@ async function changeProfile(request: Request, env: Env): Promise<Response> {
  * your session isn't enough to add a way into your account, as for changing your email address or
  * password, answers where to sign in at the Memberful site to connect your account there to yours, with
  * the cookie that keeps the state it goes with, to come back to your profile. 401 without a valid
- * session; 403 while Memberful isn't members only, or the deployment lacks its keys, or to a guest; 409
+ * session; 403 while Memberful isn't members only, or Ember lacks its keys, or to a guest; 409
  * once you've connected one; 422 without your password, or with one that isn't yours; and 429 past
  * sign-in's limit, which checking the password counts against.
  */
 async function connectMemberful(request: Request, env: Env): Promise<Response> {
   const credentials = await credentialsOf(request, env);
   if (!credentials) return problem(401, "Not signed in");
-  const site = memberfulKeysOf(env)?.site;
+  const site = await memberfulSiteFor(env);
   if (!site) return problem(403, MEMBERFUL_SIGN_IN_PROBLEMS.unavailable);
   const body: unknown = await jsonBodyOf(request);
   const { currentPassword } = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
@@ -695,7 +733,7 @@ async function connectMemberful(request: Request, env: Env): Promise<Response> {
  * enough to change how you sign in, as for connecting one, unlinks your account from the one at the
  * Memberful site, ends your other sessions and forgets their browsers' push subscriptions, as a new
  * password does, keeping this browser's at `pushSubscriptionEndpoint`, and answers your profile as it
- * is then. 401 without a valid session; 403 to a guest, or while the deployment lacks Memberful's keys;
+ * is then. 401 without a valid session; 403 to a guest, or while Ember lacks Memberful's keys;
  * 404 while you haven't connected one; 422 while you have no password, or no email address, to sign in
  * with once it's disconnected, or without your password, or with one that isn't yours; 429 past
  * sign-in's limit, which checking the password counts against; and 409 when your password, email
@@ -704,7 +742,7 @@ async function connectMemberful(request: Request, env: Env): Promise<Response> {
 async function disconnectMemberful(request: Request, env: Env): Promise<Response> {
   const credentials = await credentialsOf(request, env);
   if (!credentials) return problem(401, "Not signed in");
-  const site = memberfulKeysOf(env)?.site;
+  const site = await memberfulSiteFor(env);
   if (!site) return problem(403, MEMBERFUL_SIGN_IN_PROBLEMS.unavailable);
   const disconnection = parseMemberfulDisconnection(await jsonBodyOf(request));
   if (typeof disconnection === "string") return problem(422, disconnection);
@@ -723,7 +761,7 @@ async function disconnectMemberful(request: Request, env: Env): Promise<Response
   if (!yours) return problem(401, "Not signed in");
   // Something changed meanwhile: their password, or what they've connected.
   if (yours === "refused") return problem(409, "Disconnecting Memberful didn't work. Try again.");
-  return profileAnswer(yours, env);
+  return profileAnswer(yours, env, site);
 }
 
 /**
@@ -746,14 +784,14 @@ async function changeAvatar(request: Request, env: Env): Promise<Response> {
   const avatar = await storeAvatar(env, env.FILES, form);
   if ("error" in avatar) return problem(avatar.status, avatar.error);
   const yours = await workspace(env).changeAvatar(credentials, avatar);
-  return yours ? profileAnswer(yours, env) : problem(401, "Not signed in");
+  return yours ? profileAnswer(yours, env, await memberfulSiteFor(env)) : problem(401, "Not signed in");
 }
 
 /** Takes your avatar away, answering your profile then. */
 async function removeAvatar(request: Request, env: Env): Promise<Response> {
   const credentials = await credentialsOf(request, env);
   const yours = credentials && (await workspace(env).changeAvatar(credentials, null));
-  return yours ? profileAnswer(yours, env) : problem(401, "Not signed in");
+  return yours ? profileAnswer(yours, env, await memberfulSiteFor(env)) : problem(401, "Not signed in");
 }
 
 /**
@@ -788,7 +826,8 @@ async function dismissInvitation(request: Request, env: Env): Promise<Response> 
 
 /**
  * Everyone in the workspace, deactivated and banned people too, with their avatars' addresses, for
- * the app to show people by. No cache keeps it, as none keeps the sidebar, so the app keeps its own copy.
+ * the app to show people by, but the AI agents only administrators' direct messages reach, which only
+ * an administrator is listed. No cache keeps it, as none keeps the sidebar, so the app keeps its own copy.
  */
 async function directory(request: Request, env: Env): Promise<Response> {
   const credentials = await credentialsOf(request, env);
@@ -808,7 +847,8 @@ function segmentText(segment: string): string {
 
 /**
  * Someone's page: anyone, whatever their status, with their email address and a new sign-in link for
- * administrators, and what an agent's page tells everyone of it. An id nobody has is 404.
+ * administrators, and what an agent's page tells everyone of it. An id nobody has is 404, as is an AI
+ * agent's only administrators' direct messages reach, to anyone else.
  */
 async function showPerson(request: Request, env: Env, userId: UserId): Promise<Response> {
   const credentials = await credentialsOf(request, env);
@@ -1078,10 +1118,11 @@ function apiAction(request: Request, env: Env, pathname: string): (() => Respons
   if (pathname === "/api/account/sending_domain_checks" && request.method === "POST") return () => checkSendingDomain(request, env);
   if (pathname === "/api/account/turnstile_keys" && request.method === "PUT") return () => saveTurnstileKeys(request, env);
   if (pathname === "/api/account/turnstile_keys" && request.method === "DELETE") return () => forgetTurnstileKeys(request, env);
+  if (pathname === "/api/account/memberful_keys" && request.method === "PUT") return () => saveMemberfulKeys(request, env);
   if (pathname === "/api/account/assistant" && request.method === "PUT") return () => saveAssistant(request, env);
   if (pathname === "/api/account/assistant" && request.method === "DELETE") return () => forgetAssistant(request, env);
   if (pathname === "/api/account/assistant" && request.method === "PATCH") return () => changeAssistantSettings(request, env);
-  if (pathname === "/api/account/assistant/catalog" && request.method === "POST") return () => listAssistantModels(request, env);
+  if (pathname === "/api/account/assistant/offered" && request.method === "POST") return () => listOfferedModels(request, env);
   if (pathname === "/api/account/assistant/models" && request.method === "POST") return () => addAssistantModel(request, env);
   if (pathname === "/api/account/assistant/models" && request.method === "DELETE") return () => removeAssistantModel(request, env);
   if (pathname === "/api/account/assistant/web_search" && request.method === "PUT") return () => changeWebSearch(request, env);
@@ -1099,6 +1140,22 @@ function apiAction(request: Request, env: Env, pathname: string): (() => Respons
   if (agentAvatar && request.method === "DELETE") return () => removeAgentAvatar(request, env, agentAvatar[1]!);
   const agentTrials = pathname.match(/^\/api\/account\/agents\/([^/]+)\/trials$/);
   if (agentTrials && request.method === "POST") return () => tryAgent(request, env, agentTrials[1]!);
+  const agentTools = pathname.match(/^\/api\/account\/agents\/([^/]+)\/tools$/);
+  if (agentTools && request.method === "GET") return () => showAgentTools(request, env, agentTools[1]!);
+  if (agentTools && request.method === "PUT") return () => pickAgentTools(request, env, agentTools[1]!);
+  if (pathname === "/api/account/apps" && request.method === "GET") return () => listApps(request, env);
+  if (pathname === "/api/account/apps" && request.method === "POST") return () => connectApp(request, env);
+  const app = pathname.match(/^\/api\/account\/apps\/([^/]+)$/);
+  if (app && request.method === "GET") return () => showApp(request, env, app[1]!);
+  if (app && request.method === "PATCH") return () => changeApp(request, env, app[1]!);
+  if (app && request.method === "DELETE") return () => disconnectApp(request, env, app[1]!);
+  if (pathname === "/api/account/app-sign-ins" && request.method === "POST") return () => beginNewAppSignIn(request, env);
+  if (pathname === "/api/account/app-sign-ins/finish" && request.method === "POST") return () => finishAppSignIn(request, env);
+  const appSignIn = pathname.match(/^\/api\/account\/apps\/([^/]+)\/sign-in$/);
+  if (appSignIn && request.method === "POST") return () => beginAppSignIn(request, env, appSignIn[1]!);
+  const appTools = pathname.match(/^\/api\/account\/apps\/([^/]+)\/tools$/);
+  if (appTools && request.method === "POST") return () => readAppTools(request, env, appTools[1]!);
+  if (pathname === "/api/account/outside_ai" && request.method === "PUT") return () => changeOutsideAi(request, env);
   if (pathname === "/api/account/huddles" && request.method === "PUT") return () => saveHuddles(request, env);
   if (pathname === "/api/account/huddles" && request.method === "DELETE") return () => forgetHuddles(request, env);
   if (pathname === "/api/account/custom_domain_checks" && request.method === "POST") return () => checkCustomDomain(request, env);
@@ -1126,11 +1183,19 @@ function apiAction(request: Request, env: Env, pathname: string): (() => Respons
   if (pathname === "/api/sidebar" && request.method === "GET") return () => sidebar(request, env);
   if (pathname === "/api/sidebar/invitation" && request.method === "DELETE") return () => dismissInvitation(request, env);
   if (pathname === "/api/users" && request.method === "GET") return () => directory(request, env);
+  if (pathname === "/api/agents" && request.method === "GET") return () => listAvailableAgents(request, env);
   if (pathname === "/api/autocompletable/users" && request.method === "GET") return () => mentionable(request, env);
   if (pathname === "/api/sidebar/order" && request.method === "PUT") return () => setFavoriteOrder(request, env);
   if (pathname === "/api/users/me/profile" && request.method === "GET") return () => profile(request, env);
   if (pathname === "/api/users/me/profile" && request.method === "PATCH") return () => changeProfile(request, env);
   if (pathname === "/api/users/me/assistant" && request.method === "PATCH") return () => changeYourAssistant(request, env);
+  const ownAppSignIn = pathname.match(/^\/api\/users\/me\/apps\/([^/]+)\/sign-in$/);
+  if (ownAppSignIn && request.method === "POST") return () => beginOwnAppSignIn(request, env, ownAppSignIn[1]!);
+  if (ownAppSignIn && request.method === "DELETE") return () => signOutOfApp(request, env, ownAppSignIn[1]!);
+  const outsideConnection = pathname.match(/^\/api\/users\/me\/outside\/([^/]+)$/);
+  if (outsideConnection && request.method === "DELETE") return () => disconnectOutside(request, env, outsideConnection[1]!);
+  if (pathname === "/api/outside/asks" && request.method === "POST") return () => describeOutsideAsk(request, env);
+  if (pathname === "/api/outside/answers" && request.method === "POST") return () => answerOutsideAsk(request, env);
   if (pathname === MEMBERFUL_CONNECTIONS_PATH && request.method === "POST") return () => connectMemberful(request, env);
   if (pathname === MEMBERFUL_CONNECTIONS_PATH && request.method === "DELETE") return () => disconnectMemberful(request, env);
   if (pathname === AVATAR_PATH && request.method === "PUT") return () => changeAvatar(request, env);
@@ -1227,7 +1292,12 @@ async function route(request: Request, env: Env, pathname: string): Promise<Resp
   // Nor is Memberful's webhook, which its servers sign with the webhook's secret.
   if (pathname === MEMBERFUL_WEBHOOK_PATH) return memberfulWebhook(request, env);
   const write = request.method !== "GET" && request.method !== "HEAD";
+  // Nor is an app's authorization server, reading who Ember is.
+  if (pathname === CLIENT_DOCUMENT_PATH && !write) return clientDocument(request);
   // Nor are a room's files, to whoever has the address, whatever their browser.
+  // Nor are the AI apps that connect to Ember, whose requests carry a token of their own, or nothing.
+  const outside = outsideAction(request, env, pathname);
+  if (outside) return write && isOutsideRegistration(pathname) && (await isFromBannedAddress(request, env)) ? tooManyRequests() : outside();
   const file = fileAddressOf(pathname);
   if (file) return write ? notFound(request) : serveFile(request, env, file);
   const action = apiAction(request, env, pathname) ?? botAction(request, env, pathname);
@@ -1261,6 +1331,8 @@ async function route(request: Request, env: Env, pathname: string): Promise<Resp
   if (page?.page === "person") return personPage(request, env, pathname, page.userId);
   if (page?.page === "bot-settings") return botPage(request, env, pathname, page.userId);
   if (page?.page === "agent-settings") return agentPage(request, env, pathname, page.agentId);
+  if (page?.page === "app-settings") return appPage(request, env, pathname, page.appId);
+  if (pathname === OUTSIDE_AUTHORIZE_PATH && !write) return outsideConnectPage(request, env, pathname);
   return anyOtherPage(request, env, pathname);
 }
 

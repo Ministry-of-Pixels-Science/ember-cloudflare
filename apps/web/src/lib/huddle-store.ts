@@ -1,9 +1,9 @@
-import type { RoomId, User } from "@ember/protocol";
+import type { RoomId, User, UserId } from "@ember/protocol";
 import type { HuddlePerson } from "@ember/protocol/huddles";
 
 /**
- * The huddle this tab is in, as its room's header and the huddle's bar show it. A tab is in one huddle at
- * most, and only while it's open: loading the page again leaves it.
+ * The huddle this tab is in, as its room's header, the huddle's bar and the huddle itself, opened, show
+ * it. A tab is in one huddle at most, and only while it's open: loading the page again leaves it.
  */
 export interface JoinedHuddle {
   roomId: RoomId;
@@ -16,23 +16,59 @@ export interface JoinedHuddle {
   muted: boolean;
   /** Whether the tab has a microphone to unmute. Without one its person only listens. */
   microphone: boolean;
+  /** The tab's camera while it's on, for its person to see what the others do. */
+  camera: MediaStream | null;
+  /** The others' cameras the tab watches, by whose each is. */
+  watched: ReadonlyMap<UserId, MediaStream>;
+  /** The screen the tab's person shares, for them to see what the others do. */
+  screen: MediaStream | null;
+  /** The screens the others share that the tab watches, by whose each is. */
+  screens: ReadonlyMap<UserId, MediaStream>;
+  /** Whether the tab shows the huddle opened, a tile for each person, rather than as its bar. Only then does it watch anyone's camera or screen. */
+  open: boolean;
 }
 
-/** What the tab's huddle takes from outside it, which its header button, its bar and the shortcuts ask of it. */
+/** What the tab's huddle takes from outside it, which its header button, its bar, the huddle opened and the shortcuts ask of it. */
 export interface HuddleControls {
   leave(): void;
   setMuted(muted: boolean): void;
+  setCamera(on: boolean): void;
+  setScreen(shared: boolean): void;
+  setOpen(open: boolean): void;
 }
+
+/** The id the huddle opened has in the page, where Skip to main content goes while it covers the page. */
+export const OPEN_HUDDLE = "huddle";
 
 let joined: JoinedHuddle | null = null;
 let controls: HuddleControls | null = null;
 const listeners = new Set<() => void>();
-let ended: ((why: string) => void) | null = null;
+let told: ((what: string) => void) | null = null;
 
 /** Hears whenever the tab's huddle changes, until the function returned is called, as `useSyncExternalStore` takes it. */
 export function watchHuddle(listener: () => void): () => void {
   listeners.add(listener);
   return () => void listeners.delete(listener);
+}
+
+// Who's speaking changes several times a second, so it's kept apart from the huddle, for only what
+// shows it to hear of.
+let speaking: ReadonlySet<UserId> = new Set();
+const speakingListeners = new Set<() => void>();
+
+/** Hears whenever who's speaking in the tab's huddle changes, until the function returned is called. */
+export function watchSpeaking(listener: () => void): () => void {
+  speakingListeners.add(listener);
+  return () => void speakingListeners.delete(listener);
+}
+
+/** Whether `userId` is speaking in the tab's huddle now, as far as the tab can hear. */
+export const isSpeaking = (userId: UserId) => speaking.has(userId);
+
+/** Shows who's speaking in the tab's huddle. The huddle's own code calls this. */
+export function showSpeaking(who: ReadonlySet<UserId>): void {
+  speaking = who;
+  for (const listener of speakingListeners) listener();
 }
 
 /** The huddle the tab is in, or null. */
@@ -51,16 +87,31 @@ export const leaveHuddle = () => controls?.leave();
 /** Mutes the tab's microphone in its huddle, or unmutes it, if it's in one. */
 export const muteHuddle = (muted: boolean) => controls?.setMuted(muted);
 
-/** Has `say` told why whenever the room ends the tab's huddle for it, until the function returned is called. */
-export function hearHuddleEnd(say: (why: string) => void): () => void {
-  ended = say;
+/** Turns the tab's camera on in its huddle, which asks the browser for one, or off, if it's in one. */
+export const showHuddleCamera = (on: boolean) => controls?.setCamera(on);
+
+/** Shares the tab's screen in its huddle, which has the browser ask its person what to share, or stops sharing it, if it's in one. */
+export const shareHuddleScreen = (shared: boolean) => controls?.setScreen(shared);
+
+/** Shows the tab's huddle opened, or as its bar again, if it's in one. */
+export const openHuddle = (open: boolean) => controls?.setOpen(open);
+
+/**
+ * Has `say` told whatever the tab's huddle has to tell its person, until the function returned is
+ * called: why the room ended it for them, or why their camera stays off or their screen isn't shared.
+ */
+export function hearHuddle(say: (what: string) => void): () => void {
+  told = say;
   return () => {
-    if (ended === say) ended = null;
+    if (told === say) told = null;
   };
 }
+
+/** Tells the tab's person `what` of their huddle. The huddle's own code calls this. */
+export const tellOfHuddle = (what: string) => told?.(what);
 
 /** Shows that the room ended the tab's huddle, and says `why`. */
 export function endHuddle(why: string): void {
   showHuddle(null);
-  ended?.(why);
+  tellOfHuddle(why);
 }

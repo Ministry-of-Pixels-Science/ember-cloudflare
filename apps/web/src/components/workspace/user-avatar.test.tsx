@@ -26,6 +26,22 @@ describe("Initials avatars", () => {
     expect(image).not.toHaveAttribute("loading");
   });
 
+  it("takes the initials from behind a picture once it loads, so they don't show through one that's see-through", () => {
+    const { image } = picture(<UserAvatar user={ada} />);
+    fireEvent.load(image);
+    expect(image).toHaveAttribute("src", ada.avatarUrl);
+    expect(image.style.backgroundImage).toBe("");
+  });
+
+  it("leaves them out while the next picture loads, since the last one shows until it has", () => {
+    const { image, rerender } = picture(<UserAvatar user={ada} />);
+    fireEvent.load(image);
+    const changed = { ...ada, avatarUrl: "/users/u1.abc/avatar?v=20261015120000" };
+    rerender(new Map([[ada.id, changed]]));
+    expect(image).toHaveAttribute("src", changed.avatarUrl);
+    expect(image.style.backgroundImage).toBe("");
+  });
+
   it("crops a photo that isn't square to fill its square, as Campfire's `.avatar img` does", () => {
     expect(picture(<UserAvatar user={ada} />).image).toHaveClass("object-cover");
   });

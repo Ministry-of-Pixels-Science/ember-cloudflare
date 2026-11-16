@@ -7,7 +7,6 @@ import {
   WORKSPACE_PRELOADS,
   type Account,
   type AccountChanges,
-  type AssistantCatalog,
   type AssistantChanged,
   type AssistantChanges,
   type AssistantForgotten,
@@ -48,6 +47,7 @@ import {
   type MemberfulConnectionStart,
   type MemberfulDisconnection,
   type NewAssistantModel,
+  type OfferedModels,
   type NewDirect,
   type NewJoinCode,
   type NewRoom,
@@ -92,7 +92,30 @@ import {
   type YourAssistantChanged,
   type YourAssistantChanges,
 } from "@ember/protocol";
-import type { Agent, AgentAnswer, AgentChanges, Agents, AgentSettings, AgentTrial, AgentTrialAnswer, NewAgent } from "@ember/protocol/agents";
+import type { Agent, AgentAnswer, AgentChanges, Agents, AgentSettings, AgentTrial, AgentTrialAnswer, AvailableAgent, AvailableAgents, NewAgent } from "@ember/protocol/agents";
+import type {
+  AgentToolPicks,
+  AgentTools,
+  App,
+  AppAnswer,
+  AppChanges,
+  AppClient,
+  AppId,
+  AppRemoved,
+  Apps,
+  AppSignedIn,
+  AppSignInBegun,
+  AppSignInReturn,
+  AppSummary,
+  NewApp,
+  NewAppSignIn,
+  OfferedApp,
+  ToolPick,
+  YourAppSignedIn,
+  YourAppSignedOut,
+} from "@ember/protocol/apps";
+import type { MemberfulKeysChange, MemberfulSaved } from "@ember/protocol/memberful";
+import type { OutsideAiSettings, OutsideAnswer, OutsideAnswered, OutsideAsk, OutsideAsked, OutsideScope, YourOutsideAi } from "@ember/protocol/outside";
 import type { LogoVariants } from "@/lib/previews";
 
 // The session lives in an HttpOnly cookie, which the browser sends with every request and socket,
@@ -108,6 +131,10 @@ export class ApiError extends Error {
     readonly field?: string,
     /** The page to go to instead, when the server names one. */
     readonly redirect?: string,
+    /** Whether an app's server refused for want of a sign-in, which Ember can begin. */
+    readonly signIn?: boolean,
+    /** Whether an app's sign-in wants a client ID that Ember can't get itself, which the app's form then asks for. */
+    readonly client?: boolean,
   ) {
     super(message);
   }
@@ -118,8 +145,10 @@ export const isSignedOut = (error: unknown) => error instanceof ApiError && erro
 
 /** What an answer carries, or the ApiError it says why it failed with. */
 async function dataOf<T>(response: Response): Promise<T> {
-  const data = (await response.json().catch(() => ({}))) as T & { error?: string; field?: string; redirect?: string };
-  if (!response.ok) throw new ApiError(response.status, data.error ?? `Request failed (${response.status})`, data.field, data.redirect);
+  const data = (await response.json().catch(() => ({}))) as T & { error?: string; field?: string; redirect?: string; signIn?: unknown; client?: unknown };
+  if (!response.ok) {
+    throw new ApiError(response.status, data.error ?? `Request failed (${response.status})`, data.field, data.redirect, data.signIn === true || undefined, data.client === true || undefined);
+  }
   return data;
 }
 
@@ -538,6 +567,15 @@ export async function forgetTurnstileKeys(): Promise<TurnstileSettings["turnstil
 }
 
 /**
+ * Gives Ember a Memberful site's address and keys, as Set up Memberful does, answering Memberful as
+ * Membership's card shows it then. Fails with a 422 ApiError on the field Ember or Memberful refuses, a
+ * 502 one when Ember couldn't ask Memberful, and a 403 one for anyone but an administrator.
+ */
+export async function saveMemberfulKeys(keys: MemberfulKeysChange): Promise<MemberfulSaved> {
+  return request<MemberfulSaved>("/api/account/memberful_keys", { method: "PUT", body: JSON.stringify(keys) });
+}
+
+/**
  * Gives Ember a Realtime SFU app's ID and secret to run huddles through, answering huddles as they are
  * then. Fails with a 422 ApiError on the field Ember or Cloudflare refuses, a 502 one when Ember couldn't
  * ask Cloudflare, and a 403 one for anyone but an administrator.
@@ -552,12 +590,14 @@ export async function forgetHuddles(): Promise<null> {
 }
 
 /**
- * The text models Cloudflare's catalog lists for the account `keys` gives, with its API token, or the one
- * Ember has, when it gives none, or else the models Ember knows, and why the catalog couldn't be read.
- * Fails with a 422 ApiError on the field the Worker refuses, and a 403 one for anyone but an administrator.
+ * The models Ember offers, as Set up Ember AI, Add a model and the agents' pages list them: those the
+ * models file lists, then Workers AI's, as Cloudflare's model search lists them for the account `keys`
+ * names, with its API token, as Set up Ember AI has them typed, or else Ember AI's, or why they aren't
+ * listed. Fails with a 422 ApiError on a field that can't be what it's for, and a 403 one for anyone but
+ * an administrator.
  */
-export async function listAssistantModels(keys: AssistantKeys): Promise<AssistantCatalog> {
-  return request<AssistantCatalog>("/api/account/assistant/catalog", { method: "POST", body: JSON.stringify(keys) });
+export async function fetchOfferedModels(keys?: AssistantKeys): Promise<OfferedModels> {
+  return request<OfferedModels>("/api/account/assistant/offered", { method: "POST", body: JSON.stringify(keys ?? {}) });
 }
 
 /**
@@ -634,6 +674,11 @@ export async function fetchAgents(): Promise<Agent[]> {
   return (await request<Agents>("/api/account/agents")).agents;
 }
 
+/** The AI agents this person can ask, @ember first, then by name, with what each does and the rooms it shares with them: none while Ember AI is off. */
+export async function fetchAvailableAgents(): Promise<AvailableAgent[]> {
+  return (await request<AvailableAgents>("/api/agents")).agents;
+}
+
 /** Agent `agentId`, as its page shows it. Fails as `fetchAgents` does, and with a 404 ApiError for an id that isn't an agent's. */
 export async function fetchAgent(agentId: UserId): Promise<AgentSettings> {
   return (await request<AgentAnswer>(`/api/account/agents/${encodeURIComponent(agentId)}`)).agent;
@@ -667,6 +712,121 @@ export async function removeAgentAvatar(agentId: UserId): Promise<AgentSettings>
 /** Deletes agent `agentId`. Fails as `fetchAgent` does. */
 export async function deleteAgent(agentId: UserId): Promise<void> {
   await request(`/api/account/agents/${encodeURIComponent(agentId)}`, { method: "DELETE" });
+}
+
+/** The connected apps, by name. Fails with a 403 ApiError for anyone but an administrator, and a 409 while Ember AI is off. */
+export async function fetchApps(): Promise<AppSummary[]> {
+  return (await request<Apps>("/api/account/apps")).apps;
+}
+
+/** App `appId`, as its page shows it. Fails as `fetchApps` does, and with a 404 ApiError for an id that isn't a connected app's. */
+export async function fetchApp(appId: AppId): Promise<App> {
+  return (await request<AppAnswer>(`/api/account/apps/${encodeURIComponent(appId)}`)).app;
+}
+
+/**
+ * Connects an app, once Ember has read its server's tools, answering it as its page shows it. Fails as
+ * `fetchApps` does, with a 422 ApiError naming the field for what's refused, the address when its
+ * server doesn't answer as one does, and with a 409 when as many apps are connected as can be.
+ */
+export async function connectApp(app: NewApp): Promise<App> {
+  return (await request<AppAnswer>("/api/account/apps", { method: "POST", body: JSON.stringify(app) })).app;
+}
+
+/**
+ * Begins a sign-in to the server of `app`, one to connect, answering where its authorization server
+ * signs people in, to send the browser. Fails as `connectApp` does, the 422 saying why Ember can't use
+ * the sign-in its server describes, if it describes one.
+ */
+export async function beginNewAppSignIn(app: NewAppSignIn): Promise<string> {
+  return (await request<AppSignInBegun>("/api/account/app-sign-ins", { method: "POST", body: JSON.stringify(app) })).authorizationUrl;
+}
+
+/**
+ * Begins a sign-in to the server of the connected app `appId`, again or in place of its token, as
+ * `beginNewAppSignIn` does, as `client` when the app's page asks who Ember is there, and otherwise as
+ * the app last signed in. Fails as it and `fetchApp` do.
+ */
+export async function beginAppSignIn(appId: AppId, client?: AppClient): Promise<string> {
+  const body = client && { body: JSON.stringify(client) };
+  return (await request<AppSignInBegun>(`/api/account/apps/${encodeURIComponent(appId)}/sign-in`, { method: "POST", ...body })).authorizationUrl;
+}
+
+/**
+ * Finishes the sign-in an authorization server sent the browser `back` from, answering the app, connected
+ * by it or signed in to `again`, or, for a sign-in you made to a connected app yourself, the app as your
+ * profile then lists it. Fails as `fetchApps` does, and with a 422 ApiError for a sign-in that has
+ * ended, was begun by someone else, or that its server didn't finish.
+ */
+export async function finishAppSignIn(back: AppSignInReturn): Promise<AppSignedIn | YourAppSignedIn> {
+  return request<AppSignedIn | YourAppSignedIn>("/api/account/app-sign-ins/finish", { method: "POST", body: JSON.stringify(back) });
+}
+
+/** Begins a sign-in you make to the connected app `appId` yourself, answering where to send the browser. Fails with an ApiError: 404 for an app that isn't one Ember signs in to, 409 while Ember AI is off, 422 when its server has no sign-in Ember can use. */
+export async function beginOwnAppSignIn(appId: AppId): Promise<string> {
+  return (await request<AppSignInBegun>(`/api/users/me/apps/${encodeURIComponent(appId)}/sign-in`, { method: "POST" })).authorizationUrl;
+}
+
+/** Forgets the sign-in you made to the connected app `appId` yourself, answering the apps as your profile then lists them, and whether its service took the sign-in back. Fails as `beginOwnAppSignIn` does. */
+export async function signOutOfApp(appId: AppId): Promise<YourAppSignedOut> {
+  return request<YourAppSignedOut>(`/api/users/me/apps/${encodeURIComponent(appId)}/sign-in`, { method: "DELETE" });
+}
+
+/**
+ * What the page says of `ask`, an AI app's request to connect to Ember as you. Fails with a 401 ApiError
+ * once the session has ended, a 403 for someone who signed in with just a name, a 409 while outside AI
+ * is off, and a 422 for a request Ember can't answer.
+ */
+export function describeOutsideAsk(ask: OutsideAsk): Promise<OutsideAsked> {
+  return request<OutsideAsked>("/api/outside/asks", { method: "POST", body: JSON.stringify(ask) });
+}
+
+/** Answers `ask`, whether to connect its app as you, leaving out `without` of what it asks, answering where to send the browser: back to the app. Fails as `describeOutsideAsk` does, and with a 409 when you have as many connected as one may. */
+export async function answerOutsideAsk(ask: OutsideAsk, allow: boolean, without: OutsideScope[] = []): Promise<string> {
+  return (await request<OutsideAnswered>("/api/outside/answers", { method: "POST", body: JSON.stringify({ ask, allow, without } satisfies OutsideAnswer) })).redirectTo;
+}
+
+/** Ends the connection `id` of yours, answering the ones you have left. Fails with a 401 ApiError once the session has ended, a 409 while outside AI is off, and a 404 once the connection has ended. */
+export function disconnectOutside(id: string): Promise<YourOutsideAi> {
+  return request<YourOutsideAi>(`/api/users/me/outside/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+/** Lets AI apps connect to Ember, or stops them, which ends every connection, answering which. Fails with a 401 ApiError once the session has ended, and a 403 unless you're an administrator. */
+export function changeOutsideAi(on: boolean): Promise<OutsideAiSettings> {
+  return request<OutsideAiSettings>("/api/account/outside_ai", { method: "PUT", body: JSON.stringify({ on }) });
+}
+
+/** Changes app `appId`, leaving what `changes` leaves out, answering it as its page then shows it. Fails as `fetchApp` and `connectApp` do. */
+export async function changeApp(appId: AppId, changes: AppChanges): Promise<App> {
+  return (await request<AppAnswer>(`/api/account/apps/${encodeURIComponent(appId)}`, { method: "PATCH", body: JSON.stringify(changes) })).app;
+}
+
+/** Reads app `appId`'s tools from its server again, answering it as its page then shows it. Fails as `fetchApp` does, and with a 422 ApiError when its server doesn't answer as one does. */
+export async function readAppTools(appId: AppId): Promise<App> {
+  return (await request<AppAnswer>(`/api/account/apps/${encodeURIComponent(appId)}/tools`, { method: "POST" })).app;
+}
+
+/**
+ * Every connected app's tools as the page of `agentId`, @ember or an agent, offers them, with which it
+ * may use. Fails as `fetchApps` does, and with a 404 ApiError for an id that isn't @ember's or an agent's.
+ */
+export async function fetchAgentTools(agentId: UserId): Promise<OfferedApp[]> {
+  return (await request<AgentTools>(`/api/account/agents/${encodeURIComponent(agentId)}/tools`)).apps;
+}
+
+/**
+ * Has `tools` be every tool `agentId` may use from then on, answering what its page then offers. Fails
+ * as `fetchAgentTools` does, with a 422 ApiError for more than an agent uses, and with a 409 for a tool
+ * that isn't a connected app's any more, or that its app describes another way than when it was offered.
+ */
+export async function pickAgentTools(agentId: UserId, tools: ToolPick[]): Promise<OfferedApp[]> {
+  const picks: AgentToolPicks = { tools };
+  return (await request<AgentTools>(`/api/account/agents/${encodeURIComponent(agentId)}/tools`, { method: "PUT", body: JSON.stringify(picks) })).apps;
+}
+
+/** Disconnects app `appId`, answering whether its service took back Ember's sign-in to it, if Ember was signed in to it. Fails as `fetchApp` does. */
+export function disconnectApp(appId: AppId): Promise<Partial<AppRemoved>> {
+  return request<Partial<AppRemoved>>(`/api/account/apps/${encodeURIComponent(appId)}`, { method: "DELETE" });
 }
 
 /**

@@ -4,6 +4,7 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import type { Plugin } from "vite";
 import { defineConfig } from "vitest/config";
+import { APP_VERSION_PATH, assetsInHtml, type AppVersion } from "./src/lib/updates.ts";
 
 /**
  * Serves each icon a room can have as an SVG of its own, which `RoomIcon` draws: Lucide's at
@@ -60,8 +61,27 @@ function oneAppScript(): Plugin {
   };
 }
 
+/**
+ * Writes app-version.json beside the bundle, naming the scripts and stylesheets the built page loads,
+ * which a page left open asks for to tell whether Ember has been updated since it loaded
+ * (src/lib/updates.ts).
+ */
+function appVersion(): Plugin {
+  return {
+    name: "ember-app-version",
+    apply: "build",
+    writeBundle({ dir }, bundle) {
+      const page = bundle["index.html"];
+      const html = page?.type !== "asset" ? "" : typeof page.source === "string" ? page.source : new TextDecoder().decode(page.source);
+      const version: AppVersion = { assets: assetsInHtml(html) };
+      if (version.assets.length === 0) this.error("The built page loads none of the app's scripts, so app-version.json can't name them (see appVersion).");
+      writeFileSync(path.join(dir!, APP_VERSION_PATH), `${JSON.stringify(version)}\n`);
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [react(), tailwindcss(), roomIcons(), oneAppScript()],
+  plugins: [react(), tailwindcss(), roomIcons(), oneAppScript(), appVersion()],
   resolve: {
     alias: {
       "@": path.resolve(import.meta.dirname, "src"),

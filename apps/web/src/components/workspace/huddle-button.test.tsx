@@ -7,7 +7,9 @@ import { HuddleButton, HuddlesContext } from "./huddle-button";
 
 const huddleOf = (...userIds: string[]): LiveHuddle => ({ startedAt: "2026-11-10T09:00:00.000Z", userIds });
 /** The huddle this tab is in, in room `roomId`. */
-const joined = (roomId: string): JoinedHuddle => ({ roomId, connected: true, you: { id: "ada", name: "Ada" }, people: [], muted: false, microphone: true });
+const joined = (roomId: string): JoinedHuddle => ({ roomId, connected: true, you: { id: "ada", name: "Ada" }, people: [], muted: false, microphone: true, camera: null, watched: new Map(), screen: null, screens: new Map(), open: false });
+/** What the tab's huddle is asked to do, `leave` among it. */
+const controlsWith = (leave = vi.fn()) => ({ leave, setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn() });
 
 /** The keyboard of a device whose `navigator.platform` is `platform`. */
 const on = (platform: string) => vi.stubGlobal("navigator", { ...navigator, platform, clipboard: navigator.clipboard });
@@ -47,7 +49,7 @@ describe("The huddle button", () => {
   it("leaves the huddle this tab is in, green all over, without counting who's in it", async () => {
     const leave = vi.fn();
     const { preview, user } = renderButton({ general: huddleOf("ada", "grace") });
-    act(() => showHuddle(joined("general"), { leave, setMuted: vi.fn() }));
+    act(() => showHuddle(joined("general"), controlsWith(leave)));
     const button = screen.getByRole("button", { name: "Leave huddle" });
     expect(button.parentElement).toHaveClass("bg-positive", "text-white");
     expect(button.parentElement).not.toHaveClass("ring-positive");
@@ -58,7 +60,7 @@ describe("The huddle button", () => {
 
   it("starts or joins this room's while the tab is in another room's huddle", () => {
     renderButton();
-    act(() => showHuddle(joined("other"), { leave: vi.fn(), setMuted: vi.fn() }));
+    act(() => showHuddle(joined("other"), controlsWith()));
     expect(screen.getByRole("button", { name: "Start huddle" })).toBeInTheDocument();
   });
 
@@ -74,7 +76,7 @@ describe("The huddle button", () => {
       </HuddlesContext>,
     );
     expect(screen.getByRole("button", { name: "Join huddle, 1 in it" })).toBeInTheDocument();
-    act(() => showHuddle(joined("general"), { leave: vi.fn(), setMuted: vi.fn() }));
+    act(() => showHuddle(joined("general"), controlsWith()));
     expect(screen.getByRole("button", { name: "Leave huddle" })).toBeInTheDocument();
     act(() => showHuddle(null));
     expect(screen.getByRole("button", { name: "Join huddle, 1 in it" })).toBeInTheDocument();

@@ -15,10 +15,10 @@ export const BODY_TOO_LARGE = "A request's body can be at most 1 MiB";
 export class BodyTooLarge extends Error {}
 
 /**
- * The request's body, or null if it holds more than `max` bytes: at once when its Content-Length says
- * so, or as soon as that many have arrived, which it stops reading at.
+ * The body of a request, or of a response, or null if it holds more than `max` bytes: at once when its
+ * Content-Length says so, or as soon as that many have arrived, which it stops reading at.
  */
-export async function bytesUpTo(request: Request, max: number): Promise<ArrayBuffer | null> {
+export async function bytesUpTo(request: Request | Response, max: number): Promise<ArrayBuffer | null> {
   if (Number(request.headers.get("Content-Length")) > max) return null;
   if (!request.body) return new ArrayBuffer(0);
   const reader = request.body.getReader();
@@ -36,7 +36,7 @@ export async function bytesUpTo(request: Request, max: number): Promise<ArrayBuf
 }
 
 /** The same, as UTF-8, with invalid bytes replaced. */
-export async function bodyUpTo(request: Request, max: number): Promise<string | null> {
+export async function bodyUpTo(request: Request | Response, max: number): Promise<string | null> {
   const bytes = await bytesUpTo(request, max);
   return bytes && new TextDecoder().decode(bytes);
 }

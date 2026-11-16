@@ -1,5 +1,5 @@
 import { memo, useCallback, useContext, useMemo, useRef, useState } from "react";
-import type { Me, Message, User } from "@ember/protocol";
+import type { CardAction, Me, Message, User } from "@ember/protocol";
 import { displayBody, isAllEmoji, type DisplayNode } from "@ember/richtext/dom";
 import { NavArrowRight } from "@/components/icons/iconoir";
 import { PageLink } from "@/components/page-link";
@@ -27,6 +27,8 @@ export interface MessageActions {
   edit: (messageId: string, body: string) => boolean;
   /** Returns whether the deletion was sent. */
   remove: (messageId: string) => boolean;
+  /** Clicks a button that acts on one of a message's cards, answering whether its bot took the click, once the room says. */
+  click: (messageId: string, action: CardAction) => Promise<boolean>;
 }
 
 /**
@@ -341,7 +343,9 @@ export const MessageItem = memo(function MessageItem({ message, me, threaded: fo
             )
           )}
 
-          {message.cards && <BotCards cards={message.cards} className={threaded ? "col-start-1" : "touch:pr-8"} />}
+          {message.cards && (
+            <BotCards cards={message.cards} className={threaded ? "col-start-1" : "touch:pr-8"} onAction={actions && !pending ? (action) => actions.click(message.id, action) : undefined} />
+          )}
 
           {pending && message.failed && <p className="col-span-full text-xs text-destructive">Not sent</p>}
 

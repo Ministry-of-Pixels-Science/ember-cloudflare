@@ -5,8 +5,7 @@ import { useVisit } from "@/hooks/use-route";
 import { moveTo, staysAtAnyAddress, thisPageAt } from "@/lib/custom-domain";
 
 // A tab left open at another address as Ember is given a custom domain, which a page opened afresh would
-// move to, says so, with a link to the page it shows there. It sits where the workspace's flashes do,
-// under them.
+// move to, says so, with a link to the page it shows there. It sits with the workspace's other notices.
 
 /** Says Ember has moved to its custom domain, until it's closed, on any page that would move there. */
 export function MovedNotice() {
@@ -24,18 +23,16 @@ export function MovedNotice() {
     void moveTo(customDomain);
   };
   return (
-    <div className="fixed top-[calc(var(--spacing-header)+12px)] left-1/2 z-20 flex w-max max-w-[calc(100dvw-24px)] -translate-x-1/2 max-md:top-[calc(56px+env(safe-area-inset-top)+12px)] md:left-[calc((100%+env(safe-area-inset-left)+var(--spacing-rail)+var(--spacing-sidebar))/2)] md:max-w-[calc(100dvw-env(safe-area-inset-left)-var(--spacing-rail)-var(--spacing-sidebar)-24px)]">
-      <div role="status" className="flex items-center gap-3 rounded-[10px] border bg-background py-1 ps-4 pe-1 shadow-[0_8px_24px_#00000012]">
-        <p className="min-w-0">
-          Ember has moved to <strong className="wrap-anywhere">{customDomain}</strong>.{" "}
-          <a href={there} onClick={goThere} className="font-medium whitespace-nowrap underline">
-            Go there
-          </a>
-        </p>
-        <button type="button" aria-label="Close" onClick={() => setClosedFor(customDomain)} className="flex size-11 flex-none items-center justify-center rounded-lg hover:bg-hover">
-          <Xmark className="size-5" />
-        </button>
-      </div>
+    <div role="status" className="flex items-center gap-3 rounded-[10px] border bg-background py-1 ps-4 pe-1 shadow-[0_8px_24px_#00000012]">
+      <p className="min-w-0">
+        Ember has moved to <strong className="wrap-anywhere">{customDomain}</strong>.{" "}
+        <a href={there} onClick={goThere} className="font-medium whitespace-nowrap underline">
+          Go there
+        </a>
+      </p>
+      <button type="button" aria-label="Close" onClick={() => setClosedFor(customDomain)} className="flex size-11 flex-none items-center justify-center rounded-lg hover:bg-hover">
+        <Xmark className="size-5" />
+      </button>
     </div>
   );
 }
