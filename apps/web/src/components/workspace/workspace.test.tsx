@@ -546,12 +546,19 @@ describe("Link to a message", () => {
     }
   }
 
+  beforeEach(() => {
+    RoomSocket.last = null;
+  });
+
+  /** The socket of the room that shows, once the room has opened it, which it does in an effect that can run after its heading shows. */
+  const roomSocket = () => waitFor(() => RoomSocket.last ?? expect.fail("The room hasn't opened its socket"));
+
   it("goes to the message whose permalink is followed while the room is away, once the room lets the page in", async () => {
     vi.stubGlobal("WebSocket", RoomSocket);
     showWorkspace("/rooms/general");
     await roomHeading();
+    const room = await roomSocket();
     act(() => navigate("/rooms/general/@m1"));
-    const room = RoomSocket.last!;
     expect(room.sent).toEqual([]);
     room.letIn();
     expect(room.sent).toContainEqual({ type: "history.around", messageId: "m1" });
@@ -561,7 +568,7 @@ describe("Link to a message", () => {
     vi.stubGlobal("WebSocket", RoomSocket);
     showWorkspace("/rooms/general/@m1");
     await roomHeading();
-    const room = RoomSocket.last!;
+    const room = await roomSocket();
     const linked: Message = { id: "m1", clientMessageId: "c1", roomId: "general", creator: ada, body: "<p>Linked</p>", plainText: "Linked", mentions: [], createdAt: "2026-10-14T08:00:00.000Z", updatedAt: "2026-10-14T08:00:00.000Z", editedAt: null, boosts: [] };
     room.letIn({ messages: [linked], hasNewer: true, around: "m1" });
 
@@ -578,7 +585,7 @@ describe("Link to a message", () => {
     showWorkspace("/rooms/general/threads/m1");
     await roomHeading();
     const thread = screen.getByRole("complementary", { name: "Thread" });
-    const room = RoomSocket.last!;
+    const room = await roomSocket();
     room.letIn();
     act(() => room.onmessage?.({ data: JSON.stringify({ type: "error", message: "You can only edit your own messages", failed: "message.update" }) }));
     expect(within(thread).getByRole("alert")).toHaveTextContent("You can only edit your own messages");
@@ -591,7 +598,7 @@ describe("Link to a message", () => {
     showWorkspace("/rooms/general/messages/m1");
     expect(await roomHeading()).toHaveTextContent("general");
     expect(location.pathname).toBe("/rooms/general/@m1");
-    expect(RoomSocket.last!.url).toContain("&around=m1");
+    expect((await roomSocket()).url).toContain("&around=m1");
     expect(railCurrent()).toEqual(["Home"]);
   });
 
