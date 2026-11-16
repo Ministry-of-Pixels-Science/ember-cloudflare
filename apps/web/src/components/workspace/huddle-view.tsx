@@ -3,6 +3,7 @@ import type { Room, User, UserId } from "@ember/protocol";
 import type { HuddlePerson } from "@ember/protocol/huddles";
 import { Collapse, Headset, MicrophoneMute, NavArrowDown } from "@/components/icons/iconoir";
 import { useNameOf } from "@/hooks/use-directory";
+import { useIsSpeaking } from "@/hooks/use-huddle";
 import { OPEN_HUDDLE, openHuddle, type JoinedHuddle } from "@/lib/huddle-store";
 import { SCREEN_SHAPE, stageLayout, TILE_GAP, tilesLayout } from "@/lib/huddle-tiles";
 import { cn } from "@/lib/utils";
@@ -59,10 +60,15 @@ interface TileProps {
   className: string;
 }
 
-/** Someone in the huddle: their camera's picture, or their avatar while it's off, over their name. */
+/**
+ * Someone in the huddle: their camera's picture, or their avatar while it's off, over their name, and
+ * ringed in green while they speak. The ring is in the tile's edge's place: drawn against each other,
+ * the two show a seam between them at the corners.
+ */
 function Tile({ person, name, you, picture, className }: TileProps) {
+  const speaking = useIsSpeaking(person);
   return (
-    <li className={cn(TILE, className)}>
+    <li className={cn(TILE, speaking && "border-transparent", className)}>
       {picture ? (
         <HuddlePicture stream={picture} label={you ? "Your camera" : `${name}'s camera`} mirrored={you} />
       ) : (
@@ -76,6 +82,8 @@ function Tile({ person, name, you, picture, className }: TileProps) {
           {you && " (you)"}
         </span>
       </span>
+      {/* Last, so over the tile's picture. */}
+      {speaking && <span role="img" aria-label="Speaking" className="pointer-events-none absolute inset-0 rounded-[15px] border-2 border-positive" />}
     </li>
   );
 }

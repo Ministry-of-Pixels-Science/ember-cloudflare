@@ -1167,9 +1167,12 @@ while they're muted, as large as shows everyone in the window, and the microphon
 screen and Leave along its base. Minimizing it, or going to any page, leaves a bar along the window's
 base, which follows you from page to page with the microphone, the camera, the screen, the button
 that opens the huddle again, and Leave; a phone's bar has the microphone and Leave, and opens the
-huddle at its name. Cameras are 640 by 360 at up to 500 kbps, and up to 25 can be on in a huddle at
-once. Your browser is sent the others' only while you have the huddle open, and a camera's picture
-isn't kept in step with its person's voice, which travels apart from it.
+huddle at its name. Whoever is speaking has a green ring round their tile, and round their face on
+the bar. Your browser tells who by how loud each voice it plays is, and your own by your microphone,
+so nothing more is sent for it, and nobody muted shows as speaking. Cameras are 640 by 360 at up to
+500 kbps, and up to 25 can be on in a huddle at once. Your browser is sent the others' only while
+you have the huddle open, and a camera's picture isn't kept in step with its person's voice, which
+travels apart from it.
 
 Share screen, beside the camera, has your browser ask which screen, window or tab to share, and
 shares it until you stop it there or in your browser. Two people can share at once, as in Slack's

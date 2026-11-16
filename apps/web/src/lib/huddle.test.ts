@@ -13,10 +13,12 @@ import {
   type OfferedHuddleTrack,
 } from "@ember/protocol/huddles";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { audioEngine } from "@/test-audio-engine";
 import { ANSWER_TIMEOUT_MS, CAMERA_BITRATE, joinHuddle, LISTEN_AGAIN_MS, PUBLISH_AGAIN_MS, SCREEN_BITRATE } from "./huddle";
 import { NO_CAMERA, NO_SCREEN } from "./huddle-devices";
 import { MUSIC_AFTER_MS } from "./huddle-sounds";
-import { hearHuddle, joinedHuddle, leaveHuddle, muteHuddle, openHuddle, shareHuddleScreen, showHuddleCamera, watchHuddle } from "./huddle-store";
+import { MEASURED_EVERY_MS, SPEAKING_LEVEL } from "./huddle-speaking";
+import { hearHuddle, isSpeaking, joinedHuddle, leaveHuddle, muteHuddle, openHuddle, shareHuddleScreen, showHuddleCamera, watchHuddle, watchSpeaking } from "./huddle-store";
 
 /** Stands in for the browser's WebSocket; tests play the room and the network. */
 class FakeSocket {
@@ -877,6 +879,100 @@ describe("Hearing the others in a huddle", () => {
     expect(played()).toEqual([grace.id, grace.id, linus.id, linus.id]);
     document.body.click();
     expect(played()).toHaveLength(4);
+  });
+});
+
+describe("Who's speaking in a huddle", () => {
+  /** As loud as someone speaking. */
+  const LOUD = SPEAKING_LEVEL * 2;
+  /** Who the huddle shows as speaking, of everyone a test has in one. */
+  const speakingNow = () => [ada, grace, linus].filter(({ id }) => isSpeaking(id));
+  /** The track `user`'s voice plays from. */
+  const voiceFrom = (user: User) => playedBy(voiceOf(user))!;
+
+  it("is whoever's voice the tab plays as loud as speech, and its own person by their microphone, which only what shows who's speaking hears of", async () => {
+    const engine = audioEngine();
+    const [shown, said] = [vi.fn(), vi.fn()];
+    const stops = [watchHuddle(shown), watchSpeaking(said)];
+    await joined([person(grace), person(linus)]);
+    await offeredRound(["0", grace], ["1", linus]);
+    expect(engine.measured()).toEqual([microphoneTrack(), voiceFrom(grace), voiceFrom(linus)]);
+    shown.mockClear();
+
+    engine.setLevel(voiceFrom(grace), LOUD);
+    await wait(MEASURED_EVERY_MS);
+    expect(speakingNow()).toEqual([grace]);
+    engine.setLevel(microphoneTrack(), LOUD);
+    await wait(MEASURED_EVERY_MS);
+    expect(speakingNow()).toEqual([ada, grace]);
+    expect(said).toHaveBeenCalledTimes(2);
+    expect(shown).not.toHaveBeenCalled();
+    for (const stop of stops) stop();
+  });
+
+  it("measures a voice until its person leaves or publishes anew, and the microphone until it's unplugged", async () => {
+    const engine = audioEngine();
+    const room = await joined([person(grace), person(linus)]);
+    await offeredRound(["0", grace], ["1", linus]);
+    const gracesVoice = voiceFrom(grace);
+    engine.setLevel(voiceFrom(linus), LOUD);
+    engine.setLevel(microphoneTrack(), LOUD);
+    await wait(MEASURED_EVERY_MS);
+    expect(speakingNow()).toEqual([ada, linus]);
+
+    room.receive({ type: "huddle.left", userId: linus.id });
+    expect(engine.measured()).toEqual([microphoneTrack(), gracesVoice]);
+    room.receive({ type: "huddle.changed", person: person(grace, { audio: false }) });
+    expect(engine.measured()).toEqual([microphoneTrack()]);
+    microphoneTrack().end();
+    expect(engine.measured()).toEqual([]);
+    await wait(MEASURED_EVERY_MS);
+    expect(speakingNow()).toEqual([]);
+  });
+
+  it("measures the microphone from when the room first lets the tab in, which says whose it is, and goes on as the room lets it back in", async () => {
+    const engine = audioEngine();
+    joinHuddle({ roomId: "general", muted: false, microphone: microphone as unknown as MediaStream, camera: null, speakerId: "" });
+    socket().open();
+    expect(engine.measured()).toEqual([]);
+    await welcomed([person(grace)]);
+    await offeredRound(["0", grace]);
+    expect(engine.measured()).toEqual([microphoneTrack(), voiceFrom(grace)]);
+
+    // The voices go with the connection that brought them, and come again with the next.
+    socket().drop();
+    expect(engine.measured()).toEqual([microphoneTrack()]);
+    await wait(500);
+    socket().open();
+    await welcomed([person(grace)]);
+    await offeredRound(["0", grace]);
+    expect(engine.measured()).toEqual([microphoneTrack(), voiceFrom(grace)]);
+    expect(engine.engines).toHaveLength(1);
+  });
+
+  it("measures no microphone for a tab that joined to listen", async () => {
+    const engine = audioEngine();
+    await joined([person(grace)], { microphone: null });
+    await offeredRound(["0", grace]);
+    expect(engine.measured()).toEqual([voiceFrom(grace)]);
+  });
+
+  it("stops measuring as the tab leaves, which shows nobody speaking", async () => {
+    const engine = audioEngine();
+    await joined([person(grace)]);
+    await offeredRound(["0", grace]);
+    engine.setLevel(voiceFrom(grace), LOUD);
+    await wait(MEASURED_EVERY_MS);
+    expect(speakingNow()).toEqual([grace]);
+    const said = vi.fn();
+    const stop = watchSpeaking(said);
+
+    leaveHuddle();
+    expect(speakingNow()).toEqual([]);
+    expect(said).toHaveBeenCalledTimes(1);
+    expect(engine.measured()).toEqual([]);
+    expect(engine.engines.map(({ state }) => state)).toEqual(["closed"]);
+    stop();
   });
 });
 

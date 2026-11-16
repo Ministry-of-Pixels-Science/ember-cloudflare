@@ -16,7 +16,8 @@ import { socketUrl } from "./api";
 import { closeDevice, NO_CAMERA, NO_SCREEN, openCamera, openScreen, rememberedDevice } from "./huddle-devices";
 import { huddleSounds } from "./huddle-sounds";
 import { huddleSpeaker, type HuddleSpeaker } from "./huddle-speaker";
-import { endHuddle, leaveHuddle, showHuddle, tellOfHuddle, type HuddleControls, type JoinedHuddle } from "./huddle-store";
+import { whoSpeaks, type HuddleSpeaking } from "./huddle-speaking";
+import { endHuddle, leaveHuddle, showHuddle, showSpeaking, tellOfHuddle, type HuddleControls, type JoinedHuddle } from "./huddle-store";
 import { reconnectingSocket } from "./reconnecting-socket";
 
 // A tab's side of a huddle. Its socket to the room (`/api/rooms/:id/huddle`) says who's in the huddle and
@@ -111,13 +112,15 @@ function growingWait([least, most]: readonly [number, number]) {
 
 /**
  * The others' voices: an `<audio>` each, which plays its person's track through `speaker` from when the
- * tab is offered it until they leave.
+ * tab is offered it until they leave, while `speaking` measures it. A browser measures a voice from
+ * another computer only while the page plays it, so it's played first.
  */
-function voicesThrough(speaker: HuddleSpeaker) {
+function voicesThrough(speaker: HuddleSpeaker, speaking: HuddleSpeaking) {
   const playing = new Map<UserId, HTMLAudioElement>();
   const stop = (userId: UserId) => {
     const audio = playing.get(userId);
     if (!audio) return;
+    speaking.forget(userId);
     audio.srcObject = null;
     speaker.stop(audio);
     playing.delete(userId);
@@ -130,6 +133,7 @@ function voicesThrough(speaker: HuddleSpeaker) {
       audio.srcObject = new MediaStream([track]);
       playing.set(userId, audio);
       speaker.play(audio);
+      speaking.hear(userId, track);
     },
     stop,
     stopAll() {
@@ -473,7 +477,8 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
   let choosingScreen = false;
 
   const speaker = huddleSpeaker(speakerId);
-  const voices = voicesThrough(speaker);
+  const speaking = whoSpeaks(showSpeaking);
+  const voices = voicesThrough(speaker, speaking);
   const sounds = huddleSounds(speaker);
 
   const socket = reconnectingSocket<HuddleClientFrame>({
@@ -558,6 +563,7 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
 
   // A microphone that's unplugged, or that the browser stops letting the page use, leaves its person listening.
   const microphoneGone = () => {
+    if (huddle.you) speaking.forget(huddle.you.id);
     socket.send({ type: "huddle.mute", muted: true });
     show({ muted: true, microphone: false });
   };
@@ -645,6 +651,8 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
     socket.close();
     hangUp();
     voices.stopAll();
+    speaking.stop();
+    showSpeaking(new Set());
     sounds.end(huddle.you !== null);
     speaker.stopAll();
     track?.removeEventListener("ended", microphoneGone);
@@ -706,7 +714,11 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
         const mine = frame.people.find(({ user }) => user.id === frame.you.id);
         if (mine && mine.muted !== huddle.muted) socket.send({ type: "huddle.mute", muted: huddle.muted });
         // Let in, and not let back in after the tab's connection to the room dropped.
-        if (!huddle.you) sounds.joined();
+        if (!huddle.you) {
+          sounds.joined();
+          // Its own person speaks by the microphone, now that the room has said who they are.
+          if (track && huddle.microphone) speaking.hear(frame.you.id, track);
+        }
         show({ connected: true, you: frame.you, people: frame.people });
         for (const kind of HUDDLE_TRACK_KINDS) void sending[kind].publish();
         return listen();

@@ -200,6 +200,9 @@ const hears = (page: Page, userId: string) =>
     return track !== undefined && !track.muted && track.readyState === "live" && !audio!.paused && audio!.currentTime > 0;
   }, userId);
 
+/** The green ring a huddle's tile for `name` has while they speak. */
+const speakingIn = (huddle: Locator, name: string) => tiles(huddle).filter({ hasText: name }).getByRole("img", { name: "Speaking" });
+
 /** Where `keepSounds` has a page keep the `<audio>`s it plays. */
 type KeepsSounds = Window & { huddleSoundsPlayed: HTMLMediaElement[] };
 
@@ -334,6 +337,11 @@ test.describe("A huddle", () => {
     const stopped = await musicIn(page);
     expect(stopped.playing).toBe(false);
     expect(stopped.at).toBeGreaterThan(0);
+    // A browser's made-up microphone beeps, so each of them shows as speaking: in her own huddle by her
+    // microphone, and in the other's by her voice, as the SFU brings it.
+    for (const huddle of [adasHuddle, gracesHuddle]) {
+      for (const name of [administrator.user.name, her.name]) await expect(speakingIn(huddle, name)).toHaveCount(1, { timeout: 15_000 });
+    }
 
     // Each sees her own camera, and Ada sees Grace's, through the SFU. Ada turns hers on from the huddle, and Grace sees it.
     const [adasCamera, gracesCamera] = [`${administrator.user.name}'s camera`, `${her.name}'s camera`];
@@ -357,8 +365,12 @@ test.describe("A huddle", () => {
     // She mutes from the bar, and unmutes with the keys, which the button she pressed doesn't take as a press.
     await adasBar.getByRole("button", { name: "Mute microphone" }).click();
     await expect(adasBar.getByRole("button", { name: "Unmute microphone" })).toBeFocused();
+    // Muted, she no longer shows as speaking in Grace's huddle, and does again once she has unmuted.
+    await expect(tiles(gracesHuddle).filter({ hasText: administrator.user.name }).getByRole("img", { name: "Muted" })).toBeVisible();
+    await expect(speakingIn(gracesHuddle, administrator.user.name)).toHaveCount(0);
     await page.keyboard.press("Control+Shift+Space");
     await expect(adasBar.getByRole("button", { name: "Mute microphone" })).toBeVisible();
+    await expect(speakingIn(gracesHuddle, administrator.user.name)).toHaveCount(1, { timeout: 15_000 });
 
     // She opens it again from the bar, and sees Grace again. Then she turns her camera off, and Grace sees her avatar.
     await adasBar.getByRole("button", { name: "Open huddle", exact: true }).click();
