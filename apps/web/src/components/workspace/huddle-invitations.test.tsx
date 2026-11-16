@@ -18,7 +18,7 @@ const launch: Room = { id: "launch", name: "Launch", kind: "open", icon: null };
 const ROOMS = [direct, launch];
 /** When the tests' clock starts. */
 const NOW = Date.parse("2026-11-16T09:00:00.000Z");
-const from = (by: string, roomId = "direct-1", at = NOW): HuddleInvitation => ({ roomId, by, at, live: false });
+const from = (by: string, roomId = "direct-1", at = NOW): HuddleInvitation => ({ roomId, by, at, listed: true, live: false });
 
 const [onJoin, onDecline, onUnanswered] = [vi.fn(), vi.fn(), vi.fn()];
 
@@ -65,6 +65,13 @@ describe("An invitation into a huddle", () => {
     expect(card("Priya P. invites you to a huddle")).toBeInTheDocument();
     show([from("stranger", "launch")]);
     expect(card("Someone invites you to a huddle in Launch")).toBeInTheDocument();
+  });
+
+  it("says who invites into a room that isn't among this person's rooms yet, as one made while the tab wasn't connected", () => {
+    renderInvitations([{ ...from("priya", "direct-9"), listed: false }]);
+    const invitation = within(card("Priya Patel invites you to a huddle"));
+    fireEvent.click(invitation.getByRole("button", { name: "Join" }));
+    expect(onJoin).toHaveBeenCalledExactlyOnceWith("direct-9");
   });
 
   it("joins or declines the huddle of its room, each by its own invitation's buttons", () => {

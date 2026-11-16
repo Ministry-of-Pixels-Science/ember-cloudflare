@@ -453,13 +453,15 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
     [invitationOver, failed],
   );
   // Joining goes by the huddle's preview, as it does from the room, so a click on an invitation that
-  // has just come opens no microphone.
+  // has just come opens no microphone. A room the list doesn't have, as one made while this tab wasn't
+  // connected, has its preview once the list asked for again has come.
   const joinInvited = useCallback(
     (roomId: RoomId) => {
       answerInvitation(roomId);
-      setHuddlePreview(roomId);
+      if (roomIds?.has(roomId) ?? true) return setHuddlePreview(roomId);
+      refresh().then(() => mounted.current && setHuddlePreview(roomId), failed);
     },
-    [answerInvitation],
+    [answerInvitation, roomIds, refresh, failed, mounted],
   );
   const agentsListFailed = useCallback(
     (error: unknown) => {

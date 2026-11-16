@@ -222,14 +222,17 @@ export function HuddlePreview({ room, me, live, onClose }: Props) {
   const inIt = live?.userIds ?? [];
   const others = inIt.filter((userId) => userId !== me.id);
   const going = inIt.length > 0;
+  // Whether this person is in it already, in another tab or on another device, from where joining here moves them.
+  const moving = inIt.length > others.length;
   const place = huddlePlace(room, roomName(room, me.id, nameOf));
-  // Whoever a direct message's huddle rings as it starts: the others in it, as many as one invitation names.
-  const invited = room.kind === "direct" ? huddledWith(room, me.id, joinsNone).slice(0, MAX_HUDDLE_INVITED) : [];
+  // Whoever a direct message's huddle rings as it starts: the others in it, as many as one invitation
+  // names. Moved here by the only person in it, it starts again for nobody, so it rings none of them.
+  const invited = room.kind === "direct" && !moving ? huddledWith(room, me.id, joinsNone).slice(0, MAX_HUDDLE_INVITED) : [];
   const description = [
     others.length > 0
       ? inItNow(others.flatMap((userId) => people.get(userId)?.name ?? []), others.length)
       : !going && (room.kind === "direct" ? invitedOnceItStarts(invited.map(nameOf)) : `Everyone in ${room.name} can join once it starts.`),
-    inIt.length > others.length && "You're in it in another tab or on another device, and joining here leaves it there.",
+    moving && "You're in it in another tab or on another device, and joining here leaves it there.",
     joined && `${going ? "Joining" : "Starting"} it leaves the huddle you're in now.`,
   ];
 

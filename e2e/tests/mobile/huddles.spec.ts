@@ -1,7 +1,8 @@
 import type { DirectRoom, LiveHuddle, Sidebar, SidebarRoom, User } from "@ember/protocol";
 import type { HuddleClientFrame, HuddleServerFrame } from "@ember/protocol/huddles";
 import type { APIRequestContext, Page } from "@playwright/test";
-import { changeTheWorkspace, cookieHeader, huddleTilesKeepClear, isolateRoom, listing, openRoom, signInAs, type Session, type Tells, type TestRoom } from "../../fixtures";
+import { changeTheWorkspace, cookieHeader, editorField, huddleTilesKeepClear, isolateRoom, listing, openRoom, signInAs, type Session, type Tells, type TestRoom } from "../../fixtures";
+import { auditScreen } from "./audits";
 import { expect, hasDrawerLayout, test } from "./fixtures";
 
 // A huddle on a phone: its button in the header of a room or a DM, the preview it starts from, the
@@ -239,9 +240,47 @@ test("an invitation into a huddle fits the phone, under the header of the page i
   const [under, shown] = [(await header(page).boundingBox())!, (await invitation.boundingBox())!];
   expect(shown.y).toBeGreaterThanOrEqual(under.y + under.height);
   await screenIsFine();
+  // What's beside it is the page's still, where a tap goes through to it.
+  await editorField(page, "Write a message").tap({ trial: true });
 
   await invitation.getByRole("button", { name: "Decline", exact: true }).tap();
   await expect(invitation).toHaveCount(0);
+});
+
+test("more invitations than the phone is tall enough for are a scroll away, under the header, whose buttons stay in reach", async ({ page, room, participant, safeArea }) => {
+  const grace = (await participant("Grace Hopper")).session.user;
+  // Into rooms of this page's own, more of them than any phone shows at once, the last into the room it has open.
+  const names = Array.from({ length: 8 }, (_, index) => `Launch ${index + 1}`);
+  const others = names.map((name, index): SidebarRoom => ({ id: `invited-${index + 1}`, name, kind: "open", icon: null, unread: false, involvement: "mentions" }));
+  const rooms: SidebarRoom[] = [{ ...room, kind: "open", icon: null, unread: false, involvement: "mentions" }, ...others];
+  await page.route("**/api/sidebar", (route) => route.fulfill({ json: { rooms, favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: {} } satisfies Sidebar }));
+  const tell = await changeTheWorkspace(page, (account) => ({ ...account, huddles: true }), listing([room.id]));
+  await openRoom(page, room);
+  for (const { id } of [...others, room]) tell({ type: "huddle.invited", roomId: id, by: grace.id });
+  const into = (name: string) => page.getByRole("group", { name: `${grace.name} invites you to a huddle in ${name}`, exact: true });
+  await expect(page.getByRole("region", { name: "Huddle invitations" }).getByRole("group")).toHaveCount(rooms.length);
+  const [first, last] = [into(names[0]!), into(room.name)];
+  await expect(first).toBeInViewport({ ratio: 1 });
+  await expect(last).not.toBeInViewport();
+  // They cover the page under them for as long as they ring, so what's asked of the screen leaves out
+  // that each of the page's controls is easy to tap: none of them is cut off where no scrolling reaches.
+  const stacked = await auditScreen(page, safeArea);
+  expect.soft(stacked.overflow, "Nothing is cut off or pushed off the side of the screen").toEqual([]);
+  expect.soft(stacked.safeArea, "Nothing sits under the notch, rounded corners or home indicator").toEqual([]);
+  const startHuddle = header(page).getByRole("button", { name: "Start huddle", exact: true });
+  await startHuddle.tap({ trial: true });
+
+  // A wheel over one scrolls them, as a finger on one does, and under the header, not over it.
+  await first.hover();
+  await page.mouse.wheel(0, 4000);
+  await expect(last).toBeInViewport({ ratio: 1 });
+  await expect(first).not.toBeInViewport();
+  await startHuddle.tap({ trial: true });
+  const scrolled = await auditScreen(page, safeArea);
+  expect.soft(scrolled.overflow, "Nothing is cut off or pushed off the side of the screen").toEqual([]);
+  expect.soft(scrolled.safeArea, "Nothing sits under the notch, rounded corners or home indicator").toEqual([]);
+  await last.getByRole("button", { name: "Decline", exact: true }).tap();
+  await expect(last).toHaveCount(0);
 });
 
 test("the preview a huddle starts from, with its microphone and speaker to choose, and its camera once that's on, fits the phone", async ({ page, room, screenIsFine }) => {

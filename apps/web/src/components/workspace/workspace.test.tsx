@@ -2999,6 +2999,35 @@ describe("Huddles", () => {
       expect(invitation()).not.toBeInTheDocument();
     });
 
+    it("rings into a room this tab's rooms don't have yet, as one made while it wasn't connected, and opens its preview on Join once they've been asked for again", async () => {
+      // Ada's rooms as they were before Grace started a DM with her.
+      const { user } = showWorkspace("/rooms/general", ada, HUDDLES_ON);
+      await roomHeading();
+      await workspaceSends(INVITED);
+      const join = within(await screen.findByRole("group", { name: "Someone invites you to a huddle" })).getByRole("button", { name: "Join" });
+      expect(ringForHuddle).toHaveBeenCalledTimes(1);
+
+      serveRooms(roomList([...rooms, withGrace]));
+      const asked = roomListRequests();
+      await user.click(join);
+      expect(await screen.findByRole("dialog", { name: "Start a huddle with Grace" })).toBeVisible();
+      expect(roomListRequests()).toBe(asked + 1);
+      expect(invitation()).not.toBeInTheDocument();
+      expect(answers("d1")).toBe(1);
+    });
+
+    it("says why, and opens nothing, when Join can't ask again for the rooms that would have its room", async () => {
+      const { user } = showWorkspace("/rooms/general", ada, HUDDLES_ON);
+      await roomHeading();
+      await workspaceSends(INVITED);
+      const join = within(await screen.findByRole("group", { name: "Someone invites you to a huddle" })).getByRole("button", { name: "Join" });
+      serve({ "GET /api/sidebar": () => Response.json({ error: "Workspace unavailable" }, { status: 503 }) });
+      await user.click(join);
+      expect(await screen.findByRole("alert")).toHaveTextContent("Workspace unavailable");
+      expect(preview()).not.toBeInTheDocument();
+      expect(invitation()).not.toBeInTheDocument();
+    });
+
     it("gives up once it has rung for half a minute, unanswered, and tells the Workspace nothing", async () => {
       await withDirect();
       await workspaceSends({ type: "room.huddle", roomId: "d1", huddle: GOING });

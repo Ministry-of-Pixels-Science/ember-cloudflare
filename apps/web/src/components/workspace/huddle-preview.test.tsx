@@ -647,4 +647,12 @@ describe("A huddle in a direct message", () => {
     await user.click(screen.getByRole("button", { name: "Join Huddle" }));
     expect(joinHuddle).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ roomId: "direct-1", invite: ["priya"] }));
   });
+
+  it("invites nobody again when the only person in it moves it here from another tab or device", async () => {
+    const { user } = await openedPreview(huddleOf("ada"), directWith("priya"));
+    expect(preview()).toHaveAccessibleName("Join the huddle with Priya Patel");
+    expect(preview()).toHaveAccessibleDescription("You're in it in another tab or on another device, and joining here leaves it there.");
+    await user.click(screen.getByRole("button", { name: "Join Huddle" }));
+    expect(joinHuddle).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ roomId: "direct-1", invite: [] }));
+  });
 });

@@ -39,7 +39,7 @@ function HuddleInvitationCard({ invitation: { by, at }, room, onJoin, onDecline,
     <div
       role="group"
       aria-label={`${inviter.name} ${what}`}
-      className="rounded-2xl border bg-background p-4 shadow-[0_12px_40px_var(--color-dialog-shadow),0_2px_8px_var(--color-dialog-shadow-faint)]"
+      className="pointer-events-auto w-[320px] max-w-full rounded-2xl border bg-background p-4 shadow-[0_12px_40px_var(--color-dialog-shadow),0_2px_8px_var(--color-dialog-shadow-faint)]"
     >
       <div role="alert" className="flex items-center gap-3">
         <span className="relative shrink-0">
@@ -83,9 +83,9 @@ interface Props {
 /**
  * The invitations into huddles that ring in this tab, in the window's corner under the header, over
  * whatever page shows: one from whoever starts a huddle in a direct message with this person. Each rings
- * for half a minute, or until it's answered, here or in another of their tabs. The ring is one sound for
- * them all (huddle-ring.ts), and the focus stays where it is, so that an invitation takes nothing from
- * what its person is typing.
+ * for half a minute, or until it's answered, here or in another of their tabs. More than the window is
+ * tall enough for scroll. The ring is one sound for them all (huddle-ring.ts), and the focus stays where
+ * it is, so that an invitation takes nothing from what its person is typing.
  */
 export function HuddleInvitations({ invitations, rooms, quiet, onJoin, onDecline, onUnanswered }: Props) {
   useEffect(() => (quiet ? undefined : ringForHuddle()), [quiet]);
@@ -93,7 +93,10 @@ export function HuddleInvitations({ invitations, rooms, quiet, onJoin, onDecline
     <section
       aria-label="Huddle invitations"
       // z-30: over the page and the huddle opened, under menus and dialogs, as the workspace's flashes are.
-      className="absolute top-[calc(var(--spacing-header)+12px)] right-[max(16px,env(safe-area-inset-right))] z-30 flex w-[320px] max-w-[calc(100%-32px)] flex-col gap-2 max-md:top-[calc(56px+env(safe-area-inset-top)+8px)]"
+      // It runs from the header to the window's foot, and as wide as the window, so that more invitations
+      // than fit scroll under the header with their shadows whole, and lets a click through to the page
+      // everywhere but on an invitation.
+      className="pointer-events-none absolute inset-x-0 top-header bottom-0 z-30 flex flex-col items-end gap-2 overflow-y-auto pt-3 pr-[max(16px,env(safe-area-inset-right))] pb-[max(12px,env(safe-area-inset-bottom))] pl-4 [scrollbar-width:none] max-md:top-[calc(56px+env(safe-area-inset-top))] max-md:pt-2"
     >
       {invitations.map((invitation) => (
         <HuddleInvitationCard
