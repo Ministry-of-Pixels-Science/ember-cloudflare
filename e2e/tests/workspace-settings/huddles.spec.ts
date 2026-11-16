@@ -1045,10 +1045,11 @@ test.describe("A huddle", () => {
       await tab.getByRole("heading", { level: 1, name: room.name }).click();
     }
 
-    // Ada starts a direct message with her, whose header has the huddle button. Its preview says who the
-    // huddle is with, and that starting it invites her.
+    // Ada opens her direct message with her, which started as she joined, to welcome her, and whose
+    // header has the huddle button. Its preview says who the huddle is with, and that starting it
+    // invites her.
     const started = await request.post("/api/directs", { data: { userIds: [her.id] }, headers });
-    expect(started.status(), await started.text()).toBe(201);
+    expect(started.status(), await started.text()).toBe(200);
     const direct = ((await started.json()) as { room: { id: string } }).room;
     await useOwnAddress(page);
     await page.goto(`/rooms/${direct.id}`);

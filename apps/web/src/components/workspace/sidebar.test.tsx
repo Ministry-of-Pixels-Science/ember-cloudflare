@@ -806,6 +806,13 @@ describe("Welcome someone who joins", () => {
     rerender({ currentRoomId: null, rooms: [welcome("d1", [ada!, grace!], ada!, at(5)), welcome("d2", [ada!, linus!], linus!)] });
     expect(directRows().map((row) => row.getAttribute("href"))).toEqual(["/rooms/d1", "/rooms/d2"]);
   });
+
+  it("lists the DM that welcomed you while a huddle is going on in it, as someone in it invites you into the huddle", () => {
+    const { rerender } = renderSidebar({ rooms: [welcome("d1", [ada!, grace!], ada!)], huddles: { d1: { startedAt: at(0), userIds: [grace!.id] } } });
+    expect(directRows().map((row) => row.getAttribute("href"))).toEqual(["/rooms/d1"]);
+    rerender({ huddles: {} });
+    expect(directRows()).toEqual([]);
+  });
 });
 
 describe("Activity filter", () => {

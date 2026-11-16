@@ -67,8 +67,8 @@ interface Props {
  * Campfire's people to start one with too, latest active first, and a DM's row shows who else is in it.
  * Someone who joins after them starts in a DM with them, as in Slack, which the project's owner chose
  * (2026-11-16), but the DMs that welcomed them as they joined show only once someone writes in one, or
- * while it's open. A DM with one other person shows whether they're active or away, by a dot on their
- * avatar. A room marked unread is bold with a dot at the end of its row, a DM with how many messages
+ * while it's open or has a huddle going on. A DM with one other person shows whether they're active or
+ * away, by a dot on their avatar. A room marked unread is bold with a dot at the end of its row, a DM with how many messages
  * have come since in place of the dot, and either with a huddle going on ends its row with who's in it.
  * With Activity on, only the unread rows show, and with none it says everything's read; with it off and
  * nothing to list, it says it found nothing. Under them all, Available Agents says how many AI agents
@@ -103,7 +103,10 @@ export function Sidebar({
   const { order, moving, status, listRef, scrollerRef, listProps } = useStarOrder({ favorites, shown, nameOf, onSaved: onStarred, onSessionChanged });
   const listed = useMemo(() => inSidebarOrder(shared, order, sharedOrder), [shared, order, sharedOrder]);
   const starred = useMemo(() => new Set(order), [order]);
-  const directsListed = useMemo(() => inDirectOrder(directs.filter((room) => room.id === currentRoomId || !isQuietWelcome(room, meId))), [directs, currentRoomId, meId]);
+  const directsListed = useMemo(
+    () => inDirectOrder(directs.filter((room) => room.id === currentRoomId || room.id in huddles || !isQuietWelcome(room, meId))),
+    [directs, currentRoomId, huddles, meId],
+  );
   const empty = loaded && listed.length === 0 && directsListed.length === 0;
   const helpId = useId();
   const unreadId = useId();
