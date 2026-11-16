@@ -12,6 +12,7 @@ import {
   type WorkspaceServerFrame,
 } from "@ember/protocol";
 import { fetchMe, fetchSidebar, isSignedOut, workspaceSocketUrl, type SidebarCopy } from "@/lib/api";
+import type { InvitationsChange } from "@/lib/huddle-invitations";
 import { activeStore, watchUse } from "@/lib/presence";
 import { reconnectingSocket } from "@/lib/reconnecting-socket";
 import { NO_ROOM_LIST, roomListReducer, type RoomAnswer } from "@/lib/room-list";
@@ -100,7 +101,8 @@ const isSame = (you: Me, me: Me) => you.id === me.id && you.name === me.name && 
  * socket says has changed, or says this person is no longer told of, as an AI agent kept to
  * administrators' direct messages is. `onAccountChanged` hears the workspace as the socket says it is,
  * each time it connects and whenever an administrator changes it. `onGone` hears of each room the
- * socket says is gone as it leaves the list.
+ * socket says is gone as it leaves the list. `onInvitation` hears of each invitation into a huddle the
+ * socket brings this person, and of each they've answered, in this tab or another.
  */
 export function useSidebar(
   me: Me,
@@ -108,6 +110,7 @@ export function useSidebar(
   directory: Directory = NO_DIRECTORY,
   onAccountChanged: (account: Account) => void = () => {},
   onGone: (roomId: RoomId) => void = () => {},
+  onInvitation: (change: InvitationsChange) => void = () => {},
 ) {
   const [{ list, askAgain }, change] = useReducer(roomListReducer, NO_ROOM_LIST);
   const [active] = useState(activeStore);
@@ -140,6 +143,7 @@ export function useSidebar(
   // A failed load leaves the avatars as they are until the next.
   const reloadPeople = useEffectEvent(() => void directory.reload().catch(() => {}));
   const gone = useEffectEvent(onGone);
+  const invitation = useEffectEvent(onInvitation);
   const isSomeoneElse = useEffectEvent((user: User) => user.id !== me.id);
   // Who the session signs in as last heard, ahead of `me` until the page takes the change: two changes
   // can come before it takes the first.
@@ -219,6 +223,10 @@ export function useSidebar(
           return change({ type: "active", roomId: frame.roomId, at: frame.at });
         case "room.huddle":
           return change({ type: "huddle", roomId: frame.roomId, huddle: frame.huddle });
+        case "huddle.invited":
+          return invitation({ type: "invited", roomId: frame.roomId, by: frame.by, at: Date.now() });
+        case "huddle.answered":
+          return invitation({ type: "over", roomId: frame.roomId });
         case "user.updated":
           if (!isSomeoneElse(frame.user)) {
             toldOf.you = true;

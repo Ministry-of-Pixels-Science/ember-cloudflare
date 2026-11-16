@@ -9,6 +9,7 @@ import {
   HuddleCloseCode,
   huddleSocketQuery,
   MAX_HUDDLE_CAMERAS,
+  MAX_HUDDLE_INVITED,
   MAX_HUDDLE_PEOPLE,
   MAX_HUDDLE_SCREENS,
   MAX_SDP_LENGTH,
@@ -220,6 +221,18 @@ describe("a huddle's socket", () => {
     expect(read({ type: "huddle.listen", kind: "screen" })).toEqual({ type: "huddle.listen", kind: "screen", watch: [] });
     for (const watch of ["ada", [7], ["ada", "ada"], ["ada", "grace", "linus"]]) {
       expect(read({ type: "huddle.listen", kind: "screen", watch }), JSON.stringify(watch)).toBeNull();
+    }
+  });
+
+  it("reads who a tab invites into the huddle, as many as one takes, each named once", () => {
+    expect(read({ type: "huddle.invite", userIds: ["grace"] })).toEqual({ type: "huddle.invite", userIds: ["grace"] });
+    expect(read({ type: "huddle.invite", userIds: ["grace", "linus"], roomId: "another" })).toEqual({ type: "huddle.invite", userIds: ["grace", "linus"] });
+    const everyone = Array.from({ length: MAX_HUDDLE_INVITED }, (_, index) => `user-${index}`);
+    expect(MAX_HUDDLE_INVITED).toBe(MAX_HUDDLE_PEOPLE);
+    expect(read({ type: "huddle.invite", userIds: everyone })).toEqual({ type: "huddle.invite", userIds: everyone });
+    // Nobody is no invitation, and neither is anything but people's ids.
+    for (const userIds of [undefined, [], "grace", [7], [""], [null], ["grace", "grace"], ["u".repeat(MAX_ID_LENGTH + 1)], [...everyone, "one-more"]]) {
+      expect(read({ type: "huddle.invite", userIds }), JSON.stringify(userIds)?.slice(0, 40)).toBeNull();
     }
   });
 

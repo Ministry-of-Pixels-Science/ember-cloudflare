@@ -1,3 +1,4 @@
+import type { DirectRoom, Room, User, UserId } from "@ember/protocol";
 import { toSentence } from "./directs";
 
 /** How many people a sentence about a huddle names before it counts the rest. */
@@ -17,6 +18,25 @@ function peopleListed(names: string[], count: number): string {
   const named = names.slice(0, MAX_NAMED).map(firstName);
   return toSentence(count > named.length ? [...named, othersCounted(count - named.length)] : named);
 }
+
+/**
+ * Who a huddle in a direct message is with, for the person `meId` signs in: the others in it, but for
+ * whoever joins no huddle (`joinsNone`), which is the bots, AI agents among them, and anyone who can no
+ * longer sign in.
+ */
+export const huddledWith = (room: DirectRoom, meId: UserId, joinsNone: (user: User) => boolean): User[] => room.members.filter((member) => member.id !== meId && !joinsNone(member));
+
+/** Whether a room has huddles where they're on: every shared room, and a direct message with someone to huddle with. */
+export const hasHuddles = (room: Room, meId: UserId, joinsNone: (user: User) => boolean): boolean => room.kind !== "direct" || huddledWith(room, meId, joinsNone).length > 0;
+
+/**
+ * Where a room's huddle is, as "Huddle" and "Start a huddle" go on: "in Launch", or who a direct
+ * message's is with, "with Priya Patel". `name` is the room's as whoever's reading it reads it.
+ */
+export const huddlePlace = (room: Room, name: string) => (room.kind === "direct" ? `with ${name}` : `in ${name}`);
+
+/** Who a huddle in a direct message invites, for whoever is about to start it, by their names: "Priya is invited once it starts." */
+export const invitedOnceItStarts = (names: string[]) => `${peopleListed(names, names.length)} ${names.length === 1 ? "is" : "are"} invited once it starts.`;
 
 /** Who's in a huddle that's going on, for someone about to join it: "Sam is in it now." */
 export const inItNow = (names: string[], count: number) => `${peopleListed(names, count)} ${count === 1 ? "is" : "are"} in it now.`;

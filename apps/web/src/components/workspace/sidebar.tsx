@@ -69,7 +69,7 @@ interface Props {
  * (2026-11-16), but the DMs that welcomed them as they joined show only once someone writes in one, or
  * while it's open. A DM with one other person shows whether they're active or away, by a dot on their
  * avatar. A room marked unread is bold with a dot at the end of its row, a DM with how many messages
- * have come since in place of the dot, and a room with a huddle going on ends its row with who's in it.
+ * have come since in place of the dot, and either with a huddle going on ends its row with who's in it.
  * With Activity on, only the unread rows show, and with none it says everything's read; with it off and
  * nothing to list, it says it found nothing. Under them all, Available Agents says how many AI agents
  * this person can ask, and opens the list of them, as the project's owner chose (2026-11-15), unless
@@ -196,6 +196,7 @@ export function Sidebar({
             meId={meId}
             current={room.id === currentRoomId}
             unreadId={markedUnread(room, currentRoomId) ? unreadId : null}
+            huddle={huddles[room.id]}
             onClick={(event) => select(event, room.id)}
           />
         ))}
@@ -244,9 +245,10 @@ interface HuddleMarkProps {
 }
 
 /**
- * What a room's row ends with while a huddle is going on in it, as Slack's does: the faces of the first
- * two people in it, the headphones and how many are in it, in green. Hovering it says who they are, in
- * the words that follow it, hidden, for the row to say to screen readers, which the mark is hidden from.
+ * What a room's row, or a DM's, ends with while a huddle is going on in it, as Slack's does: the faces
+ * of the first two people in it, the headphones and how many are in it, in green. Hovering it says who
+ * they are, in the words that follow it, hidden, for the row to say to screen readers, which the mark is
+ * hidden from.
  */
 function HuddleMark({ huddle, meId, wordsId, className }: HuddleMarkProps) {
   const people = useContext(PeopleContext);
@@ -279,16 +281,19 @@ interface DirectRowProps {
   current: boolean;
   /** The element saying the DM is unread, when it's marked so, or null. */
   unreadId: string | null;
+  /** The huddle going on in it, if one is. */
+  huddle: LiveHuddle | undefined;
   onClick: (event: MouseEvent) => void;
 }
 
 /**
  * A DM's row: the avatar of the one other person in it, with whether they're active or away, or of up
  * to four in a group, at 24px or 14px each, then their names, or yours in a DM with yourself, and the
- * agent badge in a DM with an AI agent alone. One marked unread ends with how many messages it counts,
- * or a dot for one the server didn't count. Its presence and count are said to screen readers too.
+ * agent badge in a DM with an AI agent alone. It ends with who's in its huddle while one is going on, as
+ * a room's does, and one marked unread with how many messages it counts, or a dot for one the server
+ * didn't count. Its presence and count are said to screen readers too.
  */
-function DirectRow({ room, meId, current, unreadId, onClick }: DirectRowProps) {
+function DirectRow({ room, meId, current, unreadId, huddle, onClick }: DirectRowProps) {
   const nameOf = useNameOf();
   const isWithAgent = useIsWithAgent();
   const presenceOf = usePresenceOf();
@@ -297,8 +302,9 @@ function DirectRow({ room, meId, current, unreadId, onClick }: DirectRowProps) {
   // An AI agent has no presence, though @ember's isn't listed as a bot until the directory has loaded.
   const presence = members.length === 1 && !isWithAgent(room) ? presenceOf(members[0]!) : null;
   const count = unreadId ? room.unreadCount : undefined;
-  const [presenceId, countId] = [`${wordsId}-presence`, `${wordsId}-count`];
-  const described = [presence && presenceId, count === undefined ? unreadId : countId].filter(Boolean).join(" ");
+  // The words for its presence, who's in its huddle, and its count, which come with its mark.
+  const [presenceId, inHuddleId, countId] = [`${wordsId}-presence`, `${wordsId}-huddle`, `${wordsId}-count`];
+  const described = [presence && presenceId, huddle && inHuddleId, count === undefined ? unreadId : countId].filter(Boolean).join(" ");
   return (
     <>
       <a
@@ -328,6 +334,7 @@ function DirectRow({ room, meId, current, unreadId, onClick }: DirectRowProps) {
           <span className="sr-only">Direct message with</span> {members.map((member) => `${nameOf(member)}${member.id === meId ? " (you)" : ""}`).join(", ")}
           {isWithAgent(room) && <AgentBadge className="ms-0.5" />}
         </span>
+        {huddle && <HuddleMark huddle={huddle} meId={meId} wordsId={inHuddleId} />}
         {count !== undefined ? <UnreadCount count={count} /> : unreadId && <span aria-hidden="true" className="size-[7px] shrink-0 rounded-full bg-foreground" />}
       </a>
       {/* Outside the row, so they're no part of its text. */}

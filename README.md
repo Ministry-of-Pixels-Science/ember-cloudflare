@@ -166,7 +166,7 @@ it's yours. Slack's plans are as [slack.com/pricing](https://slack.com/pricing) 
 | | Ember | Slack |
 |---|---|---|
 | **Apps and workflows** | — | ✅ a directory of 2,600+ apps (Free: 10 of them) and Workflow Builder |
-| **Voice and video calls** | Huddles in any room, by voice, camera and shared screen, for up to 50 people; none in DMs yet | ✅ huddles (Free: one-on-one only) |
+| **Voice and video calls** | Huddles in any room or DM, by voice, camera and shared screen, for up to 50 people; one in a DM rings the others in it | ✅ huddles (Free: one-on-one only) |
 | **AI** | @ember and agents of your own answer when you mention or DM them, each on the model you choose | ✅ summaries, recaps and AI search on every plan, more on Business+ |
 | **Canvases, lists and clips** | — | ✅ |
 | **Channels shared with other companies** | — | ✅ Slack Connect |
