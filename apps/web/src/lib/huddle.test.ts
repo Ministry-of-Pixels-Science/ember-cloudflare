@@ -6,8 +6,10 @@ import {
   HuddleCloseCode,
   MAX_HUDDLE_CAMERAS,
   MAX_HUDDLE_SCREENS,
+  RELAY_TTL_S,
   SCREENS_FULL,
   SCREENS_OFF,
+  type HuddleIceServer,
   type HuddlePerson,
   type HuddleServerFrame,
   type HuddleTrackKind,
@@ -171,6 +173,8 @@ class FakeConnection {
   static keepingTracks = false;
   /** Whether the answers the connections are given take one size of a track sent in several, as an SFU that takes no more does. */
   static takingOneSize = false;
+  /** Whether a connection can't be made by a relay's servers, as in a browser that can't make sense of one of them. */
+  static refusingRelays = false;
 
   connectionState: RTCPeerConnectionState = "new";
   onconnectionstatechange: (() => void) | null = null;
@@ -179,6 +183,7 @@ class FakeConnection {
   transceivers: FakeTransceiver[] = [];
 
   constructor(readonly configuration: RTCConfiguration) {
+    if (FakeConnection.refusingRelays && configuration.iceServers?.some(({ username }) => username !== undefined)) throw new DOMException("Failed to parse the servers", "SyntaxError");
     FakeConnection.all.push(this);
   }
 
@@ -388,6 +393,7 @@ beforeEach(() => {
   FakeConnection.refusing = false;
   FakeConnection.keepingTracks = false;
   FakeConnection.takingOneSize = false;
+  FakeConnection.refusingRelays = false;
   microphone = new FakeStream([new FakeTrack("audio", "built-in")]);
   camera = new FakeStream([new FakeTrack("video", "front")]);
   display = new FakeStream([new FakeTrack("video")]);
@@ -2776,6 +2782,119 @@ describe("A huddle whose socket closes", () => {
     socket().open();
     await welcomed(people ? [person(grace)] : []);
     expect(socket().take()).toEqual([...(people ? [{ type: "huddle.listen", kind: "audio", fresh: true }] : []), expect.objectContaining({ type: "huddle.publish" })]);
+  });
+});
+
+describe("A huddle's relay", () => {
+  /** The servers a room whose huddles have a relay welcomes a tab with: Cloudflare's STUN server, and its relay, with what the tab uses it with for a day. */
+  const relayed = (nth = 1): HuddleIceServer[] => [
+    { urls: ["stun:stun.cloudflare.com:3478"] },
+    { urls: ["turn:turn.cloudflare.com:3478?transport=udp", "turns:turn.cloudflare.com:443?transport=tcp"], username: `the relay's name ${nth}`, credential: `the relay's credential ${nth}` },
+  ];
+  /** How a connection reaches the SFU by `servers`. */
+  const by = (servers: HuddleIceServer[]) => ({ iceServers: servers, bundlePolicy: "max-bundle" });
+  /** And by Cloudflare's STUN server alone, as it does without a relay. */
+  const DIRECT = { iceServers: [{ urls: "stun:stun.cloudflare.com:3478" }], bundlePolicy: "max-bundle" };
+  const DAY_MS = RELAY_TTL_S * 1000;
+  /** How each connection the tab has made reaches the SFU, in the order it made them. */
+  const reached = () => FakeConnection.all.map(({ configuration }) => configuration);
+
+  /** The room lets the newest socket in, to a huddle with `people` in it besides Ada, with `iceServers` for the tab's connections. */
+  async function welcomedBy(iceServers: HuddleIceServer[], people: HuddlePerson[] = []) {
+    socket().receive({ type: "huddle.welcome", you: ada, people: [...people, person(ada, { audio: false, muted: joinedHuddle()!.muted })], startedAt: STARTED_AT, iceServers });
+    await settled();
+    return socket();
+  }
+
+  /** Joins general's huddle, which the room lets the tab into as `welcomedBy` has it. */
+  async function joinedBy(iceServers: HuddleIceServer[], people: HuddlePerson[] = [], join: Partial<Parameters<typeof joinHuddle>[0]> = {}) {
+    joinHuddle({ roomId: "general", muted: false, microphone: microphone as unknown as MediaStream, camera: null, speakerId: "", ...join });
+    socket().open();
+    return welcomedBy(iceServers, people);
+  }
+
+  it("makes each of the tab's connections by the servers the room welcomed it with, the relay's among them", async () => {
+    const room = await joinedBy(relayed(), [person(grace, { video: true })], { camera: asCamera() });
+    // The ones it sends its microphone and its camera on.
+    expect(reached()).toEqual([by(relayed()), by(relayed())]);
+    // And the ones it hears and watches the others on, which it makes as the SFU's offers come.
+    room.receive(offer(["0", grace]));
+    room.receive(pictures(["0", grace]));
+    await settled();
+    expect(reached()).toEqual([by(relayed()), by(relayed()), by(relayed()), by(relayed())]);
+  });
+
+  it("goes by Cloudflare's STUN server alone once the room welcomes the tab with no servers, as it does once the relay has been taken away", async () => {
+    const room = await joinedBy(relayed(), [person(grace)]);
+    expect(reached()).toEqual([by(relayed())]);
+
+    room.drop();
+    await wait(500);
+    socket().open();
+    await welcomed([person(grace)]);
+    expect(connection().configuration).toEqual(DIRECT);
+    // A day later, a connection that fails is made again on the socket the tab has: there's nothing to have run out.
+    vi.setSystemTime(Date.now() + 2 * DAY_MS);
+    connection().becomes("failed");
+    expect(socket().closedWith).toBeUndefined();
+
+    // Nor does a list of none leave a connection without a server.
+    socket().drop();
+    await wait(500);
+    socket().open();
+    await welcomedBy([], [person(grace)]);
+    expect(connection().configuration).toEqual(DIRECT);
+  });
+
+  it("joins again, for the room to give it the relay anew, when a connection fails once the day it was given the relay for has passed, and not before", async () => {
+    const room = await joinedBy(relayed(), [person(grace)]);
+    const welcomedAt = Date.now();
+    const sending = await publishedAndConnected();
+    await offeredRound(["0", grace]);
+    const receiving = connection();
+
+    // Within the day, the tab makes the connection again on the socket it has.
+    vi.setSystemTime(welcomedAt + DAY_MS - 1);
+    receiving.becomes("failed");
+    expect(room.closedWith).toBeUndefined();
+    expect(joinedHuddle()).toMatchObject({ connected: true });
+    // After it, what it has no longer opens the relay, so it joins again.
+    vi.setSystemTime(welcomedAt + DAY_MS);
+    sending.becomes("failed");
+    expect(room.closedWith).toBe(1000);
+    expect(joinedHuddle()).toMatchObject({ connected: false });
+    for (const each of FakeConnection.all) expect(each.connectionState).toBe("closed");
+    await wait(500);
+    expect(FakeSocket.all).toHaveLength(2);
+    socket().open();
+    const again = await welcomedBy(relayed(2), [person(grace)]);
+    const welcomedAgainAt = Date.now();
+    expect(again.take()).toEqual([{ type: "huddle.listen", kind: "audio", fresh: true }, expect.objectContaining({ type: "huddle.publish" })]);
+    expect(connection().configuration).toEqual(by(relayed(2)));
+
+    // The day counts from that welcome: the connection it sends on fails within it, and the one it receives on after.
+    again.receive(offer(["0", grace]));
+    await settled();
+    const [sendingAgain, receivingAgain] = FakeConnection.all.slice(-2);
+    expect(receivingAgain!.configuration).toEqual(by(relayed(2)));
+    vi.setSystemTime(welcomedAgainAt + DAY_MS - 1);
+    sendingAgain!.becomes("failed");
+    expect(again.closedWith).toBeUndefined();
+    vi.setSystemTime(welcomedAgainAt + DAY_MS);
+    receivingAgain!.becomes("failed");
+    expect(again.closedWith).toBe(1000);
+    expect(joinedHuddle()).toMatchObject({ connected: false });
+  });
+
+  it("goes without the relay in a browser that can't make a connection by the servers it's given", async () => {
+    FakeConnection.refusingRelays = true;
+    const room = await joinedBy(relayed(), [person(grace)]);
+    expect(reached()).toEqual([DIRECT]);
+    expect(room.take()).toEqual([{ type: "huddle.listen", kind: "audio", fresh: true }, expect.objectContaining({ type: "huddle.publish" })]);
+    room.receive(offer(["0", grace]));
+    await settled();
+    expect(reached()).toEqual([DIRECT, DIRECT]);
+    expect(room.take()).toEqual([{ type: "huddle.answer", kind: "audio", sdp: "answer to offer:0" }]);
   });
 });
 

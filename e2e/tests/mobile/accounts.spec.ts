@@ -96,13 +96,14 @@ test("an administrator's Huddles tab and Set up huddles, with a key refused, fit
   await screenIsFine({ denseTargets: [SWITCHES] });
 });
 
-test("an administrator's Huddles tab, naming the app huddles run through, and its card of Cameras and Screen sharing under that, fit the phone", async ({ page, screenIsFine }) => {
+test("an administrator's Huddles tab, naming the app huddles run through, its card of Cameras and Screen sharing under that, and the relay's, with Set up the relay and a key refused, fit the phone", async ({ page, screenIsFine }) => {
   await useOwnAddress(page);
-  // The settings as they are once an app's keys are given, without giving the test server any, which every other test shows.
+  // The settings as they are once an app's keys are given, and a TURN key's, without giving the test server any, which every other test shows.
+  const relayKeyId = "7e1a".repeat(8);
   await page.route("**/api/account", async (route) => {
     const response = await route.fetch();
     if (!response.ok()) return route.fulfill({ response });
-    await route.fulfill({ response, json: { ...(await response.json()), huddles: { appId: "ca11".repeat(8) } } });
+    await route.fulfill({ response, json: { ...(await response.json()), huddles: { appId: "ca11".repeat(8), relayKeyId } } });
   });
   await page.goto("/account/edit#huddles-settings");
   await signInAsAdministrator(page);
@@ -119,6 +120,24 @@ test("an administrator's Huddles tab, naming the app huddles run through, and it
   await expect(cameras).toContainText("People can turn their camera on in a huddle.");
   await expect(screens.getByRole("switch", { name: "Screen sharing" })).toBeChecked();
   await expect(screens).toContainText("People can share their screen in a huddle, from a computer.");
+  await screenIsFine({ denseTargets: [SWITCHES] });
+
+  // Under them, the relay's card names the TURN key it goes by.
+  const relay = page.getByRole("region", { name: "Relay for strict networks", exact: true });
+  await relay.getByRole("button", { name: "Change key" }).scrollIntoViewIfNeeded();
+  await expect(relay.getByRole("switch", { name: "Relay for strict networks" })).toBeChecked();
+  await expect(relay).toContainText(`by the TURN key ${relayKeyId} in your Cloudflare account.`);
+  await screenIsFine({ denseTargets: [SWITCHES] });
+
+  // Change key opens Set up the relay, which refuses what can't be a TURN key's on its field, before Cloudflare is asked anything.
+  await relay.getByRole("button", { name: "Change key" }).tap();
+  const setup = page.getByRole("dialog", { name: "Set up the relay" });
+  await expect(setup.getByRole("list", { name: "Steps to set up the relay" })).toBeVisible();
+  await screenIsFine({ denseTargets: [SWITCHES] });
+  await setup.getByRole("textbox", { name: "TURN Token ID" }).fill("my TURN key");
+  await setup.getByRole("textbox", { name: "API Token" }).fill("f".repeat(64));
+  await setup.getByRole("button", { name: "Save" }).tap();
+  await expect(setup.getByRole("alert")).toBeVisible();
   await screenIsFine({ denseTargets: [SWITCHES] });
 });
 

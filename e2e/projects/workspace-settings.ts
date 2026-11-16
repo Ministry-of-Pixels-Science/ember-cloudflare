@@ -31,6 +31,10 @@ export const AI_GATEWAY_ACCOUNT = { accountId: "e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0
 export const SFU_PORT = Number(process.env.E2E_SFU_PORT ?? 8794);
 /** The SFU app that SFU knows, by its ID and its secret, which the huddles spec gives Ember. Neither is real. */
 export const SFU_APP = { appId: "ca11".repeat(8), appSecret: "e2e0".repeat(16) };
+/** The TURN key it knows as Cloudflare's TURN service, by its ID and its API token, which the huddles spec gives Ember too. Neither is real. */
+export const TURN_KEY = { keyId: "7e1a".repeat(8), apiToken: "e2e-only-not-a-turn-key-api-token" };
+/** The port the relay's servers it makes for that key are at, on this machine, where nothing listens. */
+export const TURN_PORT = Number(process.env.E2E_TURN_PORT ?? 8795);
 /** The project that sets the second server up. */
 export const SETTINGS_FIRST_RUN = "workspace-settings-first-run";
 

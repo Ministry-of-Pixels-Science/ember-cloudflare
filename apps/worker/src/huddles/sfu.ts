@@ -1,6 +1,7 @@
 import { APP_ID_UNKNOWN, APP_SECRET_UNKNOWN, HUDDLES_UNCHECKED, type HuddlesField, type HuddlesSetup } from "@ember/protocol/huddles";
 import type { Env } from "../env";
 import { isLoopback } from "../loopback";
+import type { RelayKey } from "./relay";
 
 // Cloudflare's Realtime SFU, which huddles run through, by its HTTPS API
 // (https://developers.cloudflare.com/realtime/sfu/https-api/). A request names an SFU app by its ID and
@@ -24,28 +25,35 @@ const MAX_LOGGED_CODE_LENGTH = 40;
 /** A Realtime SFU app's keys: its ID and its secret, as Cloudflare's dashboard shows them when the app is made. */
 export type SfuApp = HuddlesSetup;
 
-/** The app huddles run through as the Workspace tells a room of it: its keys, and whether cameras may go on in a huddle, and screens be shared. */
+/**
+ * The app huddles run through as the Workspace tells a room of it: its keys, whether cameras may go on
+ * in a huddle, and screens be shared, and the TURN key huddles' relay goes by, or null without a relay.
+ */
 export interface HuddleApp extends SfuApp {
   cameras: boolean;
   screens: boolean;
+  relay: RelayKey | null;
 }
 
-/** Where the SFU's API is: the browser tests' stand-in, which `REALTIME_SFU_URL` names at a loopback address, or Cloudflare's own. */
-function sfuApiOf(env: Env): string {
+/**
+ * Where the SFU's API is, and the TURN keys' beside it: the browser tests' stand-in, which
+ * `REALTIME_SFU_URL` names at a loopback address, or Cloudflare's own.
+ */
+export function sfuApiOf(env: Env): string {
   const standIn = URL.parse(env.REALTIME_SFU_URL?.trim() ?? "");
   return standIn && isLoopback(standIn) ? `${standIn.origin}/v1` : SFU_API;
 }
 
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+export const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 
 /**
- * What the SFU answers a request, and says in it, giving it `SFU_TIMEOUT_MS` to. The timer goes once
- * it has answered, where `AbortSignal.timeout`'s would run on, and keep a room's object from
- * hibernating until it rang.
+ * What the SFU answers a request, and says in it, giving it `SFU_TIMEOUT_MS` to, or whatever else
+ * `patienceMs` gives it. The timer goes once it has answered, where `AbortSignal.timeout`'s would run
+ * on, and keep a room's object from hibernating until it rang.
  */
-async function answerOf(url: string, init: RequestInit): Promise<{ answer: Response; said: unknown }> {
+export async function answerOf(url: string, init: RequestInit, patienceMs = SFU_TIMEOUT_MS): Promise<{ answer: Response; said: unknown }> {
   const patience = new AbortController();
-  const timer = setTimeout(() => patience.abort(), SFU_TIMEOUT_MS);
+  const timer = setTimeout(() => patience.abort(), patienceMs);
   try {
     const answer = await fetch(url, { ...init, redirect: "manual", signal: patience.signal });
     return { answer, said: await answer.json().catch(() => null) };

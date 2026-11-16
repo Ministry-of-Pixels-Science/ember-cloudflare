@@ -15,7 +15,7 @@ type Answer = () => Response | Promise<Response>;
 function serve(answers: Record<string, Answer> = {}) {
   const served: Record<string, Answer> = {
     "GET /api/account": () => Response.json({ cloudflareAccountId: ACCOUNT_ID }),
-    "PUT /api/account/huddles": () => Response.json({ huddles: { appId: APP.appId } }),
+    "PUT /api/account/huddles": () => Response.json({ huddles: { appId: APP.appId, relayKeyId: null } }),
     ...answers,
   };
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
@@ -137,7 +137,7 @@ describe("First run's question about huddles", () => {
   });
 
   it("saves the keys once Cloudflare has started a session with them, says huddles are on, and opens Ember from there", async () => {
-    const save = held(() => Response.json({ huddles: { appId: APP.appId } }));
+    const save = held(() => Response.json({ huddles: { appId: APP.appId, relayKeyId: null } }));
     serve({ "PUT /api/account/huddles": save.answered });
     const { user, onOpen } = await showSteps();
     await giveKeys(user);
@@ -164,7 +164,7 @@ describe("First run's question about huddles", () => {
 
   it("says why Cloudflare refused a key on its field, and saves the right one from there", async () => {
     const answers: Answer[] = [() => Response.json({ error: APP_SECRET_UNKNOWN, field: "appSecret" }, { status: 422 })];
-    serve({ "PUT /api/account/huddles": () => (answers.shift() ?? (() => Response.json({ huddles: { appId: APP.appId } })))() });
+    serve({ "PUT /api/account/huddles": () => (answers.shift() ?? (() => Response.json({ huddles: { appId: APP.appId, relayKeyId: null } })))() });
     const { user } = await showSteps();
     await giveKeys(user);
 
@@ -180,7 +180,7 @@ describe("First run's question about huddles", () => {
 
   it("says so above the card when Ember can't be reached, and lets the keys be saved again", async () => {
     const answers: Answer[] = [() => Promise.reject(new TypeError("Failed to fetch"))];
-    serve({ "PUT /api/account/huddles": () => (answers.shift() ?? (() => Response.json({ huddles: { appId: APP.appId } })))() });
+    serve({ "PUT /api/account/huddles": () => (answers.shift() ?? (() => Response.json({ huddles: { appId: APP.appId, relayKeyId: null } })))() });
     const { user, onOpen } = await showSteps();
     await giveKeys(user);
 

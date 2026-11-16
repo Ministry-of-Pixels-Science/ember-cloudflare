@@ -146,7 +146,7 @@ import { CSP_REPORT_PATH, cspReport } from "./csp";
 import { addressRefusal, answerProbe, deployedAddressOf, lookUpDns, originFor, probeOf, reachOf } from "./custom-domain";
 import { redirectToHttps, requiresHttps, withHeaders } from "./headers";
 import { health, isUpPath, up } from "./health";
-import { forgetHuddles, saveHuddles } from "./huddles/settings";
+import { forgetHuddleRelay, forgetHuddles, saveHuddleRelay, saveHuddles } from "./huddles/settings";
 import { invite, lookUpEmailLink, resendInvitation, revokeInvitation } from "./invitations";
 import { askForEmailLink, emailSignUpPage, invitationPage, join, joinCodeOf, joinPage, joinWithEmailLink, signUp, signUpPage } from "./join";
 import { checkResendApiKey } from "./mail";
@@ -1158,6 +1158,8 @@ function apiAction(request: Request, env: Env, pathname: string): (() => Respons
   if (pathname === "/api/account/outside_ai" && request.method === "PUT") return () => changeOutsideAi(request, env);
   if (pathname === "/api/account/huddles" && request.method === "PUT") return () => saveHuddles(request, env);
   if (pathname === "/api/account/huddles" && request.method === "DELETE") return () => forgetHuddles(request, env);
+  if (pathname === "/api/account/huddles/relay" && request.method === "PUT") return () => saveHuddleRelay(request, env);
+  if (pathname === "/api/account/huddles/relay" && request.method === "DELETE") return () => forgetHuddleRelay(request, env);
   if (pathname === "/api/account/custom_domain_checks" && request.method === "POST") return () => checkCustomDomain(request, env);
   if (pathname === "/api/account/custom_domain_lookups" && request.method === "POST") return () => lookUpCustomDomain(request, env);
   if (pathname === LOGO_PATH && request.method === "PUT") return () => changeLogo(request, env);

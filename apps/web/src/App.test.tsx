@@ -189,7 +189,7 @@ function serve({
       } satisfies WorkspaceSettings);
     if (route === "PUT /api/account/huddles") {
       account = { ...account, huddles: true };
-      return Response.json({ huddles: { appId: (JSON.parse(String(init?.body)) as HuddlesSetup).appId } });
+      return Response.json({ huddles: { appId: (JSON.parse(String(init?.body)) as HuddlesSetup).appId, relayKeyId: null } });
     }
     if (route === "GET /api/users") return Response.json({ users: [] });
     if (route === "GET /api/users/me/profile") return Response.json({ profile: { name: me.name, emailAddress: null, bio: null, apps: [], outsideAi: null } });

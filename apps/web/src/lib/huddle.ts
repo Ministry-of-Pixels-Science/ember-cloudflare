@@ -7,8 +7,10 @@ import {
   MAX_HUDDLE_CAMERAS,
   MAX_HUDDLE_PEOPLE,
   MAX_HUDDLE_SCREENS,
+  RELAY_TTL_S,
   SCREENS_FULL,
   type HuddleClientFrame,
+  type HuddleIceServer,
   type HuddleServerFrame,
   type HuddleTrackKind,
   type OfferedHuddleTrack,
@@ -35,6 +37,11 @@ import { reconnectingSocket } from "./reconnecting-socket";
 // that watches is sent the one it says it shows: the small one for small tiles, so that a huddle of
 // many costs each of them, and Cloudflare's bill, a small picture apiece.
 //
+// Where an administrator has given huddles a relay, the room's welcome has the servers the connections
+// go by, Cloudflare's TURN service among them, which carries them on a network that blocks the way to
+// the SFU. What the tab is given to use the relay with lasts a day, so a connection that fails after
+// that joins again, on a new socket, for the room to give it anew.
+//
 // The room's answers say which of those pairs they're about, and not which frame they're to, so the tab
 // asks one thing at a time of each connection, and waits for the answer before it asks the next.
 
@@ -54,8 +61,35 @@ export interface HuddleJoin {
   speakerId: string;
 }
 
-/** Cloudflare's STUN server, by which the browser learns the address the SFU reaches it at. */
+/** Cloudflare's STUN server, by which the browser learns the address the SFU reaches it at, which is all a connection goes by without a relay. */
 const CONNECTION: RTCConfiguration = { iceServers: [{ urls: "stun:stun.cloudflare.com:3478" }], bundlePolicy: "max-bundle" };
+
+/** How a tab's connections reach the SFU, as the room's welcome had it, and when the relay's servers came, if they did. */
+interface Reach {
+  configuration: RTCConfiguration;
+  relayedAt: number | null;
+}
+
+/** How they reach it by `servers`, the relay's among them, as the room gives them now, or by Cloudflare's STUN server alone where it gives none. */
+const reachBy = (servers: HuddleIceServer[] | undefined): Reach =>
+  servers?.length ? { configuration: { ...CONNECTION, iceServers: servers }, relayedAt: Date.now() } : { configuration: CONNECTION, relayedAt: null };
+
+/** Whether what the tab was given to use the relay with has run out, so that a connection made now would go without it. */
+const hasRunOut = ({ relayedAt }: Reach) => relayedAt !== null && Date.now() - relayedAt >= RELAY_TTL_S * 1000;
+
+/**
+ * A connection that reaches the SFU as `configuration` says. A browser refuses one any of whose servers
+ * it can't make sense of, and then the connection goes by Cloudflare's STUN server alone, as it would
+ * without a relay.
+ */
+function connectionBy(configuration: RTCConfiguration): RTCPeerConnection {
+  try {
+    return new RTCPeerConnection(configuration);
+  } catch {
+    return new RTCPeerConnection(CONNECTION);
+  }
+}
+
 /**
  * How long the room has to answer what a connection asked of it: longer than it gives the SFU to answer
  * all that a round of listening can have it ask. A room that hasn't by then isn't going to, and the tab
@@ -185,6 +219,10 @@ interface Huddled {
   rejoin(): void;
   /** Whether the tab has left the huddle. */
   isOver(): boolean;
+  /** Makes a connection that reaches the SFU as the room's welcome had it. */
+  connect(): RTCPeerConnection;
+  /** Whether what the tab was given to use the relay with has run out: a connection that fails then is made again only once the tab has joined again. */
+  relayRunOut(): boolean;
 }
 
 /** What one of a tab's connections carries. */
@@ -222,7 +260,7 @@ interface Received extends Carried {
 }
 
 /** One of a tab's sending connections, which publishes a track: its microphone, its camera while that's on, or its screen while that's shared. */
-function sendingConnection({ kind, vital, track, sends }: Sent, { send, rejoin, isOver }: Huddled) {
+function sendingConnection({ kind, vital, track, sends }: Sent, { send, rejoin, isOver, connect, relayRunOut }: Huddled) {
   let connection: RTCPeerConnection | null = null;
   /** The connection whose offer the room has yet to answer, which the tab may have given up since. */
   let unanswered: RTCPeerConnection | null = null;
@@ -250,13 +288,13 @@ function sendingConnection({ kind, vital, track, sends }: Sent, { send, rejoin, 
     close();
     const publishing = track();
     if (!publishing || publishing.readyState === "ended" || unanswered) return;
-    const made = (connection = new RTCPeerConnection(CONNECTION));
+    const made = (connection = connect());
     const sent = sentAs(publishing);
     sizes = sent.sendEncodings ?? [];
     const transceiver = made.addTransceiver(publishing, sent);
     made.onconnectionstatechange = () => {
       if (connection !== made) return;
-      if (made.connectionState === "failed") return publishLater();
+      if (made.connectionState === "failed") return relayRunOut() ? rejoin() : publishLater();
       if (made.connectionState !== "connected") return;
       wait.startOver();
       send({ type: "huddle.connected", kind });
@@ -382,7 +420,7 @@ function sendingConnection({ kind, vital, track, sends }: Sent, { send, rejoin, 
  * doesn't yet, a round at a time: the tab asks (`huddle.listen`), answers the offer if one comes, and
  * the room says `huddle.listening`.
  */
-function receivingConnection({ kind, vital, receivable, wanted, byName, small, play, stop }: Received, { send, rejoin, isOver }: Huddled) {
+function receivingConnection({ kind, vital, receivable, wanted, byName, small, play, stop }: Received, { send, rejoin, isOver, connect, relayRunOut }: Huddled) {
   let connection: RTCPeerConnection | null = null;
   /** Whom the tab has been offered, and so receives. */
   const heard = new Set<UserId>();
@@ -478,9 +516,11 @@ function receivingConnection({ kind, vital, receivable, wanted, byName, small, p
   }
 
   function open(): RTCPeerConnection {
-    const made = new RTCPeerConnection(CONNECTION);
+    const made = connect();
     made.onconnectionstatechange = () => {
-      if (connection === made && made.connectionState === "failed") listenAfresh();
+      if (connection !== made || made.connectionState !== "failed") return;
+      if (relayRunOut()) rejoin();
+      else listenAfresh();
     };
     return made;
   }
@@ -616,7 +656,9 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
     },
   });
 
-  const huddled: Huddled = { send: (frame) => socket.send(frame), rejoin, isOver: () => over };
+  // By Cloudflare's STUN server alone, until the room's welcome says otherwise.
+  let reach = reachBy(undefined);
+  const huddled: Huddled = { send: (frame) => socket.send(frame), rejoin, isOver: () => over, connect: () => connectionBy(reach.configuration), relayRunOut: () => hasRunOut(reach) };
   /** Everyone else in the huddle whose track of `kind` can be received. */
   const receivable = (kind: HuddleTrackKind) => huddle.people.filter((person) => person.user.id !== huddle.you?.id && person[kind]).map(({ user }) => user.id);
   /** The track of what the tab shows by `kind`, or null while it shows nothing by it. */
@@ -869,7 +911,7 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
     if (huddle.connected) show({ connected: false });
   }
 
-  /** Joins again on a new socket, the room having left something the tab asked unanswered. */
+  /** Joins again on a new socket, the room having left something the tab asked unanswered, or the tab's way through the relay having run out. */
   function rejoin() {
     socket.hold();
     socket.retry();
@@ -906,6 +948,7 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
     switch (frame.type) {
       case "huddle.welcome": {
         socket.connected();
+        reach = reachBy(frame.iceServers);
         for (const kind of HUDDLE_TRACK_KINDS) {
           sending[kind].startOver();
           receiving[kind].startOver();
