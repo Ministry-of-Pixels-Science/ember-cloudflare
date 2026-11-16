@@ -286,10 +286,21 @@ describe("Presence", () => {
 });
 
 describe("One live connection per tab outside the open room", () => {
-  it("takes only pings on the workspace socket", () => {
+  it("takes only pings and whether the tab is in use on the workspace socket", () => {
     expect(parseWorkspaceClientFrame('{"type":"ping"}')).toEqual({ type: "ping" });
     expect(parseWorkspaceClientFrame('{"type":"ping","nonce":"n1"}')).toEqual({ type: "ping" });
-    for (const raw of ['{"type":"typing.start"}', '{"type":"message.create","clientMessageId":"c1","body":"hi"}', "[]", "null", "{"]) {
+    expect(parseWorkspaceClientFrame('{"type":"presence","active":false}')).toEqual({ type: "presence", active: false });
+    expect(parseWorkspaceClientFrame('{"type":"presence","active":true,"userId":"u2"}')).toEqual({ type: "presence", active: true });
+    for (const raw of [
+      '{"type":"typing.start"}',
+      '{"type":"message.create","clientMessageId":"c1","body":"hi"}',
+      '{"type":"presence"}',
+      '{"type":"presence","active":"yes"}',
+      '{"type":"presence.visible","visible":true}',
+      "[]",
+      "null",
+      "{",
+    ]) {
       expect(parseWorkspaceClientFrame(raw), raw).toBeNull();
     }
   });

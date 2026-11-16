@@ -1,15 +1,15 @@
 import { startTransition, useCallback, useEffect, useEffectEvent, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { joinsWithLink, type Invitation, type Me } from "@ember/protocol";
+import { joinsWithLink, type Invitation, type Me, type Message, type User } from "@ember/protocol";
 import { ArrowDown } from "@/components/icons/iconoir";
 import { useAccount } from "@/hooks/use-account";
 import { RefusedUnboosts, RoomConnection } from "@/hooks/use-room";
 import { ScrollIntoViewContext } from "@/hooks/use-scroll-into-view";
 import { dropTarget } from "@/lib/drop-target";
-import { dateLabel, dateTimeLabel, timeline } from "@/lib/messages";
+import { dateLabel, dateTimeLabel, sameDay, timeline } from "@/lib/messages";
 import type { Focus, RoomState } from "@/lib/room-state";
 import { cn } from "@/lib/utils";
 import { InvitationCard } from "./invitation-card";
-import { MessageItem, type MessageActions, type MessageEditors, type ThreadPlace } from "./message-item";
+import { JoinedItem, MessageItem, type MessageActions, type MessageEditors, type ThreadPlace } from "./message-item";
 
 /**
  * How near the end of the room's messages a reader can be and still be at it, which keeps them there as
@@ -138,6 +138,8 @@ interface Props {
    * since gets the New line, unless the messages loaded may not reach back to it.
    */
   newSince?: string | null;
+  /** Who joined the workspace, and when, for a DM started as they did, which opens with their having joined. */
+  joined?: { user: User; at: string } | null;
 }
 
 /**
@@ -145,7 +147,25 @@ interface Props {
  * else, it keeps the reader's place, loads the pages before and after as they near either end, and
  * offers Jump to newest message when new ones come.
  */
-export function MessageList({ roomName, direct = false, invitation, onDismissInvitation, state, me, actions, editing, editors, onLoadOlder, onLoadNewer, onJumpToNewest, onDropFiles = () => {}, thread, openThread, newSince = null }: Props) {
+export function MessageList({
+  roomName,
+  direct = false,
+  invitation,
+  onDismissInvitation,
+  state,
+  me,
+  actions,
+  editing,
+  editors,
+  onLoadOlder,
+  onLoadNewer,
+  onJumpToNewest,
+  onDropFiles = () => {},
+  thread,
+  openThread,
+  newSince = null,
+  joined = null,
+}: Props) {
   const scroller = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
   const top = useRef<HTMLDivElement>(null);
@@ -297,6 +317,10 @@ export function MessageList({ roomName, direct = false, invitation, onDismissInv
   // Until the room lets the socket in, which brings its messages afresh. The timeline is busy then, and while it
   // draws a page newest first, so screen readers read the page once it's whole.
   const waiting = state.status === "connecting" || state.status === "reconnecting";
+  // The line a DM started as someone joined opens with, once the room has said the timeline reaches back
+  // to its start. It dates its day, which the first message then dates only if it came on another.
+  const joinedLine = !thread && joined !== null && state.paged !== null && !state.hasMore ? joined : null;
+  const datedFirst = (message: Message) => joinedLine === null || message !== items[0]!.message || !sameDay(joinedLine.at, message.createdAt);
 
   return (
     <div className="min-h-0 flex-1" {...dropTarget(onDropFiles)}>
@@ -331,13 +355,20 @@ export function MessageList({ roomName, direct = false, invitation, onDismissInv
                   </div>
                 )}
 
+                {joinedLine && (
+                  <div data-row="joined">
+                    <DaySeparator at={joinedLine.at} />
+                    <JoinedItem user={joinedLine.user} at={joinedLine.at} />
+                  </div>
+                )}
+
                 {(newestFirst ? items.slice(-FIRST_DRAWN) : items).map(({ message, firstOfDay, threaded }) => {
                   // Stable from optimistic copy to stored message, and distinct across senders.
                   const key = `${message.creator.id}:${message.clientMessageId}`;
                   return (
                     <div key={key} data-row={key} data-message-id={message.id}>
                       {/* A thread's replies start under its message, without a day's heading between them. */}
-                      {firstOfDay && (!thread || message !== items[0]!.message) && <DaySeparator at={message.createdAt} />}
+                      {firstOfDay && (!thread || message !== items[0]!.message) && datedFirst(message) && <DaySeparator at={message.createdAt} />}
                       {message === newLineAt && <NewSeparator />}
                       <MessageItem
                         message={message}

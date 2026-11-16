@@ -1,6 +1,18 @@
 import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useReducer, useRef, useState } from "react";
-import { CloseCode, parseServerFrame, type Account, type DirectoryUser, type Me, type RoomId, type User, type UserId, type WorkspaceServerFrame } from "@ember/protocol";
+import {
+  CloseCode,
+  parseServerFrame,
+  type Account,
+  type DirectoryUser,
+  type Me,
+  type RoomId,
+  type User,
+  type UserId,
+  type WorkspaceClientFrame,
+  type WorkspaceServerFrame,
+} from "@ember/protocol";
 import { fetchMe, fetchSidebar, isSignedOut, workspaceSocketUrl, type SidebarCopy } from "@/lib/api";
+import { activeStore, watchUse } from "@/lib/presence";
 import { reconnectingSocket } from "@/lib/reconnecting-socket";
 import { NO_ROOM_LIST, roomListReducer, type RoomAnswer } from "@/lib/room-list";
 
@@ -79,6 +91,9 @@ const isSame = (you: Me, me: Me) => you.id === me.id && you.name === me.name && 
  * way. `refresh` asks for it again, settling once a list asked for since has come, or failing as that
  * did.
  *
+ * Once the socket is let in, it says whether this tab is in use, and again whenever that changes
+ * (`watchUse`), and keeps who's `active` in the workspace as it hears (`activeStore`).
+ *
  * `onSessionChanged` hears when who the browser's session signs in changes: null once it has expired,
  * whoever another tab signed in as, or `me` as they are now, once they've been made an administrator,
  * say. The people `directory` loads again each time the sidebar does by itself, and hears whoever the
@@ -95,6 +110,7 @@ export function useSidebar(
   onGone: (roomId: RoomId) => void = () => {},
 ) {
   const [{ list, askAgain }, change] = useReducer(roomListReducer, NO_ROOM_LIST);
+  const [active] = useState(activeStore);
   // Whether a list the server sent has come, rather than only the empty one a failed first load leaves.
   const [answered, setAnswered] = useState(false);
   // How many of the workspace socket's frames have said what became of a room or of this person's level
@@ -167,7 +183,12 @@ export function useSidebar(
     // before its welcome. The welcome may have read it before that change, so it doesn't undo it. Each
     // try starts afresh, after a close or a socket that stopped answering alike.
     let toldOf = { you: false, account: false };
-    const onConnecting = () => void (toldOf = { you: false, account: false });
+    // Whether this connection is yet to say who's active, which its first `presence` frame says in full.
+    let unheard = true;
+    const onConnecting = () => {
+      toldOf = { you: false, account: false };
+      unheard = true;
+    };
     const heardOf = (roomId: RoomId) => roomFrames.current.lastOf.set(roomId, ++roomFrames.current.count);
     const onMessage = (data: string) => {
       const frame = parseServerFrame<WorkspaceServerFrame>(data);
@@ -179,6 +200,7 @@ export function useSidebar(
             return sessionChanged(frame.you);
           }
           workspace.connected();
+          workspace.send({ type: "presence", active: use.inUse() });
           if (!toldOf.you) signsIn(frame.you);
           if (!toldOf.account) accountChanged(frame.account);
           return reload();
@@ -190,7 +212,7 @@ export function useSidebar(
           gone(frame.roomId);
           return change({ type: "gone", roomId: frame.roomId });
         case "room.unread":
-          return change({ type: "marked", roomId: frame.roomId, at: frame.at });
+          return change({ type: "marked", roomId: frame.roomId, at: frame.at, count: frame.count });
         case "room.read":
           return change({ type: "marked", roomId: frame.roomId, at: null });
         case "room.active":
@@ -219,6 +241,11 @@ export function useSidebar(
         case "account.updated":
           toldOf.account = true;
           return accountChanged(frame.account);
+        case "presence": {
+          const first = unheard;
+          unheard = false;
+          return active.hear(frame, first);
+        }
       }
     };
 
@@ -250,12 +277,15 @@ export function useSidebar(
     };
 
     reload();
-    const workspace = reconnectingSocket({ url: workspaceSocketUrl, onMessage, onConnecting, onClose, deploySpreadMs: DEPLOY_SPREAD_MS });
+    const workspace = reconnectingSocket<WorkspaceClientFrame>({ url: workspaceSocketUrl, onMessage, onConnecting, onClose, deploySpreadMs: DEPLOY_SPREAD_MS });
+    // A change while the socket isn't let in waits for its welcome, which says how the tab is then.
+    const use = watchUse((inUse) => workspace.send({ type: "presence", active: inUse }));
     document.addEventListener("visibilitychange", visibilityChanged);
     return () => {
       closed = true;
       clearTimeout(waiting);
       workspace.close();
+      use.stop();
       document.removeEventListener("visibilitychange", visibilityChanged);
     };
   }, [refresh]);
@@ -274,5 +304,5 @@ export function useSidebar(
     };
   }, []);
 
-  return { list, answered, change, refresh, askForRoom };
+  return { list, answered, change, refresh, askForRoom, active };
 }

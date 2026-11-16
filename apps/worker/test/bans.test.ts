@@ -112,6 +112,9 @@ const roomsOf = async (userId: UserId) =>
 /** The open rooms, by id. */
 const openRooms = async () => ((await workspaceSql("SELECT id FROM rooms WHERE kind = 'open' ORDER BY id")) as Array<{ id: RoomId }>).map(({ id }) => id);
 
+/** The DMs, by id. */
+const directRooms = async () => ((await workspaceSql("SELECT id FROM rooms WHERE kind = 'direct' ORDER BY id")) as Array<{ id: RoomId }>).map(({ id }) => id);
+
 /** Changes room `roomId` as its settings do, as `session`. */
 async function changeRoom(session: Session, roomId: RoomId, changes: unknown): Promise<void> {
   const response = await api(`/api/rooms/${roomId}`, { method: "PATCH", headers: { Cookie: session.cookie }, body: JSON.stringify(changes) });
@@ -503,7 +506,8 @@ describe("Ban and unban people", () => {
 
     expect((await unban(administrator, member.user.id)).status).toBe(200);
     expect(await openRooms()).toEqual(expect.arrayContaining([launch.id, leads.id]));
-    expect(await roomsOf(member.user.id)).toEqual([...(await openRooms()), team.id].sort());
+    // The DM that welcomed her as she joined stays hers too.
+    expect(await roomsOf(member.user.id)).toEqual([...(await openRooms()), team.id, ...(await directRooms())].sort());
     expect(await roomsOf(member.user.id)).not.toContain(board.id);
     // As her sidebar lists them once she's signed in again.
     const back = await signInAsGrace("203.0.113.7");

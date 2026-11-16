@@ -1,5 +1,5 @@
 import { useEffect, useEffectEvent, useImperativeHandle, useRef, type Ref } from "react";
-import type { Favorites, Invitation, Involvement, Me } from "@ember/protocol";
+import type { Favorites, Invitation, Involvement, Me, User } from "@ember/protocol";
 import { MainContent } from "@/components/main-content";
 import { useNameOf } from "@/hooks/use-directory";
 import { useMediaQuery } from "@/hooks/use-media-query";
@@ -20,6 +20,14 @@ import { ThreadPanel } from "./thread-panel";
 
 /** Where a thread covers its room, rather than showing beside it: below 1180px wide. */
 const THREAD_COVERS_ROOM = "(width < 73.75rem)";
+
+/** Who joined the workspace, and when, in a DM started as they did, which its timeline opens with, or null. */
+function joinedIn(room: Room): { user: User; at: string } | null {
+  if (room.kind !== "direct" || !room.joined) return null;
+  const { userId, at } = room.joined;
+  const user = room.members.find((member) => member.id === userId);
+  return user ? { user, at } : null;
+}
 
 interface Props {
   room: Room;
@@ -141,6 +149,7 @@ export function RoomView({ room, messageId, threadId, replyId, invitation, onDis
             onDropFiles={(files) => composer.current?.addFiles(files)}
             openThread={threadId}
             newSince={newSince}
+            joined={joinedIn(room)}
           />
           {deleted ? (
             <RoomDeleted />

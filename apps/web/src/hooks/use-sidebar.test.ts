@@ -1,6 +1,7 @@
-import { CloseCode, type Account, type DirectoryUser, type Me, type SharedRoom, type Sidebar, type SidebarRoom, type WorkspaceServerFrame } from "@ember/protocol";
+import { CloseCode, type Account, type DirectoryUser, type Me, type SharedRoom, type Sidebar, type SidebarRoom, type WorkspaceClientFrame, type WorkspaceServerFrame } from "@ember/protocol";
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AWAY_AFTER_MS } from "@/lib/presence";
 import { RELOAD_AFTER_HIDDEN_MS, RELOAD_SPREAD_MS, useSidebar } from "./use-sidebar";
 
 const ada: Me = { id: "u1", name: "Ada", administrator: false };
@@ -24,6 +25,8 @@ class FakeSocket {
 
   readyState = FakeSocket.CONNECTING;
   closedWith: number | undefined;
+  /** The frames the hook has sent, in order. */
+  sent: WorkspaceClientFrame[] = [];
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
   onclose: ((event: { code: number }) => void) | null = null;
@@ -32,7 +35,9 @@ class FakeSocket {
     FakeSocket.all.push(this);
   }
 
-  send() {}
+  send(data: string) {
+    this.sent.push(JSON.parse(data) as WorkspaceClientFrame);
+  }
 
   close(code?: number) {
     this.closedWith = code;
@@ -337,6 +342,19 @@ describe("Unread rooms", () => {
     await settle();
     expect(result.current.list?.rooms).toEqual([{ ...design, unread: true, unreadSince: NOON }]);
   });
+
+  it("counts the messages that have come in a DM since it was marked unread, as the workspace socket says, until it's read", async () => {
+    const withGrace = { id: "d1", kind: "direct", members: [ada, grace].map(({ id, name }) => ({ id, name })), activeAt: NOON, unread: false, involvement: "everything" } satisfies SidebarRoom;
+    server.sidebar = unstarred([withGrace]);
+    const { result } = await showSidebar();
+    socket().connect();
+    await settle();
+    socket().receive({ type: "room.unread", roomId: withGrace.id, at: NOON, count: 1 });
+    socket().receive({ type: "room.unread", roomId: withGrace.id, at: NOON, count: 2 });
+    expect(result.current.list?.rooms).toEqual([{ ...withGrace, unread: true, unreadSince: NOON, unreadCount: 2 }]);
+    socket().receive({ type: "room.read", roomId: withGrace.id });
+    expect(result.current.list?.rooms).toEqual([withGrace]);
+  });
 });
 
 describe("Notification levels", () => {
@@ -393,6 +411,61 @@ describe("DM order", () => {
     await release();
     await settle();
     expect(result.current.list?.rooms).toEqual([design, { ...withGrace, activeAt: "2026-10-15T12:05:00.000Z" }]);
+  });
+});
+
+describe("Who's active", () => {
+  /** What the hook has said of whether the tab is in use, on the latest socket. */
+  const saidInUse = () => socket().sent.flatMap((frame) => (frame.type === "presence" ? [frame.active] : []));
+
+  /** Lets `ms` go by without the tab being used, the Workspace answering the socket's pings meanwhile, as it does. */
+  async function unusedFor(ms: number) {
+    for (let left = ms; left > 0; left -= 20_000) {
+      await wait(Math.min(left, 20_000));
+      socket().receive({ type: "pong" });
+    }
+  }
+
+  it("says whether the tab is in use once the Workspace lets its socket in, and again whenever that changes", async () => {
+    await showSidebar();
+    socket().open();
+    expect(saidInUse()).toEqual([]);
+    socket().receive({ type: "welcome", you: ada, account: ember });
+    expect(saidInUse()).toEqual([true]);
+
+    await unusedFor(AWAY_AFTER_MS);
+    expect(saidInUse()).toEqual([true, false]);
+    act(() => void window.dispatchEvent(new KeyboardEvent("keydown")));
+    expect(saidInUse()).toEqual([true, false, true]);
+  });
+
+  it("says it again as the next connection is let in, as the tab is then", async () => {
+    await showSidebar();
+    socket().connect();
+    await unusedFor(AWAY_AFTER_MS);
+    socket().drop();
+    await wait(60_000);
+    socket().connect();
+    expect(saidInUse()).toEqual([false]);
+  });
+
+  it("knows who's active from the first frame since the socket connected, then from the changes the frames after it tell of", async () => {
+    const { result } = await showSidebar();
+    socket().connect();
+    await settle();
+    const active = () => result.current.active.current();
+    expect(active()).toBeNull();
+    socket().receive({ type: "presence", active: [ada.id, grace.id], away: [] });
+    expect(active()).toEqual(new Set([ada.id, grace.id]));
+    socket().receive({ type: "presence", active: ["u3"], away: [grace.id] });
+    expect(active()).toEqual(new Set([ada.id, "u3"]));
+
+    // The next connection's first frame says who's active then, whoever was before.
+    socket().drop();
+    await wait(60_000);
+    socket().connect();
+    socket().receive({ type: "presence", active: [grace.id], away: [] });
+    expect(active()).toEqual(new Set([grace.id]));
   });
 });
 

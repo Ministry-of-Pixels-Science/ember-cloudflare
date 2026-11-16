@@ -4,6 +4,7 @@ import {
   apart,
   inDirectOrder,
   inSidebarOrder,
+  isQuietWelcome,
   markedUnread,
   NO_ROOM_LIST,
   roomListReducer,
@@ -158,6 +159,16 @@ describe("Unread rooms", () => {
     const read = roomListReducer(asked, { type: "marked", roomId: "r2", at: null });
     expect(roomListReducer(read, { type: "loaded", list }).list!.rooms).toEqual([room("r1", "Design"), room("r2", "general")]);
   });
+
+  it("counts the messages a DM's mark says have come since, until it's read, keeping the count as the DM's saved", () => {
+    const dm = direct("d1", "Ada", "Grace");
+    const listed = roomListReducer(NO_ROOM_LIST, { type: "loaded", list: sidebar([dm]) });
+    const marked = roomListReducer(roomListReducer(listed, { type: "marked", roomId: "d1", at: NOON, count: 1 }), { type: "marked", roomId: "d1", at: NOON, count: 2 });
+    const counted: SidebarRoom = { ...dm, unread: true, unreadSince: NOON, unreadCount: 2 };
+    expect(marked.list!.rooms).toEqual([counted]);
+    expect(withRoom(marked.list!.rooms, { id: "d1", kind: "direct", members: dm.members, activeAt: NOON })).toEqual([counted]);
+    expect(roomListReducer(marked, { type: "marked", roomId: "d1", at: null }).list!.rooms).toEqual([dm]);
+  });
 });
 
 describe("Regenerate the join link", () => {
@@ -256,6 +267,18 @@ describe("Reorder starred rooms", () => {
     const loaded = roomListReducer(NO_ROOM_LIST, { type: "loaded", list: sidebar(four, { rooms: ["r1", "r3"], version: 2 }) });
     expect(roomListReducer(loaded, { type: "gone", roomId: "r1" }).list!.favorites).toEqual({ rooms: ["r3"], version: 2 });
     expect(roomListReducer(loaded, { type: "gone", roomId: "r2" }).list!.favorites).toBe(loaded.list!.favorites);
+  });
+});
+
+describe("Welcome someone who joins", () => {
+  const welcome: DirectSidebarRoom = { ...direct("d1", "Ada", "Grace"), joined: { userId: "ada", at: NOON } };
+
+  it("keeps the DM that welcomed someone quiet for them until a message comes in it, but never for the person welcoming them", () => {
+    expect(isQuietWelcome(welcome, "ada")).toBe(true);
+    expect(isQuietWelcome(welcome, "grace")).toBe(false);
+    expect(isQuietWelcome({ ...welcome, activeAt: "2026-10-15T12:05:00.000Z" }, "ada")).toBe(false);
+    expect(isQuietWelcome(direct("d2", "Ada", "Grace"), "ada")).toBe(false);
+    expect(isQuietWelcome(room("r1", "Design"), "ada")).toBe(false);
   });
 });
 

@@ -562,7 +562,8 @@ describe("Outside AI", () => {
     expect(await (await describeAsk(member, askOf(DOCUMENT))).json()).toEqual({ name: "Claude", comesBackTo: "claude.example", workspace: "Ember", scopes: ["read"] });
     const back = await allowed(member, askOf(DOCUMENT));
     const tokens = (await (await exchange(DOCUMENT, back.searchParams.get("code")!)).json()) as Tokens;
-    expect(await roomsFor(tokens.access_token)).toHaveLength(2);
+    // general, random, and the DM that welcomed her as she joined.
+    expect(await roomsFor(tokens.access_token)).toHaveLength(3);
     expect((await workspaceSql("SELECT count(*) AS n FROM outside_clients"))[0]).toEqual({ n: 0 });
 
     // Not where the document doesn't say the app comes back, nor to an address Ember doesn't send browsers.

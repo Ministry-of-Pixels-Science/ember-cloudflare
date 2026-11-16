@@ -257,6 +257,17 @@ export interface DirectRoom {
   members: User[];
   /** When its latest message came, or when it started, until one has, as an ISO time, which DMs are listed by, latest first. */
   activeAt: string;
+  /**
+   * Who joined the workspace, and when, for a DM started as they joined, with someone who was here
+   * already, as Slack starts one: its timeline opens with their having joined. Left out for any other DM.
+   */
+  joined?: Joined;
+}
+
+/** Someone who joined the workspace, by id, and when, as an ISO time. */
+export interface Joined {
+  userId: UserId;
+  at: string;
 }
 
 /** A room someone is in, as their room list shows it: a shared room, or a DM. */
@@ -285,10 +296,10 @@ export const startingInvolvement = (room: Room): Involvement => (room.kind === "
 /**
  * A room in someone's sidebar, with whether a message has come since they last had it open in a shown
  * tab, which marks it unread for them until they do again, when the first of those messages came, while
- * it's marked, and their level in it. A room they've hidden is listed too, since they can still open it,
- * but their sidebar leaves it out.
+ * it's marked, in a DM how many have come since, and their level in it. A room they've hidden is listed
+ * too, since they can still open it, but their sidebar leaves it out.
  */
-export type SidebarRoom = Room & { unread: boolean; unreadSince?: string; involvement: Involvement };
+export type SidebarRoom = Room & { unread: boolean; unreadSince?: string; unreadCount?: number; involvement: Involvement };
 
 /**
  * The rooms someone has starred, which their sidebar lists first, in the order they starred them.
@@ -1689,20 +1700,23 @@ export type ServerFrame =
   | { type: "pong" };
 
 /**
- * What a tab sends on its workspace socket (`/api/socket`): only pings, which the runtime answers
- * without waking the Workspace.
+ * What a tab sends on its workspace socket (`/api/socket`): pings, which the runtime answers without
+ * waking the Workspace, and whether its person is using it, once it's welcomed and as they stop using it
+ * or come back to it. A tab counts as in use from when it connects until it says otherwise, and once it
+ * has said, it hears who's active (`presence`).
  */
-export type WorkspaceClientFrame = { type: "ping" };
+export type WorkspaceClientFrame = { type: "ping" } | { type: "presence"; active: boolean };
 
 /** What the Workspace sends on a tab's workspace socket. */
 export type WorkspaceServerFrame =
   /** Sent as the Workspace lets the socket in: who its session signs in, and the workspace as it is then. */
   | { type: "welcome"; you: Me; account: Account }
   /**
-   * A room of theirs has a message they haven't seen, which marks it unread, as of `at`, when that message
-   * came. Sent only to the person marked, as their mark changes.
+   * A room of theirs has a message they haven't seen, which marks it unread, as of `at`, when the first
+   * of those came. Sent only to the person marked, as their mark changes, and in a DM, as each message
+   * comes, with how many have come since it was marked.
    */
-  | { type: "room.unread"; roomId: RoomId; at: string }
+  | { type: "room.unread"; roomId: RoomId; at: string; count?: number }
   /** They've read a room marked unread, in this tab or another. */
   | { type: "room.read"; roomId: RoomId }
   /**
@@ -1748,6 +1762,14 @@ export type WorkspaceServerFrame =
   | { type: "rooms.reordered" }
   /** An administrator changed the workspace's name, settings or custom CSS, which every page applies at once. Sent to everyone. */
   | { type: "account.updated"; account: Account }
+  /**
+   * Who's active, with a tab open that they've used in the last ten minutes, as Slack counts it, and who's
+   * away otherwise: first everyone active, as the tab first says whether it's in use, and then whoever has
+   * become active or away since the last of these. Sent only to tabs that have said, and gathered over a
+   * moment, so that a deploy's reconnects tell of everyone in a few frames rather than one each: the
+   * first may be a moment behind, as the frame that follows it brings it up to date.
+   */
+  | { type: "presence"; active: UserId[]; away: UserId[] }
   | { type: "error"; message: string }
   | { type: "pong" };
 
@@ -1989,7 +2011,9 @@ export function parseClientFrame(raw: string): ClientFrame | null {
 
 /** Parses an untrusted frame from a workspace socket. Returns null for anything malformed. */
 export function parseWorkspaceClientFrame(raw: string): WorkspaceClientFrame | null {
-  return parseObject(raw)?.type === "ping" ? { type: "ping" } : null;
+  const f = parseObject(raw);
+  if (f?.type === "ping") return { type: "ping" };
+  return f?.type === "presence" && typeof f.active === "boolean" ? { type: "presence", active: f.active } : null;
 }
 
 /**
