@@ -26,7 +26,7 @@ const ada = { name: "Ada Lovelace", emailAddress: "ada@example.com", password: "
 const grace = { name: "Grace Hopper", emailAddress: "grace@example.com", password: "compiler design" };
 
 /** The workspace named `name`, as pages show a new one: translation buttons hidden, no custom CSS, and rooms anyone can create. */
-const named = (name: string): Account => ({ name, tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true });
+const named = (name: string): Account => ({ name, tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true });
 
 /** How a new workspace sends email: with the binding wrangler.jsonc declares, from no address yet. */
 const NEW_EMAIL: EmailSettings = { provider: "cloudflare", resendKey: null, cloudflare: true, from: null };

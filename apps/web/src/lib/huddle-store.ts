@@ -20,7 +20,11 @@ export interface JoinedHuddle {
   camera: MediaStream | null;
   /** The others' cameras the tab watches, by whose each is. */
   watched: ReadonlyMap<UserId, MediaStream>;
-  /** Whether the tab shows the huddle opened, a tile for each person, rather than as its bar. Only then does it watch anyone's camera. */
+  /** The screen the tab's person shares, for them to see what the others do. */
+  screen: MediaStream | null;
+  /** The screens the others share that the tab watches, by whose each is. */
+  screens: ReadonlyMap<UserId, MediaStream>;
+  /** Whether the tab shows the huddle opened, a tile for each person, rather than as its bar. Only then does it watch anyone's camera or screen. */
   open: boolean;
 }
 
@@ -29,6 +33,7 @@ export interface HuddleControls {
   leave(): void;
   setMuted(muted: boolean): void;
   setCamera(on: boolean): void;
+  setScreen(shared: boolean): void;
   setOpen(open: boolean): void;
 }
 
@@ -65,12 +70,15 @@ export const muteHuddle = (muted: boolean) => controls?.setMuted(muted);
 /** Turns the tab's camera on in its huddle, which asks the browser for one, or off, if it's in one. */
 export const showHuddleCamera = (on: boolean) => controls?.setCamera(on);
 
+/** Shares the tab's screen in its huddle, which has the browser ask its person what to share, or stops sharing it, if it's in one. */
+export const shareHuddleScreen = (shared: boolean) => controls?.setScreen(shared);
+
 /** Shows the tab's huddle opened, or as its bar again, if it's in one. */
 export const openHuddle = (open: boolean) => controls?.setOpen(open);
 
 /**
  * Has `say` told whatever the tab's huddle has to tell its person, until the function returned is
- * called: why the room ended it for them, or why their camera stays off.
+ * called: why the room ended it for them, or why their camera stays off or their screen isn't shared.
  */
 export function hearHuddle(say: (what: string) => void): () => void {
   told = say;

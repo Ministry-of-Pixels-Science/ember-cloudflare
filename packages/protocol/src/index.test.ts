@@ -298,7 +298,7 @@ describe("One live connection per tab outside the open room", () => {
     const welcome: WorkspaceServerFrame = {
       type: "welcome",
       you: { id: "u1", name: "Ada", administrator: true },
-      account: { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true },
+      account: { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true },
     };
     expect(parseServerFrame<WorkspaceServerFrame>(JSON.stringify(welcome))).toEqual(welcome);
     expect(parseServerFrame<WorkspaceServerFrame>('{"type":7}')).toBeNull();
@@ -689,6 +689,14 @@ describe("Cameras in huddles (setting)", () => {
     expect(parseAccountChanges({ settings: { huddleCameras: false } })).toEqual({ settings: { huddleCameras: false } });
     expect(parseAccountChanges({ settings: { huddleCameras: true, restrictRoomCreation: true } })).toEqual({ settings: { huddleCameras: true, restrictRoomCreation: true } });
     expect(parseAccountChanges({ settings: { huddleCameras: "off" } })).toBe("Cameras must be true or false");
+  });
+});
+
+describe("Screen sharing in huddles (setting)", () => {
+  it("takes Screen sharing as true or false, beside the other settings", () => {
+    expect(parseAccountChanges({ settings: { huddleScreens: false } })).toEqual({ settings: { huddleScreens: false } });
+    expect(parseAccountChanges({ settings: { huddleScreens: true, huddleCameras: false } })).toEqual({ settings: { huddleScreens: true, huddleCameras: false } });
+    expect(parseAccountChanges({ settings: { huddleScreens: 0 } })).toBe("Screen sharing must be true or false");
   });
 });
 

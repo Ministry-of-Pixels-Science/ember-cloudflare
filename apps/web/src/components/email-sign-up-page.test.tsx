@@ -49,6 +49,7 @@ const workspace: Omit<Bootstrap, "user"> = {
     navigationIcons: {},
     huddles: false,
     huddleCameras: true,
+    huddleScreens: true,
   },
   version: "0.1",
   vapidPublicKey: null,

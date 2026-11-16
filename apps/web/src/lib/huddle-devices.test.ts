@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cameraOf, closeDevice, listDevices, listsSpeaker, microphoneOf, NO_DEVICES, openCamera, openMicrophone, rememberDevice, rememberedDevice, watchDevices } from "./huddle-devices";
+import { cameraOf, closeDevice, listDevices, listsSpeaker, microphoneOf, NO_DEVICES, openCamera, openMicrophone, openScreen, rememberDevice, rememberedDevice, sharesScreens, watchDevices } from "./huddle-devices";
 
 /** A stream from the microphone `deviceId`, or with `kind` said, the camera, as much of one as the code reads. */
 function streamFrom(deviceId: string, kind: "audio" | "video" = "audio") {
@@ -154,6 +154,48 @@ describe("Opening a camera", () => {
     expect(cameraOf(streamFrom("mic-1").stream)).toBe("");
     closeDevice(stream);
     expect(track.stop).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Sharing a screen", () => {
+  /** What the browser throws for a request it turns down, by its name and what it says of it. */
+  const turnedDown = (name: string, message: string) => new DOMException(message, name);
+
+  it("opens what its person chooses, no larger than 1080p nor faster than 15 pictures a second, without sound, and has the browser keep its text sharp", async () => {
+    const track = { stop: vi.fn(), contentHint: "" };
+    const stream = { getVideoTracks: () => [track], getTracks: () => [track] } as unknown as MediaStream;
+    const getDisplayMedia = vi.fn().mockResolvedValue(stream);
+    withMedia({ getDisplayMedia });
+    expect(await openScreen()).toBe(stream);
+    expect(getDisplayMedia.mock.calls).toEqual([[{ video: { width: { max: 1920 }, height: { max: 1080 }, frameRate: { max: 15 } }, audio: false }]]);
+    expect(track.contentHint).toBe("detail");
+    closeDevice(stream);
+    expect(track.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("has none when its person chooses nothing", async () => {
+    withMedia({ getDisplayMedia: vi.fn().mockRejectedValue(turnedDown("NotAllowedError", "Permission denied")) });
+    expect(await openScreen()).toBeNull();
+  });
+
+  it.each([
+    ["the browser couldn't start sharing what they chose", turnedDown("NotReadableError", "Could not start video source")],
+    ["their computer keeps the browser from recording the screen, as Chrome says it", turnedDown("NotAllowedError", "Permission denied by system")],
+    ["the browser fails with something that isn't an Error", "no"],
+  ])("fails when %s", async (_, failure) => {
+    withMedia({ getDisplayMedia: vi.fn().mockRejectedValue(failure) });
+    await expect(openScreen()).rejects.toBe(failure);
+  });
+
+  it("fails in a browser that can't share a screen, as a phone's can't, which it says of itself", async () => {
+    withMedia({ getDisplayMedia: vi.fn() });
+    expect(sharesScreens()).toBe(true);
+    withMedia({});
+    expect(sharesScreens()).toBe(false);
+    await expect(openScreen()).rejects.toBeInstanceOf(TypeError);
+    vi.stubGlobal("navigator", {});
+    expect(sharesScreens()).toBe(false);
+    await expect(openScreen()).rejects.toBeInstanceOf(TypeError);
   });
 });
 

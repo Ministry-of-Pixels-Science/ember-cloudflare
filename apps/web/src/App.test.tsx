@@ -5,6 +5,7 @@ import { CloseCode, EMAIL_LINK_GONE, SIGN_IN_REJECTED, type Account, type Accoun
 import type { HuddlesSetup } from "@ember/protocol/huddles";
 import { QUESTION } from "@/components/setup-huddles";
 import { flashOnNextPage } from "@/lib/flash";
+import { showHuddle } from "@/lib/huddle-store";
 import { loadPage } from "@/lib/page";
 import { setPrefersDark } from "@/test-media";
 import { CHROME_MAC } from "@/test-platforms";
@@ -24,7 +25,7 @@ const EMAIL_LINK_TOKEN = "Gr-_em".repeat(7) + "D";
 /** Where joining with Ada's email address sends the browser. */
 const ADA_SIGNS_IN = "/session/new?email_address=ada%40example.com";
 /** The workspace as it's set up. */
-const EMBER: Account = { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true };
+const EMBER: Account = { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true };
 /** What the deployment's Set up Ember form suggests. */
 const PLACEHOLDERS = { name: "Grace Hopper", emailAddress: "grace@example.com" };
 const general = { id: "general", name: "general", kind: "open", icon: null };
@@ -769,6 +770,33 @@ describe("Huddles", () => {
     expect(cameraSwitch()).not.toBeInTheDocument();
     act(() => WorkspaceSocket.all[0]!.receive({ type: "account.updated", account: withHuddles }));
     expect(cameraSwitch()).toBeInTheDocument();
+  });
+
+  it("takes the button that shares a screen from the bar of a huddle, and gives it back, as the workspace socket says screen sharing goes off and on", async () => {
+    const withHuddles = { ...EMBER, huddles: true };
+    const shareButton = () => screen.queryByRole("button", { name: "Share screen" });
+    // A browser that can share a screen, which jsdom's isn't.
+    Object.defineProperty(navigator, "mediaDevices", { value: { getDisplayMedia: vi.fn() }, configurable: true });
+    WorkspaceSocket.all = [];
+    vi.stubGlobal("WebSocket", WorkspaceSocket);
+    serve({ signedIn: true, account: withHuddles });
+    render(<App />);
+    await roomHeading();
+    await waitFor(() => expect(WorkspaceSocket.all).toHaveLength(1));
+    act(() => WorkspaceSocket.all[0]!.welcome(ada, withHuddles));
+    // The tab is in general's huddle, minimized to its bar.
+    const controls = { leave: () => showHuddle(null), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn() };
+    act(() => showHuddle({ roomId: "general", connected: true, you: ada, people: [], muted: false, microphone: true, camera: null, watched: new Map(), screen: null, screens: new Map(), open: false }, controls));
+    try {
+      expect(shareButton()).toBeInTheDocument();
+      act(() => WorkspaceSocket.all[0]!.receive({ type: "account.updated", account: { ...withHuddles, huddleScreens: false } }));
+      expect(shareButton()).not.toBeInTheDocument();
+      act(() => WorkspaceSocket.all[0]!.receive({ type: "account.updated", account: withHuddles }));
+      expect(shareButton()).toBeInTheDocument();
+    } finally {
+      act(() => showHuddle(null));
+      Reflect.deleteProperty(navigator, "mediaDevices");
+    }
   });
 });
 

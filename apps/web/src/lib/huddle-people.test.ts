@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { inItNow, inItsHuddle, inTheHuddle } from "./huddle-people";
+import { inItNow, inItsHuddle, inTheHuddle, sharingScreens } from "./huddle-people";
 
 describe("inItNow", () => {
   it("names up to three people by first name", () => {
@@ -43,6 +43,22 @@ describe("inTheHuddle", () => {
   it("counts the others past the third", () => {
     expect(inTheHuddle(["Sam Rivera", "Priya Patel", "Leo Park", "Ada Lovelace"])).toBe("Sam, Priya, Leo, and 1 other are in the huddle");
     expect(inTheHuddle(Array.from({ length: 49 }, (_, index) => `Person ${index}`))).toBe("Person, Person, Person, and 46 others are in the huddle");
+  });
+});
+
+describe("sharingScreens", () => {
+  it("says nothing while nobody shares one", () => {
+    expect(sharingScreens([], false)).toBeNull();
+  });
+
+  it("says when only you do, and names someone else who does by first name", () => {
+    expect(sharingScreens([], true)).toBe("You're sharing your screen");
+    expect(sharingScreens(["Sam Rivera"], false)).toBe("Sam is sharing a screen");
+  });
+
+  it("names both of two who do, you last", () => {
+    expect(sharingScreens(["Sam Rivera", "Priya Patel"], false)).toBe("Sam and Priya are sharing screens");
+    expect(sharingScreens(["Sam Rivera"], true)).toBe("Sam and you are sharing screens");
   });
 });
 

@@ -45,6 +45,9 @@ const turnOff = (session: Session | null) => api("/api/account/huddles", { metho
 /** Turns Cameras on or off as `session`, as its switch on the Huddles tab does. */
 const switchCameras = (session: Session | null, huddleCameras: unknown) => api("/api/account", { method: "PATCH", headers: as(session), body: JSON.stringify({ settings: { huddleCameras } }) });
 
+/** Turns Screen sharing on or off as `session`, as its switch on the Huddles tab does. */
+const switchScreens = (session: Session | null, huddleScreens: unknown) => api("/api/account", { method: "PATCH", headers: as(session), body: JSON.stringify({ settings: { huddleScreens } }) });
+
 /** The account as a page is told of it before anyone signs in. */
 const shownAccount = async () => ((await (await api("/api/bootstrap")).json()) as Bootstrap).account;
 
@@ -348,11 +351,11 @@ describe("Cameras in huddles (setting)", () => {
     const administrator = await setUp();
     fakeSfu();
     await saveKeys(administrator);
-    expect(await workspaceStub().huddleApp()).toEqual({ ...APP, cameras: true });
+    expect(await workspaceStub().huddleApp()).toEqual({ ...APP, cameras: true, screens: true });
     await switchCameras(administrator, false);
-    expect(await workspaceStub().huddleApp()).toEqual({ ...APP, cameras: false });
+    expect(await workspaceStub().huddleApp()).toEqual({ ...APP, cameras: false, screens: true });
     await switchCameras(administrator, true);
-    expect(await workspaceStub().huddleApp()).toEqual({ ...APP, cameras: true });
+    expect(await workspaceStub().huddleApp()).toEqual({ ...APP, cameras: true, screens: true });
     // There's no app to tell it of while huddles are off.
     await turnOff(administrator);
     expect(await workspaceStub().huddleApp()).toBeNull();
@@ -370,5 +373,77 @@ describe("Cameras in huddles (setting)", () => {
     // Started afresh, the Workspace has to read the account again.
     await evictDurableObject(workspaceStub());
     expect((await shownAccount()).huddleCameras).toBe(true);
+  });
+});
+
+describe("Screen sharing in huddles (setting)", () => {
+  it("lets screens be shared until an administrator turns that off, before first run too", async () => {
+    expect((await shownAccount()).huddleScreens).toBe(true);
+    const administrator = await setUp();
+    expect((await settings(administrator)).account.huddleScreens).toBe(true);
+    expect(await storedSettings()).not.toHaveProperty("huddle_screens");
+  });
+
+  it("goes off and on for everyone as an administrator switches it, whether or not huddles are on, leaving cameras as they were", async () => {
+    const administrator = await setUp();
+    const member = await signIn("Grace");
+    fakeSfu();
+    await saveKeys(administrator);
+    await switchCameras(administrator, false);
+    const sockets = [await openWorkspaceSocket(administrator), await openWorkspaceSocket(member)];
+
+    const response = await switchScreens(administrator, false);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ account: { huddles: true, huddleCameras: false, huddleScreens: false } });
+    expect(await storedSettings()).toMatchObject({ huddle_screens: false, huddle_cameras: false, huddles: { app_id: APP.appId } });
+    for (const socket of sockets) expect(await socket.next()).toMatchObject({ type: "account.updated", account: { huddles: true, huddleCameras: false, huddleScreens: false } });
+    expect((await settings(member)).account.huddleScreens).toBe(false);
+    // As it is once the Workspace starts afresh, and for a page nobody has signed in on.
+    await evictDurableObject(workspaceStub());
+    expect((await shownAccount()).huddleScreens).toBe(false);
+
+    // Off already, it's nothing new, and huddles going off leave it as it was.
+    const again = [await openWorkspaceSocket(administrator), await openWorkspaceSocket(member)];
+    expect((await switchScreens(administrator, false)).status).toBe(200);
+    for (const socket of again) expect(await socket.answers()).toBe(true);
+    expect((await turnOff(administrator)).status).toBe(200);
+    for (const socket of again) expect(await socket.next()).toMatchObject({ type: "account.updated", account: { huddles: false, huddleScreens: false } });
+    expect(await (await switchScreens(administrator, true)).json()).toMatchObject({ account: { huddles: false, huddleCameras: false, huddleScreens: true } });
+    for (const socket of again) expect(await socket.next()).toMatchObject({ type: "account.updated", account: { huddles: false, huddleCameras: false, huddleScreens: true } });
+    expect(await storedSettings()).toMatchObject({ huddle_screens: true, huddle_cameras: false });
+  });
+
+  it("lets only administrators switch it, and takes only true or false", async () => {
+    const administrator = await setUp();
+    const member = await signIn("Grace");
+    expect((await switchScreens(member, false)).status).toBe(403);
+    expect((await switchScreens(null, false)).status).toBe(401);
+    const refused = await switchScreens(administrator, "off");
+    expect(refused.status).toBe(422);
+    expect(await refused.json()).toEqual({ error: "Screen sharing must be true or false" });
+    expect((await shownAccount()).huddleScreens).toBe(true);
+    expect(await storedSettings()).not.toHaveProperty("huddle_screens");
+  });
+
+  it("tells a room whether screens may be shared, along with the app huddles run through", async () => {
+    const administrator = await setUp();
+    fakeSfu();
+    await saveKeys(administrator);
+    await switchScreens(administrator, false);
+    expect(await workspaceStub().huddleApp()).toEqual({ ...APP, cameras: true, screens: false });
+    await switchScreens(administrator, true);
+    expect(await workspaceStub().huddleApp()).toEqual({ ...APP, cameras: true, screens: true });
+  });
+
+  it.each([
+    ["null", '{"huddle_screens":null}'],
+    ["text", '{"huddle_screens":"false"}'],
+    ["a number", '{"huddle_screens":0}'],
+  ])("keeps screen sharing on for a workspace that stored %s, which only false turns off", async (_, stored) => {
+    await setUp();
+    await workspaceSql("UPDATE accounts SET settings = ?", stored);
+    // Started afresh, the Workspace has to read the account again.
+    await evictDurableObject(workspaceStub());
+    expect((await shownAccount()).huddleScreens).toBe(true);
   });
 });
