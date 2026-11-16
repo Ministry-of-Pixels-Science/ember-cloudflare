@@ -92,7 +92,7 @@ import {
   type YourAssistantChanged,
   type YourAssistantChanges,
 } from "@ember/protocol";
-import type { Agent, AgentAnswer, AgentChanges, Agents, AgentSettings, AgentTrial, AgentTrialAnswer, NewAgent } from "@ember/protocol/agents";
+import type { Agent, AgentAnswer, AgentChanges, Agents, AgentSettings, AgentTrial, AgentTrialAnswer, AvailableAgent, AvailableAgents, NewAgent } from "@ember/protocol/agents";
 import type {
   AgentToolPicks,
   AgentTools,
@@ -672,6 +672,11 @@ export async function changeWebSearch(on: boolean): Promise<WebSearchChanged> {
 /** The agents, by name. Fails with a 409 ApiError while Ember AI is off, and a 403 one for anyone but an administrator. */
 export async function fetchAgents(): Promise<Agent[]> {
   return (await request<Agents>("/api/account/agents")).agents;
+}
+
+/** The AI agents this person can ask, @ember first, then by name, with what each does and the rooms it shares with them: none while Ember AI is off. */
+export async function fetchAvailableAgents(): Promise<AvailableAgent[]> {
+  return (await request<AvailableAgents>("/api/agents")).agents;
 }
 
 /** Agent `agentId`, as its page shows it. Fails as `fetchAgents` does, and with a 404 ApiError for an id that isn't an agent's. */

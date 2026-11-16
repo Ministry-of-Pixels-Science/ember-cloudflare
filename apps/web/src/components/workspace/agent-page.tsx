@@ -3,6 +3,7 @@ import { MAX_USER_NAME_LENGTH, type Me, type RoomId, type SidebarRoom, type User
 import {
   agentCannotSearchWith,
   MAX_AGENT_DESCRIPTION_LENGTH,
+  type AgentAccess,
   type AgentChanges,
   type AgentField,
   type AgentRoom,
@@ -34,6 +35,7 @@ import {
 import { AGENT_TEMPLATE, promptAround, templateRefusal, webPromptFor, withInstructions, type Prompt } from "@ember/protocol/prompts";
 import { displayBody, type DisplayNode } from "@ember/richtext/dom";
 import { AUTH_FORM } from "@/components/auth-page";
+import { Crown, EyeClosed } from "@/components/icons/iconoir";
 import defaultBotAvatar from "@/components/default-bot-avatar.svg";
 import { FIELD_INPUT, Field, SubmitButton } from "@/components/field";
 import { Input } from "@/components/ui/input";
@@ -65,7 +67,8 @@ import { UnsavedChanges } from "./unsaved-changes";
 // the AI assistant tab links to, as the project's owner chose in the mock-ups (2026-11-10): the agent's
 // avatar, name and what it does, its Instructions, with what Ember adds around them, which administrators
 // may modify with caution, as the project's owner asked (2026-11-11), How it answers, its
-// model and dials, with the most an answer costs at the model's prices, Search the web, its Rooms, and
+// model and dials, with the most an answer costs at the model's prices, Search the web, its Rooms, Admin
+// access, whose two switches keep it for administrators, as the project's owner asked (2026-11-15), and
 // Try it, which asks it something as the page sets it up, saved or not. Create agent and Save changes
 // ask its model a test question first when it's new, as Set up Ember AI does, and go back to the tab once
 // the agent's saved. Leaving with changes asks first. An agent's settings say who last changed it, and
@@ -90,6 +93,26 @@ export const tryExplained = (name: string) => `Ask ${name} something, as it's se
 /** What Search the web says for a model, called `name`, that can't search. */
 export const cannotSearch = (name: string) => `${name} can't search the web through AI Gateway, but the other models Ember offers can.`;
 
+/** What Rooms says of the agent called `called`, by who can ask it. */
+export function roomsExplained(called: string, access: AgentAccess): string {
+  if (access === "admin-dms") return "Not in any room while it's only available in admin DMs.";
+  return access === "admins"
+    ? `Where administrators can mention ${called}. They can also write to it directly.`
+    : `Where people can mention ${called}. Anyone can also write to it directly.`;
+}
+
+/** What Admin access says of each of its switches, for the agent called `called`. */
+export const accessExplained = (called: string) => {
+  const It = called.charAt(0).toUpperCase() + called.slice(1);
+  return {
+    adminsOff: `Anyone in ${called}'s rooms can ask it. Turn this on so that only administrators can.`,
+    adminsOn: `Only administrators can ask ${called}. Everyone else sees its answers in its rooms, but it doesn't answer them.`,
+    adminsKept: "On, since only administrators can write to it.",
+    dmsOff: `Turn this on to keep ${called} out of every room: administrators write to it directly, and nobody else can see it or ask it anything.`,
+    dmsOn: `${It} isn't in any room. Administrators write to it directly, and nobody else can see it or ask it anything.`,
+  };
+};
+
 const NOTE = "text-[0.8em] text-muted-foreground max-md:text-[12px]";
 
 /** One of the page's cards, as the bot form's and workspace settings' are. */
@@ -110,7 +133,11 @@ interface Setup {
   offered: OfferedModels;
 }
 
-/** An agent's page as it's filled in, its rooms every open one, or the ones chosen, which choosing every one keeps. */
+/**
+ * An agent's page as it's filled in: its rooms every open one, or the ones chosen, which choosing every one
+ * keeps, and its two admin switches, of which Only available in admin DMs means Admins only too, however
+ * that one was left, and no rooms, whichever were chosen.
+ */
 interface Fields {
   name: string;
   description: string;
@@ -122,6 +149,8 @@ interface Fields {
   webSearch: boolean;
   everyOpenRoom: boolean;
   chosenRooms: RoomId[];
+  adminsOnly: boolean;
+  adminDms: boolean;
 }
 
 /** Why what the page sends is refused, said on the field it's about, or else, with none, under Create agent or Save changes. */
@@ -130,14 +159,15 @@ interface Refusal {
   error: string;
 }
 
-const AGENT_FIELDS: readonly string[] = ["name", "description", "instructions", "promptTemplate", "model", "levels", "webSearch", "rooms", "question"] satisfies AgentField[];
+const AGENT_FIELDS: readonly string[] = ["name", "description", "instructions", "promptTemplate", "model", "levels", "webSearch", "access", "rooms", "question"] satisfies AgentField[];
 
 /** The field of the page an answer's `field` names, or null for none of them. */
 const fieldOf = (field: string | undefined) => (field !== undefined && AGENT_FIELDS.includes(field) ? (field as AgentField) : null);
 
 /**
  * A new agent's page: nothing typed, Ember's own around it, @ember's model chosen, or the one Ember
- * suggests if it no longer offers that, at the levels people start at, without the web, in every open room.
+ * suggests if it no longer offers that, at the levels people start at, without the web, in every open room,
+ * for everyone to ask.
  */
 const newFields = ({ assistant, offered }: Setup): Fields => ({
   name: "",
@@ -149,6 +179,8 @@ const newFields = ({ assistant, offered }: Setup): Fields => ({
   webSearch: false,
   everyOpenRoom: true,
   chosenRooms: [],
+  adminsOnly: false,
+  adminDms: false,
 });
 
 /** An agent's page as `agent` is saved. */
@@ -162,10 +194,16 @@ const fieldsOf = (agent: AgentSettings): Fields => ({
   webSearch: agent.webTools.includes("search"),
   everyOpenRoom: agent.rooms === null,
   chosenRooms: agent.rooms?.map(({ id }) => id) ?? [],
+  adminsOnly: agent.access !== "everyone",
+  adminDms: agent.access === "admin-dms",
 });
 
-/** The rooms `fields` put the agent in: null for every open one. */
-const roomsChosen = ({ everyOpenRoom, chosenRooms }: Pick<Fields, "everyOpenRoom" | "chosenRooms">) => (everyOpenRoom ? null : chosenRooms);
+/** The rooms `fields` put the agent in: null for every open one, and none while only administrators' direct messages reach it. */
+const roomsChosen = ({ everyOpenRoom, chosenRooms, adminDms }: Pick<Fields, "everyOpenRoom" | "chosenRooms" | "adminDms">) =>
+  adminDms ? [] : everyOpenRoom ? null : chosenRooms;
+
+/** Who `fields` let ask the agent. */
+const accessOf = ({ adminsOnly, adminDms }: Pick<Fields, "adminsOnly" | "adminDms">): AgentAccess => (adminDms ? "admin-dms" : adminsOnly ? "admins" : "everyone");
 
 const sameRooms = (a: readonly RoomId[] | null, b: readonly AgentRoom[] | null) =>
   a === null || b === null ? a === b : a.length === b.length && b.every(({ id }) => a.includes(id));
@@ -185,7 +223,7 @@ function roomsToPick(rooms: readonly SidebarRoom[] | null, kept: readonly AgentR
 const templateSent = (template: string) => (template.trim() === AGENT_TEMPLATE ? null : template);
 
 /** The agent `fields` set up, as New agent sends it. */
-function newAgentOf({ name, description, instructions, promptTemplate, model, levels, webSearch, ...rooms }: Fields): NewAgent {
+function newAgentOf({ name, description, instructions, promptTemplate, model, levels, webSearch, ...rest }: Fields): NewAgent {
   const template = templateSent(promptTemplate);
   return {
     name,
@@ -196,7 +234,8 @@ function newAgentOf({ name, description, instructions, promptTemplate, model, le
     thinking: levels.thinking,
     length: levels.length,
     webSearch,
-    rooms: roomsChosen(rooms),
+    access: accessOf(rest),
+    rooms: roomsChosen(rest),
   };
 }
 
@@ -214,6 +253,7 @@ function changesOf(agent: AgentSettings, fields: Fields): AgentChanges {
   if (fields.levels.thinking !== agent.levels.thinking) changes.thinking = fields.levels.thinking;
   if (fields.levels.length !== agent.levels.length) changes.length = fields.levels.length;
   if (fields.webSearch !== agent.webTools.includes("search")) changes.webSearch = fields.webSearch;
+  if (accessOf(fields) !== agent.access) changes.access = accessOf(fields);
   const rooms = roomsChosen(fields);
   if (!sameRooms(rooms, agent.rooms)) changes.rooms = rooms;
   return changes;
@@ -367,6 +407,7 @@ function AgentForm({ me, saved, setup, rooms, onFailed }: FormProps) {
   const prompt: Prompt = promptAround(saved?.id ?? null, name || "Agent", me.name, where, ANSWER_WORDS[fields.levels.length], web, new Date(), fields.promptTemplate.trim());
   const price = offered?.price;
   const changes = saved && changesOf(saved, fields);
+  const access = accessOf(fields);
   const asksModel = !saved || changes?.model !== undefined || (changes?.webSearch === true && saved.webTools.length === 0);
   const changed = busy === null && (photo.preview !== null || (saved ? removingAvatar || Object.keys(changes ?? {}).length > 0 : touched));
   const openRooms = roomsToPick(rooms, saved?.rooms ?? []);
@@ -618,31 +659,37 @@ function AgentForm({ me, saved, setup, rooms, onFailed }: FormProps) {
               Rooms
             </h2>
             <p id="agent-rooms-description" className={NOTE}>
-              Where people can mention {called}. Anyone can also write to it directly.
+              {roomsExplained(called, access)}
             </p>
           </div>
-          <fieldset aria-labelledby="agent-rooms-heading" aria-describedby={describedBy("agent-rooms", "rooms")} disabled={busy !== null} className="flex flex-col gap-1">
+          {/* Neither choice is the agent's while only administrators' direct messages reach it, so neither is checked, and the rooms chosen wait. */}
+          <fieldset
+            aria-labelledby="agent-rooms-heading"
+            aria-describedby={describedBy("agent-rooms", "rooms")}
+            disabled={busy !== null || fields.adminDms}
+            className={cn("flex flex-col gap-1", fields.adminDms && "opacity-50")}
+          >
             <label className={CHOICE}>
               <input
                 type="radio"
                 name="agent-rooms"
-                checked={fields.everyOpenRoom}
+                checked={fields.everyOpenRoom && !fields.adminDms}
                 onChange={() => change("rooms", { everyOpenRoom: true })}
                 className="size-4 flex-none accent-foreground"
               />
-              <span>Every room open to everyone, as @ember is, new ones too</span>
+              <span>Every room</span>
             </label>
             <label className={CHOICE}>
               <input
                 type="radio"
                 name="agent-rooms"
-                checked={!fields.everyOpenRoom}
+                checked={!fields.everyOpenRoom && !fields.adminDms}
                 onChange={() => change("rooms", { everyOpenRoom: false })}
                 className="size-4 flex-none accent-foreground"
               />
               <span>Only the rooms I choose</span>
             </label>
-            {!fields.everyOpenRoom && (
+            {!fields.everyOpenRoom && !fields.adminDms && (
               <div className="ms-6 grid grid-cols-2 gap-x-[2ch] gap-y-1 upto-500px:grid-cols-1">
                 {openRooms.map((room) => (
                   <label key={room.id} className={CHOICE}>
@@ -664,11 +711,19 @@ function AgentForm({ me, saved, setup, rooms, onFailed }: FormProps) {
           </fieldset>
           <Under id="agent-rooms" field="rooms" refusal={refusal} />
         </section>
+        <AdminAccess
+          called={called}
+          adminsOnly={fields.adminsOnly}
+          adminDms={fields.adminDms}
+          refusal={refusal}
+          disabled={busy !== null}
+          onTurn={(switches) => change("access", switches)}
+        />
         <TryIt
           called={called}
           agentId={saved?.id ?? null}
           trialOf={(question) => {
-            const { description: _, rooms: __, ...agent } = newAgentOf(fields);
+            const { description: _, rooms: __, access: ___, ...agent } = newAgentOf(fields);
             return { ...agent, question };
           }}
           refusalBefore={refusalBefore}
@@ -765,6 +820,67 @@ function WebSearch({
         </div>
         <Switch checked={on} onCheckedChange={onTurn} disabled={disabled} aria-labelledby="agent-search-heading" aria-describedby="agent-search-description" />
       </div>
+    </section>
+  );
+}
+
+/**
+ * Admin access: Admins only, which keeps the agent called `called` for administrators to ask, and Only
+ * available in admin DMs, which keeps it out of every room and from everyone else's sight, and so holds
+ * Admins only on, which goes back to how it was left once this is off.
+ */
+function AdminAccess({
+  called,
+  adminsOnly,
+  adminDms,
+  refusal,
+  disabled,
+  onTurn,
+}: {
+  called: string;
+  adminsOnly: boolean;
+  adminDms: boolean;
+  refusal: Refusal | null;
+  disabled: boolean;
+  onTurn: (switches: Partial<Pick<Fields, "adminsOnly" | "adminDms">>) => void;
+}) {
+  const said = accessExplained(called);
+  return (
+    <section aria-labelledby="agent-access-heading" className={CARD}>
+      <div>
+        <h2 id="agent-access-heading" className="text-base font-semibold">
+          Admin access
+        </h2>
+        <p className={NOTE}>Keep {called} for administrators.</p>
+      </div>
+      <div className="flex items-center gap-x-[1.5ch] border-t pt-4">
+        <Crown className="size-[18px] flex-none self-start" />
+        <div className="min-w-0 flex-1">
+          <div id="agent-admins-label">Admins only</div>
+          <p id="agent-admins-description" className={cn(NOTE, "wrap-anywhere")}>
+            {adminDms ? said.adminsKept : adminsOnly ? said.adminsOn : said.adminsOff}
+          </p>
+        </div>
+        <Switch
+          checked={adminsOnly || adminDms}
+          onCheckedChange={(adminsOnly) => onTurn({ adminsOnly })}
+          disabled={disabled || adminDms}
+          aria-labelledby="agent-admins-label"
+          aria-describedby="agent-admins-description"
+          className={cn(adminDms && "opacity-50")}
+        />
+      </div>
+      <div className="flex items-center gap-x-[1.5ch] border-t pt-4">
+        <EyeClosed className="size-[18px] flex-none self-start" />
+        <div className="min-w-0 flex-1">
+          <div id="agent-dms-label">Only available in admin DMs</div>
+          <p id="agent-dms-description" className={cn(NOTE, "wrap-anywhere")}>
+            {adminDms ? said.dmsOn : said.dmsOff}
+          </p>
+        </div>
+        <Switch checked={adminDms} onCheckedChange={(adminDms) => onTurn({ adminDms })} disabled={disabled} aria-labelledby="agent-dms-label" aria-describedby="agent-dms-description" />
+      </div>
+      <Under id="agent-access" field="access" refusal={refusal} />
     </section>
   );
 }

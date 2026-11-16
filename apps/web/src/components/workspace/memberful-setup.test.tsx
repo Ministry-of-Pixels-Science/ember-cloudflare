@@ -95,6 +95,16 @@ async function giveKeys(user: ReturnType<typeof userEvent.setup>, keys: Memberfu
   await user.click(button("Save"));
 }
 
+/** Types `keys` over what their fields hold, the rest staying as they are, and saves them. */
+async function changeKeys(user: ReturnType<typeof userEvent.setup>, keys: Partial<MemberfulKeysChange>) {
+  const fields = { site: siteField(), ...keyFields() };
+  for (const [key, value] of Object.entries(keys)) {
+    await user.clear(fields[key as keyof typeof KEYS]);
+    await user.type(fields[key as keyof typeof KEYS], value);
+  }
+  await user.click(button("Save"));
+}
+
 afterEach(() => vi.restoreAllMocks());
 
 describe("Set up Memberful", () => {
@@ -239,18 +249,19 @@ describe("Set up Memberful", () => {
     await user.type(siteField(), "{Backspace}");
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 
-    // Keys have no spaces in them.
-    await giveKeys(user, { ...KEYS, clientId: "my custom app" });
+    // Keys have no spaces in them. Only the fields that change are typed again from here: typing all five
+    // each time took the test past its five seconds on a busy machine.
+    await changeKeys(user, { site: KEYS.site, clientId: "my custom app" });
     expect(screen.getByRole("alert")).toHaveTextContent(MEMBERFUL_CLIENT_ID_REFUSED);
     expect(keyFields().clientId).toHaveAttribute("aria-invalid", "true");
     expect(siteField()).toHaveAttribute("aria-invalid", "false");
 
-    await giveKeys(user, { ...KEYS, apiKey: "an API key" });
+    await changeKeys(user, { clientId: KEYS.clientId, apiKey: "an API key" });
     expect(screen.getByRole("alert")).toHaveTextContent(MEMBERFUL_API_KEY_REFUSED);
     expect(keyFields().apiKey).toHaveAccessibleDescription(MEMBERFUL_API_KEY_REFUSED);
 
     // Why the webhook's secret is refused is said in the place of the line under it, so the steps stay as tall.
-    await giveKeys(user, { ...KEYS, webhookSecret: "the secret key" });
+    await changeKeys(user, { apiKey: KEYS.apiKey, webhookSecret: "the secret key" });
     expect(screen.getByRole("alert")).toHaveTextContent(MEMBERFUL_WEBHOOK_SECRET_REFUSED);
     expect(keyFields().webhookSecret).toHaveAccessibleDescription(MEMBERFUL_WEBHOOK_SECRET_REFUSED);
     expect(screen.queryByRole("status")).not.toBeInTheDocument();

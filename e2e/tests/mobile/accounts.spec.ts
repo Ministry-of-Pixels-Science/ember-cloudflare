@@ -300,6 +300,7 @@ const AGENT: AgentSettings = {
   model: "anthropic/claude-sonnet-5.5",
   modelName: "Claude Sonnet 5.5",
   webTools: ["search", "read"],
+  access: "everyone",
   rooms: [1, 2, 3, 4].map((n) => ({ id: `0mgk3x2a9b4c5${n}`, name: `${LONG_NAME}-${n}` })),
   instructions: "You sum up conversations for the team.\n\nList the decisions made, then the questions still open, then the to-dos, each with who took it on.",
   promptTemplate: `${AGENT_TEMPLATE}\n\nSign off as ${LONG_NAME}.`,

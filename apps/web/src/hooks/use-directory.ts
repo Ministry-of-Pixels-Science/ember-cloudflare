@@ -33,29 +33,36 @@ export function mentionedPerson(people: People, mentions: User[], userId: UserId
   return people.get(userId) ?? mentions.find((person) => person.id === userId && person.name !== "");
 }
 
-/** `people` with each of `changed` as they are now. */
-function withChanges(people: People, changed: DirectoryUser[]): People {
+/** What's become of someone: how they are now, or their id, once this person is no longer told of them. */
+type Change = DirectoryUser | UserId;
+
+/** `people` after each of `changes`, in the order they came. */
+function withChanges(people: People, changes: Change[]): People {
   const next = new Map(people);
-  for (const user of changed) next.set(user.id, user);
+  for (const change of changes) {
+    if (typeof change === "string") next.delete(change);
+    else next.set(change.id, change);
+  }
   return next;
 }
 
 /**
  * The people directory, which `reload` loads again, one load at a time, settling once a load asked for
- * since has come or failed, and `update` changes someone in, as the workspace socket or a change made
- * here says they are now. The people stay as they were when a load fails or the server says they
- * haven't changed. It has `loaded` once a load has come.
+ * since has come or failed, `update` changes someone in, as the workspace socket or a change made
+ * here says they are now, and `remove` takes someone out of, once the socket says this person is no
+ * longer told of them. The people stay as they were when a load fails or the server says they haven't
+ * changed. It has `loaded` once a load has come.
  */
-export function useDirectory(): { people: People; loaded: boolean; reload: () => Promise<void>; update: (user: DirectoryUser) => void } {
+export function useDirectory(): { people: People; loaded: boolean; reload: () => Promise<void>; update: (user: DirectoryUser) => void; remove: (userId: UserId) => void } {
   const [people, setPeople] = useState<People>(() => new Map());
   const [loaded, setLoaded] = useState(false);
   const [directory] = useState(() => {
     // The last directory the server sent, which it says is still current rather than send again.
     let copy: DirectoryCopy | null = null;
-    // Who changed while a load was on its way, which may have read them before they did.
-    let changedSince: DirectoryUser[] | null = null;
+    // What became of people while a load was on its way, which may have read them before it did.
+    let changedSince: Change[] | null = null;
     const load = oneAtATime(async () => {
-      const changed: DirectoryUser[] = (changedSince = []);
+      const changed: Change[] = (changedSince = []);
       try {
         const loaded = await fetchDirectory(copy);
         if (loaded === copy) return;
@@ -66,11 +73,11 @@ export function useDirectory(): { people: People; loaded: boolean; reload: () =>
         changedSince = null;
       }
     });
-    const update = (user: DirectoryUser) => {
-      changedSince?.push(user);
-      setPeople((people) => withChanges(people, [user]));
+    const make = (change: Change) => {
+      changedSince?.push(change);
+      setPeople((people) => withChanges(people, [change]));
     };
-    return { reload: load, update };
+    return { reload: load, update: (user: DirectoryUser) => make(user), remove: (userId: UserId) => make(userId) };
   });
   return { people, loaded, ...directory };
 }

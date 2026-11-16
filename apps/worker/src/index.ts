@@ -116,7 +116,7 @@ import {
 } from "./apps/api";
 import { answerOutsideAsk, changeOutsideAi, describeOutsideAsk, disconnectOutside, isOutsideRegistration, outsideAction, outsideConnectPage } from "./outside/api";
 import { CLIENT_DOCUMENT_PATH } from "./apps/oauth";
-import { agentPage, changeAgent, createAgent, deleteAgent, listAgents, removeAgentAvatar, showAgent, tryAgent } from "./assistant/agents";
+import { agentPage, changeAgent, createAgent, deleteAgent, listAgents, listAvailableAgents, removeAgentAvatar, showAgent, tryAgent } from "./assistant/agents";
 import {
   addAssistantModel,
   changeAssistantAvatar,
@@ -826,7 +826,8 @@ async function dismissInvitation(request: Request, env: Env): Promise<Response> 
 
 /**
  * Everyone in the workspace, deactivated and banned people too, with their avatars' addresses, for
- * the app to show people by. No cache keeps it, as none keeps the sidebar, so the app keeps its own copy.
+ * the app to show people by, but the AI agents only administrators' direct messages reach, which only
+ * an administrator is listed. No cache keeps it, as none keeps the sidebar, so the app keeps its own copy.
  */
 async function directory(request: Request, env: Env): Promise<Response> {
   const credentials = await credentialsOf(request, env);
@@ -846,7 +847,8 @@ function segmentText(segment: string): string {
 
 /**
  * Someone's page: anyone, whatever their status, with their email address and a new sign-in link for
- * administrators, and what an agent's page tells everyone of it. An id nobody has is 404.
+ * administrators, and what an agent's page tells everyone of it. An id nobody has is 404, as is an AI
+ * agent's only administrators' direct messages reach, to anyone else.
  */
 async function showPerson(request: Request, env: Env, userId: UserId): Promise<Response> {
   const credentials = await credentialsOf(request, env);
@@ -1181,6 +1183,7 @@ function apiAction(request: Request, env: Env, pathname: string): (() => Respons
   if (pathname === "/api/sidebar" && request.method === "GET") return () => sidebar(request, env);
   if (pathname === "/api/sidebar/invitation" && request.method === "DELETE") return () => dismissInvitation(request, env);
   if (pathname === "/api/users" && request.method === "GET") return () => directory(request, env);
+  if (pathname === "/api/agents" && request.method === "GET") return () => listAvailableAgents(request, env);
   if (pathname === "/api/autocompletable/users" && request.method === "GET") return () => mentionable(request, env);
   if (pathname === "/api/sidebar/order" && request.method === "PUT") return () => setFavoriteOrder(request, env);
   if (pathname === "/api/users/me/profile" && request.method === "GET") return () => profile(request, env);

@@ -1,4 +1,5 @@
-import type { DirectoryUser, DirectRoom, Room, User, UserId } from "@ember/protocol";
+import type { DirectoryUser, DirectRoom, Me, Room, User, UserId } from "@ember/protocol";
+import { canAsk } from "./agents";
 
 /**
  * Names in a sentence, as Rails' `to_sentence` joins them for a DM's name: "Ada", "Ada and Grace", or
@@ -38,14 +39,15 @@ export function soughtName(typed: string): string {
 const foldedCase = (text: string) => text.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
 
 /**
- * The people New direct message lists for `name`: everyone active, bots included, whose name has `name`
- * in it, ignoring the case of A to Z, by name in lower case. It leaves out `meId`, and orders people
+ * The people New direct message lists `me` for `name`: everyone active, bots included, whose name has
+ * `name` in it, ignoring the case of A to Z, by name in lower case. It leaves out `me`, and the AI agents
+ * only administrators can ask unless they're one, as a DM with one wouldn't start, and orders people
  * with the same name by id, where SQLite leaves them in no particular order.
  */
-export function peopleMatching(people: Iterable<DirectoryUser>, meId: UserId, name: string): DirectoryUser[] {
+export function peopleMatching(people: Iterable<DirectoryUser>, me: Me, name: string): DirectoryUser[] {
   const sought = foldedCase(name);
   return [...people]
-    .filter((person) => person.status === "active" && person.id !== meId && foldedCase(person.name).includes(sought))
+    .filter((person) => person.status === "active" && person.id !== me.id && canAsk(person, me) && foldedCase(person.name).includes(sought))
     .map((person) => ({ person, key: foldedCase(person.name) }))
     .sort((a, b) => (a.key !== b.key ? (a.key < b.key ? -1 : 1) : a.person.id < b.person.id ? -1 : 1))
     .map(({ person }) => person);
