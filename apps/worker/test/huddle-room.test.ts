@@ -309,6 +309,26 @@ describe("A room's huddle", () => {
     expect(await adas.next("huddle.left")).toEqual({ type: "huddle.left", userId: grace.user.id });
     expect(sfu.asked).toEqual([]);
   });
+
+  it("takes whoever sends a frame larger than a room takes out of the huddle as it closes their socket, though their tab never answers the close", async () => {
+    const { ada, sfu } = await huddlesOn();
+    const room = await freshRoom("too-large");
+    const grace = await signIn("Grace");
+    const adas = await welcomed(room, ada);
+    const graces = await welcomed(room, grace);
+    await publishing(sfu, adas);
+    const fromGrace = await publishing(sfu, graces);
+    await listen(graces, true);
+    const toGrace = newest(sfu);
+    // As when a tab never answers the close: the room hears nothing more of the socket.
+    await runInDurableObject(roomStub(room), (instance: ChatRoom) => void vi.spyOn((instance as unknown as { huddle: Huddle }).huddle, "left").mockImplementation(() => {}));
+
+    graces.sendRaw(" ".repeat(MAX_ROOM_FRAME_SIZE + 1));
+    expect((await graces.closed).code).toBe(1009);
+    expect(await adas.next("huddle.left")).toEqual({ type: "huddle.left", userId: grace.user.id });
+    await vi.waitFor(() => expect([closedOn(sfu, fromGrace), closedOn(sfu, toGrace)]).toEqual([["0"], ["0"]]));
+    expect(await remembered(room)).toMatchObject([{ user: ada.user }]);
+  });
 });
 
 describe("What a huddle asks of the Realtime SFU", () => {
