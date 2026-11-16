@@ -187,17 +187,27 @@ declare const URL: { parse(url: string, base: string): { readonly origin: string
 declare const URLSearchParams: new (init: string) => { get(name: string): string | null };
 
 /**
- * The page of the workspace at `origin` that `address` names, its query and fragment included, or "/"
- * for anything else, as `address` is someone's to make up: another site's, or a page that isn't the
- * workspace's.
+ * `address`'s path, query and fragment, if it names a page at `origin` that `isPage` takes, or else "/",
+ * as `address` is someone's to make up: another site's, or a page that isn't one.
  */
-export function workspacePathIn(address: string | null, origin: string): string {
+function pathIn(address: string | null, origin: string, isPage: (pathname: string) => boolean): string {
   const url = address === null ? null : URL.parse(address, origin);
-  return url?.origin === origin && workspacePageOf(url.pathname) ? `${url.pathname}${url.search}${url.hash}` : "/";
+  return url?.origin === origin && isPage(url.pathname) ? `${url.pathname}${url.search}${url.hash}` : "/";
 }
+
+/** The page of the workspace at `origin` that `address` names, its query and fragment included, or "/" for anything else. */
+export const workspacePathIn = (address: string | null, origin: string) => pathIn(address, origin, (pathname) => workspacePageOf(pathname) !== null);
 
 /** Where someone new who joined with Memberful chooses their picture, name and username, before going on. */
 export const WELCOME_PATH = "/welcome";
+
+/**
+ * The page at `origin` that signing in comes back to, as `address` names it: a page of the workspace, or
+ * the welcome page, which someone whose session ended there comes back to, and which checks the page it
+ * goes on to itself, or "/" for anything else.
+ */
+export const signInReturnPathIn = (address: string | null, origin: string) =>
+  pathIn(address, origin, (pathname) => pathname === WELCOME_PATH || workspacePageOf(pathname) !== null);
 
 /** The welcome page's address for someone new who goes on to `returnPath`, a page of the workspace, as its `return_to` says. */
 export const welcomePath = (returnPath: string) => (returnPath === "/" ? WELCOME_PATH : `${WELCOME_PATH}?return_to=${encodeURIComponent(returnPath)}`);

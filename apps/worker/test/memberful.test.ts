@@ -889,13 +889,22 @@ describe("Sign in with Memberful", () => {
         "https://example.com/rooms/abc",
         "//example.com/rooms/abc",
         "/api/me",
-        "/welcome",
+        "/welcome/",
         `/rooms/${"a".repeat(1024)}`,
         `/rooms/abc?q=${"é".repeat(200)}`,
       ]) {
         expect(locationOf(await signInWithMemberful({ returnTo })), returnTo).toBe(`${origin}/`);
       }
       expect(locationOf(await signInWithMemberful())).toBe(`${origin}/`);
+    });
+
+    it("comes back to the welcome page for a member whose session ended there, which checks where it goes on to itself", async () => {
+      await setUpWithMemberful();
+      fakeMemberful();
+      expect(locationOf(await signInWithMemberful())).toBe(`${origin}/welcome`);
+      for (const returnTo of ["/welcome?return_to=%2Frooms%2Fabc", "/welcome"]) {
+        expect(locationOf(await signInWithMemberful({ returnTo })), returnTo).toBe(`${origin}${returnTo}`);
+      }
     });
 
     it("signs nobody new in once an administrator has turned it off, nor anyone once the deployment has lost the keys", async () => {

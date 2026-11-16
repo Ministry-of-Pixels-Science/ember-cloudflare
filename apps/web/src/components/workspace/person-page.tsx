@@ -65,7 +65,8 @@ export function PersonPage({ userId, me, onStartDirect, onPersonChanged, reloadP
   useLayoutEffect(() => {
     listedNow.current = listed;
   }, [listed]);
-  const person = fetched && { ...fetched.person, ...listed };
+  // Without the username they had when the page loaded, once the directory leaves it out for their having taken it away.
+  const person = fetched && (listed ? { ...fetched.person, username: undefined, ...listed } : fetched.person);
   const [starting, setStarting] = useState(false);
   const [banning, setBanning] = useState(false);
   // How many times a ban or its lifting has loaded the page again.

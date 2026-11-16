@@ -1,8 +1,8 @@
 import {
   MEMBERFUL_CONNECTED,
   MEMBERFUL_PROBLEM_PARAM,
+  signInReturnPathIn,
   welcomePath,
-  workspacePathIn,
   type AccountSettings,
   type MemberfulConnection,
   type MemberfulSignInProblem,
@@ -96,12 +96,13 @@ function authorizationOf({ site, clientId }: MemberfulKeys, state: string): stri
 }
 
 /**
- * The page of the workspace at `origin` that `returnTo` names, its query and fragment included, or "/"
- * for anything else, so that signing in only ever opens a page here, or for one too long to keep, as
- * its address writes it, with every character that isn't ASCII escaped.
+ * The page of the workspace, or the welcome page, at `origin` that `returnTo` names, its query and
+ * fragment included (`signInReturnPathIn`), or "/" for anything else, so that signing in only ever opens
+ * a page here, or for one too long to keep, as its address writes it, with every character that isn't
+ * ASCII escaped.
  */
 function returnPathOf(returnTo: string | null, origin: string): string {
-  const path = workspacePathIn(returnTo, origin);
+  const path = signInReturnPathIn(returnTo, origin);
   return path.length <= MAX_RETURN_PATH_LENGTH ? path : "/";
 }
 

@@ -3931,16 +3931,18 @@ export class WorkspaceStore {
   }
 
   /**
-   * The names and usernames of everyone but `userId` who's active, or can be again with the name they
-   * have: people, bots and agents active, and people banned, whom lifting the ban lets back, or suspended
-   * for their membership's lapsing, whom renewing it does.
+   * The names of everyone but `userId` who's active, or can be again with the name they have: people,
+   * bots and agents active, and people banned, whom lifting the ban lets back, or suspended for their
+   * membership's lapsing, whom renewing it does. And everyone else's usernames, whatever their status, as
+   * a username stays its person's, and lifting a ban lets back even someone removed.
    */
   async namesInUse(userId: UserId | null): Promise<string[]> {
-    const rows = await this.db.all<{ name: string; username: string | null }>(
-      `SELECT name, username FROM users WHERE status IN (${ACTIVE}, ${BANNED}, ${SUSPENDED}) AND id IS NOT ?`,
+    const rows = await this.db.all<{ name: string }>(
+      `SELECT name FROM users WHERE status IN (${ACTIVE}, ${BANNED}, ${SUSPENDED}) AND id IS NOT ?1
+        UNION ALL SELECT username FROM users WHERE username IS NOT NULL AND id IS NOT ?1`,
       userId,
     );
-    return rows.flatMap((row) => (row.username === null ? [row.name] : [row.name, row.username]));
+    return rows.map((row) => row.name);
   }
 
   /** Whether anyone but `userId`, whatever their status, has `username`. */

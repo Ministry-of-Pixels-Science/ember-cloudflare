@@ -851,6 +851,11 @@ describe("AI agents", () => {
       expect(named.status, await named.clone().text()).toBe(200);
       expect(await refusalOf(await makeAgent(administrator, { ...RECAP, name: "Scout" }))).toEqual([422, { error: NAME_TAKEN, field: "name" }]);
       expect(await refusalOf(await changeAgent(administrator, recap.id, { name: "SCOUT" }))).toEqual([422, { error: NAME_TAKEN, field: "name" }]);
+
+      // Someone removed keeps their username, as lifting a ban lets back even them.
+      expect((await api(`/api/account/users/${member.user.id}`, { method: "DELETE", headers: as(administrator) })).status).toBe(200);
+      expect(await refusalOf(await makeAgent(administrator, { ...RECAP, name: "Scout" }))).toEqual([422, { error: NAME_TAKEN, field: "name" }]);
+      expect(await refusalOf(await changeAgent(administrator, recap.id, { name: "SCOUT" }))).toEqual([422, { error: NAME_TAKEN, field: "name" }]);
     });
   });
 

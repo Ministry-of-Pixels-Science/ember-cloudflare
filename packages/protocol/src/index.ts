@@ -125,6 +125,7 @@ export {
   PROFILE_PATH,
   PUSH_SUBSCRIPTIONS_PATH,
   SEARCHES_PATH,
+  signInReturnPathIn,
   SIGN_UP_PATH,
   threadPath,
   TRANSFER_PATH,

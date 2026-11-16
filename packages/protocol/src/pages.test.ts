@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { huddlePath, isAppPage, MAX_ID_LENGTH, pageAfterWelcome, threadPath, TRANSFER_PATH, transferLink, welcomePath, workspacePageOf, workspacePathIn } from "./index";
+import { huddlePath, isAppPage, MAX_ID_LENGTH, pageAfterWelcome, signInReturnPathIn, threadPath, TRANSFER_PATH, transferLink, welcomePath, workspacePageOf, workspacePathIn } from "./index";
 
 describe("Error pages", () => {
   it("names the pages the app shows, for the Worker to serve the app at", () => {
@@ -117,6 +117,15 @@ describe("Welcome", () => {
     }
     expect(workspacePathIn(`${origin}/rooms/abc`, origin)).toBe("/rooms/abc");
     expect(workspacePathIn(null, origin)).toBe("/");
+  });
+
+  it("is a page signing in comes back to, for someone whose session ended there, which checks where it goes on to itself", () => {
+    for (const address of ["/welcome", "/welcome?return_to=%2Frooms%2Fabc", "/welcome?return_to=https%3A%2F%2Fexample.com", "/rooms/abc?tab=pins#latest"]) {
+      expect(signInReturnPathIn(address, origin), address).toBe(address);
+    }
+    for (const address of ["https://example.com/welcome", "//example.com/welcome", "/welcome/", "/api/me", "/session/new", null]) {
+      expect(signInReturnPathIn(address, origin), String(address)).toBe("/");
+    }
   });
 });
 
