@@ -5,9 +5,9 @@ import { changeTheWorkspace, huddleTilesKeepClear, isolateRoom, listing, openRoo
 import { expect, hasDrawerLayout, test } from "./fixtures";
 
 // A room's huddle on a phone: its button in the room's header, the preview it starts from, and the
-// huddle the tab is in, opened and as its bar. The main test server has no huddles, whose keys Cloudflare
-// would be asked about, so these pages are told that huddles are on, and the huddle a tab joins is the
-// test's own.
+// huddle the tab is in, opened and as its bar, which switches between the phone's cameras and keeps its
+// screen awake. The main test server has no huddles, whose keys Cloudflare would be asked about, so
+// these pages are told that huddles are on, and the huddle a tab joins is the test's own.
 
 /** A huddle's socket, for `page.routeWebSocket`. */
 const HUDDLE_SOCKET = /\/api\/rooms\/[^/]+\/huddle/;
@@ -40,6 +40,57 @@ const header = (page: Page) => page.getByRole("navigation", { name: "Page" });
 async function standInHuddle(page: Page, you: User, others: User[] = []): Promise<void> {
   const people = [...others, you].map((user) => ({ user, muted: false, audio: false, video: false, screen: false }));
   await page.routeWebSocket(HUDDLE_SOCKET, (ws) => ws.send(JSON.stringify({ type: "huddle.welcome", you, people, startedAt: new Date().toISOString() } satisfies HuddleServerFrame)));
+}
+
+/** Where a page keeps what its huddle asked the browser's cameras for, and what the browser handed it for a screen it keeps awake. */
+type PhoneWindow = Window & { camerasAsked?: MediaTrackConstraints[]; screensKept?: WakeLockSentinel[] };
+
+/**
+ * In the page, before it loads: has the browser be a phone's, with a camera over its screen and one on
+ * its back, each of which says which way it faces, and of which it opens one at a time, as a phone
+ * does. Each shows the picture of the browser's made-up camera. What the page asks of them is kept for
+ * the test.
+ */
+function phoneCameras(): void {
+  const cameras = [
+    { deviceId: "front", label: "Front Camera", facingMode: "user" },
+    { deviceId: "back", label: "Back Camera", facingMode: "environment" },
+  ];
+  const media = navigator.mediaDevices;
+  const [open, list] = [media.getUserMedia.bind(media), media.enumerateDevices.bind(media)];
+  const opened: MediaStreamTrack[] = [];
+  const asked: MediaTrackConstraints[] = ((window as PhoneWindow).camerasAsked = []);
+  const exactly = (constraint: ConstrainDOMString | undefined) => (constraint as { exact?: string } | undefined)?.exact;
+  media.getUserMedia = async (constraints) => {
+    if (!constraints?.video) return open(constraints);
+    const video = constraints.video === true ? {} : constraints.video;
+    asked.push(video);
+    const [facingMode, deviceId] = [exactly(video.facingMode), exactly(video.deviceId)];
+    const camera = cameras.find((listed) => (facingMode ? listed.facingMode === facingMode : !deviceId || listed.deviceId === deviceId));
+    if (!camera) throw new DOMException("No such camera", "OverconstrainedError");
+    if (opened.some((track) => track.readyState === "live")) throw new DOMException("Could not start video source", "NotReadableError");
+    const stream = await open({ video: { width: video.width, height: video.height } });
+    const track = stream.getVideoTracks()[0]!;
+    const settings = track.getSettings.bind(track);
+    track.getSettings = () => ({ ...settings(), deviceId: camera.deviceId, facingMode: camera.facingMode });
+    opened.push(track);
+    return stream;
+  };
+  media.enumerateDevices = async () => [
+    ...(await list()).filter(({ kind }) => kind !== "videoinput"),
+    ...cameras.map(({ deviceId, label }) => ({ kind: "videoinput", deviceId, label, groupId: "" }) as MediaDeviceInfo),
+  ];
+}
+
+/** In the page, before it loads: keeps what the browser hands the page each time the page has it keep the screen awake, for the test. */
+function keepWhatKeepsAwake(): void {
+  const kept: WakeLockSentinel[] = ((window as PhoneWindow).screensKept = []);
+  const request = navigator.wakeLock.request.bind(navigator.wakeLock);
+  navigator.wakeLock.request = async (type) => {
+    const lock = await request(type);
+    kept.push(lock);
+    return lock;
+  };
 }
 
 /** Where a page keeps the connection that stands in for the SFU's, which sends it the screens it watches. */
@@ -195,6 +246,77 @@ test("the huddle you're in fits the phone, opened with a tile for each person an
   await opened.getByRole("button", { name: "Leave", exact: true }).tap();
   await expect(opened).toHaveCount(0);
   await expect(bar).toHaveCount(0);
+});
+
+test("the huddle you're in switches between the phone's front camera and its back one, which shows as it is, and its button for that fits the phone", async ({ page, room, session, screenIsFine }) => {
+  await page.addInitScript(phoneCameras);
+  await standInHuddle(page, session.user);
+  await openRoomWithHuddlesOn(page, room);
+  await header(page).getByRole("button", { name: "Start huddle", exact: true }).tap();
+  await page.getByRole("dialog", { name: `Start a huddle in ${room.name}` }).getByRole("button", { name: "Start Huddle" }).tap();
+  const opened = page.locator("#huddle");
+  const yours = opened.getByLabel("Your camera");
+  /** Which of the phone's cameras the huddle shows its person, once its picture plays, and whether as a mirror would. */
+  const shown = () =>
+    yours.evaluate((video: HTMLVideoElement) => ({
+      camera: video.paused || video.videoWidth === 0 ? "none yet" : (video.srcObject as MediaStream).getVideoTracks()[0]!.getSettings().deviceId,
+      mirrored: parseFloat(getComputedStyle(video).scale) < 0,
+    }));
+  const asked = () => page.evaluate(() => (window as PhoneWindow).camerasAsked!.map(({ facingMode, deviceId }) => facingMode ?? deviceId ?? "its own choice"));
+  // The button is there in the place of the camera's arrow, which the huddle has where it's beside the sidebar, as on the largest phone held on its side.
+  const button = opened.getByRole("button", { name: "Switch camera" });
+  const arrow = opened.getByRole("button", { name: "Camera", exact: true });
+  const byButton = hasDrawerLayout(page);
+  /** Switches to the camera called `label`: by the button, or from the arrow's menu. */
+  const switchTo = async (label: string) => {
+    if (byButton) return button.tap();
+    await arrow.tap();
+    await page.getByRole("menu", { name: "Camera", exact: true }).getByRole("menuitemradio", { name: label }).tap();
+  };
+
+  // With the camera off there's no camera to switch from.
+  await expect(button).toBeHidden();
+  await opened.getByRole("button", { name: "Turn on camera" }).tap();
+  await expect.poll(shown).toEqual({ camera: "front", mirrored: true });
+  await expect(button).toBeVisible({ visible: byButton });
+  await expect(arrow).toBeVisible({ visible: !byButton });
+  await screenIsFine();
+
+  // The back camera's picture shows as it is. The phone would open neither camera while the other was open.
+  await switchTo("Back Camera");
+  await expect.poll(shown).toEqual({ camera: "back", mirrored: false });
+  await screenIsFine();
+  await switchTo("Front Camera");
+  await expect.poll(shown).toEqual({ camera: "front", mirrored: true });
+  expect(await asked()).toEqual(byButton ? ["its own choice", { exact: "environment" }, { exact: "user" }] : ["its own choice", { exact: "back" }, { exact: "front" }]);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+
+  // The camera it's left on is the one its next huddle starts with.
+  await opened.getByRole("button", { name: "Leave", exact: true }).tap();
+  await expect(opened).toHaveCount(0);
+  expect(await page.evaluate(() => localStorage.getItem("ember:huddle-camera"))).toBe("front");
+});
+
+test("a huddle keeps the phone's screen awake from when you join it until you leave", async ({ page, room, session }) => {
+  await page.addInitScript(keepWhatKeepsAwake);
+  await standInHuddle(page, session.user);
+  await openRoomWithHuddlesOn(page, room);
+  /** What the page has had the browser keep awake, and whether each is kept awake still. */
+  const kept = () => page.evaluate(() => (window as PhoneWindow).screensKept!.map(({ type, released }) => ({ type, released })));
+  await header(page).getByRole("button", { name: "Start huddle", exact: true }).tap();
+  const preview = page.getByRole("dialog", { name: `Start a huddle in ${room.name}` });
+  await expect(preview.getByRole("combobox", { name: "Microphone" })).toBeVisible();
+  // The preview keeps nothing awake.
+  expect(await kept()).toEqual([]);
+
+  await preview.getByRole("button", { name: "Start Huddle" }).tap();
+  const opened = page.locator("#huddle");
+  await expect(opened.getByRole("button", { name: "Leave", exact: true })).toBeVisible();
+  await expect.poll(kept).toEqual([{ type: "screen", released: false }]);
+
+  await opened.getByRole("button", { name: "Leave", exact: true }).tap();
+  await expect(opened).toHaveCount(0);
+  await expect.poll(kept).toEqual([{ type: "screen", released: true }]);
 });
 
 test("the screens people share in the huddle you're in fit the phone, one large and the other among the huddle's tiles, under it or beside it", async ({ page, room, session, participant, screenIsFine }) => {

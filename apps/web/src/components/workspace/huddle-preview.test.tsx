@@ -27,6 +27,8 @@ class FakeTrack extends EventTarget {
   constructor(
     readonly deviceId: string,
     readonly label: string,
+    /** Which way its camera faces, where the browser says, as a phone's does. */
+    readonly facingMode?: string,
   ) {
     super();
   }
@@ -34,7 +36,7 @@ class FakeTrack extends EventTarget {
     this.stopped = true;
   }
   getSettings() {
-    return { deviceId: this.deviceId };
+    return { deviceId: this.deviceId, facingMode: this.facingMode };
   }
   addEventListener(...listener: Parameters<EventTarget["addEventListener"]>) {
     this.listenedTo = true;
@@ -64,6 +66,8 @@ const PICTURE = { width: { ideal: 640 }, height: { ideal: 360 } };
  */
 class FakeMedia extends EventTarget {
   devices: MediaDeviceInfo[] = [BUILT_IN, USB, FACETIME, WEBCAM];
+  /** Which way each camera it says so of faces, by its device's id. */
+  faces: Record<string, string> = {};
   refuses = false;
   refusesCameras = false;
   pending = false;
@@ -83,7 +87,7 @@ class FakeMedia extends EventTarget {
     const wanted = typeof asked === "object" ? (asked.deviceId as { exact: string } | undefined)?.exact : undefined;
     const found = wanted === undefined ? listed[0] : listed.find(({ deviceId }) => deviceId === wanted);
     if (!found) throw Object.assign(new Error("Requested device not found"), { name: wanted === undefined ? "NotFoundError" : "OverconstrainedError" });
-    const track = new FakeTrack(found.deviceId, found.label);
+    const track = new FakeTrack(found.deviceId, found.label, this.faces[found.deviceId]);
     const stream = { track, getAudioTracks: () => (camera ? [] : [track]), getVideoTracks: () => (camera ? [track] : []), getTracks: () => [track] };
     this.opened.push(stream);
     return stream;
@@ -441,6 +445,16 @@ describe("A huddle's camera", () => {
     expect(joinHuddle).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ microphone: media.opened[0], camera: media.opened[2] }));
   });
 
+  it("shows you a camera that faces away from you, as a phone's back camera does, as it is, and one that faces you as a mirror would", async () => {
+    media.faces = { [FACETIME.deviceId]: "user", [WEBCAM.deviceId]: "environment" };
+    const { user } = await previewWithCamera();
+    expect(picture()).toHaveClass("-scale-x-100");
+    await waitFor(() => expect(optionsOf(cameraSelect())).toContain("USB Webcam"));
+    await user.selectOptions(cameraSelect(), "USB Webcam");
+    await waitFor(() => expect(picture().srcObject).toBe(media.opened[2]));
+    expect(picture()).not.toHaveClass("-scale-x-100");
+  });
+
   it("names the camera that's open even if the browser's list leaves it out, and numbers ones without a name", async () => {
     media.enumerateDevices = async () => [device("videoinput", "cam-7", "")];
     await previewWithCamera();
@@ -585,7 +599,7 @@ describe("Joining a huddle", () => {
 
   it("says that it leaves the huddle this tab is in", async () => {
     const elsewhere = { roomId: "other", connected: true, you: ada, people: [], muted: false, microphone: true, microphoneId: "", speakerId: "", camera: null, watched: new Map(), screen: null, screens: new Map(), open: false };
-    act(() => showHuddle(elsewhere, { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setDevice: vi.fn(), setSmall: vi.fn() }));
+    act(() => showHuddle(elsewhere, { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setDevice: vi.fn(), setSmall: vi.fn(), switchCamera: vi.fn() }));
     const { unmount } = await openedPreview();
     expect(preview()).toHaveAccessibleDescription("Everyone in general can join once it starts. Starting it leaves the huddle you're in now.");
     unmount();

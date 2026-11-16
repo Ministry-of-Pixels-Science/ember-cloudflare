@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { settledVisibility, VISIBILITY_CHANGE_DELAY_MS, type SettledVisibility } from "./visibility";
+import { settledVisibility, VISIBILITY_CHANGE_DELAY_MS, whenShownAgain, type SettledVisibility } from "./visibility";
 
 const wait = (ms: number) => vi.advanceTimersByTime(ms);
 const visibility = (state: DocumentVisibilityState) => {
@@ -74,5 +74,25 @@ describe("Presence", () => {
     visibility("hidden");
     wait(VISIBILITY_CHANGE_DELAY_MS);
     expect([tab.visible, onChange.mock.calls]).toEqual([true, []]);
+  });
+});
+
+describe("A tab that shows again", () => {
+  it("is heard of each time it shows, at once, and not as it's hidden, until it's told to stop", () => {
+    const shown = vi.fn();
+    const stop = whenShownAgain(shown);
+    expect(shown).not.toHaveBeenCalled();
+    visibility("hidden");
+    expect(shown).not.toHaveBeenCalled();
+    visibility("visible");
+    expect(shown).toHaveBeenCalledTimes(1);
+    visibility("hidden");
+    visibility("visible");
+    expect(shown).toHaveBeenCalledTimes(2);
+
+    stop();
+    visibility("hidden");
+    visibility("visible");
+    expect(shown).toHaveBeenCalledTimes(2);
   });
 });

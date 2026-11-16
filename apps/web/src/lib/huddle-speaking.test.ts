@@ -14,6 +14,12 @@ class FakeStream {
 const [LOUD, QUIET] = [SPEAKING_LEVEL * 2, SPEAKING_LEVEL / 2];
 const measures = (count = 1) => vi.advanceTimersByTime(count * MEASURED_EVERY_MS);
 
+/** The page is hidden, as when its person goes to another app on a phone, or shows again. */
+const shows = (state: DocumentVisibilityState) => {
+  vi.spyOn(document, "visibilityState", "get").mockReturnValue(state);
+  document.dispatchEvent(new Event("visibilitychange"));
+};
+
 /** What a test measures voices with, which is stopped after it. */
 let speaking: HuddleSpeaking;
 /** Who was speaking each time that changed, in order. */
@@ -30,6 +36,7 @@ afterEach(() => {
   speaking.stop();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe("Who's speaking in a huddle", () => {
@@ -190,6 +197,35 @@ describe("Who's speaking in a huddle", () => {
     expect(engine.engines.map(({ state }) => state)).toEqual(["running"]);
     measures(4);
     expect(said).toEqual([["sam"]]);
+  });
+
+  it("has an engine the browser stopped while the page was hidden run as the page shows again, from when it hears who's speaking", () => {
+    const engine = audioEngine();
+    const sam = voice();
+    measuring().hear("sam", sam);
+    engine.engines[0]!.state = "suspended";
+    engine.setLevel(sam, LOUD);
+    shows("hidden");
+    expect(engine.engines.map(({ state }) => state)).toEqual(["suspended"]);
+
+    shows("visible");
+    expect(engine.engines.map(({ state }) => state)).toEqual(["running"]);
+    measures(4);
+    expect(said).toEqual([["sam"]]);
+  });
+
+  it("asks nothing more of an engine that runs, or of one it has closed, as the page shows again", () => {
+    const engine = audioEngine();
+    measuring().hear("sam", voice());
+    const [started] = engine.engines as unknown as AudioContext[];
+    const resume = vi.spyOn(started!, "resume");
+    shows("visible");
+    // Stopped, it listens to the page no more.
+    const unheard = vi.spyOn(document, "removeEventListener");
+    speaking.stop();
+    expect(unheard).toHaveBeenCalledWith("visibilitychange", expect.any(Function));
+    shows("visible");
+    expect(resume).not.toHaveBeenCalled();
   });
 
   it("asks nothing more of an engine that runs, or of one it has closed, at a click", () => {

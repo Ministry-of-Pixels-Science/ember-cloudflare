@@ -1,10 +1,11 @@
+import { useEffect, useState } from "react";
 import type { Room, UserId } from "@ember/protocol";
-import { Microphone, MicrophoneMute, ModernTv, VideoCamera, VideoCameraOff } from "@/components/icons/iconoir";
+import { Microphone, MicrophoneMute, ModernTv, RotateCameraRight, VideoCamera, VideoCameraOff } from "@/components/icons/iconoir";
 import { useCamerasAllowed, useScreensAllowed } from "@/hooks/use-account";
 import { useNameOf } from "@/hooks/use-directory";
 import { roomName } from "@/lib/directs";
-import { sharesScreens } from "@/lib/huddle-devices";
-import { leaveHuddle, muteHuddle, shareHuddleScreen, showHuddleCamera, type JoinedHuddle } from "@/lib/huddle-store";
+import { listDevices, sharesScreens, watchDevices } from "@/lib/huddle-devices";
+import { leaveHuddle, muteHuddle, shareHuddleScreen, showHuddleCamera, switchHuddleCamera, type JoinedHuddle } from "@/lib/huddle-store";
 import { muteShortcut } from "@/lib/keyboard";
 import { cn } from "@/lib/utils";
 import { CameraMenu, MicrophoneMenu } from "./huddle-device-menu";
@@ -20,6 +21,8 @@ export const TOOL_ON = "bg-foreground text-background";
  */
 const BESIDE_ARROW = "md:rounded-r-none";
 const ARROW = "min-w-6 rounded-l-none border-l border-background max-md:hidden [&_svg]:size-3.5";
+/** What a phone has in the camera's arrow's place. */
+const IN_ARROWS_PLACE = "md:hidden";
 
 /** What the tab's huddle is called, on its bar and opened: by its room, or just Huddle once the room isn't among this person's. */
 export function useHuddleName(room: Room | null, meId: UserId): string {
@@ -84,6 +87,38 @@ export function CameraTool({ huddle, devices = false, className }: ToolProps) {
       {tool}
       <CameraMenu huddle={huddle} className={cn(TOOL, look, ARROW)} />
     </span>
+  );
+}
+
+/**
+ * Whether the browser lists a camera besides the one that's `on`, which it's asked as that turns on,
+ * when it names them, and again whenever one is plugged in or taken away.
+ */
+function useHasAnotherCamera(on: boolean): boolean {
+  const [cameras, setCameras] = useState(0);
+  useEffect(() => {
+    if (!on) return;
+    const count = async () => setCameras((await listDevices()).cameras.length);
+    void count();
+    return watchDevices(() => void count());
+  }, [on]);
+  return on && cameras > 1;
+}
+
+/**
+ * Switches the tab's camera in its huddle to the one that faces the other way, as from a phone's front
+ * camera to its back one, or to the next the browser lists. It's there in the place of the arrow that
+ * chooses a camera, where the huddle has none, as on a phone, while the camera is on and the browser
+ * has another.
+ */
+export function SwitchCameraTool({ huddle }: { huddle: JoinedHuddle }) {
+  const allowed = useCamerasAllowed();
+  const another = useHasAnotherCamera(huddle.camera !== null);
+  if (!allowed || !another) return null;
+  return (
+    <button type="button" title="Switch camera" aria-label="Switch camera" onClick={switchHuddleCamera} className={cn(TOOL, TOOL_OFF, IN_ARROWS_PLACE)}>
+      <RotateCameraRight />
+    </button>
   );
 }
 

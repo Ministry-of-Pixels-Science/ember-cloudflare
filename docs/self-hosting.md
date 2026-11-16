@@ -1194,6 +1194,19 @@ others see it. A screen is sent as large as 1920 by 1080, at up to 15 frames a s
 without its sound, and only to those who have the huddle open: once it's minimized, its bar says
 who's sharing. A phone's browser has no screen to share, so phones watch.
 
+On a phone, where the huddle is over all of the page and has no arrows, a button beside the camera,
+Switch camera, is there while your camera is on and the browser has another. It shows the camera
+that faces the other way, as a phone's back camera does from its front one, or the next the browser
+lists where it doesn't say which way its cameras face, and this browser's next huddle starts with
+it. A phone opens one of its cameras at a time, so a huddle lets go of the camera that's on before
+it opens another, on a computer too, and opens it again when the browser won't open the other, which
+you're told. Your own picture shows as a mirror would, unless your camera faces away from you. A
+phone's browser stops a page once its screen locks, and the huddle with it, so a huddle keeps the
+screen of a phone or a tablet awake for as long as its page shows, where the browser can, which one
+may refuse while the phone saves its battery. Whatever the browser stopped while you were in another
+app, the others' voices, their pictures or the telling of who's speaking, starts again as you come
+back to the page, and a tab that lost the room meanwhile joins the huddle again by itself.
+
 A sound plays as someone joins the huddle, yourself included, and another as someone leaves it. While
 you're the only one in it, quiet music plays on a loop, as Slack's does, from five seconds after you
 find yourself alone until someone joins you. The two sounds were written for Ember and the music was

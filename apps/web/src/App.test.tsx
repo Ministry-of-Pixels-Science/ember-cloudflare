@@ -785,7 +785,7 @@ describe("Huddles", () => {
     await waitFor(() => expect(WorkspaceSocket.all).toHaveLength(1));
     act(() => WorkspaceSocket.all[0]!.welcome(ada, withHuddles));
     // The tab is in general's huddle, minimized to its bar.
-    const controls = { leave: () => showHuddle(null), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setDevice: vi.fn(), setSmall: vi.fn() };
+    const controls = { leave: () => showHuddle(null), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setDevice: vi.fn(), setSmall: vi.fn(), switchCamera: vi.fn() };
     act(() => showHuddle({ roomId: "general", connected: true, you: ada, people: [], muted: false, microphone: true, microphoneId: "", speakerId: "", camera: null, watched: new Map(), screen: null, screens: new Map(), open: false }, controls));
     try {
       expect(shareButton()).toBeInTheDocument();

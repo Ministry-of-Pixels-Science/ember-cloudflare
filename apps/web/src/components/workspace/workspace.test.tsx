@@ -2454,7 +2454,10 @@ describe("Huddles", () => {
     setOpen: vi.fn((open: boolean) => showHuddle({ ...joinedHuddle()!, open })),
     setDevice: vi.fn(),
     setSmall: vi.fn(),
+    switchCamera: vi.fn(),
   } satisfies HuddleControls;
+  /** The tab's camera, on: one that doesn't say which way it faces, as a computer's doesn't. */
+  const CAMERA = { getVideoTracks: () => [] } as unknown as MediaStream;
   /** Joins `roomId`'s huddle as the preview would, without a microphone or a camera. */
   const join = (roomId: string) => act(() => joinHuddle({ roomId, muted: false, microphone: null, camera: null, speakerId: "" }));
   /** Serves `sidebar` as this person's rooms, and a search that finds nothing, as the search box and its page ask. */
@@ -2766,7 +2769,7 @@ describe("Huddles", () => {
     const { showAccount } = showWorkspace("/rooms/general", ada, HUDDLES_ON);
     await roomHeading();
     join("general");
-    act(() => showHuddle({ ...joinedHuddle()!, camera: {} as MediaStream }));
+    act(() => showHuddle({ ...joinedHuddle()!, camera: CAMERA }));
     expect(within(opened()!).getByRole("button", { name: "Turn off camera" })).toBeInTheDocument();
     controls.setCamera.mockImplementationOnce(() => showHuddle({ ...joinedHuddle()!, camera: null }));
 
@@ -2782,7 +2785,7 @@ describe("Huddles", () => {
     const { showAccount } = showWorkspace("/rooms/general", ada, HUDDLES_ON);
     await roomHeading();
     join("general");
-    act(() => showHuddle({ ...joinedHuddle()!, camera: {} as MediaStream, screen: {} as MediaStream }));
+    act(() => showHuddle({ ...joinedHuddle()!, camera: CAMERA, screen: {} as MediaStream }));
     expect(within(opened()!).getByRole("button", { name: "Stop sharing screen" })).toBeInTheDocument();
     controls.setScreen.mockImplementationOnce(() => showHuddle({ ...joinedHuddle()!, screen: null }));
 

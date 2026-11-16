@@ -4,6 +4,18 @@
  */
 export const VISIBILITY_CHANGE_DELAY_MS = 5_000;
 
+/**
+ * Has `shown` run each time the tab shows again, having been hidden, as when its person comes back to
+ * a phone's browser, until the function returned is called.
+ */
+export function whenShownAgain(shown: () => void): () => void {
+  const changed = () => {
+    if (document.visibilityState === "visible") shown();
+  };
+  document.addEventListener("visibilitychange", changed);
+  return () => document.removeEventListener("visibilitychange", changed);
+}
+
 export interface SettledVisibility {
   /** Whether the tab counts as shown: as it was when followed, or as it has since stayed for the delay. */
   readonly visible: boolean;
