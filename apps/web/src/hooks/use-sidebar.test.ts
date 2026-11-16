@@ -430,6 +430,21 @@ describe("Huddles in your rooms", () => {
     // Neither changes the rooms listed.
     expect(result.current.list).toBe(shown);
   });
+
+  it("tells that an invitation into a room's huddle is over once the workspace socket says the room is gone, a room it never listed too", async () => {
+    const onInvitation = vi.fn();
+    server.change(unstarred([design]));
+    renderHook(() => useSidebar(ada, () => {}, undefined, undefined, undefined, onInvitation));
+    await settle();
+    socket().connect();
+    await settle();
+
+    socket().receive({ type: "room.gone", roomId: design.id });
+    expect(onInvitation).toHaveBeenCalledExactlyOnceWith({ type: "over", roomId: design.id });
+    socket().receive({ type: "room.gone", roomId: "direct-1" });
+    expect(onInvitation).toHaveBeenLastCalledWith({ type: "over", roomId: "direct-1" });
+    expect(onInvitation).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("Make or revoke administrators", () => {
