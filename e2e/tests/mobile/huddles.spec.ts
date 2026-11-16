@@ -93,6 +93,18 @@ function keepWhatKeepsAwake(): void {
   };
 }
 
+/**
+ * Has the browser keep the screen awake for a page that asks it to, as a phone's does without asking
+ * its person. The headless Chromium these tests run in on CI refuses a page it hasn't been told to let.
+ * Telling it so refuses the page whatever isn't named, so the microphone and the camera are named
+ * too, and it holds for as long as the session that said it, which is left to end with the page.
+ */
+async function letScreenBeKeptAwake(page: Page): Promise<void> {
+  const cdp = await page.context().newCDPSession(page);
+  const { targetInfo } = await cdp.send("Target.getTargetInfo");
+  await cdp.send("Browser.grantPermissions", { permissions: ["wakeLockScreen", "audioCapture", "videoCapture"], browserContextId: targetInfo.browserContextId });
+}
+
 /** Where a page keeps the connection that stands in for the SFU's, which sends it the screens it watches. */
 type SentScreens = Window & { screensSent?: RTCPeerConnection };
 
@@ -299,6 +311,7 @@ test("the huddle you're in switches between the phone's front camera and its bac
 
 test("a huddle keeps the phone's screen awake from when you join it until you leave", async ({ page, room, session }) => {
   await page.addInitScript(keepWhatKeepsAwake);
+  await letScreenBeKeptAwake(page);
   await standInHuddle(page, session.user);
   await openRoomWithHuddlesOn(page, room);
   /** What the page has had the browser keep awake, and whether each is kept awake still. */
