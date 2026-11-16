@@ -1151,28 +1151,40 @@ new one.
 
 ### Huddles
 
-A huddle is a room's voice call, laid out as Slack's is. The headphones at the top of a room start its
-huddle, or join the one going on, and show the rest of the room how many are in it. So does the
-room's row in the sidebar, which ends with the faces of the first two people in the huddle, the
-headphones and how many are in it, and says who they are under a pointer. Starting or joining goes by
-a preview, which asks the browser for a microphone and offers a choice of it and, where the browser
-has one, of the speaker; without a microphone you join to listen. While you're in a huddle, a bar along
-the window's base follows you from page to page, with the microphone's switch and Leave. A sound
-plays as someone joins the huddle, yourself included, and another as someone leaves it. While you're
-the only one in it, quiet music plays on a loop, as Slack's does, from five seconds after you find
-yourself alone until someone joins you. The two sounds were written for Ember and the music was
+A huddle is a room's call, by voice and by camera, laid out as Slack's is. The headphones at the top
+of a room start its huddle, or join the one going on, and show the rest of the room how many are in
+it. So does the room's row in the sidebar, which ends with the faces of the first two people in the
+huddle, the headphones and how many are in it, and says who they are under a pointer. Starting or
+joining goes by a preview, which asks the browser for a microphone and offers a choice of it and,
+where the browser has one, of the speaker; without a microphone you join to listen. The preview's
+camera switch turns your camera on, which asks the browser for one only then, shows you its picture
+and offers a choice of camera.
+
+The huddle opens as you join it, over the page beside the sidebar, or over all of a phone's: a tile
+for each person, with their camera's picture, or their avatar while it's off, their name, and a mark
+while they're muted, as large as shows everyone in the window, and the microphone, the camera and
+Leave along its base. Minimizing it, or going to any page, leaves a bar along the window's base, which
+follows you from page to page with the microphone, the camera, the button that opens the huddle
+again, and Leave; a phone's bar has the microphone and Leave, and opens the huddle at its name.
+Cameras are 640 by 360 at up to 500 kbps, and up to 25 can be on in a huddle at once. Your browser is
+sent the others' only while you have the huddle open, and a camera's picture isn't kept in step with
+its person's voice, which travels apart from it.
+
+A sound plays as someone joins the huddle, yourself included, and another as someone leaves it. While
+you're the only one in it, quiet music plays on a loop, as Slack's does, from five seconds after you
+find yourself alone until someone joins you. The two sounds were written for Ember and the music was
 generated for it by Google's AI, so nothing is owed for playing them, and
 `apps/web/src/lib/huddle-sounds/` says where each came from and how to change them.
 Ctrl+Alt+Shift+H (⌘⌥⇧H on a Mac) leaves the huddle you're in, or opens the preview for the room
 you're looking at, and Ctrl+Shift+Space (⌘⇧Space) mutes and unmutes. The arrow beside the headphones
-copies the huddle's link, which opens the room at the preview. A huddle takes up to 50 people and
-ends when the last of them leaves. A tab is in one huddle at a time, and joining a room's huddle from
-another tab or device leaves it in the first. DMs have no huddles yet, and there's no video or screen
-sharing yet.
+copies the huddle's link, which opens the room at the preview, or the huddle once you're in it. A
+huddle takes up to 50 people and ends when the last of them leaves. A tab is in one huddle at a time,
+and joining a room's huddle from another tab or device leaves it in the first. DMs have no huddles
+yet, and there's no screen sharing yet.
 
 An administrator turns huddles on under Huddles in community settings, with the switch on its card.
 Huddles run through Cloudflare's [Realtime SFU](https://developers.cloudflare.com/realtime/sfu/),
-which carries what each person in a huddle says to the others, by an SFU app in your Cloudflare
+which carries what each person in a huddle says and shows to the others, by an SFU app in your Cloudflare
 account. Turning the card on opens Set up huddles, which has two steps: create the app under
 Realtime, Serverless SFU in the Cloudflare dashboard, which the dialog's button opens, in the
 account Ember is deployed to when the deploy gave it, then copy the app's App ID and App Secret into
@@ -1184,8 +1196,8 @@ off forgets them, which ends any huddle going on within half a minute. Setting E
 huddles too: once it has made the administrator's account, Set up Ember asks whether to turn them
 on, and takes the same two steps before it opens Ember, or Not now, which leaves them to community
 settings. The secret stays in the Worker, which alone asks the SFU's API: a browser sends its
-microphone to the SFU, and hears the others from it, over WebRTC, and finds its way there with
-Cloudflare's STUN server (`stun.cloudflare.com:3478`).
+microphone and its camera to the SFU, and hears and sees the others from it, over WebRTC, and finds
+its way there with Cloudflare's STUN server (`stun.cloudflare.com:3478`).
 What the SFU charges is in [What it costs](#what-it-costs).
 
 ### A preview from GitHub Actions
@@ -1405,7 +1417,9 @@ pages had them in October 2026:
   huddle, and nothing for what they send it. The first 1,000 GB a month are free, and it's $0.05 per GB
   after that, as its page had it in November 2026. A voice is about 50 kbps to each person who hears
   it, so five people talking for an hour are sent under half a GB between them, and the free 1,000 GB
-  carry about 2,000 such hours a month.
+  carry about 2,000 such hours a month. A camera is up to 500 kbps to each person who has the huddle
+  open, so the same five with their cameras on throughout are sent up to 4.5 GB more in the hour, and
+  the free 1,000 GB carry about 200 such hours a month.
 
 Cloudflare's pages have the details: [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/),
 [Durable Objects pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/),

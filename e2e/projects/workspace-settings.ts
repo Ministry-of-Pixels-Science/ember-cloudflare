@@ -46,7 +46,7 @@ const ON_SETTINGS_SERVER: Project<PlaywrightTestOptions, PlaywrightWorkerOptions
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined,
     args: [
       "--ignore-certificate-errors",
-      // For the huddles spec: a microphone that beeps, which a page may use without asking anyone.
+      // For the huddles spec: a microphone that beeps and a camera with a made-up picture, which a page may use without asking anyone.
       "--use-fake-device-for-media-stream",
       "--use-fake-ui-for-media-stream",
     ],
