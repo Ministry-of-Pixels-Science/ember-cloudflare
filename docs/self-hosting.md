@@ -1231,6 +1231,14 @@ reaches the people in the direct message who hear its @mentions or more, so nobo
 its notifications off, and only where Ember is open: a device with Ember closed doesn't ring yet.
 Nothing is kept of an invitation, so one that comes while someone's connection is down is lost.
 
+Anyone in a huddle can invite more of its room's people into it. Invite people, the first button
+along the huddle's base, or in the menu of More, the last before Leave, on a phone, lists the people
+in the room who aren't in the huddle and could join it, by name, 20 at a time under a search once
+there are more. Tick one or more, up to 50, and Send Invite has the room invite them as it does for
+a direct message's huddle, and an invitation into a shared room says which: "Priya Patel invites you
+to a huddle in Launch". Here too, it rings only those who hear the room's @mentions or more, and
+whoever sent it is told who they invited, not who it reached, nor of a Decline.
+
 An administrator turns huddles on under Huddles in community settings, with the switch on its card.
 Huddles run through Cloudflare's [Realtime SFU](https://developers.cloudflare.com/realtime/sfu/),
 which carries what each person in a huddle says and shows to the others, by an SFU app in your Cloudflare

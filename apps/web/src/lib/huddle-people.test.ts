@@ -1,6 +1,6 @@
 import type { DirectRoom, Room, User } from "@ember/protocol";
 import { describe, expect, it } from "vitest";
-import { hasHuddles, huddledWith, huddlePlace, inItNow, inItsHuddle, inTheHuddle, invitedOnceItStarts, sharingScreens } from "./huddle-people";
+import { hasHuddles, huddledWith, huddlePlace, inItNow, inItsHuddle, inTheHuddle, invitable, invitedNow, invitedOnceItStarts, sharingScreens } from "./huddle-people";
 
 const [ada, priya, sam, deploys]: User[] = [
   { id: "ada", name: "Ada Lovelace" },
@@ -39,6 +39,18 @@ describe("hasHuddles", () => {
   });
 });
 
+describe("invitable", () => {
+  it("is everyone in the huddle's room but oneself, whoever is in the huddle, and whoever joins none, in the room's order", () => {
+    expect(invitable([sam!, ada!, deploys!, priya!], "ada", new Set(), joinsNone)).toEqual([sam, priya]);
+    expect(invitable([sam!, ada!, deploys!, priya!], "ada", new Set(["ada", "sam"]), joinsNone)).toEqual([priya]);
+  });
+
+  it("is nobody once everyone who could join is in it", () => {
+    expect(invitable([ada!, deploys!, priya!], "ada", new Set(["ada", "priya"]), joinsNone)).toEqual([]);
+    expect(invitable([], "ada", new Set(), joinsNone)).toEqual([]);
+  });
+});
+
 describe("huddlePlace", () => {
   it("is in a shared room, and with whoever a direct message is with", () => {
     expect(huddlePlace(launch, "Launch")).toBe("in Launch");
@@ -51,6 +63,14 @@ describe("invitedOnceItStarts", () => {
     expect(invitedOnceItStarts(["Priya Patel"])).toBe("Priya is invited once it starts.");
     expect(invitedOnceItStarts(["Priya Patel", "Sam Rivera"])).toBe("Priya and Sam are invited once it starts.");
     expect(invitedOnceItStarts(["Priya Patel", "Sam Rivera", "Leo Park", "Maya Chen"])).toBe("Priya, Sam, Leo, and 1 other are invited once it starts.");
+  });
+});
+
+describe("invitedNow", () => {
+  it("names whoever someone in a huddle has invited, by first name up to three", () => {
+    expect(invitedNow(["Priya Patel"])).toBe("Priya is invited.");
+    expect(invitedNow(["Priya Patel", "Sam Rivera"])).toBe("Priya and Sam are invited.");
+    expect(invitedNow(["Priya Patel", "Sam Rivera", "Leo Park", "Maya Chen", "Noor Aziz"])).toBe("Priya, Sam, Leo, and 2 others are invited.");
   });
 });
 

@@ -46,6 +46,8 @@ export interface HuddleControls {
   setDevice(kind: HuddleDevice, deviceId: string): void;
   /** Shows, in place of the camera that's on, the one that faces the other way, or the next the browser lists. */
   switchCamera(): void;
+  /** Asks the room to invite the people `userIds` names into the huddle, saying whether it could, which it can't while its connection to the room is down. */
+  invite(userIds: UserId[]): boolean;
 }
 
 /** The id the huddle opened has in the page, where Skip to main content goes while it covers the page. */
@@ -121,6 +123,13 @@ export const chooseHuddleDevice = (kind: HuddleDevice, deviceId: string) => cont
  * phone's back camera does from its front one, or the next the browser lists, if it's in one.
  */
 export const switchHuddleCamera = () => controls?.switchCamera();
+
+/**
+ * Invites the people `userIds` names into the tab's huddle, whose room rings those of them it reaches,
+ * and says whether the room was asked to, which it isn't while the tab's connection to it is down, or
+ * once the tab is in no huddle.
+ */
+export const inviteToHuddle = (userIds: UserId[]) => controls?.invite(userIds) ?? false;
 
 /**
  * Has `say` told whatever the tab's huddle has to tell its person, until the function returned is

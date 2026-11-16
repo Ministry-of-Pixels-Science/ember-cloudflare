@@ -30,13 +30,25 @@ export const huddledWith = (room: DirectRoom, meId: UserId, joinsNone: (user: Us
 export const hasHuddles = (room: Room, meId: UserId, joinsNone: (user: User) => boolean): boolean => room.kind !== "direct" || huddledWith(room, meId, joinsNone).length > 0;
 
 /**
+ * Who the person `meId` signs in can invite into a huddle they're in, of the people in its room
+ * (`members`): everyone but themselves, whoever is in it already (`inIt`), and whoever joins none.
+ */
+export const invitable = (members: User[], meId: UserId, inIt: ReadonlySet<UserId>, joinsNone: (user: User) => boolean): User[] =>
+  members.filter((member) => member.id !== meId && !inIt.has(member.id) && !joinsNone(member));
+
+/**
  * Where a room's huddle is, as "Huddle" and "Start a huddle" go on: "in Launch", or who a direct
  * message's is with, "with Priya Patel". `name` is the room's as whoever's reading it reads it.
  */
 export const huddlePlace = (room: Room, name: string) => (room.kind === "direct" ? `with ${name}` : `in ${name}`);
 
+const invited = (names: string[]) => `${peopleListed(names, names.length)} ${names.length === 1 ? "is" : "are"} invited`;
+
 /** Who a huddle in a direct message invites, for whoever is about to start it, by their names: "Priya is invited once it starts." */
-export const invitedOnceItStarts = (names: string[]) => `${peopleListed(names, names.length)} ${names.length === 1 ? "is" : "are"} invited once it starts.`;
+export const invitedOnceItStarts = (names: string[]) => `${invited(names)} once it starts.`;
+
+/** Who someone in a huddle has just invited into it, by their names: "Priya and Sam are invited." */
+export const invitedNow = (names: string[]) => `${invited(names)}.`;
 
 /** Who's in a huddle that's going on, for someone about to join it: "Sam is in it now." */
 export const inItNow = (names: string[], count: number) => `${peopleListed(names, count)} ${count === 1 ? "is" : "are"} in it now.`;
