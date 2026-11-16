@@ -1,12 +1,14 @@
 import { CloseCode, ROOM_PROTOCOL, type Me, type RoomId, type ServerFrame } from "@ember/protocol";
-import { CAMERAS_FULL, HUDDLE_FAILED, HuddleCloseCode, MAX_HUDDLE_CAMERAS, MAX_HUDDLE_PEOPLE, type HuddlePerson, type HuddleTrackKind } from "@ember/protocol/huddles";
+import { CAMERAS_FULL, CAMERAS_OFF, HUDDLE_FAILED, HuddleCloseCode, MAX_HUDDLE_CAMERAS, MAX_HUDDLE_PEOPLE, type HuddlePerson, type HuddleTrackKind } from "@ember/protocol/huddles";
 import { evictDurableObject, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HUDDLE_HEADER, type ChatRoom } from "../src/chat-room";
+import type { Env } from "../src/env";
 import { HUDDLE_CHECK_MS, HUDDLE_SILENT_MS, HUDDLE_TAG, NO_OFFER, PUBLICATION_SETTLES_MS, TOO_FAST, type Huddle, type HuddleAttachment } from "../src/huddles/room";
 import { REVOCATIONS_KEPT_MS, sessionTag } from "../src/revocations";
 import { MAX_ROOM_FRAME_SIZE } from "../src/sockets";
 import { viewersOf } from "../src/viewing";
+import { workspace } from "../src/workspace";
 import {
   alarmOf,
   APP,
@@ -22,6 +24,7 @@ import {
   reached,
   ring,
   setUp,
+  switchCameras,
   watch,
   welcomed,
   type HuddleSocket,
@@ -83,6 +86,8 @@ async function crowd(room: RoomId, count: number): Promise<HuddleSocket[]> {
   return sockets;
 }
 const failed = (frame: string, kind: HuddleTrackKind = "audio") => ({ type: "error", message: HUDDLE_FAILED, failed: frame, kind });
+/** What a tab hears of a camera the room won't publish while an administrator has cameras off. */
+const CAMERA_OFF = { type: "error", message: CAMERAS_OFF, failed: "huddle.publish", kind: "video", refused: true };
 
 beforeEach(freshDeploy);
 afterEach(() => {
@@ -881,6 +886,86 @@ describe("Cameras in a huddle", () => {
     // What the SFU made for it meanwhile is closed.
     await vi.waitFor(() => expect(closedOn(sfu, newest(sfu))).toEqual(["0"]));
     expect((await remembered(room)).filter(({ cameras }) => cameras?.publishing)).toHaveLength(MAX_HUDDLE_CAMERAS);
+  });
+
+  it("refuses cameras once its check hears that an administrator has them off, and takes down the ones that are on, a few a check", async () => {
+    const { ada, sfu } = await huddlesOn();
+    const room = await freshRoom("cameras-off");
+    const sockets = await crowd(room, 10);
+    const microphones: string[] = [];
+    for (const socket of sockets) microphones.push(await publishing(sfu, socket));
+    const cameras: string[] = [];
+    for (const socket of sockets) cameras.push(await showing(sfu, socket));
+    const watcher = sockets.at(-1)!;
+    await reached(watcher);
+    const heard = watcher.log.length;
+    const stillShown = async () => (await remembered(room)).filter(({ cameras }) => cameras?.publishing).length;
+
+    // Each tab hears why its camera went off, the others that they can't watch it, and the SFU closes it: the first eight to have joined.
+    await switchCameras(ada, false);
+    await ring(room);
+    for (const socket of sockets.slice(0, 8)) expect(await socket.next("error")).toEqual(CAMERA_OFF);
+    await vi.waitFor(() => expect(cameras.slice(0, 8).map((id) => closedOn(sfu, id))).toEqual(cameras.slice(0, 8).map(() => ["0"])));
+    await reached(watcher);
+    const changed = watcher.log.slice(heard).filter(({ type }) => type === "huddle.changed");
+    expect(changed).toEqual(sockets.slice(0, 8).map((_, n) => ({ type: "huddle.changed", person: { user: { id: `person-${n}`, name: `Person ${n}` }, muted: false, audio: true, video: false } })));
+    expect(await stillShown()).toBe(2);
+    // And the rest at the next.
+    await ring(room);
+    for (const socket of sockets.slice(8)) expect(await socket.next("error")).toEqual(CAMERA_OFF);
+    await vi.waitFor(() => expect(cameras.map((id) => closedOn(sfu, id))).toEqual(cameras.map(() => ["0"])));
+    expect(await stillShown()).toBe(0);
+    // Their microphones go on as they were, and a check with no camera on asks the SFU nothing.
+    expect(microphones.map((id) => closedOn(sfu, id))).toEqual(microphones.map(() => []));
+    const asked = sfu.asked.length;
+    await ring(room);
+    expect(sfu.asked).toHaveLength(asked);
+
+    // One that asks is refused before the SFU is asked anything.
+    sockets[0]!.send(camera("a camera while they're off"));
+    expect(await sockets[0]!.next("error")).toEqual(CAMERA_OFF);
+    expect(sfu.asked).toHaveLength(asked);
+
+    // On again, cameras go on as before.
+    await switchCameras(ada, true);
+    await ring(room);
+    await showing(sfu, sockets[0]!, "a camera once they're on");
+    expect(await stillShown()).toBe(1);
+  });
+
+  it("refuses a camera the SFU was still answering for when its check heard that cameras are off", async () => {
+    const { ada, sfu } = await huddlesOn();
+    const room = await freshRoom("cameras-off-late");
+    const adas = await welcomed(room, ada);
+    const started = sfu.askedTo(/sessions\/new$/).length;
+    const release = sfu.hold(/sessions\/new$/);
+    adas.send(camera("Ada's camera"));
+    await vi.waitFor(() => expect(sfu.askedTo(/sessions\/new$/)).toHaveLength(started + 1));
+    await switchCameras(ada, false);
+    // Nothing of hers is on for the check to take down.
+    await ring(room);
+    release();
+    expect(await adas.next("error")).toEqual(CAMERA_OFF);
+    // What the SFU made for it meanwhile is closed.
+    await vi.waitFor(() => expect(closedOn(sfu, newest(sfu))).toEqual(["0"]));
+    expect((await remembered(room))[0]!.cameras?.publishing).toBeUndefined();
+  });
+
+  it("lets cameras go on when the Workspace says nothing of them, as one from before they could be turned off does", async () => {
+    const { ada, sfu } = await huddlesOn();
+    const room = await freshRoom("cameras-unsaid");
+    const adas = await welcomed(room, ada);
+    await runInDurableObject(roomStub(room), (instance: ChatRoom) => {
+      const huddle = (instance as unknown as { huddle: { env: Env } }).huddle;
+      const reached = workspace(huddle.env);
+      const older = { huddleApp: async () => APP, reportHuddle: (...report: Parameters<typeof reached.reportHuddle>) => reached.reportHuddle(...report) };
+      huddle.env = { ...huddle.env, WORKSPACE: { getByName: () => older } as unknown as Env["WORKSPACE"] };
+    });
+    await ring(room);
+    await showing(sfu, adas);
+    await ring(room);
+    expect((await remembered(room))[0]!.cameras?.publishing).toBeDefined();
+    expect(adas.pending("error")).toEqual([]);
   });
 
   it("has the SFU close everything a tab sent and received, on all four of its connections, once it leaves", async () => {

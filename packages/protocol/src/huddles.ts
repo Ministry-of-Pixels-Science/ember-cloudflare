@@ -217,6 +217,9 @@ export const parseHuddleSocketParams = (query: { get(name: string): string | nul
 /** Why the room couldn't do what a huddle's tab asked: the SFU refused, or couldn't be reached. */
 export const HUDDLE_FAILED = "The huddle couldn't connect. Trying again.";
 
+/** Why the room won't show someone's camera while an administrator has cameras off, which their tab tells them as theirs goes off. */
+export const CAMERAS_OFF = "Cameras are turned off for huddles here.";
+
 /** Why the room won't show someone's camera while the huddle shows as many as one does. */
 export const CAMERAS_FULL = `${MAX_HUDDLE_CAMERAS} cameras are on in this huddle, which is as many as one shows. Yours can go on once someone turns theirs off.`;
 

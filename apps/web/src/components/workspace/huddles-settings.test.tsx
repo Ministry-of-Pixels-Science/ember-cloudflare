@@ -1,10 +1,12 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { WorkspaceSettings } from "@ember/protocol";
+import type { AccountSettings, WorkspaceSettings } from "@ember/protocol";
 import { HUDDLES_FORBIDDEN } from "@ember/protocol/huddles";
+import { AccountContext, useAccount } from "@/hooks/use-account";
 import { ApiError } from "@/lib/api";
-import { CONFIRM_STOP_HUDDLES, HUDDLES_EXPLAINED, HuddlesSettings } from "./huddles-settings";
+import { CAMERAS_EXPLAINED, CONFIRM_STOP_HUDDLES, HUDDLES_EXPLAINED, HuddleCameras, HuddlesSettings } from "./huddles-settings";
 
 const APP_ID = "2a95132c15732412d22c1476fa83f27a";
 
@@ -94,5 +96,64 @@ describe("Set up huddles", () => {
     expect(onStopped).not.toHaveBeenCalled();
     expect(huddlesSwitch()).toBeChecked();
     expect(huddlesSwitch()).toBeEnabled();
+  });
+});
+
+describe("Cameras in huddles", () => {
+  /** The workspace as it is where cameras may go on in huddles, or may not. */
+  function Workspace({ cameras, children }: { cameras: boolean; children: ReactNode }) {
+    return <AccountContext value={{ ...useAccount(), huddleCameras: cameras }}>{children}</AccountContext>;
+  }
+
+  /** The Cameras card, for a workspace whose cameras are as `cameras` says, with what its switch saved and the calls that settle each save. */
+  function showCameras(cameras = true) {
+    const settled: Array<() => void> = [];
+    const saveSwitch = vi.fn((_: AccountSettings, done: () => void) => void settled.push(done));
+    const card = (shown: boolean) => (
+      <Workspace cameras={shown}>
+        <HuddleCameras saveSwitch={saveSwitch} />
+      </Workspace>
+    );
+    const { rerender } = render(card(cameras));
+    return { saveSwitch, settled, user: userEvent.setup(), show: (shown: boolean) => rerender(card(shown)) };
+  }
+
+  const camerasCard = () => screen.getByRole("region", { name: "Cameras" });
+  const camerasSwitch = () => within(camerasCard()).getByRole("switch", { name: "Cameras" });
+
+  it("says what its switch lets people do, which is on until an administrator turns it off", () => {
+    showCameras();
+    expect(within(camerasCard()).getByRole("heading", { level: 2, name: "Cameras" })).toBeVisible();
+    expect(camerasCard()).toHaveTextContent(CAMERAS_EXPLAINED);
+    expect(CAMERAS_EXPLAINED).toBe("People can turn their camera on in a huddle.");
+    expect(camerasSwitch()).toBeChecked();
+    expect(camerasSwitch()).toHaveAccessibleDescription(CAMERAS_EXPLAINED);
+  });
+
+  it("saves its switch at once, staying where it was moved to until that's saved, and moved no further meanwhile", async () => {
+    const { saveSwitch, settled, user, show } = showCameras();
+    await user.click(camerasSwitch());
+    expect(saveSwitch.mock.calls.map(([settings]) => settings)).toEqual([{ huddleCameras: false }]);
+    expect(camerasSwitch()).not.toBeChecked();
+    await user.click(camerasSwitch());
+    expect(saveSwitch).toHaveBeenCalledOnce();
+    expect(camerasSwitch()).not.toBeChecked();
+
+    // Saved, it's as the workspace says, which by then says cameras are off.
+    show(false);
+    act(() => settled[0]!());
+    expect(camerasSwitch()).not.toBeChecked();
+    await user.click(camerasSwitch());
+    expect(saveSwitch.mock.calls.map(([settings]) => settings)).toEqual([{ huddleCameras: false }, { huddleCameras: true }]);
+    expect(camerasSwitch()).toBeChecked();
+  });
+
+  it("goes back to where it was when saving it fails", async () => {
+    const { settled, user } = showCameras();
+    await user.click(camerasSwitch());
+    expect(camerasSwitch()).not.toBeChecked();
+    // The page's alerts say why, and the workspace still says cameras are on.
+    act(() => settled[0]!());
+    expect(camerasSwitch()).toBeChecked();
   });
 });

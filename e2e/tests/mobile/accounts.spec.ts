@@ -96,7 +96,7 @@ test("an administrator's Huddles tab and Set up huddles, with a key refused, fit
   await screenIsFine({ denseTargets: [SWITCHES] });
 });
 
-test("an administrator's Huddles tab, naming the app huddles run through, fits the phone", async ({ page, screenIsFine }) => {
+test("an administrator's Huddles tab, naming the app huddles run through, and its Cameras card under that, fit the phone", async ({ page, screenIsFine }) => {
   await useOwnAddress(page);
   // The settings as they are once an app's keys are given, without giving the test server any, which every other test shows.
   await page.route("**/api/account", async (route) => {
@@ -109,6 +109,13 @@ test("an administrator's Huddles tab, naming the app huddles run through, fits t
   const card = page.getByRole("region", { name: "Audio and video chat", exact: true });
   await card.getByRole("button", { name: "Change keys" }).scrollIntoViewIfNeeded();
   await expect(card.getByRole("switch", { name: "Audio and video chat" })).toBeChecked();
+  await screenIsFine({ denseTargets: [SWITCHES] });
+
+  // What people may do in a huddle comes with huddles: cameras, which are on.
+  const cameras = page.getByRole("region", { name: "Cameras", exact: true });
+  await cameras.getByRole("switch", { name: "Cameras" }).scrollIntoViewIfNeeded();
+  await expect(cameras.getByRole("switch", { name: "Cameras" })).toBeChecked();
+  await expect(cameras).toContainText("People can turn their camera on in a huddle.");
   await screenIsFine({ denseTargets: [SWITCHES] });
 });
 

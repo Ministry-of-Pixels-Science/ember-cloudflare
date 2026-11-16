@@ -477,6 +477,11 @@ export interface Account {
    * does, when no room's header has a huddle button.
    */
   huddles: boolean;
+  /**
+   * Whether people may turn their camera on in a huddle, as the Huddles tab's Cameras switch says. On
+   * until an administrator turns it off, which keeps huddles to voices.
+   */
+  huddleCameras: boolean;
 }
 
 /** What `GET /api/account` answers for workspace settings. */
@@ -743,6 +748,7 @@ export interface AccountChanges {
 export interface AccountSettings {
   hideTranslationButtons?: boolean;
   restrictRoomCreation?: boolean;
+  huddleCameras?: boolean;
   joinLink?: boolean;
   openSignUp?: boolean;
   memberfulJoin?: boolean;
@@ -2060,6 +2066,7 @@ export function parseNewDirect(data: unknown): NewDirect | string {
 const SETTING_NAMES: Record<keyof AccountSettings, string> = {
   hideTranslationButtons: "Hide translation buttons",
   restrictRoomCreation: "Must be admin to create new rooms",
+  huddleCameras: "Cameras",
   joinLink: "Join link",
   openSignUp: "Open",
   memberfulJoin: "Memberful",

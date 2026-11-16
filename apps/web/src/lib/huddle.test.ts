@@ -1,5 +1,5 @@
 import { CloseCode, type User } from "@ember/protocol";
-import { CAMERAS_FULL, HuddleCloseCode, MAX_HUDDLE_CAMERAS, type HuddlePerson, type HuddleServerFrame, type HuddleTrackKind, type OfferedHuddleTrack } from "@ember/protocol/huddles";
+import { CAMERAS_FULL, CAMERAS_OFF, HuddleCloseCode, MAX_HUDDLE_CAMERAS, type HuddlePerson, type HuddleServerFrame, type HuddleTrackKind, type OfferedHuddleTrack } from "@ember/protocol/huddles";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ANSWER_TIMEOUT_MS, CAMERA_BITRATE, joinHuddle, LISTEN_AGAIN_MS, PUBLISH_AGAIN_MS } from "./huddle";
 import { NO_CAMERA } from "./huddle-devices";
@@ -967,14 +967,17 @@ describe("A huddle's camera", () => {
     stop();
   });
 
-  it("goes off, with what the room says of it, when the huddle shows as many cameras as it does", async () => {
+  it.each([
+    ["the huddle shows as many cameras as it does", CAMERAS_FULL],
+    ["an administrator has cameras off", CAMERAS_OFF],
+  ])("goes off, with what the room says of it, when %s", async (_, message) => {
     const said = vi.fn();
     const stop = hearHuddle(said);
     const room = await joined([], { camera: asCamera() });
     room.take();
 
-    room.receive({ type: "error", message: CAMERAS_FULL, failed: "huddle.publish", kind: "video", refused: true });
-    expect(said).toHaveBeenCalledExactlyOnceWith(CAMERAS_FULL);
+    room.receive({ type: "error", message, failed: "huddle.publish", kind: "video", refused: true });
+    expect(said).toHaveBeenCalledExactlyOnceWith(message);
     expect(joinedHuddle()).toMatchObject({ camera: null, connected: true });
     expect(cameraTrack().readyState).toBe("ended");
     expect(connection().connectionState).toBe("closed");

@@ -99,14 +99,15 @@ const NEW_ACCOUNT_SETTINGS = JSON.stringify({ restrict_room_creation_to_administ
 /**
  * What a new account's settings and custom CSS read as: no tagline, translation buttons hidden, no CSS,
  * anyone may create rooms, no custom domain, people join with the join link but can't sign up without
- * it, nor join with Memberful or an email domain, members sign in with passwords, and the rail has its
- * own icons.
+ * it, nor join with Memberful or an email domain, members sign in with passwords, the rail has its
+ * own icons, and cameras may go on in huddles.
  */
 export const NEW_ACCOUNT_LOOKS = {
   tagline: "",
   hideTranslationButtons: true,
   customStyles: "",
   restrictRoomCreation: false,
+  huddleCameras: true,
   customDomain: null,
   joinLink: true,
   openSignUp: false,
@@ -236,6 +237,7 @@ export type AccountChange = Partial<
     | "tagline"
     | "hideTranslationButtons"
     | "restrictRoomCreation"
+    | "huddleCameras"
     | "customDomain"
     | "otherAddresses"
     | "joinLink"
@@ -1197,6 +1199,9 @@ function huddlesIn(settings: Record<string, unknown> | null): SavedHuddles | nul
   return typeof appId === "string" && typeof sealedAppSecret === "string" ? { appId, sealedAppSecret } : null;
 }
 
+/** Whether the account's settings let cameras go on in huddles, which they keep as `huddle_cameras`: unless that's stored as false, as the Cameras switch stores it. */
+const showsHuddleCameras = (settings: Record<string, unknown> | null) => settings?.huddle_cameras !== false;
+
 /**
  * How Ember AI asks AI Gateway, which the account's settings keep as `assistant`, `{ account_id,
  * api_token, model, format, models, web_tools, web_tools_asked_at, provider_endpoints_tried_at }`, the
@@ -1870,6 +1875,7 @@ export const setSetting = (key: string) => `UPDATE accounts SET settings = json_
 const SET_TAGLINE = setSetting("tagline");
 const SET_HIDE_TRANSLATION_BUTTONS = setSetting("hide_translation_buttons");
 const SET_RESTRICT_ROOM_CREATION = setSetting("restrict_room_creation_to_administrators");
+const SET_HUDDLE_CAMERAS = setSetting("huddle_cameras");
 const SET_CUSTOM_DOMAIN = setSetting("custom_domain");
 const SET_JOIN_LINK = setSetting("join_link");
 const SET_OPEN_SIGN_UP = setSetting("open_sign_up");
@@ -2731,6 +2737,7 @@ export class WorkspaceStore {
       hideTranslationButtons: hidesTranslationButtons(settings),
       customStyles: row.custom_styles ?? "",
       restrictRoomCreation: restrictsRoomCreation(settings),
+      huddleCameras: showsHuddleCameras(settings),
       customDomain: customDomainIn(settings),
       joinLink: joinsWithLinkIn(settings),
       openSignUp: signsUpOpenlyIn(settings),
@@ -2768,6 +2775,7 @@ export class WorkspaceStore {
       tagline,
       hideTranslationButtons,
       restrictRoomCreation,
+      huddleCameras,
       customDomain,
       otherAddresses,
       joinLink,
@@ -2789,6 +2797,7 @@ export class WorkspaceStore {
       ...(tagline === undefined ? [] : [statement(SET_TAGLINE, JSON.stringify(tagline), now)]),
       ...(hideTranslationButtons === undefined ? [] : [statement(SET_HIDE_TRANSLATION_BUTTONS, JSON.stringify(hideTranslationButtons), now)]),
       ...(restrictRoomCreation === undefined ? [] : [statement(SET_RESTRICT_ROOM_CREATION, JSON.stringify(restrictRoomCreation), now)]),
+      ...(huddleCameras === undefined ? [] : [statement(SET_HUDDLE_CAMERAS, JSON.stringify(huddleCameras), now)]),
       ...(customDomain === undefined ? [] : [statement(SET_CUSTOM_DOMAIN, JSON.stringify(customDomain), now)]),
       ...(otherAddresses === undefined ? [] : [statement(REMEMBER_OTHER_ADDRESSES, JSON.stringify(otherAddresses))]),
       ...(joinLink === undefined ? [] : [statement(SET_JOIN_LINK, JSON.stringify(joinLink), now)]),

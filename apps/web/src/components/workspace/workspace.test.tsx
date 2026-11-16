@@ -4,6 +4,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { CloseCode, startingInvolvement, type Account, type Bot, type DirectoryUser, type DirectRoom, type Me, type Message, type Room, type RoomId, type RoomSettings, type SharedRoom, type SidebarRoom, type TimelinePage, type WorkspaceServerFrame, type WorkspaceSettings } from "@ember/protocol";
 import type { AgentSettings, AvailableAgent } from "@ember/protocol/agents";
 import { THINKING_LEVELS, type AssistantSettings } from "@ember/protocol/assistant";
+import { CAMERAS_OFF } from "@ember/protocol/huddles";
 import { FlashProvider } from "@/components/flash";
 import { AccountContext } from "@/hooks/use-account";
 import { SHIPPED_MODELS } from "@/hooks/use-offered-models";
@@ -43,7 +44,7 @@ const roomList = (listed: Room[], favorites: RoomId[] = [], sharedOrder: RoomId[
 });
 const generalSettings: RoomSettings = { room: rooms[0]!, canAdminister: true, people: [{ ...ada, member: true }] };
 const workspaceSettings: WorkspaceSettings = {
-  account: { name: "Analytical Engines", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false },
+  account: { name: "Analytical Engines", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true },
   joinCode: "aB3d-Ef5h-iJ7k",
   canAdminister: false,
   memberfulSite: null,
@@ -142,12 +143,15 @@ function showWorkspace(path = "/", me = ada, account?: Account) {
   const workspace = (
     <Workspace me={me} workspaceName="Analytical Engines" onAccountChanged={onAccountChanged} onSignOut={onSignOut} onSessionChanged={onSessionChanged} />
   );
-  const { unmount } = render(
+  const page = (shown?: Account) => (
     <PushContext value={PUSH_ON}>
-      <FlashProvider workspace>{account ? <AccountContext value={account}>{workspace}</AccountContext> : workspace}</FlashProvider>
-    </PushContext>,
+      <FlashProvider workspace>{shown ? <AccountContext value={shown}>{workspace}</AccountContext> : workspace}</FlashProvider>
+    </PushContext>
   );
-  return { onAccountChanged, onSignOut, onSessionChanged, unmount, user: userEvent.setup() };
+  const { unmount, rerender } = render(page(account));
+  /** Shows the workspace as its account has become, where it was given one to begin with. */
+  const showAccount = (changed: Account) => rerender(page(changed));
+  return { onAccountChanged, onSignOut, onSessionChanged, unmount, showAccount, user: userEvent.setup() };
 }
 
 const roomHeading = () => screen.findByRole("heading", { level: 1 });
@@ -2746,6 +2750,36 @@ describe("Huddles", () => {
     act(() => tellOfHuddle("Ember has no camera to use."));
     expect(await screen.findByRole("alert")).toHaveTextContent("Ember has no camera to use.");
     expect(opened()).toBeInTheDocument();
+  });
+
+  it("turns the tab's camera off, and says why, once an administrator turns cameras off", async () => {
+    const { showAccount } = showWorkspace("/rooms/general", ada, HUDDLES_ON);
+    await roomHeading();
+    join("general");
+    act(() => showHuddle({ ...joinedHuddle()!, camera: {} as MediaStream }));
+    expect(within(opened()!).getByRole("button", { name: "Turn off camera" })).toBeInTheDocument();
+    controls.setCamera.mockImplementationOnce(() => showHuddle({ ...joinedHuddle()!, camera: null }));
+
+    showAccount({ ...HUDDLES_ON, huddleCameras: false });
+    expect(controls.setCamera.mock.calls).toEqual([[false]]);
+    expect(await screen.findByRole("alert")).toHaveTextContent(CAMERAS_OFF);
+    // They stay in the huddle, which has no camera button now.
+    expect(within(opened()!).queryByRole("button", { name: /camera/ })).not.toBeInTheDocument();
+    expect(within(opened()!).getByRole("button", { name: "Mute microphone" })).toBeInTheDocument();
+  });
+
+  it("has nothing to say of cameras turned off to a tab whose camera is off, and gives its button back once they're on again", async () => {
+    const { showAccount } = showWorkspace("/rooms/general", ada, HUDDLES_ON);
+    await roomHeading();
+    join("general");
+    expect(within(opened()!).getByRole("button", { name: "Turn on camera" })).toBeInTheDocument();
+    showAccount({ ...HUDDLES_ON, huddleCameras: false });
+    expect(within(opened()!).queryByRole("button", { name: /camera/ })).not.toBeInTheDocument();
+    expect(controls.setCamera).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    showAccount(HUDDLES_ON);
+    expect(within(opened()!).getByRole("button", { name: "Turn on camera" })).toBeInTheDocument();
   });
 
   it("closes the preview of a room that stops being this person's, for good", async () => {

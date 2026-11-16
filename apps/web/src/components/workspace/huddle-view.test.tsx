@@ -2,7 +2,9 @@ import type { DirectoryUser, Room, User } from "@ember/protocol";
 import type { HuddlePerson } from "@ember/protocol/huddles";
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
+import { AccountContext, useAccount } from "@/hooks/use-account";
 import { PeopleContext } from "@/hooks/use-directory";
 import { showHuddle, type JoinedHuddle } from "@/lib/huddle-store";
 import { HuddleView } from "./huddle-view";
@@ -35,6 +37,11 @@ function renderView(joined: JoinedHuddle = huddle(), room: Room | null = general
   const user = userEvent.setup();
   const view = render(<HuddleView huddle={joined} room={room} meId="ada" />);
   return { ...controls, user, ...view };
+}
+
+/** A workspace whose administrator has cameras off in huddles. */
+function CamerasOff({ children }: { children: ReactNode }) {
+  return <AccountContext value={{ ...useAccount(), huddleCameras: false }}>{children}</AccountContext>;
 }
 
 const opened = () => screen.getByRole("region");
@@ -217,6 +224,37 @@ describe("The buttons along the base of a huddle", () => {
     expect(on).toHaveClass("bg-foreground", "text-background");
     await user.click(on);
     expect(setCamera.mock.calls).toEqual([[true], [false]]);
+  });
+
+  it("has no camera button while an administrator has cameras off, but to turn off a camera that's on still", async () => {
+    const { setCamera, user, rerender } = renderView();
+    rerender(
+      <CamerasOff>
+        <HuddleView huddle={huddle()} room={general} meId="ada" />
+      </CamerasOff>,
+    );
+    expect(screen.queryByRole("button", { name: /camera/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Mute microphone" })).toBeInTheDocument();
+    rerender(
+      <CamerasOff>
+        <HuddleView huddle={huddle({ camera: camera() })} room={general} meId="ada" />
+      </CamerasOff>,
+    );
+    await user.click(screen.getByRole("button", { name: "Turn off camera" }));
+    expect(setCamera.mock.calls).toEqual([[false]]);
+  });
+
+  it("keeps its camera button under a workspace that says nothing of cameras, as one told of by an older Worker does", () => {
+    function Unsaid({ children }: { children: ReactNode }) {
+      return <AccountContext value={{ ...useAccount(), huddleCameras: undefined as unknown as boolean }}>{children}</AccountContext>;
+    }
+    const { rerender } = renderView();
+    rerender(
+      <Unsaid>
+        <HuddleView huddle={huddle()} room={general} meId="ada" />
+      </Unsaid>,
+    );
+    expect(screen.getByRole("button", { name: "Turn on camera" })).toBeInTheDocument();
   });
 
   it("leaves on Leave, the last of its buttons", async () => {

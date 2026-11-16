@@ -298,7 +298,7 @@ describe("One live connection per tab outside the open room", () => {
     const welcome: WorkspaceServerFrame = {
       type: "welcome",
       you: { id: "u1", name: "Ada", administrator: true },
-      account: { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false },
+      account: { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true },
     };
     expect(parseServerFrame<WorkspaceServerFrame>(JSON.stringify(welcome))).toEqual(welcome);
     expect(parseServerFrame<WorkspaceServerFrame>('{"type":7}')).toBeNull();
@@ -681,6 +681,14 @@ describe("Only administrators create rooms (setting)", () => {
       settings: { restrictRoomCreation: false, hideTranslationButtons: true },
     });
     expect(parseAccountChanges({ settings: { restrictRoomCreation: "true" } })).toBe("Must be admin to create new rooms must be true or false");
+  });
+});
+
+describe("Cameras in huddles (setting)", () => {
+  it("takes Cameras as true or false, beside the other settings", () => {
+    expect(parseAccountChanges({ settings: { huddleCameras: false } })).toEqual({ settings: { huddleCameras: false } });
+    expect(parseAccountChanges({ settings: { huddleCameras: true, restrictRoomCreation: true } })).toEqual({ settings: { huddleCameras: true, restrictRoomCreation: true } });
+    expect(parseAccountChanges({ settings: { huddleCameras: "off" } })).toBe("Cameras must be true or false");
   });
 });
 
