@@ -405,7 +405,9 @@ export interface SavedPasswordReset {
 /**
  * The sessions a new password ends, all of its person's but `kept`, the one saving it, whose sockets it
  * closes with `code` in every room they're in, due at `dueAt`, and the push subscriptions it forgets with
- * them, all of theirs but those at `pushEndpoint`, its browser's.
+ * them, all of theirs but those at `pushEndpoint`, its browser's. `kept` stays signed in, but the sign-in
+ * links it showed before `dueAt` end with them, since one that someone else has would go on signing them
+ * in (migrations/0064_session_transfers.sql).
  */
 export interface EndedByPassword {
   kept: string;
@@ -940,13 +942,14 @@ const DISCONNECT_IDENTITY = `DELETE FROM identities WHERE user_id = ?1 AND issue
 
 /**
  * The same, for someone signing in with a sign-in link, unless they're no longer active, or are a guest
- * while ?7 says guests can't stay signed in, or the session ?8 names, which showed the link, has ended,
- * is a guest's while ?7 says that, or is neither theirs nor an active administrator's.
+ * while ?7 says guests can't stay signed in, or the session ?8 names, which showed the link at ?9, has
+ * ended, has ended the links it showed until after then (`EndedByPassword`), is a guest's while ?7 says
+ * that, or is neither theirs nor an active administrator's.
  */
 const INSERT_TRANSFERRED_SESSION = `INSERT INTO sessions (id, user_id, token_digest, ip_address, user_agent, last_active_at, created_at, updated_at)
   SELECT ?1, id, ?2, ?3, ?4, ?5, ?5, ?5 FROM users WHERE id = ?6 AND status = ${ACTIVE} AND (guest = 0 OR ?7 = 1)
     AND EXISTS (SELECT 1 FROM sessions AS showing JOIN users AS shower ON shower.id = showing.user_id
-      WHERE showing.id = ?8 AND shower.status = ${ACTIVE} AND (shower.guest = 0 OR ?7 = 1)
+      WHERE showing.id = ?8 AND showing.transfers_since <= ?9 AND shower.status = ${ACTIVE} AND (shower.guest = 0 OR ?7 = 1)
         AND (shower.id = users.id OR shower.role = ${ADMINISTRATOR}))`;
 
 /** The session a token's digest names, if its person is still active. */
@@ -3054,15 +3057,17 @@ export class WorkspaceStore {
    * Unlinks the account at `issuer` from `userId`, while their password's digest is still
    * `passwordDigest`, as the Worker checked it, and in the same transaction ends the sessions and
    * forgets the push subscriptions `ended` says, queuing closing those sessions' sockets, and forgets
-   * the connections their browsers started and haven't finished, as a new password does. Each
-   * statement checks both, so a password changed meanwhile, or an account disconnected already, changes
-   * nothing. Answers whether it was unlinked, and whether it queued any.
+   * the connections their browsers started and haven't finished, and ends the sign-in links the session
+   * it keeps has shown, as a new password does. Each statement checks both, so a password changed
+   * meanwhile, or an account disconnected already, changes nothing. Answers whether it was unlinked, and
+   * whether it queued any.
    */
   async disconnectIdentity(userId: UserId, issuer: string, passwordDigest: string, ended: EndedByPassword): Promise<Disconnection> {
-    const [queued, , , , unlinked] = await this.db.batch([
+    const [queued, , , , , unlinked] = await this.db.batch([
       // Before their sessions go, which it finds their sockets by, and before the link, which each checks.
       statement(QUEUE_DISCONNECTED_SESSION_REVOCATIONS, userId, issuer, passwordDigest, SESSION_TAG_PREFIX, ended.code, ended.dueAt, ended.kept),
       statement(`DELETE FROM sessions WHERE user_id = ?1 AND id <> ?4 AND ${DISCONNECTING}`, userId, issuer, passwordDigest, ended.kept),
+      statement(`UPDATE sessions SET transfers_since = ?5 WHERE id = ?4 AND ${DISCONNECTING}`, userId, issuer, passwordDigest, ended.kept, ended.dueAt),
       statement(`DELETE FROM push_subscriptions WHERE user_id = ?1 AND endpoint IS NOT ?4 AND ${DISCONNECTING}`, userId, issuer, passwordDigest, ended.pushEndpoint),
       statement(`DELETE FROM pending_identities WHERE user_id = ?1 AND ${DISCONNECTING}`, userId, issuer, passwordDigest),
       statement(DISCONNECT_IDENTITY, userId, issuer, passwordDigest),
@@ -3265,13 +3270,15 @@ export class WorkspaceStore {
   }
 
   /**
-   * Starts a session for someone who opened a sign-in link for them that the session `shownBy` showed,
-   * unless they're no longer active, or are a guest while `guests` says guests can't stay signed in, or
-   * that session has ended or is neither theirs nor an active administrator's.
+   * Starts a session for someone who opened a sign-in link for them that the session `shownBy` showed
+   * at `shownAt`, unless they're no longer active, or are a guest while `guests` says guests can't stay
+   * signed in, or that session has ended, has ended the links it showed until then, or is neither theirs
+   * nor an active administrator's.
    */
   async startTransferredSession(
     userId: UserId,
     shownBy: string,
+    shownAt: number,
     guests: boolean,
     sessionId: string,
     tokenDigest: string,
@@ -3279,7 +3286,7 @@ export class WorkspaceStore {
     now: string,
   ): Promise<StoredSession | null> {
     const [, [row]] = (await this.db.batch([
-      statement(INSERT_TRANSFERRED_SESSION, sessionId, tokenDigest, client.ip, client.userAgent, now, userId, guests ? 1 : 0, shownBy),
+      statement(INSERT_TRANSFERRED_SESSION, sessionId, tokenDigest, client.ip, client.userAgent, now, userId, guests ? 1 : 0, shownBy, shownAt),
       statement(SESSION, tokenDigest),
     ])) as [unknown[], SessionRow[]];
     return row ? storedSession(row) : null;
@@ -4456,9 +4463,10 @@ export class WorkspaceStore {
   /**
    * Saves someone's profile, and a new password when `passwordDigest` is one's, recording when. With a
    * new password, in the same transaction it ends the sessions and forgets the push subscriptions
-   * `ended` says, queuing closing those sessions' sockets, and forgets the accounts elsewhere their old
-   * password started connecting, or connected, if they had one and keep an email address to sign in
-   * with (`UNLINK_ON_NEW_PASSWORD`). Answers whether it queued any.
+   * `ended` says, queuing closing those sessions' sockets, ends the sign-in links the session it keeps
+   * has shown, and forgets the accounts elsewhere their old password started connecting, or connected, if
+   * they had one and keep an email address to sign in with (`UNLINK_ON_NEW_PASSWORD`). Answers whether it
+   * queued any.
    */
   async changeProfile(userId: UserId, { name, emailAddress, bio, passwordDigest }: ProfileChange, now: string, ended: EndedByPassword | null): Promise<boolean> {
     const change = statement(CHANGE_PROFILE, name, emailAddress, bio, passwordDigest, now, userId);
@@ -4470,6 +4478,7 @@ export class WorkspaceStore {
       // Before their sessions go, which it finds their sockets by.
       statement(QUEUE_OTHER_SESSION_REVOCATIONS, SESSION_TAG_PREFIX, ended.code, ended.dueAt, userId, ended.kept),
       statement(`DELETE FROM sessions WHERE user_id = ? AND id <> ?`, userId, ended.kept),
+      statement(`UPDATE sessions SET transfers_since = ? WHERE id = ?`, ended.dueAt, ended.kept),
       statement(`DELETE FROM push_subscriptions WHERE user_id = ? AND endpoint IS NOT ?`, userId, ended.pushEndpoint),
       statement(`DELETE FROM pending_identities WHERE user_id = ?`, userId),
       statement(UNLINK_ON_NEW_PASSWORD, userId, emailAddress),

@@ -629,7 +629,7 @@ async function unbanPerson(request: Request, env: Env, userId: UserId): Promise<
  * the link.
  */
 async function profileAnswer({ transfer, profile, memberful }: YourProfile, env: Env, site: string | null): Promise<Response> {
-  const transferId = await newTransferId(transfer, env.SESSION_SECRET, Date.now());
+  const transferId = await newTransferId(transfer, env.SESSION_SECRET);
   const answer = { ...profile, memberful: memberfulStatusOf(memberful, site) };
   return json({ profile: answer, transferId } satisfies ProfileAnswer, { headers: { "Cache-Control": "no-store" } });
 }
@@ -856,7 +856,7 @@ async function showPerson(request: Request, env: Env, userId: UserId): Promise<R
   if (!found) return problem(401, "Not signed in");
   if (found === "not found") return problem(404, "Not found");
   const [shown] = await directoryOf([found.person], env.SESSION_SECRET);
-  const transferId = found.transfer ? await newTransferId(found.transfer, env.SESSION_SECRET, Date.now()) : undefined;
+  const transferId = found.transfer ? await newTransferId(found.transfer, env.SESSION_SECRET) : undefined;
   return json({ person: shown!, transferId, ...(found.agent && { agent: found.agent }) } satisfies PersonAnswer, { headers: { "Cache-Control": "no-store" } });
 }
 

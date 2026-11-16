@@ -2548,13 +2548,13 @@ export class Workspace extends DurableObject<Env> {
   /**
    * Signs in the person a sign-in link names, with a session of its own, unless they're no longer
    * active, or are a guest while `guests` says guests can't stay signed in, or the session that showed
-   * the link has ended, is a guest's while that's so, or is neither theirs nor an active
-   * administrator's.
+   * the link has ended, has ended the links it showed until then, is a guest's while that's so, or is
+   * neither theirs nor an active administrator's.
    */
-  async transferSession({ userId, sessionId: shownBy }: Transfer, tokenDigest: string, client: Client, guests: boolean): Promise<Me | null> {
+  async transferSession({ userId, sessionId: shownBy, shownAt }: Transfer, tokenDigest: string, client: Client, guests: boolean): Promise<Me | null> {
     // On D1 a role change can overlap it, so it's remembered only if none did.
     const session = await this.sessions.keep(tokenDigest, () =>
-      this.store.startTransferredSession(userId, shownBy, guests, sortableId(), tokenDigest, client, new Date().toISOString()),
+      this.store.startTransferredSession(userId, shownBy, shownAt, guests, sortableId(), tokenDigest, client, new Date().toISOString()),
     );
     return session && meOf(session);
   }
@@ -2757,7 +2757,8 @@ export class Workspace extends DurableObject<Env> {
    * `pushEndpoint`, and so are the connections their browsers started and haven't finished, which could
    * connect an account again. Each statement checks that they're still connected there and still have that
    * password and an email address, so a reset ahead of it in line, or another tab's Disconnect or
-   * profile change, makes it "refused". Null without a valid session.
+   * profile change, makes it "refused". Null without a valid session. The sign-in links this session
+   * showed until now stop working too, as when it saves a new password.
    */
   async disconnectMemberful(credentials: Credentials, issuer: string, checked: string, pushEndpoint: string | null): Promise<YourProfile | "refused" | null> {
     return this.closingSockets(async () => {
@@ -3288,7 +3289,7 @@ export class Workspace extends DurableObject<Env> {
     const agent = person.agent ? await this.store.agentProfile(userId) : null;
     if (administrator) {
       const transferable = person.status === "active" && person.role !== "bot";
-      return { person, transfer: transferable ? { userId: person.id, sessionId: session.id } : null, agent };
+      return { person, transfer: transferable ? { userId: person.id, sessionId: session.id, shownAt: Date.now() } : null, agent };
     }
     const { emailAddress, ...listed } = person;
     return { person: listed, transfer: null, agent };
@@ -4420,7 +4421,7 @@ export class Workspace extends DurableObject<Env> {
     const memberful = session.guest ? null : { membersOnly: account?.memberfulSignIn ?? false, accounts: person.accounts };
     const [apps, outsideAi] = await Promise.all([this.yourApps(person.id, session.guest, account), this.yourOutsideAi(person.id, session.guest, account)]);
     return {
-      transfer: { userId: person.id, sessionId: session.id },
+      transfer: { userId: person.id, sessionId: session.id, shownAt: Date.now() },
       profile: { name, emailAddress, bio, avatarUrl, avatar: avatar !== null, password, membershipNeeded, assistant: yourAssistantOf(account, person.picks), apps, outsideAi },
       memberful,
     };
@@ -4464,9 +4465,10 @@ export class Workspace extends DurableObject<Env> {
    * password ends their other sessions: their sockets close and are told to reconnect, here at once and
    * in every room they're in through the outbox, and their push subscriptions are forgotten but this
    * browser's, at `pushEndpoint`, and a password that replaces one they had unlinks the accounts
-   * elsewhere they connected with it. Everyone's workspace sockets hear of a new name or bio, which the
-   * people directory lists. A new name can't be @ember's ("name reserved"), or an agent's ("agent's
-   * name"), unless it was theirs before.
+   * elsewhere they connected with it. Any new password ends the sign-in links this session showed until
+   * now, too. Everyone's workspace sockets hear of a new name or bio, which the people directory lists.
+   * A new name can't be @ember's ("name reserved"), or an agent's ("agent's name"), unless it was theirs
+   * before.
    */
   async changeProfile(
     credentials: Credentials,

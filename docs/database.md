@@ -178,6 +178,11 @@ Objects, D1 or speed call for something else.
   the cookie that carries it. We store an HMAC of the token, keyed by `SESSION_SECRET`, so a leaked
   database or backup holds no live sessions; changing the secret still signs everyone out, as
   changing Campfire's does.
+- **Sessions know which sign-in links they've ended.** Campfire's sign-in links are signed ids of
+  their person, which work until they expire. Ours name the session that showed them too, and work
+  only while it's signed in. A new password saved from a profile, and Disconnect Memberful, end the
+  person's other sessions and keep the one that asked, so `sessions.transfers_since` (workspace
+  migration 0064) holds when that was, and a link the session showed before then signs nobody in.
 - **Passwords are scrypt digests.** Campfire keeps bcrypt digests, which Workers could only make
   with bcrypt compiled to WebAssembly. `users.password_digest` holds
   `$scrypt$ln=15,r=8,p=3$<salt>$<hash>` (the PHC string format), made by Node's `crypto.scrypt`,
