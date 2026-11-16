@@ -1,6 +1,7 @@
-import { ASSISTANT_ID, type Directory, type DirectoryUser, type DirectRoom, type Me, type Message, type NewRoomForm, type NewWorkspace, type PersonAnswer, type PersonRole, type RoomId, type RoomSettings, type User, type UserId } from "@ember/protocol";
+import { ASSISTANT_ID, type BotAnswer, type BotSettings, type Directory, type DirectoryUser, type DirectRoom, type Me, type Message, type NewRoomForm, type NewWorkspace, type PersonAnswer, type PersonRole, type RoomId, type RoomSettings, type User, type UserId } from "@ember/protocol";
 import { ACCESS_REFUSED, EMBER_DOES, type AgentAccess, type AgentAnswer, type AgentSettings, type AvailableAgent, type AvailableAgents, type NewAgent } from "@ember/protocol/agents";
 import { THINKING_LEVELS } from "@ember/protocol/assistant";
+import { botMessagesPath } from "@ember/protocol/bots";
 import { MENTION_CONTENT_TYPE, mentionSgid } from "@ember/richtext";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ANSWERING_AGENT, DIRECT_PEOPLE } from "../src/workspace-store";
@@ -117,6 +118,20 @@ const changeAgent = async (administrator: Session, id: UserId, changes: Partial<
 /** Deletes agent `id` as `administrator`, as its page's Delete agent does. */
 async function deleteAgent(administrator: Session, id: UserId): Promise<void> {
   expect((await api(`/api/account/agents/${id}`, { method: "DELETE", headers: { Cookie: administrator.cookie } })).status).toBe(204);
+}
+
+/** Adds a bot as `administrator`, answering it as its edit page shows it, with the key its scripts read and write its rooms with. */
+async function addBot(administrator: Session, name: string): Promise<BotSettings> {
+  const response = await api("/api/account/bots", { method: "POST", headers: { Cookie: administrator.cookie }, body: JSON.stringify({ name }) });
+  expect(response.status, await response.clone().text()).toBe(201);
+  return ((await response.json()) as BotAnswer).bot;
+}
+
+/** What `key`, a bot's, reads in room `roomId`: who wrote each message there and what it says, oldest first. */
+async function readWith(key: string, roomId: RoomId): Promise<Array<[UserId, string]>> {
+  const response = await api(botMessagesPath(roomId, key));
+  expect(response.status, await response.clone().text()).toBe(200);
+  return ((await response.json()) as Array<{ creator: { id: UserId }; body: { plain_text: string } }>).map(({ creator, body }) => [creator.id, body.plain_text]);
 }
 
 /** The rooms someone is in, by ID. */
@@ -414,6 +429,48 @@ describe("An AI agent only available in administrators' DMs", () => {
     expect(questions).toHaveLength(2);
     together.close();
     adas.close();
+  });
+
+  it("answers among administrators alone: nothing in a DM it shares with a bot, whose key reads it, and it's nobody to name with a bot or another agent", async () => {
+    const { ada } = await setUp();
+    const [scout, recap, bender] = [await makeAgent(ada, SCOUT), await makeAgent(ada, RECAP), await addBot(ada, "Bender")];
+
+    // While anyone can ask Scout, it answers in a DM with a bot, where whoever has the bot's key reads it.
+    const questions = internet("Sunny.");
+    const shared = await directWith(ada, [scout, bender]);
+    expect(shared.members.map(({ id }) => id).sort()).toEqual([ada.user.id, bender.id, scout.id].sort());
+    const adas = await connect(shared.id, ada);
+    await post(adas, "<p>What's the forecast?</p>");
+    expect(await nextFrom(adas, scout)).toMatchObject({ plainText: "Sunny." });
+    await allAsked(shared.id, adas);
+    expect(questions).toHaveLength(1);
+
+    // Kept to administrators' DMs, it says nothing more there, to Ada neither.
+    await changeAgent(ada, scout.id, { access: "admin-dms" });
+    await post(adas, "<p>And tomorrow?</p>");
+    await allAsked(shared.id, adas);
+    expect(await workspaceStub().answererIn(shared.id, scout.id, ada.user.id)).toBeNull();
+    expect(questions).toHaveLength(1);
+    expect(await readWith(bender.key, shared.id)).toEqual([
+      [ada.user.id, "What's the forecast?"],
+      [scout.id, "Sunny."],
+      [ada.user.id, "And tomorrow?"],
+    ]);
+    adas.close();
+
+    // Named with a bot, another agent or @ember, it's nobody, so none of them is in a DM with it.
+    for (const other of [bender, recap, { id: ASSISTANT_ID }]) {
+      const direct = await directWith(ada, [scout, other]);
+      expect(direct.members.map(({ id }) => id).sort()).toEqual([ada.user.id, other.id].sort());
+    }
+    expect(await roomsOf(scout.id)).toEqual([shared.id]);
+
+    // Alone with Ada, it answers.
+    const alone = await directWith(ada, [scout]);
+    const client = await connect(alone.id, ada);
+    await post(client, "<p>Just us?</p>");
+    expect(await nextFrom(client, scout)).toMatchObject({ plainText: "Sunny." });
+    client.close();
   });
 
   it("is heard of on administrators' sockets alone, and gone from everyone else's directory once it's kept for them", async () => {

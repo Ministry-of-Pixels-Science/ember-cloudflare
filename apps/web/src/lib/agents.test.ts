@@ -1,6 +1,6 @@
 import type { DirectoryUser, Me } from "@ember/protocol";
 import { describe, expect, it } from "vitest";
-import { agentsToAsk, canAsk } from "./agents";
+import { agentsToAsk, asListed, canAsk } from "./agents";
 
 const member: Me = { id: "u1", name: "Ada", administrator: false };
 const administrator: Me = { id: "u2", name: "Grace", administrator: true };
@@ -29,6 +29,15 @@ describe("AI agents someone can ask", () => {
     expect(canAsk(herald, member)).toBe(false);
     expect(canAsk(herald, administrator)).toBe(true);
     expect(canAsk(linus, member)).toBe(true);
+  });
+
+  it("takes someone as the directory lists them now, with whether only administrators can ask them, which it leaves out once anyone can", () => {
+    const fetched = { ...herald, emailAddress: null };
+    expect(asListed(fetched, { ...herald, name: "Town Crier" })).toEqual({ ...fetched, name: "Town Crier" });
+    const freed = asListed(fetched, listed("herald", { role: "bot", agent: true }));
+    expect(freed.adminsOnly).toBeUndefined();
+    expect(canAsk(freed, member)).toBe(true);
+    expect(asListed(recap, herald).adminsOnly).toBe(true);
   });
 
   it("counts the active agents, @ember among them, leaving out people, other bots and agents deleted", () => {

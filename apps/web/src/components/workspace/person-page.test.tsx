@@ -357,6 +357,17 @@ describe("A bot's profile", () => {
       expect(onStartDirect).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: recap.id }));
     });
 
+    it("has the DM button again once the directory says anyone can ask one that was kept for administrators", async () => {
+      const kept: Person = { ...recap, adminsOnly: true };
+      const { list } = showAgent(HAIKU, { people: new Map([[kept.id, kept]]) }, kept);
+      expect(await screen.findByText(adminsOnlyAsk("Recap"))).toBeVisible();
+
+      // The directory's entry leaves out that it's kept, which what the page was answered mustn't put back.
+      list(new Map([[recap.id, recap]]));
+      await waitFor(() => expect(directButton("Recap")).toBeVisible());
+      expect(screen.queryByText(adminsOnlyAsk("Recap"))).toBeNull();
+    });
+
     it("badges an agent the people directory lists, deleted ones too, with only their avatar, as a bot's page", async () => {
       const deleted = { ...recap, status: "deactivated" as const };
       serve(found(deleted));

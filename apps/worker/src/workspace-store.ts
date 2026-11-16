@@ -1770,11 +1770,12 @@ const askedBy = (asker: string) => `(users.agent_access IS NULL OR ${administrat
 /**
  * Whether the bot `users` reads answers `asker` in room `room`, both parameters: any does, unless it's an
  * AI agent kept for administrators, which answers only an administrator, and one only their direct
- * messages reach only where nobody else in the room is a member, so that nobody else reads what it says.
+ * messages reach only where everyone else in the room is an administrator, so that nobody else reads
+ * what it says: no member, and nobody with the key of a bot there, which reads the room and is sent it.
  */
 const answersTo = (asker: string, room: string) => `(users.agent_access IS NULL OR (${administratorIs(asker)}
     AND (users.agent_access <> 'admin-dms' OR NOT EXISTS (SELECT 1 FROM memberships AS others JOIN users AS people ON people.id = others.user_id
-      WHERE others.room_id = ${room} AND people.role = ${MEMBER}))))`;
+      WHERE others.room_id = ${room} AND others.user_id <> users.id AND people.role <> ${ADMINISTRATOR}))))`;
 
 /**
  * The bots a new message, numbered ?4, by ?2 in room ?1 goes to: in a DM, the active bots in it, and in
@@ -2394,13 +2395,14 @@ export const PEOPLE_WITH_IDS = `SELECT id, name FROM users WHERE id IN (SELECT v
 /**
  * The people a JSON array ?1 names whom ?2 can start a DM with, whatever their status: anyone, but an AI
  * agent kept for administrators, which only an administrator writes to, and one only their direct
- * messages reach only while nobody else named is a member, so that nobody else is shown it.
+ * messages reach only while everyone else named is an administrator, so that nobody else is shown it:
+ * no member, and no bot, another agent included, as whoever has a bot's key reads the rooms it's in.
  */
 export const DIRECT_PEOPLE = `SELECT users.id, users.name FROM users
   WHERE users.id IN (SELECT value FROM json_each(?1))
     AND (users.agent_access IS NULL OR (${administratorIs("?2")}
       AND (users.agent_access <> 'admin-dms' OR NOT EXISTS (SELECT 1 FROM users AS others
-        WHERE others.id IN (SELECT value FROM json_each(?1)) AND others.role = ${MEMBER}))))`;
+        WHERE others.id IN (SELECT value FROM json_each(?1)) AND others.id <> users.id AND others.role <> ${ADMINISTRATOR}))))`;
 
 /** The same, as the people directory lists them. */
 const DIRECTORY_WITH_IDS = `SELECT ${DIRECTORY_COLUMNS} FROM users WHERE id IN (SELECT value FROM json_each(?))`;

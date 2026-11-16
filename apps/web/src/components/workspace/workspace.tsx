@@ -27,7 +27,7 @@ import { afterNavigating, messagePath, navigate, pageMark, roomPath, routeOf, us
 import { HuddlesContext, NO_HUDDLES, type Huddles } from "./huddle-button";
 import { MovedNotice } from "./moved-notice";
 import { KeyboardShortcutsDialog } from "./keyboard-shortcuts-dialog";
-import { NewDirectDialog } from "./new-direct-dialog";
+import { NewDirectDialog, startedWithout } from "./new-direct-dialog";
 import { Notices } from "./notices";
 import { DrawerOpen, PageHeader } from "./page-header";
 import { Rail, type RailPage } from "./rail";
@@ -893,6 +893,7 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
                 // opening it would.
                 if (startedShown) roomView.current?.focusComposer();
               }}
+              onLeftOut={(people) => flash("alert", startedWithout(people.map((person) => person.name)))}
               onFailed={failed}
             />
           )}

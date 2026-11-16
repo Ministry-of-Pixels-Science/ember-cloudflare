@@ -3186,10 +3186,10 @@ export class Workspace extends DurableObject<Env> {
    * Starts a DM as the person `credentials` signs in: the DM between them and the people `userIds` names
    * who exist, whatever their status, or their DM with themselves when it names nobody else. An AI agent
    * kept for administrators counts as nobody to anyone else, and one only their direct messages reach to
-   * an administrator who names a member with it, who would read what it says (`DIRECT_PEOPLE`). A group
-   * of people has one DM, so the one they have opens again. Answers it, and whether it's new, or null
-   * without a valid session. Everyone in a new DM sees it in their sidebars at once, and nobody else
-   * hears of it.
+   * an administrator who names with it anyone who isn't one, a member or a bot, who would read what it
+   * says (`DIRECT_PEOPLE`). A group of people has one DM, so the one they have opens again. Answers it,
+   * and whether it's new, or null without a valid session. Everyone in a new DM sees it in their sidebars
+   * at once, and nobody else hears of it.
    */
   async startDirect(credentials: Credentials, userIds: UserId[]): Promise<{ room: DirectRoom; started: boolean } | null> {
     const user = await this.authenticate(credentials);

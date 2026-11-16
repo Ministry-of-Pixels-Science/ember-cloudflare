@@ -14,6 +14,12 @@ export const KEPT_FOR: Readonly<Record<Exclude<AgentAccess, "everyone">, string>
 export const canAsk = (person: Pick<DirectoryUser, "adminsOnly">, me: Me) => me.administrator || person.adminsOnly !== true;
 
 /**
+ * `person` as the people directory lists them now, `listed`: its entry over what was read of them before,
+ * with whether only administrators can ask them, which the entry leaves out once anyone can again.
+ */
+export const asListed = <P extends DirectoryUser>(person: P, listed: DirectoryUser): P => ({ ...person, ...listed, adminsOnly: listed.adminsOnly });
+
+/**
  * How many AI agents `me` can ask, of the `people` the directory lists, which the sidebar's Available
  * Agents says: @ember and the agents administrators made, while they're active, which none is while
  * Ember AI is off.

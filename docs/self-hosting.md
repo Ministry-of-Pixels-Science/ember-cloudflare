@@ -834,8 +834,9 @@ agent's page, which changes it. The page sets up:
   - **Only available in admin DMs** takes the agent out of every room, private ones too, keeps it out
     of them, and holds Admins only on. Nobody else can see it: their people directory, mention prompt
     and Available Agents don't list it, and its profile and avatar aren't there for them. Only an
-    administrator can start a DM with it, and it answers there while everyone in the DM is an
-    administrator.
+    administrator can start a DM with it, and it answers there while everyone else in the DM is an
+    administrator. A DM started with it and anyone else, a member, a bot, whose key reads the rooms
+    it's in, or another agent, is started without it.
 
   Whoever becomes an administrator can ask these agents from then on, and no longer once they aren't
   one. A DM someone had with an agent before it was kept for administrators stays theirs to read, and

@@ -14,6 +14,7 @@ import { endHuddle, joinedHuddle, showHuddle, tellOfHuddle, type HuddleControls 
 import { loadPage } from "@/lib/page";
 import { badgeTheApp } from "@/test-badge";
 import { PUSH_ON } from "@/test-push";
+import { startedWithout } from "./new-direct-dialog";
 import { Workspace, loadPageAhead } from "./workspace";
 
 vi.mock("@/lib/page", () => ({ loadPage: vi.fn() }));
@@ -767,6 +768,21 @@ describe("New direct message dialog", () => {
     expect(location.pathname).toBe("/rooms/d1");
     expect(screen.getByRole("textbox", { name: "Write a message" })).toBe(composer);
     await waitFor(() => expect(composer).toHaveFocus());
+  });
+
+  it("tells an administrator that a DM started without an agent only available in admin DMs, which was picked with someone who isn't one", async () => {
+    vi.stubGlobal("WebSocket", OpenRoomSocket);
+    const steward: DirectoryUser = { id: "a9", name: "Steward", bio: null, role: "bot", status: "active", avatarUrl: "/users/a9/avatar", agent: true, adminsOnly: true };
+    serve({ "GET /api/users": () => Response.json({ users: [...people, steward] }), "POST /api/directs": () => Response.json({ room: withGrace }, { status: 201 }) });
+    const { user } = showWorkspace("/rooms/general", { ...ada, administrator: true });
+    await roomHeading();
+    await user.click(dms());
+    await user.click(await screen.findByRole("option", { name: "Steward Agent" }));
+    await user.click(screen.getByRole("option", { name: "Grace" }));
+    await user.click(screen.getByRole("button", { name: "Start conversation" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(startedWithout(["Steward"]));
+    expect(await screen.findByRole("heading", { level: 1, name: "Direct message with Grace" })).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledWith("/api/directs", expect.objectContaining({ method: "POST", body: JSON.stringify({ userIds: ["a9", "u2"] }) }));
   });
 
   it("asks before leaving a room's unsaved settings for the DM, keeping the people picked to come back to", async () => {

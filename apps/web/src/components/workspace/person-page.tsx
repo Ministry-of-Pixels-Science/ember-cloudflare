@@ -8,7 +8,7 @@ import { PeopleContext, useNameOf } from "@/hooks/use-directory";
 import { useMounted } from "@/hooks/use-mounted";
 import { leave, PROFILE_PATH, useBackPath } from "@/hooks/use-route";
 import { useTitle } from "@/hooks/use-title";
-import { canAsk } from "@/lib/agents";
+import { asListed, canAsk } from "@/lib/agents";
 import { banPerson, fetchPerson, isSignedOut, unbanPerson } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { AgentBadge, isAgent } from "./agent-badge";
@@ -69,7 +69,7 @@ export function PersonPage({ userId, me, onStartDirect, onPersonChanged, reloadP
   useLayoutEffect(() => {
     listedNow.current = listed;
   }, [listed]);
-  const person = fetched && { ...fetched.person, ...listed };
+  const person = fetched && (listed ? asListed(fetched.person, listed) : fetched.person);
   const [starting, setStarting] = useState(false);
   const [banning, setBanning] = useState(false);
   // How many times a ban or its lifting has loaded the page again.

@@ -9,7 +9,7 @@ import { PeopleContext, type People } from "@/hooks/use-directory";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { useMounted } from "@/hooks/use-mounted";
 import { agentSettingsPath, leave, NEW_AGENT_PATH, roomPath } from "@/hooks/use-route";
-import { canAsk, DMS_ONLY, EVERY_ROOM, KEPT_FOR } from "@/lib/agents";
+import { asListed, canAsk, DMS_ONLY, EVERY_ROOM, KEPT_FOR } from "@/lib/agents";
 import { fetchAvailableAgents, isSignedOut } from "@/lib/api";
 import { copyWithSuccess } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
@@ -50,7 +50,7 @@ const COUNT = "grid h-5 min-w-5 place-items-center rounded-full bg-foreground/8 
 function listedNow(agents: AvailableAgent[], people: People, me: Me): AvailableAgent[] {
   return agents.flatMap((agent) => {
     const listed = people.get(agent.id);
-    return listed?.status === "active" && canAsk(listed, me) ? [{ ...agent, ...listed }] : [];
+    return listed?.status === "active" && canAsk(listed, me) ? [asListed(agent, listed)] : [];
   });
 }
 
