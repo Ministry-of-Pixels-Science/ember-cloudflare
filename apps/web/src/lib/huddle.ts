@@ -626,7 +626,8 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
 
   /**
    * The room couldn't do what a frame asked for one of the connections, which starts over. A camera it
-   * refused, the huddle showing as many as it does, goes off instead, and its person is told.
+   * refused, the huddle showing as many as it does or an administrator having cameras off, goes off
+   * instead, and its person is told.
    */
   function couldNot({ failed, kind = "audio", refused, message }: Extract<HuddleServerFrame, { type: "error" }>) {
     if (failed === "huddle.listen" || failed === "huddle.answer") return receiving[kind].failed();

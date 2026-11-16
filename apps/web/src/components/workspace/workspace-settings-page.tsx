@@ -43,7 +43,7 @@ import { CustomDomainSettings } from "./custom-domain-settings";
 import { EmberVersion } from "./ember-version";
 import { EmailSettings, sendsEmail } from "./email-settings";
 import { EmailSetup } from "./email-setup";
-import { HuddlesSettings } from "./huddles-settings";
+import { HuddleCameras, HuddlesSettings } from "./huddles-settings";
 import { HuddlesSetup } from "./huddles-setup";
 import { InviteByEmail } from "./invite-by-email";
 import { InviteLink } from "./invite-link";
@@ -113,7 +113,7 @@ interface Props {
  *   its page, and New agent. Then whether AI apps, such as Claude, may connect to Ember as the people in
  *   it (Outside AI).
  * - Huddles: for administrators, whether huddles are on, through the Realtime SFU app whose keys Set up
- *   huddles takes.
+ *   huddles takes, and while they are, whether people may turn their cameras on in them.
  */
 export function WorkspaceSettingsPage({
   me,
@@ -645,6 +645,7 @@ export function WorkspaceSettingsPage({
           (settings.canAdminister ? (
             <>
               <HuddlesSettings huddles={settings.huddles} onSetUp={() => setSettingUpHuddles(true)} onStopped={() => showHuddles(null)} onFailed={onFailed} />
+              {settings.huddles !== null && <HuddleCameras saveSwitch={saveSwitch} />}
               {settingUpHuddles && (
                 <HuddlesSetup
                   huddles={settings.huddles}

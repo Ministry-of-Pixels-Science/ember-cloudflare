@@ -1,5 +1,5 @@
 import type { Me, WorkspaceSettings } from "@ember/protocol";
-import { APP_ID_UNKNOWN, APP_SECRET_UNKNOWN } from "@ember/protocol/huddles";
+import { APP_ID_UNKNOWN, APP_SECRET_UNKNOWN, CAMERAS_OFF } from "@ember/protocol/huddles";
 import type { APIRequestContext, Page } from "@playwright/test";
 import { administratorSession, cookieHeader, expect, newAddress, SAME_ORIGIN, signInAsAdministrator, test, useOwnAddress, type TestRoom } from "../../fixtures";
 import { AI_GATEWAY_ACCOUNT, SFU_APP } from "../../projects/workspace-settings";
@@ -8,7 +8,7 @@ import { startFakeSfu, type FakeSfu } from "./fake-sfu";
 // The Huddles tab's card and Set up huddles, and a huddle itself, on the second test server, which asks
 // the Realtime SFU this spec fakes: to start a session with the keys it's given, and to carry what the
 // people in a huddle say and what their cameras show, which the fake does through a page of its own.
-// Each test leaves the workspace as a new one is: huddles off.
+// Each test leaves the workspace as a new one is: huddles off, and cameras allowed in them.
 
 let sfu: FakeSfu;
 let relay: Page;
@@ -24,13 +24,27 @@ test.afterAll(async () => {
 test.afterEach(async ({ request }) => {
   const forgotten = await request.delete("/api/account/huddles", { headers: await asAdministrator(request) });
   expect(forgotten.status(), await forgotten.text()).toBe(200);
+  await switchCameras(request, true);
 });
 
 /** The administrator's session's headers, for the API. */
 const asAdministrator = async (request: APIRequestContext) => ({ Cookie: cookieHeader(await administratorSession(request)), ...SAME_ORIGIN });
 
+/** Turns Cameras on or off as the administrator, as its switch on the Huddles tab does. */
+async function switchCameras(request: APIRequestContext, huddleCameras: boolean): Promise<void> {
+  const switched = await request.patch("/api/account", { data: { settings: { huddleCameras } }, headers: await asAdministrator(request) });
+  expect(switched.status(), await switched.text()).toBe(200);
+}
+
+/** Whether cameras may go on in huddles, as the workspace's settings have it. */
+const camerasAllowed = async (request: APIRequestContext) =>
+  ((await (await request.get("/api/account", { headers: await asAdministrator(request) })).json()) as WorkspaceSettings).account.huddleCameras;
+
 /** The Huddles tab's card on the page. */
 const huddlesCard = (page: Page) => page.getByRole("region", { name: "Audio and video chat", exact: true });
+
+/** The card under it, which the tab has while huddles are on. */
+const camerasCard = (page: Page) => page.getByRole("region", { name: "Cameras", exact: true });
 
 /** Opens community settings' Huddles tab as the administrator, answering its card. */
 async function openHuddles(page: Page) {
@@ -46,6 +60,7 @@ test.describe("Set up huddles", () => {
     await expect(huddles).toContainText("Huddles let people in a room talk to each other live.");
     const huddlesSwitch = huddles.getByRole("switch", { name: "Audio and video chat" });
     await expect(huddlesSwitch).not.toBeChecked();
+    await expect(camerasCard(page)).toHaveCount(0);
     await huddlesSwitch.click();
 
     const setup = page.getByRole("dialog");
@@ -81,6 +96,8 @@ test.describe("Set up huddles", () => {
     await expect(setup).toBeHidden();
     await expect(huddles).toContainText(`Huddles run through the Realtime SFU app ${SFU_APP.appId} in your Cloudflare account.`);
     await expect(huddlesSwitch).toBeChecked();
+    // What people may do in a huddle comes with them: cameras, which are on.
+    await expect(camerasCard(page).getByRole("switch", { name: "Cameras" })).toBeChecked();
 
     // Ember keeps the keys, and Change keys starts from the app's ID, asking for its secret again.
     await page.reload();
@@ -102,8 +119,29 @@ test.describe("Set up huddles", () => {
     await expect(huddlesSwitch).not.toBeChecked();
     await expect(huddlesSwitch).toBeEnabled();
     await expect(huddles.getByRole("button", { name: "Change keys" })).toHaveCount(0);
+    await expect(camerasCard(page)).toHaveCount(0);
     await page.reload();
     await expect(huddlesCard(page).getByRole("switch", { name: "Audio and video chat" })).not.toBeChecked();
+  });
+
+  test("the administrator turns cameras off for huddles, and on again, which Ember keeps", async ({ page, request }) => {
+    const saved = await request.put("/api/account/huddles", { data: SFU_APP, headers: await asAdministrator(request) });
+    expect(saved.status(), await saved.text()).toBe(200);
+    await openHuddles(page);
+    const cameras = camerasCard(page);
+    await expect(cameras).toContainText("People can turn their camera on in a huddle.");
+    const camerasSwitch = cameras.getByRole("switch", { name: "Cameras" });
+    await expect(camerasSwitch).toBeChecked();
+
+    // It's saved as it's switched, with nothing to press.
+    await camerasSwitch.click();
+    await expect(camerasSwitch).not.toBeChecked();
+    await expect.poll(() => camerasAllowed(request)).toBe(false);
+    await page.reload();
+    await expect(camerasSwitch).not.toBeChecked();
+    await camerasSwitch.click();
+    await expect(camerasSwitch).toBeChecked();
+    await expect.poll(() => camerasAllowed(request)).toBe(true);
   });
 });
 
@@ -274,6 +312,17 @@ test.describe("A huddle", () => {
     await expect(adasHuddle.getByLabel("Your camera")).toHaveCount(0);
     await expect(gracesHuddle.getByLabel(adasCamera)).toHaveCount(0);
     await expect(gracesHuddle.getByRole("listitem").first().locator("img")).toBeVisible();
+
+    // An administrator turns cameras off. Grace's goes off, which she's told, so Ada sees her avatar, and
+    // neither has a camera button until cameras are on again.
+    await switchCameras(request, false);
+    await expect(grace.getByRole("alert").filter({ hasText: CAMERAS_OFF })).toBeVisible();
+    await expect(gracesHuddle.getByLabel("Your camera")).toHaveCount(0);
+    await expect(adasHuddle.getByLabel(gracesCamera)).toHaveCount(0);
+    for (const huddle of [adasHuddle, gracesHuddle]) await expect(huddle.getByRole("button", { name: /camera/ })).toHaveCount(0);
+    await expect(page.getByRole("alert").filter({ hasText: CAMERAS_OFF })).toHaveCount(0);
+    await switchCameras(request, true);
+    for (const huddle of [adasHuddle, gracesHuddle]) await expect(huddle.getByRole("button", { name: "Turn on camera" })).toBeVisible();
 
     // Grace leaves from her huddle. It goes on for Ada, who no longer hears her, or sees her.
     await gracesHuddle.getByRole("button", { name: "Leave", exact: true }).click();

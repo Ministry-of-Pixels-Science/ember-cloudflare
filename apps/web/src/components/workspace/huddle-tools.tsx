@@ -1,5 +1,6 @@
 import type { Room, UserId } from "@ember/protocol";
 import { Microphone, MicrophoneMute, VideoCamera, VideoCameraOff } from "@/components/icons/iconoir";
+import { useCamerasAllowed } from "@/hooks/use-account";
 import { useNameOf } from "@/hooks/use-directory";
 import { roomName } from "@/lib/directs";
 import { leaveHuddle, muteHuddle, showHuddleCamera, type JoinedHuddle } from "@/lib/huddle-store";
@@ -34,9 +35,15 @@ export function MicrophoneTool({ huddle }: { huddle: JoinedHuddle }) {
   );
 }
 
-/** Turns the tab's camera on in its huddle, which has the browser ask for it the first time, or off. */
+/**
+ * Turns the tab's camera on in its huddle, which has the browser ask for it the first time, or off.
+ * While an administrator has cameras off there's none to turn on, so it's there only to turn off one
+ * that's on still.
+ */
 export function CameraTool({ huddle, className }: { huddle: JoinedHuddle; className?: string }) {
+  const allowed = useCamerasAllowed();
   const on = huddle.camera !== null;
+  if (!allowed && !on) return null;
   const label = on ? "Turn off camera" : "Turn on camera";
   return (
     <button type="button" title={label} aria-label={label} onClick={() => showHuddleCamera(!on)} className={cn(TOOL, on ? TOOL_ON : TOOL_OFF, className)}>
