@@ -2999,6 +2999,17 @@ describe("Huddles", () => {
       expect(invitation()).not.toBeInTheDocument();
     });
 
+    it("goes with a room said to be gone before this tab's rooms had it, as one made and deleted while it connected again", async () => {
+      // Ada's rooms as they were before Grace started a DM with her.
+      showWorkspace("/rooms/general", ada, HUDDLES_ON);
+      await roomHeading();
+      await workspaceSends(INVITED);
+      expect(await screen.findByRole("group", { name: "Someone invites you to a huddle" })).toBeInTheDocument();
+      expect(ringForHuddle).toHaveBeenCalledTimes(1);
+      await workspaceSends({ type: "room.gone", roomId: "d1" });
+      expect(invitation()).not.toBeInTheDocument();
+    });
+
     it("rings into a room this tab's rooms don't have yet, as one made while it wasn't connected, and opens its preview on Join once they've been asked for again", async () => {
       // Ada's rooms as they were before Grace started a DM with her.
       const { user } = showWorkspace("/rooms/general", ada, HUDDLES_ON);
