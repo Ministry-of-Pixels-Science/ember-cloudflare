@@ -27,7 +27,7 @@ import {
   MAX_CONTENT_ATTACHMENT_DEPTH,
   sanitizeContentAttribute,
 } from "./content";
-import { BODY, parseReplacement, setInnerHtml, type HtmlParser } from "./markup";
+import { BODY, forOneReading, parseReplacement, setInnerHtml, type HtmlParser } from "./markup";
 import { mentionSgid } from "./mentions";
 import { previewContent, removeSoloUnfurledLinkText } from "./previews";
 import { chomp, htmlEscape, presence, strip } from "./ruby";
@@ -65,7 +65,8 @@ interface Partials {
  */
 export function presentMessage(parse: HtmlParser, body: string, resolve: ResolveMention, mention: Partials["mention"], host = ""): string {
   const partials = { mention, preview: opengraphEmbedPartial };
-  return toHtml(renderFiltered(parse, filterMessage(parse, body, resolve, host), resolve, partials, host), { escapeAttributeBrackets: true });
+  const read = forOneReading(parse);
+  return toHtml(renderFiltered(read, filterMessage(read, body, resolve, host), resolve, partials, host), { escapeAttributeBrackets: true });
 }
 
 const MENTION_MARKER = "ember-mention";
@@ -89,7 +90,8 @@ export function canonicalize(parse: HtmlParser, body: string, resolve: ResolveMe
     mention: (user) => `<${MENTION_MARKER} user="${htmlEscape(user.id)}"></${MENTION_MARKER}>`,
     preview: (embed) => `<${PREVIEW_MARKER} index="${previews.push(embed) - 1}"></${PREVIEW_MARKER}>`,
   };
-  const content = withoutLayout(renderFiltered(parse, filterStored(parse, body, resolve), resolve, markers, ""));
+  const read = forOneReading(parse);
+  const content = withoutLayout(renderFiltered(read, filterStored(read, body, resolve), resolve, markers, ""));
   const replacements = new Map<Node, Node[]>();
   for (const node of descendants(content)) {
     if (!isElement(node)) continue;
@@ -130,7 +132,7 @@ function previewAttachment(embed: OpengraphEmbed): Element {
  * SanitizeTags and SanitizeAttributes. The first reads the body's plain text, which can raise.
  */
 export function filterMessage(parse: HtmlParser, body: string, resolve: ResolveMention, host = ""): Fragment {
-  const plainText = contentToPlainText(parse, loadContent(parse, body), resolve);
+  const plainText = readPlainText(parse, body, resolve);
   const content = loadContent(parse, body);
   removeSoloUnfurledLinkText(parse, content, plainText, host);
   return sanitizeFiltered(parse, content);
@@ -141,8 +143,14 @@ export function filterMessage(parse: HtmlParser, body: string, resolve: ResolveM
  * applies as a message shows, but still raising where reading its plain text does.
  */
 function filterStored(parse: HtmlParser, body: string, resolve: ResolveMention): Fragment {
-  contentToPlainText(parse, loadContent(parse, body), resolve);
+  readPlainText(parse, body, resolve);
   return sanitizeFiltered(parse, loadContent(parse, body));
+}
+
+/** The body's plain text, in a reading of its own: the one `parse` is for reads the body again, and copies as much. */
+function readPlainText(parse: HtmlParser, body: string, resolve: ResolveMention): string {
+  const read = forOneReading(parse);
+  return contentToPlainText(read, loadContent(read, body), resolve);
 }
 
 /** SanitizeTags, then SanitizeAttributes. */

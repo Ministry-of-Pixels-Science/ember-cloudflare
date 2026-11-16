@@ -3,6 +3,7 @@ import { OPENGRAPH_EMBED_CONTENT_TYPE } from "./attachments";
 import { autoLink } from "./autolink";
 import { plainText, prepareBody } from "./body";
 import { displayBody } from "./display";
+import * as worker from "./index";
 import { MAX_ATTRIBUTES, ParseLimitError } from "./markup";
 import { mentionSgid, userIdsIn } from "./mentions";
 import { parseHtml } from "./parse";
@@ -69,6 +70,12 @@ function nestedGalleries(levels: number, padding: string): string {
   }
   return body;
 }
+
+/** A `<b>` left open, whose title serializes to 1,000 units unless it's given, reopened in each of `copies` paragraphs. */
+const reopenedTitle = (copies: number, title = "x".repeat(991)) => `<p><b title="${title}">a${"<p>b".repeat(copies)}`;
+
+const contentAttachment = (content: string) =>
+  `<action-text-attachment content-type="text/html" content="${content.replaceAll("&", "&amp;").replaceAll('"', "&quot;")}"></action-text-attachment>`;
 
 /** The page and the stored form both have to refuse `body`, and quickly. */
 function expectRefusedQuickly(what: string, body: string): void {
@@ -176,6 +183,45 @@ describe("Rich text, safely", () => {
     expectRefusedQuickly("390 formatting elements reopened in each of 1,600 paragraphs", `<p>${unclosed}</p>${"<p>x</p>".repeat(1_600)}`);
     const boldTitle = `<p><b>Title</p>${"<p>line</p>".repeat(500)}`;
     expect(prepareBody(parseHtml, boldTitle, none)?.html).toBe(`<p><b>Title</b></p>${"<p><b>line</b></p>".repeat(500)}`);
+  });
+
+  it(
+    "refuses a body that copies more attributes than a message holds",
+    () => {
+      // Parsed in full, as Rails parses them, the first two bodies' 99 KB hold 95 MB and 28 MB of titles
+      const long = "A".repeat(95_000);
+      const unclosed = Array.from({ length: 300 }, (_, i) => `<b id=${i}>`).join("");
+      expectRefusedQuickly("a 95 KB title reopened in each of 1,000 paragraphs", reopenedTitle(1_000, long));
+      expectRefusedQuickly("a 95 KB title the adoption agency copies for each of 300 end tags", `${unclosed}<i title="${long}"><div>${"</b>".repeat(300)}`);
+      expectRefusedQuickly("a 1.9 KB title reopened in each of 1,000 paragraphs", reopenedTitle(1_000, "A".repeat(1_900)));
+      expectRefusedQuickly("66 attachments that each copy as much as a message may", contentAttachment(reopenedTitle(100)).repeat(66));
+    },
+    SLOW_TEST_MS,
+  );
+
+  it("keeps a body that copies as much as a message holds, though storing it reads it more than once", () => {
+    const paragraph = (text: string) => `<p><b title="${"x".repeat(991)}">${text}</b></p>`;
+    const kept = { html: paragraph("a") + paragraph("b").repeat(100), plainText: `a${"\n\nb".repeat(100)}` };
+    const stored = (body: string) => worker.prepareBody(body, none);
+    expect(stored(reopenedTitle(100))?.html === kept.html).toBe(true);
+    expect(stored(reopenedTitle(101))).toBeNull();
+    expect(worker.plainText(reopenedTitle(100), none)).toBe(kept.plainText);
+    expect(() => worker.plainText(reopenedTitle(101), none)).toThrow(ParseLimitError);
+    expect(worker.writtenBody(reopenedTitle(100)).plainText).toBe(kept.plainText);
+    expect(() => worker.writtenBody(reopenedTitle(101))).toThrow(ParseLimitError);
+    // What attachments copy counts with the rest, as deep as they render
+    expect(stored(contentAttachment(reopenedTitle(100)))?.html === kept.html).toBe(true);
+    expect(stored(contentAttachment(reopenedTitle(101)))).toBeNull();
+    expect(stored(contentAttachment(reopenedTitle(50)) + reopenedTitle(50))).not.toBeNull();
+    expect(stored(contentAttachment(reopenedTitle(50)) + reopenedTitle(51))).toBeNull();
+    expect(stored(contentAttachment(contentAttachment(reopenedTitle(50)).repeat(2)))).not.toBeNull();
+    expect(stored(contentAttachment(contentAttachment(reopenedTitle(50)) + contentAttachment(reopenedTitle(51))))).toBeNull();
+    // A link a pasted page left open over 700 paragraphs
+    const link = `<a href="https://example.com/${"x".repeat(64)}">`;
+    expect(stored(`<p>${link}x${"<p>y".repeat(700)}`)?.plainText).toBe(`x${"\n\ny".repeat(700)}`);
+    // An element closed inside a block is copied once, however many blocks it's closed in after
+    const long = "A".repeat(95_000);
+    expect(stored(`<b title="${long}">${"<div></b>".repeat(390)}x`)?.html.split(long)).toHaveLength(3);
   });
 
   const hostileBodies = {
