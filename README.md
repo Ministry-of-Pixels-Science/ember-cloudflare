@@ -166,7 +166,7 @@ it's yours. Slack's plans are as [slack.com/pricing](https://slack.com/pricing) 
 | | Ember | Slack |
 |---|---|---|
 | **Apps and workflows** | — | ✅ a directory of 2,600+ apps (Free: 10 of them) and Workflow Builder |
-| **Voice and video calls** | — | ✅ huddles (Free: one-on-one only) |
+| **Voice and video calls** | Huddles in any room, by voice, camera and shared screen, for up to 50 people; none in DMs yet | ✅ huddles (Free: one-on-one only) |
 | **AI** | @ember and agents of your own answer when you mention or DM them, each on the model you choose | ✅ summaries, recaps and AI search on every plan, more on Business+ |
 | **Canvases, lists and clips** | — | ✅ |
 | **Channels shared with other companies** | — | ✅ Slack Connect |
@@ -175,7 +175,7 @@ it's yours. Slack's plans are as [slack.com/pricing](https://slack.com/pricing) 
 | **Exports of every message, DMs included** | — not yet | ✅ on Business+ and up |
 | **Support** | GitHub issues | ✅ 24/7 on Business+ |
 
-If your team lives in huddles, workflows and a hundred integrations, Slack earns its price. If you
+If your team lives in canvases, workflows and a hundred integrations, Slack earns its price. If you
 want fast, calm, searchable chat that you own outright, Ember is built for you.
 
 ## What it costs
@@ -189,6 +189,7 @@ Ember is free. Cloudflare runs it, at its own prices:
 | **Files** | 10 GB in [R2](https://developers.cloudflare.com/r2/pricing/) free, then $0.015 per GB a month, with nothing to pay for downloads. |
 | **Email, if you want it** | Free with [Resend](https://resend.com), up to 3,000 emails a month and 100 a day, or 3,000 a month included with Workers Paid through Cloudflare Email Service. |
 | **@ember and agents, if you turn them on** | Claude, GPT or Grok at their makers' prices, from $0.10 for a million tokens read, paid with [AI Gateway's credits](https://developers.cloudflare.com/ai-gateway/features/unified-billing/), or Workers AI's models, free for 10,000 [Neurons](https://developers.cloudflare.com/workers-ai/platform/pricing/) a day. |
+| **Huddles, if you turn them on** | Free for the first 1,000 GB a month that Cloudflare's [Realtime SFU](https://developers.cloudflare.com/realtime/sfu/pricing/) sends, which carries about 2,000 hours of five people talking, or 200 with their cameras on, then $0.05 per GB. |
 | **Your own domain, if you want one** | Whatever your registrar charges. |
 
 The free plan's allowances are daily: once a day's are used up, Ember can't save anything new until
