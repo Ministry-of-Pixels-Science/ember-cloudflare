@@ -1,6 +1,6 @@
-// The microphone, the speaker and the camera a huddle uses, which its preview lets someone choose, and
-// this browser remembers for the next, and the screen someone shares in one, which the browser asks
-// them for each time.
+// The microphone, the speaker and the camera a huddle uses, which its preview lets someone choose, as
+// the huddle's own menus do once they're in it, and this browser remembers for the next, and the screen
+// someone shares in one, which the browser asks them for each time.
 
 export type HuddleDevice = "microphone" | "speaker" | "camera";
 
@@ -70,6 +70,13 @@ export async function openCamera(deviceId: string | null): Promise<MediaStream |
     return deviceId && deviceGone(error) ? openCamera(null) : null;
   }
 }
+
+/** What someone in a huddle is told once the browser won't open the microphone, or the camera, they chose in place of theirs, or play through the speaker they chose. */
+export const NO_OTHER_MICROPHONE = "Ember couldn't use that microphone. Nothing has changed.";
+export const NO_OTHER_CAMERA = "Ember couldn't use that camera. Nothing has changed.";
+export const NO_OTHER_SPEAKER = "Ember couldn't use that speaker. Nothing has changed.";
+/** And what someone who only listens in one is told once the browser has no microphone for them still. */
+export const STILL_NO_MICROPHONE = "Ember has no microphone to use. To speak, let this site use your microphone in your browser's settings, then choose it again.";
 
 /** The device a camera's stream is from, by its id, or empty where the browser doesn't say. */
 export const cameraOf = (stream: MediaStream | null) => stream?.getVideoTracks()[0]?.getSettings().deviceId ?? "";
@@ -157,6 +164,19 @@ export async function listsSpeaker(deviceId: string): Promise<boolean> {
   } catch {
     return true;
   }
+}
+
+/** A device to choose: its id, and what the browser calls it, which is nothing where it doesn't say. */
+export type DeviceChoice = Pick<MediaDeviceInfo, "deviceId" | "label">;
+
+/** The devices to choose among, led by the one that's open where the browser's list leaves it out. */
+export function withOpen(listed: MediaDeviceInfo[], deviceId: string, open?: MediaStreamTrack): DeviceChoice[] {
+  return listed.some((device) => device.deviceId === deviceId) ? listed : [{ deviceId, label: open?.label ?? "" }, ...listed];
+}
+
+/** The speakers to choose among: a browser that lists its own choice has it first, and the others get one to choose. */
+export function speakerChoices(listed: MediaDeviceInfo[]): DeviceChoice[] {
+  return listed.some(({ deviceId }) => deviceId === "default") ? listed : [{ deviceId: "", label: "System default" }, ...listed];
 }
 
 /** Has `changed` hear whenever a device is plugged in or taken away, until the function returned is called. */

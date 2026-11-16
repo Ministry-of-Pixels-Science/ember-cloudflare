@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cameraOf, closeDevice, listDevices, listsSpeaker, microphoneOf, NO_DEVICES, openCamera, openMicrophone, openScreen, rememberDevice, rememberedDevice, sharesScreens, watchDevices } from "./huddle-devices";
+import { cameraOf, closeDevice, listDevices, listsSpeaker, microphoneOf, NO_DEVICES, openCamera, openMicrophone, openScreen, rememberDevice, rememberedDevice, sharesScreens, speakerChoices, watchDevices, withOpen } from "./huddle-devices";
 
 /** A stream from the microphone `deviceId`, or with `kind` said, the camera, as much of one as the code reads. */
 function streamFrom(deviceId: string, kind: "audio" | "video" = "audio") {
@@ -257,5 +257,23 @@ describe("Listing a huddle's devices", () => {
     expect(changed).toHaveBeenCalledTimes(1);
     vi.stubGlobal("navigator", {});
     expect(() => watchDevices(changed)()).not.toThrow();
+  });
+});
+
+describe("The devices to choose among", () => {
+  const MICROPHONES = [device("audioinput", "mic-1", "Built-in Microphone"), device("audioinput", "mic-2", "USB Microphone")];
+  const SPEAKERS = [device("audiooutput", "speaker-1", "Built-in Speakers")];
+
+  it("are those the browser lists, led by the one that's open where its list leaves that out, by the name its track comes with", () => {
+    expect(withOpen(MICROPHONES, "mic-2")).toBe(MICROPHONES);
+    expect(withOpen(MICROPHONES, "mic-3")).toEqual([{ deviceId: "mic-3", label: "" }, ...MICROPHONES]);
+    expect(withOpen([], "", { label: "Headset" } as MediaStreamTrack)).toEqual([{ deviceId: "", label: "Headset" }]);
+  });
+
+  it("are led, for speakers, by the system's where the browser doesn't list its own choice", () => {
+    expect(speakerChoices(SPEAKERS)).toEqual([{ deviceId: "", label: "System default" }, ...SPEAKERS]);
+    expect(speakerChoices([])).toEqual([{ deviceId: "", label: "System default" }]);
+    const withOwnChoice = [device("audiooutput", "default", "Default - Built-in Speakers"), ...SPEAKERS];
+    expect(speakerChoices(withOwnChoice)).toBe(withOwnChoice);
   });
 });

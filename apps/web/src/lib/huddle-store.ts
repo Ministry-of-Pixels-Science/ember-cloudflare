@@ -1,5 +1,6 @@
 import type { RoomId, User, UserId } from "@ember/protocol";
 import type { HuddlePerson } from "@ember/protocol/huddles";
+import type { HuddleDevice } from "./huddle-devices";
 
 /**
  * The huddle this tab is in, as its room's header, the huddle's bar and the huddle itself, opened, show
@@ -16,6 +17,10 @@ export interface JoinedHuddle {
   muted: boolean;
   /** Whether the tab has a microphone to unmute. Without one its person only listens. */
   microphone: boolean;
+  /** That microphone, by its device's id: empty with none, and where the browser doesn't say which it is. */
+  microphoneId: string;
+  /** The speaker the tab plays the huddle through, by its device's id, or empty for the system's. */
+  speakerId: string;
   /** The tab's camera while it's on, for its person to see what the others do. */
   camera: MediaStream | null;
   /** The others' cameras the tab watches, by whose each is. */
@@ -35,6 +40,8 @@ export interface HuddleControls {
   setCamera(on: boolean): void;
   setScreen(shared: boolean): void;
   setOpen(open: boolean): void;
+  /** Speaks through the microphone `deviceId`, plays through that speaker, or shows that camera, from now. */
+  setDevice(kind: HuddleDevice, deviceId: string): void;
 }
 
 /** The id the huddle opened has in the page, where Skip to main content goes while it covers the page. */
@@ -95,6 +102,12 @@ export const shareHuddleScreen = (shared: boolean) => controls?.setScreen(shared
 
 /** Shows the tab's huddle opened, or as its bar again, if it's in one. */
 export const openHuddle = (open: boolean) => controls?.setOpen(open);
+
+/**
+ * Has the tab's huddle speak through another microphone, play through another speaker, or show another
+ * camera, which turns its camera on, if it's in one. For a speaker, an empty id is the system's.
+ */
+export const chooseHuddleDevice = (kind: HuddleDevice, deviceId: string) => controls?.setDevice(kind, deviceId);
 
 /**
  * Has `say` told whatever the tab's huddle has to tell its person, until the function returned is

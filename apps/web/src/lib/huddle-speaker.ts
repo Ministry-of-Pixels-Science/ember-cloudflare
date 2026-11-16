@@ -3,9 +3,13 @@ import { listsSpeaker, watchDevices } from "./huddle-devices";
 /** What a browser takes for the person's touch, and lets a sound or a video play from. A tap is one at its click, and not as the finger lands. */
 export const TOUCHES = ["click", "keydown"] as const;
 
-/** Plays `audio` through the speaker `deviceId`, or the system's for none. Safari has no way to choose one, and plays through the system's. */
-function playThrough(audio: HTMLAudioElement, deviceId: string): void {
-  if (typeof audio.setSinkId === "function") void audio.setSinkId(deviceId).catch(() => {});
+/** Plays `audio` through the speaker `deviceId`, or the system's for none, and answers whether the browser would. Safari has no way to choose one, and plays through the system's. */
+async function playThrough(audio: HTMLAudioElement, deviceId: string): Promise<boolean> {
+  if (typeof audio.setSinkId !== "function") return true;
+  return audio.setSinkId(deviceId).then(
+    () => true,
+    () => false,
+  );
 }
 
 /** What a huddle plays its `<audio>`s through: the others' voices, its music and its sounds. */
@@ -16,27 +20,53 @@ export interface HuddleSpeaker {
   stop(audio: HTMLAudioElement): void;
   /** Plays `audio` once, from its start, without the page: a sound that's over before anything could change for it. */
   playOnce(audio: HTMLAudioElement): void;
+  /**
+   * Plays through the speaker `deviceId` from now, or the system's when that's empty, and answers
+   * whether the browser would: one it won't play through leaves the huddle on the one before. One
+   * chosen while the browser takes up another waits for that one.
+   */
+  use(deviceId: string): Promise<boolean>;
   /** Stops all it plays until stopped, for good. What plays once plays out. */
   stopAll(): void;
 }
 
 /**
- * The speaker a huddle plays through: `speakerId`'s, or the system's when that's empty, and for as long
- * as that speaker is unplugged, when it would play nothing. What plays until it's stopped is kept in
- * the page, and a browser that won't play it until the person has touched the page plays it at their
- * next click or key.
+ * The speaker a huddle plays through: `speakerId`'s until its person chooses another, or the system's
+ * when that's empty, and for as long as the one chosen is unplugged, when it would play nothing. What
+ * plays until it's stopped is kept in the page, and a browser that won't play it until the person has
+ * touched the page plays it at their next click or key.
  */
 export function huddleSpeaker(speakerId: string): HuddleSpeaker {
   const playing = new Set<HTMLAudioElement>();
   const box = document.createElement("div");
   box.hidden = true;
   box.dataset.huddleVoices = "";
-  /** The speaker they play through now, by its device's id, or empty for the system's. */
-  let speaker = speakerId;
+  /** The speaker its person chose, by its device's id, or empty for the system's. */
+  let chosen = speakerId;
+  /** The speaker they play through now: the one chosen, or the system's while that's unplugged. */
+  let speaker = chosen;
+  /** The change of speaker under way, if its person has asked for one, which another they choose meanwhile waits for. */
+  let changing: Promise<boolean> | null = null;
+  const playAllThrough = async (deviceId: string) => {
+    speaker = deviceId;
+    const played = await Promise.all([...playing].map((audio) => playThrough(audio, deviceId)));
+    return played.every(Boolean);
+  };
+  /** Plays through the speaker `deviceId`, and answers whether the browser would: refused, it's back on the one before. */
+  const change = async (deviceId: string) => {
+    const before = { chosen, speaker };
+    chosen = deviceId;
+    if (await playAllThrough(deviceId)) return true;
+    chosen = before.chosen;
+    await playAllThrough(before.speaker);
+    return false;
+  };
   const followSpeaker = async () => {
-    if (!speakerId) return;
-    speaker = (await listsSpeaker(speakerId)) ? speakerId : "";
-    for (const audio of playing) playThrough(audio, speaker);
+    const followed = chosen;
+    if (!followed) return;
+    const listed = await listsSpeaker(followed);
+    // Another chosen meanwhile is the one to play through.
+    if (chosen === followed) void playAllThrough(listed ? followed : "");
   };
   const stopWatching = watchDevices(() => void followSpeaker());
   /**
@@ -44,7 +74,7 @@ export function huddleSpeaker(speakerId: string): HuddleSpeaker {
    * may have played last through a speaker that has been unplugged since, or plugged back in.
    */
   const through = (audio: HTMLAudioElement) => {
-    if ((audio.sinkId ?? "") !== speaker) playThrough(audio, speaker);
+    if ((audio.sinkId ?? "") !== speaker) void playThrough(audio, speaker);
   };
   const playRefused = () => {
     for (const audio of playing) if (audio.paused) void audio.play().catch(() => {});
@@ -72,6 +102,16 @@ export function huddleSpeaker(speakerId: string): HuddleSpeaker {
       audio.currentTime = 0;
       // Refused, it plays nothing: by the person's next touch, the moment has passed.
       void audio.play().catch(() => {});
+    },
+    // One change at a time, in the order they were chosen: the browser may finish the later of two
+    // first, and one it refuses goes back to where the one before it left the huddle.
+    use(deviceId) {
+      const changed = changing ? changing.then(() => change(deviceId)) : change(deviceId);
+      changing = changed;
+      void changed.then(() => {
+        if (changing === changed) changing = null;
+      });
+      return changed;
     },
     stopAll() {
       for (const audio of [...playing]) stop(audio);

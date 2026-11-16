@@ -15,10 +15,10 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { audioEngine } from "@/test-audio-engine";
 import { ANSWER_TIMEOUT_MS, CAMERA_BITRATE, joinHuddle, LISTEN_AGAIN_MS, PUBLISH_AGAIN_MS, SCREEN_BITRATE } from "./huddle";
-import { NO_CAMERA, NO_SCREEN } from "./huddle-devices";
+import { NO_CAMERA, NO_OTHER_CAMERA, NO_OTHER_MICROPHONE, NO_OTHER_SPEAKER, NO_SCREEN, STILL_NO_MICROPHONE } from "./huddle-devices";
 import { MUSIC_AFTER_MS } from "./huddle-sounds";
 import { MEASURED_EVERY_MS, SPEAKING_LEVEL } from "./huddle-speaking";
-import { hearHuddle, isSpeaking, joinedHuddle, leaveHuddle, muteHuddle, openHuddle, shareHuddleScreen, showHuddleCamera, watchHuddle, watchSpeaking } from "./huddle-store";
+import { chooseHuddleDevice, hearHuddle, isSpeaking, joinedHuddle, leaveHuddle, muteHuddle, openHuddle, shareHuddleScreen, showHuddleCamera, watchHuddle, watchSpeaking } from "./huddle-store";
 
 /** Stands in for the browser's WebSocket; tests play the room and the network. */
 class FakeSocket {
@@ -81,8 +81,16 @@ class FakeTrack extends EventTarget {
   readyState: MediaStreamTrackState = "live";
   contentHint = "";
 
-  constructor(readonly kind: HuddleTrackKind = "audio") {
+  constructor(
+    readonly kind: HuddleTrackKind = "audio",
+    /** The device it's from, by its id, where the browser says. */
+    readonly deviceId = "",
+  ) {
     super();
+  }
+
+  getSettings() {
+    return { deviceId: this.deviceId };
   }
 
   stop() {
@@ -103,11 +111,28 @@ class FakeStream {
   getVideoTracks = () => this.tracks.filter(({ kind }) => kind === "video");
 }
 
+/** Stands in for what sends a track over a connection, which a browser has send another in its place, unless the connection has closed. */
+class FakeSender {
+  readonly #connection: FakeConnection;
+
+  constructor(
+    connection: FakeConnection,
+    public track: FakeTrack | null,
+  ) {
+    this.#connection = connection;
+  }
+
+  async replaceTrack(track: FakeTrack | null) {
+    if (FakeConnection.keepingTracks || this.#connection.connectionState === "closed") throw new DOMException("The connection can't send another track", "InvalidStateError");
+    this.track = track;
+  }
+}
+
 interface FakeTransceiver {
   mid: string | null;
   direction?: string;
   sendEncodings?: RTCRtpEncodingParameters[];
-  sender: { track: FakeTrack | null };
+  sender: FakeSender;
   receiver: { track: FakeTrack };
 }
 
@@ -120,6 +145,8 @@ class FakeConnection {
   static offers = 0;
   /** What the next description set fails with, as a browser refuses one it can't make sense of. */
   static refusing = false;
+  /** Whether the connections refuse to send another track in place of the one they send. */
+  static keepingTracks = false;
 
   connectionState: RTCPeerConnectionState = "new";
   onconnectionstatechange: (() => void) | null = null;
@@ -132,12 +159,13 @@ class FakeConnection {
   }
 
   addTransceiver(track: FakeTrack, { direction, sendEncodings }: RTCRtpTransceiverInit) {
-    const transceiver: FakeTransceiver = { mid: null, direction, ...(sendEncodings && { sendEncodings }), sender: { track }, receiver: { track: new FakeTrack() } };
+    const transceiver: FakeTransceiver = { mid: null, direction, ...(sendEncodings && { sendEncodings }), sender: new FakeSender(this, track), receiver: { track: new FakeTrack() } };
     this.transceivers.push(transceiver);
     return transceiver;
   }
 
   getTransceivers = () => this.transceivers;
+  getSenders = () => this.transceivers.map(({ sender }) => sender);
 
   async createOffer(): Promise<RTCSessionDescriptionInit> {
     return { type: "offer", sdp: `offer ${++FakeConnection.offers}` };
@@ -158,7 +186,7 @@ class FakeConnection {
     this.remoteDescription = description;
     if (description.type !== "offer") return;
     for (const mid of description.sdp!.split(":")[1]!.split(",")) {
-      if (!this.transceivers.some((transceiver) => transceiver.mid === mid)) this.transceivers.push({ mid, sender: { track: null }, receiver: { track: new FakeTrack() } });
+      if (!this.transceivers.some((transceiver) => transceiver.mid === mid)) this.transceivers.push({ mid, sender: new FakeSender(this, null), receiver: { track: new FakeTrack() } });
     }
   }
 
@@ -315,8 +343,9 @@ beforeEach(() => {
   FakeConnection.all = [];
   FakeConnection.offers = 0;
   FakeConnection.refusing = false;
-  microphone = new FakeStream([new FakeTrack()]);
-  camera = new FakeStream([new FakeTrack("video")]);
+  FakeConnection.keepingTracks = false;
+  microphone = new FakeStream([new FakeTrack("audio", "built-in")]);
+  camera = new FakeStream([new FakeTrack("video", "front")]);
   display = new FakeStream([new FakeTrack("video")]);
   vi.stubGlobal("WebSocket", FakeSocket);
   vi.stubGlobal("RTCPeerConnection", FakeConnection);
@@ -346,7 +375,8 @@ describe("Joining a huddle", () => {
     joinHuddle({ roomId: "general", muted: false, microphone: microphone as unknown as MediaStream, camera: null, speakerId: "" });
 
     expect(socket().url).toBe("ws://localhost:3000/api/rooms/general/huddle");
-    expect(joinedHuddle()).toEqual({ roomId: "general", connected: false, you: null, people: [], muted: false, microphone: true, camera: null, watched: new Map(), screen: null, screens: new Map(), open: true });
+    const joining = { roomId: "general", connected: false, you: null, people: [], muted: false, microphone: true, microphoneId: "built-in", speakerId: "", camera: null, watched: new Map(), screen: null, screens: new Map(), open: true };
+    expect(joinedHuddle()).toEqual(joining);
     expect(shown).toHaveBeenCalledTimes(1);
     // Nothing is asked of the room before it has said who the tab is.
     socket().open();
@@ -355,7 +385,7 @@ describe("Joining a huddle", () => {
     expect(FakeConnection.all).toEqual([]);
 
     await welcomed([person(grace)]);
-    expect(joinedHuddle()).toEqual({ roomId: "general", connected: true, you: ada, people: [person(grace), person(ada, { audio: false })], muted: false, microphone: true, camera: null, watched: new Map(), screen: null, screens: new Map(), open: true });
+    expect(joinedHuddle()).toEqual({ ...joining, connected: true, you: ada, people: [person(grace), person(ada, { audio: false })] });
     stop();
   });
 
@@ -507,7 +537,7 @@ describe("A huddle's microphone", () => {
 
     microphoneTrack().end();
     expect(room.take()).toEqual([{ type: "huddle.mute", muted: true }]);
-    expect(joinedHuddle()).toMatchObject({ muted: true, microphone: false });
+    expect(joinedHuddle()).toMatchObject({ muted: true, microphone: false, microphoneId: "" });
     muteHuddle(false);
     expect(joinedHuddle()).toMatchObject({ muted: true });
     // And nothing more is published of it.
@@ -1742,6 +1772,480 @@ describe("Watching the screens shared in a huddle", () => {
     await wait(LISTEN_AGAIN_MS[0]);
     expect(room.take()).toEqual([{ type: "huddle.listen", kind: "screen", fresh: true, watch: [grace.id, linus.id] }]);
     expect(room.closedWith).toBeUndefined();
+  });
+});
+
+describe("Choosing another device in a huddle", () => {
+  /** A microphone's stream, or a camera's, from the device `deviceId`. */
+  const deviceStream = (kind: "audio" | "video", deviceId: string) => new FakeStream([new FakeTrack(kind, deviceId)]);
+  const trackOf = (stream: FakeStream) => stream.tracks[0]!;
+  /** What the tab asks the browser for the camera `deviceId` with. */
+  const cameraAsked = (deviceId: string) => ({ video: { width: { ideal: 640 }, height: { ideal: 360 }, deviceId: { exact: deviceId } } });
+
+  /**
+   * Has the browser open, of `streams`, the one from the device the tab asks for, or the first when it
+   * asks for the browser's own choice, and refuse it any other. Answers what the tab asked it.
+   */
+  function browserDevices(...streams: FakeStream[]) {
+    const getUserMedia = vi.fn(async ({ audio, video }: MediaStreamConstraints) => {
+      const { deviceId } = (audio ?? video) as { deviceId?: { exact: string } };
+      const stream = deviceId ? streams.find((from) => trackOf(from).deviceId === deviceId.exact) : streams[0];
+      if (!stream) throw new DOMException("Permission denied", "NotAllowedError");
+      return stream;
+    });
+    vi.stubGlobal("navigator", { mediaDevices: Object.assign(new EventTarget(), { getUserMedia }) });
+    return getUserMedia;
+  }
+
+  /** The tab's camera is published, and its connection has connected. */
+  async function cameraConnected() {
+    const picture = connection();
+    socket().receive({ type: "huddle.published", kind: "video", sdp: "the SFU's answer" });
+    await settled();
+    picture.becomes("connected");
+    socket().take();
+    return picture;
+  }
+
+  afterEach(() => {
+    for (const kind of ["microphone", "speaker", "camera"]) localStorage.removeItem(`ember:huddle-${kind}`);
+  });
+
+  it("speaks through another microphone once the browser has opened it: on the connection it has, measured in the first one's place, which is closed", async () => {
+    const usb = deviceStream("audio", "usb");
+    const asked = browserDevices(usb);
+    const engine = audioEngine();
+    const room = await joined();
+    const sending = await publishedAndConnected();
+    const first = microphoneTrack();
+    room.take();
+    expect(joinedHuddle()).toMatchObject({ microphoneId: "built-in" });
+
+    chooseHuddleDevice("microphone", "usb");
+    await settled();
+    expect(asked).toHaveBeenCalledExactlyOnceWith({ audio: { deviceId: { exact: "usb" } } });
+    expect(sending.transceivers[0]!.sender.track).toBe(trackOf(usb));
+    expect([first.readyState, trackOf(usb).readyState]).toEqual(["ended", "live"]);
+    expect(joinedHuddle()).toMatchObject({ muted: false, microphone: true, microphoneId: "usb" });
+    expect(engine.measured()).toEqual([trackOf(usb)]);
+    expect(localStorage.getItem("ember:huddle-microphone")).toBe("usb");
+    // The SFU carries the track it did, so the room hears nothing of it.
+    expect(room.take()).toEqual([]);
+    expect(FakeConnection.all).toEqual([sending]);
+
+    // Chosen again, the one it has is nothing to ask the browser for.
+    chooseHuddleDevice("microphone", "usb");
+    await settled();
+    expect(asked).toHaveBeenCalledTimes(1);
+  });
+
+  it("stays as muted as it was, and mutes and unmutes the microphone it speaks through now", async () => {
+    const usb = deviceStream("audio", "usb");
+    browserDevices(usb);
+    const room = await joined();
+    muteHuddle(true);
+    room.take();
+
+    chooseHuddleDevice("microphone", "usb");
+    await settled();
+    expect(trackOf(usb).enabled).toBe(false);
+    expect(joinedHuddle()).toMatchObject({ muted: true, microphone: true });
+    expect(room.take()).toEqual([]);
+
+    muteHuddle(false);
+    expect(trackOf(usb).enabled).toBe(true);
+    expect(room.take()).toEqual([{ type: "huddle.mute", muted: false }]);
+  });
+
+  it("leaves its person listening once the microphone chosen is unplugged, where the end of the one before is nothing to it", async () => {
+    const usb = deviceStream("audio", "usb");
+    browserDevices(usb);
+    const room = await joined();
+    const first = microphoneTrack();
+    chooseHuddleDevice("microphone", "usb");
+    await settled();
+    room.take();
+
+    first.end();
+    expect(room.take()).toEqual([]);
+    expect(joinedHuddle()).toMatchObject({ muted: false, microphone: true });
+    trackOf(usb).end();
+    expect(room.take()).toEqual([{ type: "huddle.mute", muted: true }]);
+    expect(joinedHuddle()).toMatchObject({ muted: true, microphone: false, microphoneId: "" });
+  });
+
+  it("publishes the microphone anew when its connection won't send another track", async () => {
+    const usb = deviceStream("audio", "usb");
+    browserDevices(usb);
+    const room = await joined();
+    const first = await publishedAndConnected();
+    room.take();
+    FakeConnection.keepingTracks = true;
+
+    chooseHuddleDevice("microphone", "usb");
+    await settled();
+    expect(first.connectionState).toBe("closed");
+    expect(connection().transceivers[0]!.sender.track).toBe(trackOf(usb));
+    expect(room.take()).toEqual([{ type: "huddle.publish", sdp: "offer 2", tracks: [{ mid: "0", kind: "audio" }] }]);
+  });
+
+  it("publishes a microphone chosen before the room lets the tab in with the room's welcome, which measures it as its person's", async () => {
+    const usb = deviceStream("audio", "usb");
+    browserDevices(usb);
+    const engine = audioEngine();
+    joinHuddle({ roomId: "general", muted: false, microphone: microphone as unknown as MediaStream, camera: null, speakerId: "" });
+    socket().open();
+    chooseHuddleDevice("microphone", "usb");
+    await settled();
+    expect(FakeConnection.all).toEqual([]);
+    expect(engine.measured()).toEqual([]);
+
+    const room = await welcomed();
+    expect(FakeConnection.all).toHaveLength(1);
+    expect(connection().transceivers[0]!.sender.track).toBe(trackOf(usb));
+    expect(room.take()).toEqual([{ type: "huddle.publish", sdp: "offer 1", tracks: [{ mid: "0", kind: "audio" }] }]);
+    expect(engine.measured()).toEqual([trackOf(usb)]);
+  });
+
+  it("gives a tab that joined to listen the browser's own choice of microphone, which it publishes, and stays muted on until its person unmutes", async () => {
+    const builtIn = deviceStream("audio", "built-in");
+    const asked = browserDevices(builtIn);
+    const engine = audioEngine();
+    const room = await joined([], { microphone: null });
+    expect(room.take()).toEqual([]);
+    expect(joinedHuddle()).toMatchObject({ muted: true, microphone: false, microphoneId: "" });
+
+    chooseHuddleDevice("microphone", "");
+    await settled();
+    expect(asked).toHaveBeenCalledExactlyOnceWith({ audio: true });
+    expect(joinedHuddle()).toMatchObject({ muted: true, microphone: true, microphoneId: "built-in" });
+    expect(trackOf(builtIn).enabled).toBe(false);
+    expect(connection().transceivers[0]!.sender.track).toBe(trackOf(builtIn));
+    expect(room.take()).toEqual([{ type: "huddle.publish", sdp: "offer 1", tracks: [{ mid: "0", kind: "audio" }] }]);
+    expect(engine.measured()).toEqual([trackOf(builtIn)]);
+
+    muteHuddle(false);
+    expect(trackOf(builtIn).enabled).toBe(true);
+    expect(room.take()).toEqual([{ type: "huddle.mute", muted: false }]);
+    expect(joinedHuddle()).toMatchObject({ muted: false });
+  });
+
+  it("has a microphone again, muted still, once one is chosen after its own was unplugged", async () => {
+    const usb = deviceStream("audio", "usb");
+    browserDevices(usb);
+    const room = await joined();
+    const sending = await publishedAndConnected();
+    microphoneTrack().end();
+    room.take();
+
+    chooseHuddleDevice("microphone", "usb");
+    await settled();
+    expect(joinedHuddle()).toMatchObject({ muted: true, microphone: true, microphoneId: "usb" });
+    expect(trackOf(usb).enabled).toBe(false);
+    expect(sending.transceivers[0]!.sender.track).toBe(trackOf(usb));
+    expect(room.take()).toEqual([]);
+  });
+
+  it("keeps the microphone it has, and says so, when the browser won't open the one chosen", async () => {
+    browserDevices();
+    const said = vi.fn();
+    const stop = hearHuddle(said);
+    const room = await joined();
+    const sending = connection();
+    room.take();
+
+    chooseHuddleDevice("microphone", "usb");
+    await settled();
+    expect(said).toHaveBeenCalledExactlyOnceWith(NO_OTHER_MICROPHONE);
+    expect(microphoneTrack().readyState).toBe("live");
+    expect(sending.transceivers[0]!.sender.track).toBe(microphoneTrack());
+    expect(joinedHuddle()).toMatchObject({ microphone: true, microphoneId: "built-in" });
+    expect(room.take()).toEqual([]);
+    stop();
+  });
+
+  it("tells someone who only listens that there's no microphone for them still, when the browser won't open one", async () => {
+    browserDevices();
+    const said = vi.fn();
+    const stop = hearHuddle(said);
+    await joined([], { microphone: null });
+
+    chooseHuddleDevice("microphone", "");
+    await settled();
+    expect(said).toHaveBeenCalledExactlyOnceWith(STILL_NO_MICROPHONE);
+    expect(joinedHuddle()).toMatchObject({ muted: true, microphone: false });
+    stop();
+  });
+
+  it("speaks through the last of the microphones chosen while the browser opens them, whichever it opens last, and closes the others", async () => {
+    const [usb, headset] = [deviceStream("audio", "usb"), deviceStream("audio", "headset")];
+    // The browser takes its time over the first one chosen.
+    let openFirst = () => {};
+    const getUserMedia = vi.fn(({ audio }: MediaStreamConstraints) =>
+      (audio as { deviceId: { exact: string } }).deviceId.exact === "usb" ? new Promise<FakeStream>((resolve) => (openFirst = () => resolve(usb))) : Promise.resolve(headset),
+    );
+    vi.stubGlobal("navigator", { mediaDevices: Object.assign(new EventTarget(), { getUserMedia }) });
+    await joined();
+    const sending = connection();
+
+    chooseHuddleDevice("microphone", "usb");
+    chooseHuddleDevice("microphone", "headset");
+    await settled();
+    expect(sending.transceivers[0]!.sender.track).toBe(trackOf(headset));
+    openFirst();
+    await settled();
+    expect([trackOf(usb).readyState, trackOf(headset).readyState]).toEqual(["ended", "live"]);
+    expect(sending.transceivers[0]!.sender.track).toBe(trackOf(headset));
+    expect(joinedHuddle()).toMatchObject({ microphoneId: "headset" });
+    expect(localStorage.getItem("ember:huddle-microphone")).toBe("headset");
+  });
+
+  it("keeps the microphone it has when that's chosen while the browser opens another, which is closed", async () => {
+    const usb = deviceStream("audio", "usb");
+    browserDevices(usb);
+    await joined();
+
+    chooseHuddleDevice("microphone", "usb");
+    chooseHuddleDevice("microphone", "built-in");
+    await settled();
+    expect([microphoneTrack().readyState, trackOf(usb).readyState]).toEqual(["live", "ended"]);
+    expect(joinedHuddle()).toMatchObject({ microphoneId: "built-in" });
+    expect(localStorage.getItem("ember:huddle-microphone")).toBe("built-in");
+  });
+
+  it("closes a microphone the browser opens once the tab has left", async () => {
+    const usb = deviceStream("audio", "usb");
+    browserDevices(usb);
+    await joined();
+
+    chooseHuddleDevice("microphone", "usb");
+    leaveHuddle();
+    await settled();
+    expect(trackOf(usb).readyState).toBe("ended");
+  });
+
+  it("plays through another speaker: what the huddle plays now, and what it plays after", async () => {
+    const setSinkId = vi.fn(async () => {});
+    Object.defineProperty(HTMLMediaElement.prototype, "setSinkId", { configurable: true, value: setSinkId });
+    try {
+      await joined([person(grace), person(linus)]);
+      await offeredRound(["0", grace]);
+      expect(setSinkId).not.toHaveBeenCalled();
+
+      chooseHuddleDevice("speaker", "headphones");
+      expect(setSinkId).toHaveBeenCalledExactlyOnceWith("headphones");
+      expect(madeOn(setSinkId)).toEqual([grace.id]);
+      // Shown, and kept for the next huddle, once the browser plays through it.
+      expect(joinedHuddle()).toMatchObject({ speakerId: "" });
+      await settled();
+      expect(joinedHuddle()).toMatchObject({ speakerId: "headphones" });
+      expect(localStorage.getItem("ember:huddle-speaker")).toBe("headphones");
+      await offeredRound(["1", linus]);
+      expect(setSinkId.mock.calls).toEqual([["headphones"], ["headphones"]]);
+      expect(madeOn(setSinkId)).toEqual([grace.id, linus.id]);
+
+      // And through the system's again, which this browser's next huddle starts with.
+      setSinkId.mockClear();
+      chooseHuddleDevice("speaker", "");
+      expect(setSinkId.mock.calls).toEqual([[""], [""]]);
+      await settled();
+      expect(joinedHuddle()).toMatchObject({ speakerId: "" });
+      expect(localStorage.getItem("ember:huddle-speaker")).toBeNull();
+    } finally {
+      delete (HTMLMediaElement.prototype as { setSinkId?: unknown }).setSinkId;
+    }
+  });
+
+  it("keeps the speaker it has, and says so, when the browser won't play through the one chosen", async () => {
+    const setSinkId = vi.fn(async (deviceId: string) => {
+      if (deviceId === "monitor") throw new DOMException("Refused", "NotAllowedError");
+    });
+    Object.defineProperty(HTMLMediaElement.prototype, "setSinkId", { configurable: true, value: setSinkId });
+    const said = vi.fn();
+    const stop = hearHuddle(said);
+    try {
+      await joined([person(grace)]);
+      await offeredRound(["0", grace]);
+      chooseHuddleDevice("speaker", "headphones");
+      await settled();
+      setSinkId.mockClear();
+
+      chooseHuddleDevice("speaker", "monitor");
+      await settled();
+      expect(said).toHaveBeenCalledExactlyOnceWith(NO_OTHER_SPEAKER);
+      // Back through the one before, which the huddle shows still, and this browser's next huddle starts with.
+      expect(setSinkId.mock.calls).toEqual([["monitor"], ["headphones"]]);
+      expect(joinedHuddle()).toMatchObject({ speakerId: "headphones" });
+      expect(localStorage.getItem("ember:huddle-speaker")).toBe("headphones");
+    } finally {
+      stop();
+      delete (HTMLMediaElement.prototype as { setSinkId?: unknown }).setSinkId;
+    }
+  });
+
+  it("shows the last of two speakers chosen one right after the other, however long the browser takes over the first", async () => {
+    let take = () => {};
+    const taken = new Promise<void>((resolve) => (take = resolve));
+    const setSinkId = vi.fn(async (deviceId: string) => {
+      if (deviceId === "headphones") await taken;
+    });
+    Object.defineProperty(HTMLMediaElement.prototype, "setSinkId", { configurable: true, value: setSinkId });
+    try {
+      await joined([person(grace)]);
+      await offeredRound(["0", grace]);
+
+      chooseHuddleDevice("speaker", "headphones");
+      chooseHuddleDevice("speaker", "monitor");
+      await settled();
+      expect(joinedHuddle()).toMatchObject({ speakerId: "" });
+      take();
+      await settled();
+      expect(setSinkId.mock.calls).toEqual([["headphones"], ["monitor"]]);
+      expect(joinedHuddle()).toMatchObject({ speakerId: "monitor" });
+      expect(localStorage.getItem("ember:huddle-speaker")).toBe("monitor");
+    } finally {
+      delete (HTMLMediaElement.prototype as { setSinkId?: unknown }).setSinkId;
+    }
+  });
+
+  it("forgets a speaker chosen as the tab leaves, which its next huddle doesn't start with", async () => {
+    const setSinkId = vi.fn(async () => {});
+    Object.defineProperty(HTMLMediaElement.prototype, "setSinkId", { configurable: true, value: setSinkId });
+    const said = vi.fn();
+    const stop = hearHuddle(said);
+    try {
+      await joined([person(grace)]);
+      await offeredRound(["0", grace]);
+
+      chooseHuddleDevice("speaker", "headphones");
+      leaveHuddle();
+      await settled();
+      expect(localStorage.getItem("ember:huddle-speaker")).toBeNull();
+      expect(said).not.toHaveBeenCalled();
+    } finally {
+      stop();
+      delete (HTMLMediaElement.prototype as { setSinkId?: unknown }).setSinkId;
+    }
+  });
+
+  it("shows another camera in place of the one that's on, once the browser has opened it: on the connection it has, with the first one closed", async () => {
+    const rear = deviceStream("video", "rear");
+    const asked = browserDevices(rear);
+    const room = await joined([], { camera: asCamera() });
+    const picture = await cameraConnected();
+    const first = cameraTrack();
+
+    chooseHuddleDevice("camera", "rear");
+    await settled();
+    expect(asked).toHaveBeenCalledExactlyOnceWith(cameraAsked("rear"));
+    expect(joinedHuddle()).toMatchObject({ camera: rear });
+    expect(picture.transceivers[0]!.sender.track).toBe(trackOf(rear));
+    expect([first.readyState, trackOf(rear).readyState]).toEqual(["ended", "live"]);
+    expect(localStorage.getItem("ember:huddle-camera")).toBe("rear");
+    expect(room.take()).toEqual([]);
+    expect(FakeConnection.all).toHaveLength(2);
+
+    // The end of the one before is nothing to it, and the one chosen goes off as it's unplugged.
+    first.end();
+    expect(joinedHuddle()).toMatchObject({ camera: rear });
+    trackOf(rear).end();
+    expect(joinedHuddle()).toMatchObject({ camera: null });
+    expect(room.take()).toEqual([{ type: "huddle.unpublish", kind: "video" }]);
+  });
+
+  it("asks the browser for nothing when the camera chosen is the one that's on", async () => {
+    const asked = browserDevices();
+    await joined([], { camera: asCamera() });
+
+    chooseHuddleDevice("camera", "front");
+    await settled();
+    expect(asked).not.toHaveBeenCalled();
+    expect(joinedHuddle()).toMatchObject({ camera });
+  });
+
+  it("turns the camera on with the one chosen while it's off", async () => {
+    const rear = deviceStream("video", "rear");
+    const asked = browserDevices(rear);
+    const room = await joined();
+    room.take();
+
+    chooseHuddleDevice("camera", "rear");
+    await settled();
+    expect(asked).toHaveBeenCalledExactlyOnceWith(cameraAsked("rear"));
+    expect(joinedHuddle()).toMatchObject({ camera: rear });
+    expect(connection().transceivers[0]!.sender.track).toBe(trackOf(rear));
+    expect(room.take()).toEqual([{ type: "huddle.publish", sdp: "offer 2", tracks: [{ mid: "0", kind: "video" }] }]);
+    expect(localStorage.getItem("ember:huddle-camera")).toBe("rear");
+  });
+
+  it("publishes a camera chosen before the room lets the tab in with the room's welcome", async () => {
+    const rear = deviceStream("video", "rear");
+    browserDevices(rear);
+    joinHuddle({ roomId: "general", muted: false, microphone: microphone as unknown as MediaStream, camera: asCamera(), speakerId: "" });
+    socket().open();
+    chooseHuddleDevice("camera", "rear");
+    await settled();
+    expect(joinedHuddle()).toMatchObject({ camera: rear });
+    expect(FakeConnection.all).toEqual([]);
+
+    await welcomed();
+    expect(FakeConnection.all).toHaveLength(2);
+    expect(connection().transceivers[0]!.sender.track).toBe(trackOf(rear));
+  });
+
+  it("keeps the camera that's on, and says so, when the browser won't open the one chosen", async () => {
+    browserDevices();
+    const said = vi.fn();
+    const stop = hearHuddle(said);
+    const room = await joined([], { camera: asCamera() });
+    const picture = await cameraConnected();
+
+    chooseHuddleDevice("camera", "rear");
+    await settled();
+    expect(said).toHaveBeenCalledExactlyOnceWith(NO_OTHER_CAMERA);
+    expect(joinedHuddle()).toMatchObject({ camera });
+    expect(cameraTrack().readyState).toBe("live");
+    expect(picture.transceivers[0]!.sender.track).toBe(cameraTrack());
+    expect(room.take()).toEqual([]);
+    stop();
+  });
+
+  it("takes up no camera chosen while the browser opens another, which is the one this browser remembers", async () => {
+    const [rear, side] = [deviceStream("video", "rear"), deviceStream("video", "side")];
+    const asked = browserDevices(rear, side);
+    await joined([], { camera: asCamera() });
+
+    chooseHuddleDevice("camera", "rear");
+    chooseHuddleDevice("camera", "side");
+    await settled();
+    expect(asked).toHaveBeenCalledExactlyOnceWith(cameraAsked("rear"));
+    expect(joinedHuddle()).toMatchObject({ camera: rear });
+    expect(localStorage.getItem("ember:huddle-camera")).toBe("rear");
+  });
+
+  it("closes a camera the browser opens once the one it was to take the place of is off", async () => {
+    const rear = deviceStream("video", "rear");
+    browserDevices(rear);
+    const room = await joined([], { camera: asCamera() });
+    room.take();
+
+    chooseHuddleDevice("camera", "rear");
+    showHuddleCamera(false);
+    await settled();
+    expect(trackOf(rear).readyState).toBe("ended");
+    expect(joinedHuddle()).toMatchObject({ camera: null });
+    expect(room.take()).toEqual([{ type: "huddle.unpublish", kind: "video" }]);
+  });
+
+  it("closes a camera the browser opens once the tab has left", async () => {
+    const rear = deviceStream("video", "rear");
+    browserDevices(rear);
+    await joined([], { camera: asCamera() });
+
+    chooseHuddleDevice("camera", "rear");
+    leaveHuddle();
+    await settled();
+    expect(trackOf(rear).readyState).toBe("ended");
   });
 });
 

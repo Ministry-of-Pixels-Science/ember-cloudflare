@@ -13,7 +13,7 @@ import {
   type OfferedHuddleTrack,
 } from "@ember/protocol/huddles";
 import { socketUrl } from "./api";
-import { closeDevice, NO_CAMERA, NO_SCREEN, openCamera, openScreen, rememberedDevice } from "./huddle-devices";
+import { cameraOf, closeDevice, microphoneOf, NO_CAMERA, NO_OTHER_CAMERA, NO_OTHER_MICROPHONE, NO_OTHER_SPEAKER, NO_SCREEN, openCamera, openMicrophone, openScreen, rememberDevice, rememberedDevice, STILL_NO_MICROPHONE } from "./huddle-devices";
 import { huddleSounds } from "./huddle-sounds";
 import { huddleSpeaker, type HuddleSpeaker } from "./huddle-speaker";
 import { whoSpeaks, type HuddleSpeaking } from "./huddle-speaking";
@@ -257,6 +257,19 @@ function sendingConnection({ kind, vital, track, sends }: Sent, { send, rejoin, 
     }
   }
 
+  /**
+   * Sends the track there is now in place of the one the connection sent, which the others receive as
+   * the same track still. Without a connection, or with one that can't, it publishes anew.
+   */
+  async function swap() {
+    const swapping = connection;
+    const swapped = await swapping?.getSenders()[0]?.replaceTrack(track()).then(
+      () => true,
+      () => false,
+    );
+    if (!swapped && connection === swapping) void publish();
+  }
+
   /** Closes the connection, which sends nothing more. What the room owes an answer to, it still owes. */
   function close() {
     if (!unanswered) clearTimeout(timer);
@@ -267,6 +280,7 @@ function sendingConnection({ kind, vital, track, sends }: Sent, { send, rejoin, 
   return {
     publish,
     published,
+    swap,
     close,
     /** The room couldn't publish what it was asked to: the SFU refused, or couldn't be reached. */
     failed() {
@@ -467,10 +481,28 @@ function receivingConnection({ kind, vital, receivable, wanted, byName, play, st
 /** Joins room `roomId`'s huddle, which starts it when nobody's in it, leaving any the tab was in. */
 export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: HuddleJoin): void {
   leaveHuddle();
-  const track = microphone?.getAudioTracks()[0] ?? null;
-  let huddle: JoinedHuddle = { roomId, connected: false, you: null, people: [], muted: muted || !track, microphone: track !== null, camera: null, watched: new Map(), screen: null, screens: new Map(), open: true };
+  /** The microphone the tab speaks through, and its track, until its person chooses another. */
+  let voice = microphone;
+  let track = voice?.getAudioTracks()[0] ?? null;
+  let huddle: JoinedHuddle = {
+    roomId,
+    connected: false,
+    you: null,
+    people: [],
+    muted: muted || !track,
+    microphone: track !== null,
+    microphoneId: microphoneOf(voice),
+    speakerId,
+    camera: null,
+    watched: new Map(),
+    screen: null,
+    screens: new Map(),
+    open: true,
+  };
   let over = false;
   if (track) track.enabled = !huddle.muted;
+  /** How many times its person has chosen a microphone in place of the tab's: one the browser opens for any choice but the last is closed again. */
+  let microphonesAsked = 0;
   /** Whether the browser is being asked for a camera. */
   let openingCamera = false;
   /** Whether the browser is asking the tab's person what to share. */
@@ -550,6 +582,11 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
       show({ open });
       for (const kind of SHOWN_KINDS) receiving[kind].listen();
     },
+    setDevice(kind, deviceId) {
+      if (kind === "microphone") return void speakThrough(deviceId);
+      if (kind === "camera") return void showThrough(deviceId);
+      void playThrough(deviceId);
+    },
   };
 
   /** Shows the huddle with `changes`, the tab's person among its people muted as the tab is. */
@@ -565,13 +602,76 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
   const microphoneGone = () => {
     if (huddle.you) speaking.forget(huddle.you.id);
     socket.send({ type: "huddle.mute", muted: true });
-    show({ muted: true, microphone: false });
+    show({ muted: true, microphone: false, microphoneId: "" });
   };
   track?.addEventListener("ended", microphoneGone);
+
+  /**
+   * Speaks through another microphone: once the browser has opened it, the connection sends its track
+   * in place of the one before, which is closed. The tab stays as muted as it was, and one that only
+   * listened for want of a microphone has one to unmute. A microphone the browser won't open changes
+   * nothing, which the tab's person is told. Of several chosen while the browser opens them, the last
+   * is the one, which may be the one the tab has.
+   */
+  async function speakThrough(deviceId: string) {
+    rememberDevice("microphone", deviceId);
+    const asking = ++microphonesAsked;
+    if (huddle.microphone && deviceId === huddle.microphoneId) return;
+    const opened = await openMicrophone(deviceId);
+    if (over || asking !== microphonesAsked) return closeDevice(opened);
+    const next = opened?.getAudioTracks()[0];
+    if (!next) return tellOfHuddle(huddle.microphone ? NO_OTHER_MICROPHONE : STILL_NO_MICROPHONE);
+    track?.removeEventListener("ended", microphoneGone);
+    closeDevice(voice);
+    [voice, track] = [opened, next];
+    next.enabled = !huddle.muted;
+    next.addEventListener("ended", microphoneGone);
+    if (huddle.you) speaking.hear(huddle.you.id, next);
+    show({ microphone: true, microphoneId: microphoneOf(opened) });
+    // A tab the room has yet to let in, or let back in, publishes it with the room's welcome.
+    if (huddle.connected) void sending.audio.swap();
+  }
+
+  /**
+   * Plays the huddle through another speaker, which this browser's next huddle starts with, once the
+   * browser plays through it. One it won't play through changes nothing, which the tab's person is told.
+   */
+  async function playThrough(deviceId: string) {
+    const played = await speaker.use(deviceId);
+    if (over) return;
+    if (!played) return tellOfHuddle(NO_OTHER_SPEAKER);
+    rememberDevice("speaker", deviceId);
+    show({ speakerId: deviceId });
+  }
 
   /** Turns the camera on: asks the browser for one, which asks the person the first time, and shows it. */
   function turnCameraOn() {
     if (!over && !huddle.camera && !openingCamera) void showOnceOpen(openCamera(rememberedDevice("camera")));
+  }
+
+  /**
+   * Shows another camera. One that's off turns on with it. One that's on gives way to it once the
+   * browser has opened it, which the others go on watching as the same camera, and stays on if the
+   * browser won't, which the tab's person is told. One chosen while the browser opens another isn't
+   * taken up.
+   */
+  async function showThrough(deviceId: string) {
+    if (over || openingCamera) return;
+    rememberDevice("camera", deviceId);
+    if (huddle.camera && deviceId === cameraOf(huddle.camera)) return;
+    if (!huddle.camera) return void showOnceOpen(openCamera(deviceId));
+    openingCamera = true;
+    const opened = await openCamera(deviceId);
+    openingCamera = false;
+    const shown = huddle.camera;
+    // Left meanwhile, or turned off, when there's none for it to take the place of.
+    if (over || !shown) return closeDevice(opened);
+    if (!opened) return tellOfHuddle(NO_OTHER_CAMERA);
+    shown.getVideoTracks()[0]?.removeEventListener("ended", ended.video);
+    closeDevice(shown);
+    opened.getVideoTracks()[0]?.addEventListener("ended", ended.video);
+    show({ camera: opened });
+    if (huddle.connected) void sending.video.swap();
   }
 
   /** Shows the camera the browser is opening, once it has, or tells the tab's person that there's none for it. */
@@ -656,7 +756,7 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
     sounds.end(huddle.you !== null);
     speaker.stopAll();
     track?.removeEventListener("ended", microphoneGone);
-    closeDevice(microphone);
+    closeDevice(voice);
     for (const kind of SHOWN_KINDS) {
       shownTrack(kind)?.removeEventListener("ended", ended[kind]);
       closeDevice(huddle[SHOWN[kind].own]);

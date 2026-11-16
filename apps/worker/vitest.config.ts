@@ -11,9 +11,13 @@ const recordedImages = Object.fromEntries(
   await Promise.all((await readdir(storageFiles)).map(async (name) => [name, (await readFile(`${storageFiles}/${name}`)).toString("base64")])),
 );
 
+// A test gets 15 seconds where vitest allows 5: the slowest take 3, as one that checks a dozen passwords
+// does, each a quarter of a second of scrypt, and a runner can take twice as long as it usually does.
+const TEST_TIMEOUT_MS = 15_000;
+
 const backend = (name: "do-sqlite" | "d1") => ({
   extends: true as const,
-  test: { name, include: ["test/**/*.test.ts"], setupFiles: name === "d1" ? ["./test/apply-migrations.ts"] : [] },
+  test: { name, include: ["test/**/*.test.ts"], setupFiles: ["./test/waits.ts", ...(name === "d1" ? ["./test/apply-migrations.ts"] : [])], testTimeout: TEST_TIMEOUT_MS },
   plugins: [
     cloudflareTest({
       wrangler: { configPath: "../../wrangler.jsonc" },

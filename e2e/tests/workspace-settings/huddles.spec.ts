@@ -203,6 +203,58 @@ const hears = (page: Page, userId: string) =>
 /** The green ring a huddle's tile for `name` has while they speak. */
 const speakingIn = (huddle: Locator, name: string) => tiles(huddle).filter({ hasText: name }).getByRole("img", { name: "Speaking" });
 
+/** What Chromium calls the devices it makes up, its own choice of each first. A connection sends the first camera's picture and the third's. */
+const MICROPHONES = ["Fake Default Audio Input", "Fake Audio Input 1", "Fake Audio Input 2"] as const;
+const SPEAKERS = ["Fake Default Audio Output", "Fake Audio Output 1", "Fake Audio Output 2"] as const;
+const CAMERAS = ["fake_device_0", "fake_device_1", "fake_device_2"] as const;
+
+/** The menu the arrow called `name` opens in a huddle, of the devices the button beside it uses. */
+const devicesMenu = (page: Page, name: string) => page.getByRole("menu", { name, exact: true });
+
+/** Opens it in the huddle `page` has open, and answers it. */
+async function openDevices(page: Page, room: TestRoom, name: string): Promise<Locator> {
+  await huddleOpened(page, room).getByRole("button", { name, exact: true }).click();
+  await expect(devicesMenu(page, name)).toBeVisible();
+  return devicesMenu(page, name);
+}
+
+/** The devices such a menu has under `heading` to choose among, and the one of them it ticks, which the huddle uses. */
+const devicesIn = (menu: Locator, heading: string) => menu.getByRole("group", { name: heading, exact: true }).getByRole("menuitemradio");
+const tickedIn = (menu: Locator, heading: string) => menu.getByRole("group", { name: heading, exact: true }).getByRole("menuitemradio", { checked: true });
+
+/** Chooses the device called `label` under `heading` in such a menu, which shuts it. */
+async function choose(menu: Locator, heading: string, label: string): Promise<void> {
+  await devicesIn(menu, heading).filter({ hasText: label }).click();
+  await expect(menu).toBeHidden();
+}
+
+/** Whether `page` plays the voice of `userId` through the speaker its browser calls `label`. */
+const playsThrough = (page: Page, userId: string, label: string) =>
+  page.evaluate(
+    async ({ userId, label }) => {
+      const audio = document.querySelector<HTMLAudioElement>(`[data-huddle-voices] audio[data-user-id="${userId}"]`);
+      const speaker = (await navigator.mediaDevices.enumerateDevices()).find((device) => device.kind === "audiooutput" && device.label === label);
+      return audio !== null && speaker !== undefined && audio.sinkId === speaker.deviceId;
+    },
+    { userId, label },
+  );
+
+/** How many pictures `page` has shown so far of the camera its huddle labels `label`. */
+const picturesOf = (page: Page, label: string) =>
+  page.evaluate((label) => [...document.querySelectorAll<HTMLVideoElement>("#huddle video")].find((video) => video.ariaLabel === label)?.getVideoPlaybackQuality().totalVideoFrames ?? 0, label);
+
+/** Where `refuseDevices` has a page keep what lets it use its devices after all. */
+type RefusesDevices = Window & { letUseDevices(): void };
+
+/** Has `page`'s browser refuse it a microphone, as one answers once its person has said no, until the page's `letUseDevices` is called. */
+const refuseDevices = (page: Page) =>
+  page.addInitScript(() => {
+    const media = navigator.mediaDevices;
+    const open = media.getUserMedia.bind(media);
+    Object.assign(window, { letUseDevices: () => void (media.getUserMedia = open) });
+    media.getUserMedia = () => Promise.reject(new DOMException("Permission denied", "NotAllowedError"));
+  });
+
 /** Where `keepSounds` has a page keep the `<audio>`s it plays. */
 type KeepsSounds = Window & { huddleSoundsPlayed: HTMLMediaElement[] };
 
@@ -264,6 +316,9 @@ const sessionsCarried = () => new Set(sfu.asked.flatMap(({ method, path }) => (m
 
 /** Those of them the room hasn't had the SFU close a track of. */
 const sessionsLeftOpen = () => [...sessionsCarried()].filter((sessionId) => !sfu.asked.some(({ method, path }) => method === "PUT" && path.endsWith(`/sessions/${sessionId}/tracks/close`)));
+
+/** How many tracks the SFU has been asked for: to take one a browser publishes, or to give a browser one. */
+const tracksAsked = () => sfu.asked.filter(({ method, path }) => method === "POST" && path.endsWith("/tracks/new")).length;
 
 test.describe("A huddle", () => {
   test("two people start and join a room's huddle, which their sidebars show, hear and see each other and hear its sounds, and leave it", async ({ page, browser, baseURL, request }) => {
@@ -565,5 +620,117 @@ test.describe("A huddle", () => {
     await expect.poll(sessionsLeftOpen).toEqual([]);
     await her.context.close();
     await him.context.close();
+  });
+
+  test("people change their microphone, speaker and camera inside a huddle, which the other goes on hearing and seeing them through, and someone who only listens takes up a microphone", async ({ page, browser, baseURL, request }) => {
+    // Two browsers, and what each of them sends changed under its connection.
+    test.slow();
+    const administrator = await administratorSession(request);
+    const room = await roomOfItsOwn(request);
+    const saved = await request.put("/api/account/huddles", { data: SFU_APP, headers: await asAdministrator(request) });
+    expect(saved.status(), await saved.text()).toBe(200);
+
+    // Ada starts the room's huddle with her browser's own choice of microphone. Grace, whose browser refuses her one, joins to listen.
+    await useOwnAddress(page);
+    await page.goto(`/rooms/${room.id}`);
+    await signInAsAdministrator(page);
+    await page.getByRole("button", { name: "Start huddle", exact: true }).click();
+    const starting = page.getByRole("dialog", { name: `Start a huddle in ${room.name}` });
+    await starting.getByRole("button", { name: "Start Huddle" }).click();
+    const adasHuddle = huddleOpened(page, room);
+    await expect(adasHuddle).toContainText("1 person");
+    const { user: her, context } = await newcomer(browser, baseURL, request, "Grace");
+    const grace = await context.newPage();
+    await refuseDevices(grace);
+    const gracesHuddle = await joinByLink(grace, room);
+    for (const huddle of [adasHuddle, gracesHuddle]) await expect(huddle).toContainText("2 people");
+    await expect.poll(() => hears(grace, administrator.user.id), { timeout: 15_000 }).toBe(true);
+    await expect(gracesHuddle.getByRole("button", { name: "No microphone" })).toBeDisabled();
+    await expect(page.locator(`[data-huddle-voices] audio[data-user-id="${her.id}"]`)).toHaveCount(0);
+
+    // Her browser lets her use one after all. The arrow beside her microphone lists the browser's, none of them ticked, and
+    // she takes up her second. It reaches Ada through the SFU, muted until she unmutes it, when Ada hears her.
+    await grace.evaluate(() => (window as unknown as RefusesDevices).letUseDevices());
+    const gracesDevices = await openDevices(grace, room, "Microphone and speaker");
+    await expect(devicesIn(gracesDevices, "Microphone")).toHaveText(MICROPHONES);
+    await expect(tickedIn(gracesDevices, "Microphone")).toHaveCount(0);
+    await choose(gracesDevices, "Microphone", MICROPHONES[1]);
+    await expect.poll(() => hears(page, her.id), { timeout: 15_000 }).toBe(true);
+    await expect(tiles(adasHuddle).filter({ hasText: her.name }).getByRole("img", { name: "Muted" })).toBeVisible();
+    await gracesHuddle.getByRole("button", { name: "Unmute microphone" }).click();
+    for (const huddle of [adasHuddle, gracesHuddle]) await expect(speakingIn(huddle, her.name)).toHaveCount(1, { timeout: 15_000 });
+    await expect(tickedIn(await openDevices(grace, room, "Microphone and speaker"), "Microphone")).toHaveText(MICROPHONES[1]);
+    await grace.keyboard.press("Escape");
+    await expect(gracesDevices).toBeHidden();
+
+    // Ada mutes, and opens the menu beside her microphone with the keys, which has her browser's own choice of microphone
+    // and of speaker ticked, and the first of them under the keys. With them she chooses her third microphone.
+    await adasHuddle.getByRole("button", { name: "Mute microphone" }).click();
+    await expect(tiles(gracesHuddle).filter({ hasText: administrator.user.name }).getByRole("img", { name: "Muted" })).toBeVisible();
+    await expect(speakingIn(gracesHuddle, administrator.user.name)).toHaveCount(0);
+    const askedBefore = tracksAsked();
+    const adasArrow = adasHuddle.getByRole("button", { name: "Microphone and speaker", exact: true });
+    await adasArrow.press("Enter");
+    const adasDevices = devicesMenu(page, "Microphone and speaker");
+    await expect(devicesIn(adasDevices, "Microphone").first()).toBeFocused();
+    await expect(tickedIn(adasDevices, "Microphone")).toHaveText(MICROPHONES[0]);
+    await expect(devicesIn(adasDevices, "Speaker")).toHaveText(SPEAKERS);
+    await expect(tickedIn(adasDevices, "Speaker")).toHaveText(SPEAKERS[0]);
+    for (const next of [1, 2]) {
+      await page.keyboard.press("ArrowDown");
+      await expect(devicesIn(adasDevices, "Microphone").nth(next)).toBeFocused();
+    }
+    await page.keyboard.press("Enter");
+    await expect(adasDevices).toBeHidden();
+    await expect(adasArrow).toBeFocused();
+    // It leaves her as muted as she was, and the menu ticks it once the huddle speaks through it. There she chooses her
+    // second speaker as well, which she hears Grace through from then.
+    await expect(adasHuddle.getByRole("button", { name: "Unmute microphone" })).toBeVisible();
+    await expect(tickedIn(await openDevices(page, room, "Microphone and speaker"), "Microphone")).toHaveText(MICROPHONES[2]);
+    await choose(adasDevices, "Speaker", SPEAKERS[1]);
+    await expect.poll(() => playsThrough(page, her.id, SPEAKERS[1])).toBe(true);
+    await expect(tickedIn(await openDevices(page, room, "Microphone and speaker"), "Speaker")).toHaveText(SPEAKERS[1]);
+    await page.keyboard.press("Escape");
+    await expect(adasDevices).toBeHidden();
+    // Unmuted, she shows as speaking in Grace's huddle again, by the microphone she chose, as the one before it is
+    // closed. The SFU wasn't asked for it: her connection carries it in place of the other.
+    await adasHuddle.getByRole("button", { name: "Unmute microphone" }).click();
+    await expect(speakingIn(gracesHuddle, administrator.user.name)).toHaveCount(1, { timeout: 15_000 });
+    expect(await hears(grace, administrator.user.id)).toBe(true);
+    expect(tracksAsked()).toBe(askedBefore);
+
+    // Her camera is off, so the menu beside it ticks none of her browser's. Choosing her third turns it on with
+    // that one, which Grace sees.
+    const adasCamera = `${administrator.user.name}'s camera`;
+    const adasCameras = await openDevices(page, room, "Camera");
+    await expect(devicesIn(adasCameras, "Camera")).toHaveText(CAMERAS);
+    await expect(tickedIn(adasCameras, "Camera")).toHaveCount(0);
+    await choose(adasCameras, "Camera", CAMERAS[2]);
+    await expect.poll(() => sees(page, "Your camera"), { timeout: 15_000 }).toBe(true);
+    await expect.poll(() => sees(grace, adasCamera), { timeout: 15_000 }).toBe(true);
+    await expect(tickedIn(await openDevices(page, room, "Camera"), "Camera")).toHaveText(CAMERAS[2]);
+    // She chooses her first in its place, which the SFU isn't asked for either. Grace goes on seeing her, by the
+    // pictures that reach her once the camera before it is closed.
+    const askedWithCamera = tracksAsked();
+    await choose(adasCameras, "Camera", CAMERAS[0]);
+    await expect(tickedIn(await openDevices(page, room, "Camera"), "Camera")).toHaveText(CAMERAS[0]);
+    await page.keyboard.press("Escape");
+    await expect(adasCameras).toBeHidden();
+    const shownBefore = await picturesOf(grace, adasCamera);
+    await expect.poll(() => picturesOf(grace, adasCamera), { timeout: 15_000 }).toBeGreaterThan(shownBefore + 10);
+    expect(await sees(page, "Your camera")).toBe(true);
+    expect(tracksAsked()).toBe(askedWithCamera);
+
+    // They leave, and the room has had the SFU close what each of them published and what each heard and saw. The
+    // preview of Ada's next huddle starts with the microphone and the speaker she chose in this one.
+    for (const huddle of [gracesHuddle, adasHuddle]) await huddle.getByRole("button", { name: "Leave", exact: true }).click();
+    await expect(adasHuddle).toHaveCount(0);
+    await expect.poll(sessionsLeftOpen).toEqual([]);
+    await page.getByRole("button", { name: "Start huddle", exact: true }).click();
+    await expect(starting.getByRole("combobox", { name: "Microphone" }).locator("option:checked")).toHaveText(MICROPHONES[2]);
+    await expect(starting.getByRole("combobox", { name: "Speaker" }).locator("option:checked")).toHaveText(SPEAKERS[1]);
+    await starting.getByRole("button", { name: "Cancel", exact: true }).last().click();
+    await expect(starting).toBeHidden();
+    await context.close();
   });
 });
