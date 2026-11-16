@@ -55,6 +55,16 @@ function nestedContentAttachments(levels: number, padding: string): string {
   return body;
 }
 
+/** Galleries nested `levels` deep, each in the content of an attachment of the one above, which says which level it is. */
+function nestedGalleries(levels: number, padding: string): string {
+  let body = "";
+  for (let level = levels; level >= 1; level--) {
+    const content = `<p>level ${level}${padding}</p>${body}`.replaceAll("&", "&amp;").replaceAll('"', "&quot;");
+    body = `<div><action-text-attachment presentation="gallery" content-type="text/html" content="${content}"></action-text-attachment>${galleryAttachment}</div>`;
+  }
+  return body;
+}
+
 /** The page and the stored form both have to refuse `body`, and quickly. */
 function expectRefusedQuickly(what: string, body: string): void {
   expectQuick(what, () => {
@@ -85,6 +95,14 @@ describe("Rich text, safely", () => {
     },
     SLOW_TEST_MS,
   );
+
+  it("renders nested galleries eight levels deep, and each one's attachments once", () => {
+    // Rails renders the inner gallery's attachments again as the outer one's, which has four, and shows level 2 twice
+    const html = presentation(nestedGalleries(2, ""));
+    expect(html.match(/attachment-gallery--\d+|level \d+/g)).toEqual(["attachment-gallery--2", "level 1", "attachment-gallery--2", "level 2"]);
+    const deep = presentation(nestedGalleries(12, ""));
+    for (let level = 1; level <= 12; level++) expect(deep.split(`level ${level}<`).length - 1, `level ${level}`).toBe(level <= 8 ? 1 : 0);
+  });
 
   it(
     "refuses deeply nested elements quickly",
@@ -162,6 +180,7 @@ describe("Rich text, safely", () => {
     "a list of 50,000 items": `<ol>${"<li>x</li>".repeat(50_000)}</ol>`,
     "10,000 mentions": `<p>${mention(1).repeat(10_000)}</p>`,
     "2,000 galleries": `<div>${galleryAttachment.repeat(2)}</div>`.repeat(2_000),
+    "60 nested galleries": nestedGalleries(60, "x".repeat(1000)),
     "300 KB of misnested links": `<b>${"<a>x</a><p>y".repeat(25_000)}`,
     "a misnested <b> around 200,000 <br>s": `<b><div>${"<br>".repeat(200_000)}</b>`,
     "500 KB of escaped ampersands": `<p><a href="${"&amp;#38;".repeat(50_000)}">x</a></p>`,
