@@ -44,6 +44,8 @@ export interface HuddleControls {
   setSmall(small: boolean): void;
   /** Speaks through the microphone `deviceId`, plays through that speaker, or shows that camera, from now. */
   setDevice(kind: HuddleDevice, deviceId: string): void;
+  /** Shows, in place of the camera that's on, the one that faces the other way, or the next the browser lists. */
+  switchCamera(): void;
 }
 
 /** The id the huddle opened has in the page, where Skip to main content goes while it covers the page. */
@@ -113,6 +115,12 @@ export const takeCamerasSmall = (small: boolean) => controls?.setSmall(small);
  * camera, which turns its camera on, if it's in one. For a speaker, an empty id is the system's.
  */
 export const chooseHuddleDevice = (kind: HuddleDevice, deviceId: string) => controls?.setDevice(kind, deviceId);
+
+/**
+ * Has the tab's huddle show, in place of its camera that's on, the one that faces the other way, as a
+ * phone's back camera does from its front one, or the next the browser lists, if it's in one.
+ */
+export const switchHuddleCamera = () => controls?.switchCamera();
 
 /**
  * Has `say` told whatever the tab's huddle has to tell its person, until the function returned is

@@ -16,7 +16,27 @@ import {
   type OfferedHuddleTrack,
 } from "@ember/protocol/huddles";
 import { socketUrl } from "./api";
-import { cameraOf, closeDevice, microphoneOf, NO_CAMERA, NO_OTHER_CAMERA, NO_OTHER_MICROPHONE, NO_OTHER_SPEAKER, NO_SCREEN, openCamera, openMicrophone, openScreen, rememberDevice, rememberedDevice, STILL_NO_MICROPHONE } from "./huddle-devices";
+import { keepScreenAwake } from "./huddle-awake";
+import {
+  CAMERA_WENT_OFF,
+  cameraOf,
+  closeDevice,
+  facingOf,
+  microphoneOf,
+  NO_CAMERA,
+  NO_OTHER_CAMERA,
+  NO_OTHER_MICROPHONE,
+  NO_OTHER_SPEAKER,
+  NO_SCREEN,
+  openCamera,
+  openMicrophone,
+  openOtherCamera,
+  openScreen,
+  rememberDevice,
+  rememberedDevice,
+  STILL_NO_MICROPHONE,
+  type CameraFacing,
+} from "./huddle-devices";
 import { huddleSounds } from "./huddle-sounds";
 import { huddleSpeaker, type HuddleSpeaker } from "./huddle-speaker";
 import { whoSpeaks, type HuddleSpeaking } from "./huddle-speaking";
@@ -44,6 +64,10 @@ import { reconnectingSocket } from "./reconnecting-socket";
 //
 // The room's answers say which of those pairs they're about, and not which frame they're to, so the tab
 // asks one thing at a time of each connection, and waits for the answer before it asks the next.
+//
+// A phone's browser stops a page once its screen locks, so a huddle keeps a phone's screen awake
+// (huddle-awake.ts). And a phone opens one of its cameras at a time, so the camera that's on is let go
+// of before another is opened in its place.
 
 /** How a tab joins a huddle, as the preview before it leaves things. */
 export interface HuddleJoin {
@@ -631,6 +655,7 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
   /** Whether the huddle, opened, last showed people in tiles small enough for the smaller of a camera's sizes. */
   let smallTiles = false;
 
+  const letScreenSleep = keepScreenAwake();
   const speaker = huddleSpeaker(speakerId);
   const speaking = whoSpeaks(showSpeaking);
   const voices = voicesThrough(speaker, speaking);
@@ -726,8 +751,11 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
     },
     setDevice(kind, deviceId) {
       if (kind === "microphone") return void speakThrough(deviceId);
-      if (kind === "camera") return void showThrough(deviceId);
+      if (kind === "camera") return showThrough(deviceId);
       void playThrough(deviceId);
+    },
+    switchCamera() {
+      void showOtherCamera();
     },
   };
 
@@ -792,28 +820,60 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
   }
 
   /**
-   * Shows another camera. One that's off turns on with it. One that's on gives way to it once the
-   * browser has opened it, which the others go on watching as the same camera, and stays on if the
-   * browser won't, which the tab's person is told. One chosen while the browser opens another isn't
-   * taken up.
+   * Shows another camera, which this browser's next huddle starts with. One that's off turns on with
+   * it, and one that's on gives way to it. One chosen while the browser opens another isn't taken up.
    */
-  async function showThrough(deviceId: string) {
+  function showThrough(deviceId: string) {
     if (over || openingCamera) return;
     rememberDevice("camera", deviceId);
-    if (huddle.camera && deviceId === cameraOf(huddle.camera)) return;
     if (!huddle.camera) return void showOnceOpen(openCamera(deviceId));
-    openingCamera = true;
-    const opened = await openCamera(deviceId);
-    openingCamera = false;
+    if (deviceId !== cameraOf(huddle.camera)) void showInstead(() => openCamera(deviceId));
+  }
+
+  /**
+   * Switches from the camera that's on to the one that faces the other way, as a phone's back camera
+   * does from its front one, or to the next the browser lists, which this browser's next huddle starts
+   * with. A camera that's off stays off.
+   */
+  async function showOtherCamera() {
+    const other = await showInstead(openOtherCamera);
+    if (other) rememberDevice("camera", cameraOf(other));
+  }
+
+  /**
+   * Shows the camera `open` opens in place of the one that's on, whose device and which way it faced
+   * `open` is given, and answers it once it shows. The one that's on is let go of first, since a phone
+   * opens one camera at a time, and the others go on watching what takes its place as the same camera.
+   * Where the browser won't open that, the one before comes back on, and the tab's person is told, as
+   * they are of a camera left off because the browser wouldn't open that one again either. Nothing
+   * is asked of the browser while it opens a camera already.
+   */
+  async function showInstead(open: (deviceId: string, facing: CameraFacing | null) => Promise<MediaStream | null>): Promise<MediaStream | null> {
     const shown = huddle.camera;
-    // Left meanwhile, or turned off, when there's none for it to take the place of.
-    if (over || !shown) return closeDevice(opened);
-    if (!opened) return tellOfHuddle(NO_OTHER_CAMERA);
+    if (over || openingCamera || !shown) return null;
+    openingCamera = true;
+    const deviceId = cameraOf(shown);
+    const facing = facingOf(shown);
     shown.getVideoTracks()[0]?.removeEventListener("ended", ended.video);
     closeDevice(shown);
+    const other = await open(deviceId, facing);
+    // Left meanwhile, or turned off, when there's none for it to take the place of.
+    const gone = () => over || huddle.camera !== shown;
+    const opened = other ?? (gone() ? null : await openCamera(deviceId || null));
+    openingCamera = false;
+    if (gone()) {
+      closeDevice(opened);
+      return null;
+    }
+    if (!other) tellOfHuddle(opened ? NO_OTHER_CAMERA : CAMERA_WENT_OFF);
+    if (!opened) {
+      takeDown("video");
+      return null;
+    }
     opened.getVideoTracks()[0]?.addEventListener("ended", ended.video);
     show({ camera: opened });
     if (huddle.connected) void sending.video.swap();
+    return other;
   }
 
   /** Shows the camera the browser is opening, once it has, or tells the tab's person that there's none for it. */
@@ -885,13 +945,14 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
 
   /**
    * Leaves for good: the socket closes, which is how the room hears, and so do the connections, the
-   * microphone, the camera and the screen it shares. A tab the room had let in hears the leaving sound,
-   * however its huddle ended.
+   * microphone, the camera and the screen it shares, and a phone's own screen is left to sleep again.
+   * A tab the room had let in hears the leaving sound, however its huddle ended.
    */
   function stop() {
     over = true;
     socket.close();
     hangUp();
+    letScreenSleep();
     voices.stopAll();
     speaking.stop();
     showSpeaking(new Set());

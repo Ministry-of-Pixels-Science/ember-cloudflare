@@ -8,7 +8,7 @@ import { useCamerasAllowed } from "@/hooks/use-account";
 import { PeopleContext } from "@/hooks/use-directory";
 import { useHuddle } from "@/hooks/use-huddle";
 import { joinHuddle } from "@/lib/huddle";
-import { cameraOf, closeDevice, listDevices, microphoneOf, NO_CAMERA, NO_DEVICES, openCamera, openMicrophone, rememberDevice, rememberedDevice, speakerChoices, watchDevices, withOpen } from "@/lib/huddle-devices";
+import { cameraOf, closeDevice, facesAway, listDevices, microphoneOf, NO_CAMERA, NO_DEVICES, openCamera, openMicrophone, rememberDevice, rememberedDevice, speakerChoices, watchDevices, withOpen } from "@/lib/huddle-devices";
 import { inItNow } from "@/lib/huddle-people";
 import { cn } from "@/lib/utils";
 import { HuddlePicture } from "./huddle-picture";
@@ -271,7 +271,11 @@ export function HuddlePreview({ room, me, live, onClose }: Props) {
 
         {/* As wide as a camera's picture, which fills it while the camera's on, and taller where a narrow phone's wouldn't hold the avatar and the switches. */}
         <div className={cn("relative mt-5 grid aspect-[16/9] justify-center justify-items-center gap-3.5 overflow-hidden rounded-xl border bg-surface py-4", camera.stream ? "content-end" : "content-center")}>
-          {camera.stream ? <HuddlePicture stream={camera.stream} label="Your camera" mirrored /> : <UserAvatar user={me} square className="size-[88px] rounded-2xl upto-480px:size-[72px]" />}
+          {camera.stream ? (
+            <HuddlePicture stream={camera.stream} label="Your camera" mirrored={!facesAway(camera.stream)} />
+          ) : (
+            <UserAvatar user={me} square className="size-[88px] rounded-2xl upto-480px:size-[72px]" />
+          )}
           <div className="relative flex gap-2.5">
             <PreviewSwitch label={silent ? "Unmute microphone" : "Mute microphone"} on={!silent} disabled={!stream} onClick={() => setMuted(!muted)}>
               {silent ? <MicrophoneMute /> : <Microphone />}

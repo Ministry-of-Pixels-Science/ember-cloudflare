@@ -30,14 +30,15 @@ const huddle = (changes: Partial<JoinedHuddle> = {}): JoinedHuddle => ({
   open: true,
   ...changes,
 });
-/** A camera's stream, or a shared screen's, as much of one as a tile reads: jsdom has none. */
-const camera = () => ({}) as MediaStream;
+/** A camera's stream, as much of one as a tile reads, which is the way it faces, where the browser says: jsdom has none. */
+const camera = (facingMode?: string) => ({ getVideoTracks: () => [{ getSettings: () => ({ facingMode }) }] }) as unknown as MediaStream;
+/** And a shared screen's, of which it reads nothing. */
 const shared = () => ({}) as MediaStream;
 const crowd = (count: number) => Array.from({ length: count }, (_, index) => inHuddle({ id: `u${index}`, name: `Person ${index}` }));
 
 /** The huddle this tab is in, opened, with what the huddle's controls were asked. */
 function renderView(joined: JoinedHuddle = huddle(), room: Room | null = general) {
-  const controls = { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setDevice: vi.fn(), setSmall: vi.fn() };
+  const controls = { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setDevice: vi.fn(), setSmall: vi.fn(), switchCamera: vi.fn() };
   act(() => showHuddle(joined, controls));
   const user = userEvent.setup();
   const view = render(<HuddleView huddle={joined} room={room} meId="ada" />);
@@ -57,6 +58,18 @@ function ScreensOff({ children }: { children: ReactNode }) {
 /** Has the browser be one that can share a screen, which jsdom's isn't, as a phone's isn't. */
 function browserSharesScreens() {
   Object.defineProperty(navigator, "mediaDevices", { value: { getDisplayMedia: vi.fn() }, configurable: true });
+}
+
+/** Has the browser list `count` cameras. Answers what has it list another number, and tell the page that its devices changed. */
+function browserCameras(count: number) {
+  let listed = count;
+  const enumerateDevices = async () => Array.from({ length: listed }, (_, index) => ({ kind: "videoinput", deviceId: `camera-${index}`, label: "" }));
+  const media = Object.assign(new EventTarget(), { enumerateDevices });
+  Object.defineProperty(navigator, "mediaDevices", { value: media, configurable: true });
+  return async (now: number) => {
+    listed = now;
+    await act(async () => void media.dispatchEvent(new Event("devicechange")));
+  };
 }
 
 /** Has the huddle measure `space` as its own, which jsdom, laying nothing out, leaves to the test. Answers what tells it that its window changed. */
@@ -84,6 +97,12 @@ const tiles = () => within(list()).getAllByRole("listitem");
 const stage = () => screen.queryByRole("figure");
 const shape = () => parseFloat((stage()!.querySelector("figcaption")!.nextElementSibling as HTMLElement).style.aspectRatio);
 const count = () => opened().querySelector("header [aria-live]");
+
+/** The page is hidden, as when its person goes to another app on a phone, or shows again. */
+const pageShows = (state: DocumentVisibilityState) => {
+  vi.spyOn(document, "visibilityState", "get").mockReturnValue(state);
+  document.dispatchEvent(new Event("visibilitychange"));
+};
 
 let play: MockInstance<HTMLMediaElement["play"]>;
 
@@ -231,6 +250,16 @@ describe("The tiles of a huddle", () => {
     expect(tiles()[1]).toContainElement(picture);
   });
 
+  it("shows you a camera that faces away from you, as a phone's back camera does, as it is, and one that faces you as a mirror would", () => {
+    const { rerender } = renderView(huddle({ camera: camera("environment") }));
+    expect(screen.getByLabelText("Your camera")).not.toHaveClass("-scale-x-100");
+    rerender(<HuddleView huddle={huddle({ camera: camera("user") })} room={general} meId="ada" />);
+    expect(screen.getByLabelText("Your camera")).toHaveClass("-scale-x-100");
+    // Someone else's is as it is whichever way it faces.
+    rerender(<HuddleView huddle={huddle({ watched: new Map([["sam", camera("user")]]) })} room={general} meId="ada" />);
+    expect(screen.getByLabelText("Sam Rivera's camera")).not.toHaveClass("-scale-x-100");
+  });
+
   it("plays a picture the browser kept from playing at the person's next click or key, until it's gone", async () => {
     const { user, rerender } = renderView(huddle({ watched: new Map([["sam", camera()]]) }));
     const picture = screen.getByLabelText<HTMLVideoElement>("Sam Rivera's camera");
@@ -243,6 +272,20 @@ describe("The tiles of a huddle", () => {
     expect(picture.srcObject).toBeNull();
     await user.click(screen.getByRole("heading", { level: 2 }));
     expect(play).toHaveBeenCalledTimes(2);
+  });
+
+  it("plays a picture the browser stopped while the page was hidden as the page shows again, and none that plays still, until it's gone", () => {
+    const { rerender } = renderView(huddle({ camera: camera("user"), watched: new Map([["sam", camera()]]) }));
+    const [yours, sams] = [screen.getByLabelText<HTMLVideoElement>("Your camera"), screen.getByLabelText<HTMLVideoElement>("Sam Rivera's camera")];
+    vi.spyOn(yours, "paused", "get").mockReturnValue(false);
+    pageShows("hidden");
+    expect(play).not.toHaveBeenCalled();
+    pageShows("visible");
+    expect(play.mock.contexts).toEqual([sams]);
+
+    rerender(<HuddleView huddle={huddle()} room={general} meId="ada" />);
+    pageShows("visible");
+    expect(play).toHaveBeenCalledTimes(1);
   });
 
   it("lays the tiles out as large as shows them all in the space it measures, and again as its window changes", () => {
@@ -507,6 +550,62 @@ describe("The buttons along the base of a huddle", () => {
     expect(screen.getByRole("button", { name: "Turn off camera" })).not.toHaveClass("md:rounded-r-none");
     expect(screen.queryByRole("button", { name: "Camera" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Microphone and speaker" })).toBeInTheDocument();
+  });
+
+  it("has a button that switches cameras in the camera's arrow's place, as on a phone, while the camera is on and the browser lists another", async () => {
+    browserCameras(2);
+    const { switchCamera, user, rerender } = renderView(huddle({ camera: camera() }));
+    const button = await screen.findByRole("button", { name: "Switch camera" });
+    expect(button).toHaveClass("md:hidden", "bg-hover");
+    expect(button).toHaveAttribute("title", "Switch camera");
+    expect(screen.getByRole("button", { name: "Camera" })).toHaveClass("max-md:hidden");
+    // Right after the camera's own, and its arrow on a computer.
+    const names = screen.getAllByRole("button").map((each) => each.getAttribute("aria-label") ?? each.textContent);
+    expect(names.slice(names.indexOf("Turn off camera"))).toEqual(["Turn off camera", "Camera", "Switch camera", "Leave"]);
+
+    await user.click(button);
+    expect(switchCamera).toHaveBeenCalledExactlyOnceWith();
+    // Off, there's none to switch from.
+    rerender(<HuddleView huddle={huddle()} room={general} meId="ada" />);
+    expect(screen.queryByRole("button", { name: "Switch camera" })).not.toBeInTheDocument();
+  });
+
+  it("has no button to switch cameras while the browser lists the one, until another is plugged in, nor once that's taken away", async () => {
+    const lists = browserCameras(1);
+    renderView(huddle({ camera: camera() }));
+    await act(async () => {});
+    expect(screen.queryByRole("button", { name: "Switch camera" })).not.toBeInTheDocument();
+    await lists(2);
+    expect(screen.getByRole("button", { name: "Switch camera" })).toBeInTheDocument();
+    await lists(1);
+    expect(screen.queryByRole("button", { name: "Switch camera" })).not.toBeInTheDocument();
+  });
+
+  it("asks nothing of the browser's cameras while its own is off, and hears no more of them once it's off again", async () => {
+    const lists = browserCameras(2);
+    const enumerateDevices = vi.spyOn(navigator.mediaDevices, "enumerateDevices");
+    const { rerender } = renderView();
+    await lists(2);
+    expect(enumerateDevices).not.toHaveBeenCalled();
+    rerender(<HuddleView huddle={huddle({ camera: camera() })} room={general} meId="ada" />);
+    expect(await screen.findByRole("button", { name: "Switch camera" })).toBeInTheDocument();
+    expect(enumerateDevices).toHaveBeenCalledTimes(1);
+    rerender(<HuddleView huddle={huddle()} room={general} meId="ada" />);
+    await lists(2);
+    expect(enumerateDevices).toHaveBeenCalledTimes(1);
+  });
+
+  it("has no button to switch cameras while an administrator has cameras off, who leaves none to choose", async () => {
+    browserCameras(2);
+    const { rerender } = renderView();
+    rerender(
+      <CamerasOff>
+        <HuddleView huddle={huddle({ camera: camera() })} room={general} meId="ada" />
+      </CamerasOff>,
+    );
+    await act(async () => {});
+    expect(screen.getByRole("button", { name: "Turn off camera" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Switch camera" })).not.toBeInTheDocument();
   });
 
   it("keeps its camera button under a workspace that says nothing of cameras, as one told of by an older Worker does", () => {

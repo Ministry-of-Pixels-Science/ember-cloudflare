@@ -4,11 +4,12 @@ import type { HuddlePerson } from "@ember/protocol/huddles";
 import { Collapse, Headset, MicrophoneMute, NavArrowDown } from "@/components/icons/iconoir";
 import { useNameOf } from "@/hooks/use-directory";
 import { useIsSpeaking } from "@/hooks/use-huddle";
+import { facesAway } from "@/lib/huddle-devices";
 import { OPEN_HUDDLE, openHuddle, takeCamerasSmall, type JoinedHuddle } from "@/lib/huddle-store";
 import { SCREEN_SHAPE, showsCamerasSmall, stageLayout, TILE_GAP, tilesLayout } from "@/lib/huddle-tiles";
 import { cn } from "@/lib/utils";
 import { HuddlePicture } from "./huddle-picture";
-import { CameraTool, LeaveButton, MicrophoneTool, ScreenTool, useHuddleName, waitingToJoin } from "./huddle-tools";
+import { CameraTool, LeaveButton, MicrophoneTool, ScreenTool, SwitchCameraTool, useHuddleName, waitingToJoin } from "./huddle-tools";
 import { UserAvatar } from "./user-avatar";
 
 interface Space {
@@ -52,7 +53,7 @@ const CAPTION = "absolute bottom-2.5 left-2.5 flex max-w-[calc(100%-20px)] items
 interface TileProps {
   person: HuddlePerson;
   name: string;
-  /** Whether they're this tab's person, who sees their own camera as a mirror would show it. */
+  /** Whether they're this tab's person, who sees their own camera as a mirror would show it, unless it faces away from them. */
   you: boolean;
   /** Their camera, while it's on and this tab has it to show. */
   picture: MediaStream | null;
@@ -70,7 +71,7 @@ function Tile({ person, name, you, picture, className }: TileProps) {
   return (
     <li className={cn(TILE, speaking && "border-transparent", className)}>
       {picture ? (
-        <HuddlePicture stream={picture} label={you ? "Your camera" : `${name}'s camera`} mirrored={you} />
+        <HuddlePicture stream={picture} label={you ? "Your camera" : `${name}'s camera`} mirrored={you && !facesAway(picture)} />
       ) : (
         // 96px on a tile at its widest, and smaller with the tile: two fifths of its width, and no taller than its rows leave it over the caption.
         <UserAvatar user={person.user} square className="row-start-2 aspect-square h-auto w-[min(40cqw,96px,calc(100cqh-50px))] rounded-[16%]" />
@@ -198,7 +199,8 @@ interface Props {
  * The huddle this tab is in, opened, inside Ember, over the page beside the sidebar, and over all of a
  * phone's: its name and how many are in it, a tile for each of them, as large as shows them all, and
  * along its base the microphone, the camera, the screen and Leave, where Slack has them, the first two
- * with an arrow that chooses which microphone, speaker or camera the huddle uses. While someone
+ * with an arrow that chooses which microphone, speaker or camera the huddle uses, or on a phone, which
+ * has no arrows, a button beside the camera that switches between its cameras. While someone
  * else shares a screen it shows that large, and the tiles in what it leaves them, beside it or under
  * it, as on a phone held upright, whichever shows the screen larger. The screen that shows is the
  * one this tab's person chose among the tiles, while it's shared and the tab has it to show, or else
@@ -287,6 +289,7 @@ export function HuddleView({ huddle, room, meId }: Props) {
         <div className="col-start-2 flex gap-1.5">
           <MicrophoneTool huddle={huddle} devices />
           <CameraTool huddle={huddle} devices />
+          <SwitchCameraTool huddle={huddle} />
           <ScreenTool huddle={huddle} />
         </div>
         <div className="flex justify-end">

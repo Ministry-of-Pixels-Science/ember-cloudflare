@@ -1,5 +1,24 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cameraOf, closeDevice, listDevices, listsSpeaker, microphoneOf, NO_DEVICES, openCamera, openMicrophone, openScreen, rememberDevice, rememberedDevice, sharesScreens, speakerChoices, watchDevices, withOpen } from "./huddle-devices";
+import {
+  cameraOf,
+  closeDevice,
+  facesAway,
+  facingOf,
+  listDevices,
+  listsSpeaker,
+  microphoneOf,
+  NO_DEVICES,
+  openCamera,
+  openMicrophone,
+  openOtherCamera,
+  openScreen,
+  rememberDevice,
+  rememberedDevice,
+  sharesScreens,
+  speakerChoices,
+  watchDevices,
+  withOpen,
+} from "./huddle-devices";
 
 /** A stream from the microphone `deviceId`, or with `kind` said, the camera, as much of one as the code reads. */
 function streamFrom(deviceId: string, kind: "audio" | "video" = "audio") {
@@ -154,6 +173,73 @@ describe("Opening a camera", () => {
     expect(cameraOf(streamFrom("mic-1").stream)).toBe("");
     closeDevice(stream);
     expect(track.stop).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Opening the camera to switch to", () => {
+  const TILE = { width: { ideal: 640 }, height: { ideal: 360 } };
+  /** What the browser is asked for the camera that faces `facingMode` with, and for the camera `deviceId`. */
+  const facingAsked = (facingMode: string) => [{ video: { ...TILE, facingMode: { exact: facingMode } } }];
+  const cameraAsked = (deviceId: string) => [{ video: { ...TILE, deviceId: { exact: deviceId } } }];
+
+  /** A camera's stream, as much of one as says which way its camera faces, where the browser says. */
+  const facing = (facingMode?: string) => ({ getVideoTracks: () => [{ getSettings: () => ({ facingMode }) }] }) as unknown as MediaStream;
+  /** Has the browser list the cameras `deviceIds`, among its microphones. */
+  const lists = (...deviceIds: string[]) => vi.fn().mockResolvedValue([device("audioinput", "mic-1"), ...deviceIds.map((deviceId) => device("videoinput", deviceId))]);
+
+  it("says which way a camera faces, where the browser does, and whether that's away from its person", () => {
+    expect([facing("user"), facing("environment"), facing(), facing("left"), null].map(facingOf)).toEqual(["user", "environment", null, null, null]);
+    // A microphone's stream is from no camera.
+    expect(facingOf(streamFrom("mic-1").stream)).toBeNull();
+    expect([facing("environment"), facing("user"), facing(), null].map(facesAway)).toEqual([true, false, false, false]);
+  });
+
+  it("opens the camera that faces the other way from the one that was on, without asking which the browser lists", async () => {
+    const { stream } = streamFrom("back", "video");
+    const getUserMedia = vi.fn().mockResolvedValue(stream);
+    const enumerateDevices = lists("front", "back");
+    withMedia({ getUserMedia, enumerateDevices });
+    expect(await openOtherCamera("front", "user")).toBe(stream);
+    expect(await openOtherCamera("back", "environment")).toBe(stream);
+    expect(getUserMedia.mock.calls).toEqual([facingAsked("environment"), facingAsked("user")]);
+    expect(enumerateDevices).not.toHaveBeenCalled();
+  });
+
+  it("opens the next camera the browser lists where it didn't say which way the one that was on faced: its first after its last, and its first after one it doesn't list", async () => {
+    const { stream } = streamFrom("camera-2", "video");
+    const getUserMedia = vi.fn().mockResolvedValue(stream);
+    withMedia({ getUserMedia, enumerateDevices: lists("camera-1", "camera-2", "camera-3") });
+    for (const from of ["camera-1", "camera-2", "camera-3", "unplugged", ""]) expect(await openOtherCamera(from, null)).toBe(stream);
+    expect(getUserMedia.mock.calls).toEqual(["camera-2", "camera-3", "camera-1", "camera-1", "camera-1"].map(cameraAsked));
+  });
+
+  it("opens the next camera the browser lists where it has none that faces the other way, or won't open the one that does", async () => {
+    const { stream } = streamFrom("usb", "video");
+    const getUserMedia = vi.fn().mockRejectedValueOnce(refusal("OverconstrainedError")).mockResolvedValue(stream);
+    withMedia({ getUserMedia, enumerateDevices: lists("front", "usb") });
+    expect(await openOtherCamera("front", "user")).toBe(stream);
+    expect(getUserMedia.mock.calls).toEqual([facingAsked("environment"), cameraAsked("usb")]);
+  });
+
+  it("has none where the browser lists no other camera, lists none or can't say, and asks it for none", async () => {
+    const getUserMedia = vi.fn();
+    for (const enumerateDevices of [lists("only"), lists(), vi.fn().mockRejectedValue(refusal("NotAllowedError"))]) {
+      withMedia({ getUserMedia, enumerateDevices });
+      expect(await openOtherCamera("only", null)).toBeNull();
+    }
+    expect(getUserMedia).not.toHaveBeenCalled();
+  });
+
+  it("has none where the browser won't open the next it lists, rather than its own choice, which may be the one that was on", async () => {
+    const getUserMedia = vi.fn().mockRejectedValue(refusal("OverconstrainedError"));
+    withMedia({ getUserMedia, enumerateDevices: lists("camera-1", "camera-2") });
+    expect(await openOtherCamera("camera-1", null)).toBeNull();
+    expect(getUserMedia.mock.calls).toEqual([cameraAsked("camera-2")]);
+  });
+
+  it("has none on a page the browser gives no camera", async () => {
+    vi.stubGlobal("navigator", {});
+    expect(await openOtherCamera("camera-1", "user")).toBeNull();
   });
 });
 

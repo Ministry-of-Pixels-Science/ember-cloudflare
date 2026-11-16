@@ -48,7 +48,7 @@ function browserLists(devices: MediaDeviceInfo[], choosesSpeaker = true) {
 
 /** One of a huddle's two menus, shut, with what the huddle's controls were asked. */
 function renderMenu(Menu: typeof MicrophoneMenu, joined: JoinedHuddle = huddle()) {
-  const controls = { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setDevice: vi.fn(), setSmall: vi.fn() };
+  const controls = { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setDevice: vi.fn(), setSmall: vi.fn(), switchCamera: vi.fn() };
   act(() => showHuddle(joined, controls));
   const user = userEvent.setup();
   const view = render(<Menu huddle={joined} className="" />);
