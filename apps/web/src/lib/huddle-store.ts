@@ -40,6 +40,8 @@ export interface HuddleControls {
   setCamera(on: boolean): void;
   setScreen(shared: boolean): void;
   setOpen(open: boolean): void;
+  /** Says whether the huddle, opened, shows people in tiles small enough for the smaller of the sizes a camera is sent in, which is then the one it's sent. */
+  setSmall(small: boolean): void;
   /** Speaks through the microphone `deviceId`, plays through that speaker, or shows that camera, from now. */
   setDevice(kind: HuddleDevice, deviceId: string): void;
 }
@@ -102,6 +104,9 @@ export const shareHuddleScreen = (shared: boolean) => controls?.setScreen(shared
 
 /** Shows the tab's huddle opened, or as its bar again, if it's in one. */
 export const openHuddle = (open: boolean) => controls?.setOpen(open);
+
+/** Has the tab's huddle be sent the others' cameras in the smaller of their sizes, as while it shows them in small tiles, or in the larger again, if it's in one. */
+export const takeCamerasSmall = (small: boolean) => controls?.setSmall(small);
 
 /**
  * Has the tab's huddle speak through another microphone, play through another speaker, or show another

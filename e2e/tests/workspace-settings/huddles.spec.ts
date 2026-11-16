@@ -9,7 +9,7 @@ import { startFakeSfu, type FakeSfu } from "./fake-sfu";
 // the Realtime SFU this spec fakes: to start a session with the keys it's given, and to carry what the
 // people in a huddle say, what their cameras show and the screens they share, which the fake does
 // through a page of its own. Each test leaves the workspace as a new one is: huddles off, and cameras
-// and screen sharing allowed in them.
+// and screen sharing allowed in them, and the SFU taking a camera in each size it's sent in.
 
 let sfu: FakeSfu;
 let relay: Page;
@@ -23,6 +23,7 @@ test.afterAll(async () => {
   await sfu.close();
 });
 test.afterEach(async ({ request }) => {
+  Object.assign(sfu, { oneSize: false, fixedSizes: false });
   const forgotten = await request.delete("/api/account/huddles", { headers: await asAdministrator(request) });
   expect(forgotten.status(), await forgotten.text()).toBe(200);
   await switchHuddles(request, { huddleCameras: true, huddleScreens: true });
@@ -243,6 +244,10 @@ const playsThrough = (page: Page, userId: string, label: string) =>
 const picturesOf = (page: Page, label: string) =>
   page.evaluate((label) => [...document.querySelectorAll<HTMLVideoElement>("#huddle video")].find((video) => video.ariaLabel === label)?.getVideoPlaybackQuality().totalVideoFrames ?? 0, label);
 
+/** How wide the pictures are that `page` shows of the camera its huddle labels `label`: nothing until it has one. */
+const widthOf = (page: Page, label: string) =>
+  page.evaluate((label) => [...document.querySelectorAll<HTMLVideoElement>("#huddle video")].find((video) => video.ariaLabel === label)?.videoWidth ?? 0, label);
+
 /** Where `refuseDevices` has a page keep what lets it use its devices after all. */
 type RefusesDevices = Window & { letUseDevices(): void };
 
@@ -319,6 +324,9 @@ const sessionsLeftOpen = () => [...sessionsCarried()].filter((sessionId) => !sfu
 
 /** How many tracks the SFU has been asked for: to take one a browser publishes, or to give a browser one. */
 const tracksAsked = () => sfu.asked.filter(({ method, path }) => method === "POST" && path.endsWith("/tracks/new")).length;
+
+/** The sizes the SFU has been asked for since its request number `since`, in order: with a track it gives a browser, or of one it gives already. */
+const sizesAsked = (since: number) => sfu.asked.slice(since).flatMap(({ path, sizes = [] }) => sizes.map((size) => `${path.endsWith("/tracks/update") ? "changed to" : "asked for in"} ${size}`));
 
 test.describe("A huddle", () => {
   test("two people start and join a room's huddle, which their sidebars show, hear and see each other and hear its sounds, and leave it", async ({ page, browser, baseURL, request }) => {
@@ -731,6 +739,89 @@ test.describe("A huddle", () => {
     await expect(starting.getByRole("combobox", { name: "Speaker" }).locator("option:checked")).toHaveText(SPEAKERS[1]);
     await starting.getByRole("button", { name: "Cancel", exact: true }).last().click();
     await expect(starting).toBeHidden();
+    await context.close();
+  });
+
+  test("a camera is sent in two sizes, and someone watching is sent the one their tiles show: the smaller in small tiles, and the larger again in large ones", async ({ page, browser, baseURL, request }) => {
+    // Two browsers, one of which sends its camera twice over.
+    test.slow();
+    const administrator = await administratorSession(request);
+    const room = await roomOfItsOwn(request);
+    const saved = await request.put("/api/account/huddles", { data: SFU_APP, headers: await asAdministrator(request) });
+    expect(saved.status(), await saved.text()).toBe(200);
+    const askedBefore = sfu.asked.length;
+    /** How tall Grace's tiles are, and whether the pictures she's shown of Ada's camera are the larger size's, wider than the smaller's 320px, or the smaller's. */
+    const tileHeight = async () => (await tiles(gracesHuddle).first().boundingBox())!.height;
+    const shownLarge = async () => (await widthOf(grace, adasCamera)) > 320;
+    const shownSmall = async () => {
+      const width = await widthOf(grace, adasCamera);
+      return width > 0 && width <= 320;
+    };
+
+    // Ada starts the room's huddle and turns her camera on. Grace joins, in a window whose tiles are tall, and is sent the larger size.
+    await useOwnAddress(page);
+    await page.goto(`/rooms/${room.id}`);
+    await signInAsAdministrator(page);
+    await page.getByRole("button", { name: "Start huddle", exact: true }).click();
+    await page.getByRole("dialog", { name: `Start a huddle in ${room.name}` }).getByRole("button", { name: "Start Huddle" }).click();
+    const adasHuddle = huddleOpened(page, room);
+    await adasHuddle.getByRole("button", { name: "Turn on camera" }).click();
+    await expect.poll(() => sees(page, "Your camera"), { timeout: 15_000 }).toBe(true);
+    const { context } = await newcomer(browser, baseURL, request, "Grace");
+    const grace = await context.newPage();
+    const gracesHuddle = await joinByLink(grace, room);
+    const adasCamera = `${administrator.user.name}'s camera`;
+    await expect.poll(shownLarge, { timeout: 15_000 }).toBe(true);
+    expect(await tileHeight()).toBeGreaterThan(180);
+    expect(sizesAsked(askedBefore)).toEqual(["asked for in a"]);
+
+    // Her window gets short, and its tiles no taller than the smaller size. The SFU is asked to send her that one in place
+    // of the other, on the track it sends her already, and she goes on seeing Ada.
+    const tracksBefore = tracksAsked();
+    await grace.setViewportSize({ width: 1280, height: 330 });
+    await expect.poll(tileHeight).toBeLessThanOrEqual(180);
+    await expect.poll(shownSmall, { timeout: 15_000 }).toBe(true);
+    expect(sizesAsked(askedBefore)).toEqual(["asked for in a", "changed to b"]);
+    // And the larger again once her window is as tall as it was.
+    await grace.setViewportSize({ width: 1280, height: 720 });
+    await expect.poll(shownLarge, { timeout: 15_000 }).toBe(true);
+    expect(sizesAsked(askedBefore)).toEqual(["asked for in a", "changed to b", "changed to a"]);
+    expect(tracksAsked()).toBe(tracksBefore);
+
+    // An SFU that won't make a camera larger has it closed, and is asked for it anew, as it would send it, so
+    // that her tall tiles aren't left the smaller size. It's asked for no size of hers from then on.
+    await grace.setViewportSize({ width: 1280, height: 330 });
+    await expect.poll(shownSmall, { timeout: 15_000 }).toBe(true);
+    sfu.fixedSizes = true;
+    await grace.setViewportSize({ width: 1280, height: 720 });
+    await expect.poll(shownLarge, { timeout: 15_000 }).toBe(true);
+    const sizesChanged = ["asked for in a", "changed to b", "changed to a", "changed to b", "changed to a"];
+    expect(sizesAsked(askedBefore)).toEqual(sizesChanged);
+    expect(tracksAsked()).toBe(tracksBefore + 1);
+    sfu.fixedSizes = false;
+    await grace.setViewportSize({ width: 1280, height: 330 });
+    await expect.poll(tileHeight).toBeLessThanOrEqual(180);
+    await grace.setViewportSize({ width: 1280, height: 720 });
+    await expect.poll(tileHeight).toBeGreaterThan(180);
+
+    // An SFU that takes a camera in one size is sent it whole, and not the smaller of the two it was offered, which
+    // is all a browser goes on sending then. Nothing is asked about its size, whatever the tiles'.
+    sfu.oneSize = true;
+    await adasHuddle.getByRole("button", { name: "Turn off camera" }).click();
+    await expect(gracesHuddle.getByLabel(adasCamera)).toHaveCount(0);
+    await adasHuddle.getByRole("button", { name: "Turn on camera" }).click();
+    await expect.poll(shownLarge, { timeout: 15_000 }).toBe(true);
+    await grace.setViewportSize({ width: 1280, height: 330 });
+    await expect.poll(tileHeight).toBeLessThanOrEqual(180);
+    const shownBefore = await picturesOf(grace, adasCamera);
+    await expect.poll(() => picturesOf(grace, adasCamera), { timeout: 15_000 }).toBeGreaterThan(shownBefore + 10);
+    expect(await shownLarge()).toBe(true);
+    expect(sizesAsked(askedBefore)).toEqual(sizesChanged);
+
+    // They leave, and the room has had the SFU close what each of them published, the camera's two sizes as one, and what each heard and saw.
+    for (const huddle of [gracesHuddle, adasHuddle]) await huddle.getByRole("button", { name: "Leave", exact: true }).click();
+    await expect(adasHuddle).toHaveCount(0);
+    await expect.poll(sessionsLeftOpen).toEqual([]);
     await context.close();
   });
 });

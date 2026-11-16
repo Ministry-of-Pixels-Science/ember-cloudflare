@@ -1175,9 +1175,13 @@ the screen, the button that opens the huddle again, and Leave; a phone's bar has
 Leave, and opens the huddle at its name. Whoever is speaking has a green ring round their tile, and
 round their face on the bar. Your browser tells who by how loud each voice it plays is, and your own
 by your microphone, so nothing more is sent for it, and nobody muted shows as speaking. Cameras are
-640 by 360 at up to 500 kbps, and up to 25 can be on in a huddle at once. Your browser is sent the
-others' only while you have the huddle open, and a camera's picture isn't kept in step with its
-person's voice, which travels apart from it.
+640 by 360 at up to 500 kbps, and up to 25 can be on in a huddle at once. Chrome, Edge and the other
+browsers built on Chromium send a camera in a second size as well, 320 by 180 at up to 150 kbps, and
+a browser whose tiles are no taller than that, as with many people in the huddle, or beside a
+shared screen, is sent that size in place of the larger. Safari and Firefox send a camera in the one
+size, which everyone is sent. Your browser is sent the others' cameras only while you have the
+huddle open, and a camera's picture isn't kept in step with its person's voice, which travels apart
+from it.
 
 Share screen, beside the camera, has your browser ask which screen, window or tab to share, and
 shares it until you stop it there or in your browser. Two people can share at once, as in Slack's
@@ -1449,9 +1453,12 @@ pages had them in October 2026:
   it, so five people talking for an hour are sent under half a GB between them, and the free 1,000 GB
   carry about 2,000 such hours a month. A camera is up to 500 kbps to each person who has the huddle
   open, so the same five with their cameras on throughout are sent up to 4.5 GB more in the hour, and
-  the free 1,000 GB carry about 200 such hours a month. A shared screen is up to 1.5 Mbps to each
-  person who has the huddle open, so one shared with the other four throughout is up to 2.7 GB more
-  in the hour. Turning Cameras and Screen sharing off under Huddles keeps huddles to voices.
+  the free 1,000 GB carry about 200 such hours a month. A camera from a browser that sends it in two
+  sizes is up to 150 kbps to each person whose tiles show it small, so twenty people with their
+  cameras on throughout, each in a window that shows the others small, are sent up to 26 GB in the
+  hour, where the larger size would come to 86. A shared screen is up to 1.5 Mbps to each person who
+  has the huddle open, so one shared with the other four throughout is up to 2.7 GB more in the
+  hour. Turning Cameras and Screen sharing off under Huddles keeps huddles to voices.
 
 Cloudflare's pages have the details: [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/),
 [Durable Objects pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/),

@@ -11,6 +11,8 @@ import { isLoopback } from "../loopback";
 // session with an offer, which the SFU answers. Another pulls that track into its own session by the
 // publisher's session and the track's name, which the SFU offers, and the browser answers
 // (`acceptAnswer`). A session's ID finds what's published on it, so the room keeps them to itself.
+// A track published in several sizes at once (simulcast) is pulled in one of them, by the name its
+// publisher gave that size, its RID, and sent in another from when the SFU is asked (`resizeTracks`).
 
 /** Where the SFU's API is. */
 const SFU_API = "https://rtc.live.cloudflare.com/v1";
@@ -165,7 +167,18 @@ export interface RemoteTrack {
   /** The session that publishes it. */
   sessionId: string;
   trackName: string;
+  /** The size of it to send, by that size's RID, of a track published in several. One pulled without is sent in whichever the SFU chooses. */
+  rid?: string;
 }
+
+/**
+ * How the SFU chooses among a track's sizes: the one `rid` names, or while that one isn't sent, or is
+ * more than the connection has the bandwidth for, the next in the alphabet's order.
+ */
+const sizeChosen = (rid: string) => ({ preferredRid: rid, priorityOrdering: "asciibetical", ridNotAvailable: "asciibetical" });
+
+/** A track another session publishes, as the SFU is asked for it. */
+const remote = ({ sessionId, trackName, rid }: RemoteTrack) => ({ location: "remote", sessionId, trackName, ...(rid !== undefined && { simulcast: sizeChosen(rid) }) });
 
 /** What pulling tracks into a session came to. */
 export interface Pulled {
@@ -183,9 +196,7 @@ export interface Pulled {
  * (`acceptAnswer`). An `SfuError` when the request itself is refused.
  */
 export async function pullTracks(env: Env, app: SfuApp, sessionId: string, tracks: RemoteTrack[]): Promise<Pulled> {
-  const said = await ask(env, app, "POST", `/sessions/${sessionId}/tracks/new`, {
-    tracks: tracks.map(({ sessionId: publisher, trackName }) => ({ location: "remote", sessionId: publisher, trackName })),
-  });
+  const said = await ask(env, app, "POST", `/sessions/${sessionId}/tracks/new`, { tracks: tracks.map(remote) });
   const results = tracksIn(said);
   const pulled: Pulled = { offer: descriptionIn(said, "offer"), tracks: [], missing: [] };
   for (const track of tracks) {
@@ -197,6 +208,32 @@ export async function pullTracks(env: Env, app: SfuApp, sessionId: string, track
   // An offer is what carries the tracks to the browser, so without one it found none.
   if (pulled.offer === null && pulled.tracks.length > 0) throw new SfuError(200, null);
   return pulled;
+}
+
+/** A track a session has pulled, in the media section of it that carries the track, and the size of it to send from now. */
+export type ResizedTrack = RemoteTrack & { mid: string; rid: string };
+
+/** What asking for tracks in other sizes came to. */
+export interface Resized {
+  /** The SFU's offer for the session's browser to answer, should the change take one, or null. */
+  offer: string | null;
+  /** The media sections whose tracks stay in the size they were, each with the SFU's error code for it. */
+  refused: Array<{ mid: string; code: string }>;
+}
+
+/**
+ * Has the SFU send a session `tracks`, which it has pulled, at most `TRACKS_PER_REQUEST` of them, each
+ * in the size its `rid` names from now. An `SfuError` when the request itself is refused.
+ */
+export async function resizeTracks(env: Env, app: SfuApp, sessionId: string, tracks: ResizedTrack[]): Promise<Resized> {
+  const said = await ask(env, app, "PUT", `/sessions/${sessionId}/tracks/update`, { tracks: tracks.map((track) => ({ ...remote(track), mid: track.mid })) });
+  const results = tracksIn(said);
+  const refused = tracks.flatMap(({ mid }) => {
+    const result = results.find((result) => result.mid === mid);
+    const code = result ? errorCodeOf(result) : "missing";
+    return code === null ? [] : [{ mid, code }];
+  });
+  return { offer: descriptionIn(said, "offer"), refused };
 }
 
 /** Gives the SFU the `answer` a session's browser made to its offer, which finishes what the offer began. */

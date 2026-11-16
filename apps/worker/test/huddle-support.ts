@@ -26,10 +26,11 @@ export interface AskedOfSfu {
   body: unknown;
 }
 
-/** A track a session pulls: the session that publishes it, and its name there. */
+/** A track a session pulls: the session that publishes it, its name there, and the size of it the session was last sent, by its RID, if it asked for one. */
 interface Pulled {
   sessionId: string;
   trackName: string;
+  rid?: string;
 }
 
 /** A session the stand-in started, with what it carries now. */
@@ -53,12 +54,17 @@ const refused = (status: number, errorCode: string) => Response.json({ errorCode
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
 
+/** The size a session asks to be sent of a track it pulls, by its RID, or undefined when it asks for none. */
+const ridAsked = ({ simulcast }: Record<string, unknown>): string | undefined => (isRecord(simulcast) && typeof simulcast.preferredRid === "string" ? simulcast.preferredRid : undefined);
+
 /**
  * Stands in for Cloudflare's Realtime SFU as far as huddles ask it, by its HTTPS API: it starts
- * sessions, takes what one publishes, offers a session what others publish and takes its answer, and
- * closes tracks, refusing what the SFU refuses: an app or a secret it doesn't know, a session it never
- * started, a track nobody publishes, and anything asked of a session whose offer is still unanswered.
- * It keeps what it was asked, and never sees a session description beyond passing it on.
+ * sessions, takes what one publishes, offers a session what others publish and takes its answer, sends
+ * a track in another of its sizes, and closes tracks, refusing what the SFU refuses: an app or a secret
+ * it doesn't know, a session it never started, a track nobody publishes, and anything asked of a
+ * session whose offer is still unanswered. It keeps what it was asked, and passes a session
+ * description on as it is, but for an offer's word that it sends a track in several sizes, which its
+ * answer says it takes.
  */
 export function standInSfu() {
   const asked: AskedOfSfu[] = [];
@@ -67,31 +73,50 @@ export function standInSfu() {
   /** The sessions that have published, in the order they first did. */
   const publishers: string[] = [];
   let offers = 0;
+  /** Whether it takes a track in one size, whatever the offer sends. */
+  let oneSize = false;
 
   function publish(sessionId: string, session: StandInSession, body: Record<string, unknown>, tracks: Array<Record<string, unknown>>): Response {
     const offer = isRecord(body.sessionDescription) && body.sessionDescription.type === "offer" ? body.sessionDescription.sdp : null;
     if (typeof offer !== "string") return refused(400, "invalid_params");
     for (const { mid, trackName } of tracks) session.published.set(String(mid), String(trackName));
     if (!publishers.includes(sessionId)) publishers.push(sessionId);
+    // As an answer does, it says of the sizes an offer sends that it takes them, or says nothing of sizes.
+    const sdp = oneSize ? offer.replaceAll(/^a=simulcast:.*\r\n/gm, "") : offer.replaceAll("a=simulcast:send ", "a=simulcast:recv ");
     return Response.json({
       requiresImmediateRenegotiation: false,
-      sessionDescription: { type: "answer", sdp: `answer to ${offer}` },
+      sessionDescription: { type: "answer", sdp: `answer to ${sdp}` },
       tracks: tracks.map(({ mid, trackName }) => ({ mid, trackName })),
     });
   }
 
   function pull(session: StandInSession, tracks: Array<Record<string, unknown>>): Response {
-    const results = tracks.map(({ sessionId, trackName }) => {
+    const results = tracks.map((track) => {
+      const { sessionId, trackName } = track;
       const published = [...(sessions.get(String(sessionId))?.published.values() ?? [])].includes(String(trackName));
       if (!published) return { sessionId, trackName, errorCode: "not_found_track_error", errorDescription: "Track not found" };
       // A session numbers its own media sections, so two sessions carry different tracks in sections of one name.
       const mid = String(session.offered++);
-      session.pulled.set(mid, { sessionId: String(sessionId), trackName: String(trackName) });
+      const rid = ridAsked(track);
+      session.pulled.set(mid, { sessionId: String(sessionId), trackName: String(trackName), ...(rid !== undefined && { rid }) });
       return { sessionId, trackName, mid };
     });
     if (results.every((result) => "errorCode" in result)) return Response.json({ requiresImmediateRenegotiation: false, tracks: results });
     session.offering = true;
     return Response.json({ requiresImmediateRenegotiation: true, sessionDescription: { type: "offer", sdp: `offer ${++offers}` }, tracks: results });
+  }
+
+  /** Sends a session the tracks it pulls in the sizes it now asks for, each of which it names by its media section and by what it carries. */
+  function resize(session: StandInSession, tracks: Array<Record<string, unknown>>): Response {
+    const results = tracks.map((track) => {
+      const { mid, sessionId, trackName } = track;
+      const pulled = session.pulled.get(String(mid));
+      const rid = ridAsked(track);
+      if (!pulled || pulled.sessionId !== sessionId || pulled.trackName !== trackName || rid === undefined) return { mid, sessionId, trackName, errorCode: "update_track_error", errorDescription: "Track can't be updated" };
+      pulled.rid = rid;
+      return { mid, sessionId, trackName };
+    });
+    return Response.json({ requiresImmediateRenegotiation: false, tracks: results });
   }
 
   function close(session: StandInSession, body: Record<string, unknown>): Response {
@@ -132,6 +157,10 @@ export function standInSfu() {
       if (tracks.every(({ location }) => location === "local")) return publish(sessionId, session, body, tracks);
       if (tracks.every(({ location }) => location === "remote")) return pull(session, tracks);
     }
+    if (method === "PUT" && what === "/tracks/update" && Array.isArray(body.tracks)) {
+      const tracks = (body.tracks as unknown[]).filter(isRecord);
+      if (tracks.length > 0 && tracks.length <= 64 && tracks.every(({ location }) => location === "remote")) return resize(session, tracks);
+    }
     return refused(400, "invalid_params");
   }
 
@@ -157,6 +186,8 @@ export function standInSfu() {
     askedTo,
     sessions,
     publishers,
+    /** Has the SFU take every track in one size from now, whatever sizes its offer sends, as an SFU that takes no more does. */
+    takeOneSize: () => void (oneSize = true),
     /** Has the SFU answer the next request whose address ends as `path` does with `answer`, doing nothing of what's asked. */
     answerInstead: (path: RegExp, answer: () => Response | Promise<Response>) => void instead.push({ path, answer }),
     /** Has the SFU refuse the next such request, with a status and an error code. */
@@ -266,19 +297,25 @@ export const publishCamera = (client: HuddleSocket, sdp = "a camera's offer") =>
 /** Publishes the screen `client` shares, as `publishShown` does. */
 export const publishScreen = (client: HuddleSocket, sdp = "a screen's offer") => publishShown(client, "screen", sdp);
 
+/** Has `client` ask what `asking` does, and answer the offer it's made, which this answers: null when it's made none. */
+async function offeredFor(client: HuddleSocket, asking: Extract<HuddleClientFrame, { type: "huddle.listen" }>) {
+  client.send(asking);
+  const offer = await client.next("huddle.offer", "huddle.listening");
+  if (offer.type === "huddle.listening") return null;
+  client.send({ type: "huddle.answer", kind: asking.kind, sdp: `answer to ${offer.sdp}` });
+  await client.next("huddle.listening");
+  return offer;
+}
+
 /**
  * Has `client` ask to watch the cameras of `people`, or their screens if `kind` says so, and nobody
  * else's, on a `fresh` connection if said, and answer the offer it's made, which this answers: null when
  * it's made none.
  */
-export async function watch(client: HuddleSocket, people: UserId[], fresh = false, kind: "video" | "screen" = "video") {
-  client.send({ type: "huddle.listen", kind, watch: people, ...(fresh && { fresh: true }) });
-  const offer = await client.next("huddle.offer", "huddle.listening");
-  if (offer.type === "huddle.listening") return null;
-  client.send({ type: "huddle.answer", kind, sdp: `answer to ${offer.sdp}` });
-  await client.next("huddle.listening");
-  return offer;
-}
+export const watch = (client: HuddleSocket, people: UserId[], fresh = false, kind: "video" | "screen" = "video") => offeredFor(client, { type: "huddle.listen", kind, watch: people, ...(fresh && { fresh: true as const }) });
+
+/** Has `client` ask to watch the cameras of `people` as a tab that shows cameras small does, and answer as `watch` does. */
+export const watchSmall = (client: HuddleSocket, people: UserId[], fresh = false) => offeredFor(client, { type: "huddle.listen", kind: "video", watch: people, small: true, ...(fresh && { fresh: true as const }) });
 
 const founder = { name: "Ada Lovelace", emailAddress: "ada@example.com", password: "analytical engine" };
 

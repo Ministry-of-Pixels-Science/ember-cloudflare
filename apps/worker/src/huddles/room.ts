@@ -1,7 +1,9 @@
 import { CloseCode, type RoomId, type User, type UserId } from "@ember/protocol";
 import {
+  CAMERA_SIZES,
   CAMERAS_FULL,
   CAMERAS_OFF,
+  carriesBothSizes,
   HUDDLE_FAILED,
   HUDDLE_TRACK_KINDS,
   HuddleCloseCode,
@@ -11,6 +13,7 @@ import {
   parseHuddleClientFrame,
   SCREENS_FULL,
   SCREENS_OFF,
+  type CameraSize,
   type HuddleClientFrame,
   type HuddlePerson,
   type HuddleServerFrame,
@@ -20,7 +23,7 @@ import {
 import type { Env } from "../env";
 import { CLOSE_REASONS, closedAtOnce, closeTooLarge, isTooLarge, MAX_ROOM_FRAME_SIZE } from "../sockets";
 import { workspace } from "../workspace";
-import { acceptAnswer, closeTracks, publishTracks, pullTracks, SfuError, startSession, TRACKS_PER_REQUEST, type HuddleApp, type SfuApp } from "./sfu";
+import { acceptAnswer, closeTracks, publishTracks, pullTracks, resizeTracks, SfuError, startSession, TRACKS_PER_REQUEST, type HuddleApp, type SfuApp } from "./sfu";
 
 // A room's huddle, which the room's Durable Object keeps beside its own sockets (src/chat-room.ts): who's
 // in it, and what each of them publishes and receives at Cloudflare's Realtime SFU, which carries what
@@ -37,7 +40,9 @@ import { acceptAnswer, closeTracks, publishTracks, pullTracks, SfuError, startSe
 // doesn't hear yet (`huddle.listen`), rather than the room adding each newcomer to everyone's
 // connection: an event then asks the SFU a few things however many are in the huddle, where Workers'
 // free plan lets an event make 50 requests. It asks for cameras and screens by whose they are, and
-// only while it shows the huddle open, so what nobody looks at isn't sent.
+// only while it shows the huddle open, so what nobody looks at isn't sent. A camera whose browser
+// sends it in two sizes at once (simulcast) is sent to each tab in the one that tab says it shows
+// cameras in, so that small tiles cost a small picture.
 //
 // What a socket publishes and hears is in its attachment, which outlives hibernation, so a huddle costs
 // the room nothing between its frames but a check every `HUDDLE_CHECK_MS`. When someone leaves, or loses
@@ -136,6 +141,8 @@ interface Publishing {
   tracks: HuddleTrack[];
   /** When the tab said the connection had connected, from when the others can listen to it. */
   connectedAt?: number;
+  /** Whether it's a camera the SFU takes in both of a camera's sizes, as the tab's offer and the SFU's answer to it both said. */
+  sized?: true;
 }
 
 /** A track a tab hears, or has been offered. */
@@ -145,14 +152,25 @@ interface Heard {
   /** The session that publishes it. */
   from: string;
   kind: HuddleTrackKind;
+  /** The size the SFU was last asked to send, of a camera it takes in both. */
+  size?: CameraSize;
 }
 
 /** What a tab hears, or watches, on one of its receiving connections. */
 interface Receiving {
   sessionId: string;
   heard: Heard[];
-  /** What the SFU's latest offer adds, until the tab has answered it. */
+  /** What the SFU's latest offer adds, until the tab has answered it: nothing, where the offer is of a change of sizes. */
   offered?: Heard[];
+  /** Set once the SFU has refused to send a camera in the size asked for, or to make one larger: it's asked for none on this connection from then on, and sends what it chooses. */
+  unsized?: true;
+}
+
+/** What someone publishes on one of their sending connections, as a tab that would receive it is told of it. */
+interface Publication {
+  userId: UserId;
+  tracks: HuddleTrack[];
+  sized: boolean;
 }
 
 /** A tab's pair of connections for one kind of track: the one it sends on, and the one it receives on. */
@@ -374,7 +392,7 @@ export class Huddle {
         return this.inTurn(this.sending, frame.kind, ws, frame.type, async () => this.unpublish(ws, frame.kind));
       case "huddle.listen":
         // Voices aren't asked for by name: a tab hears everyone.
-        return this.inTurn(this.receiving, frame.kind, ws, frame.type, () => this.listen(ws, frame.kind, frame.fresh === true, frame.kind === "audio" ? null : (frame.watch ?? [])));
+        return this.inTurn(this.receiving, frame.kind, ws, frame.type, () => this.listen(ws, frame.kind, frame.fresh === true, frame.kind === "audio" ? null : (frame.watch ?? []), frame.small === true));
       case "huddle.answer":
         return this.inTurn(this.receiving, frame.kind, ws, frame.type, () => this.answer(ws, frame.kind, frame.sdp));
     }
@@ -498,7 +516,8 @@ export class Huddle {
    * sends it the SFU's answer. The track goes by its kind, which is how the others' sessions ask for
    * it. What the tab published of that kind before, on a connection it has given up, is closed. A
    * camera or a screen is refused while an administrator has them off, or past as many as a huddle
-   * shows, which its tab hears.
+   * shows, which its tab hears. A camera is sent in sizes only where the offer says the tab sends both
+   * and the answer that the SFU takes both: a browser sends one size to an SFU that takes one.
    */
   private async publish(ws: WebSocket, offer: string, track: HuddleTrack): Promise<void> {
     const { kind } = track;
@@ -518,7 +537,8 @@ export class Huddle {
       return this.cut(app.appId, published);
     }
     const earlier = connectionsOf(attachmentOf(ws), kind).publishing;
-    const attachment = changeConnections(ws, kind, (connections) => ({ ...connections, publishing: { sessionId, tracks: [track] } }));
+    const sized = kind === "video" && carriesBothSizes(offer, track.mid, "send") && carriesBothSizes(answer, track.mid, "recv");
+    const attachment = changeConnections(ws, kind, (connections) => ({ ...connections, publishing: { sessionId, tracks: [track], ...(sized && { sized }) } }));
     send(ws, { type: "huddle.published", kind, sdp: answer });
     if (!earlier) return;
     // Nobody can listen to them, or watch them, until the new connection has connected.
@@ -588,8 +608,14 @@ export class Huddle {
    * they published before: named, the tab would take it for what they publish now, and never ask for
    * that. Should the SFU refuse, the room lets go of the connection, since it can't tell what the
    * session then carries.
+   *
+   * Of a camera the SFU takes in both sizes, a tab is sent the smaller while it says it shows cameras
+   * `small`, and otherwise the larger: the cameras it's offered now, and those it watches already in
+   * the other size, which the SFU is asked to change first. A camera the SFU won't send in a size, or
+   * won't make larger, is asked for without one, as is every other on that connection from then on,
+   * so that it shows in whatever size the SFU chooses rather than not at all, or small in a large tile.
    */
-  private async listen(ws: WebSocket, kind: HuddleTrackKind, fresh: boolean, only: UserId[] | null): Promise<void> {
+  private async listen(ws: WebSocket, kind: HuddleTrackKind, fresh: boolean, only: UserId[] | null, small: boolean): Promise<void> {
     const app = await this.appOf(ws);
     if (!app) return;
     if (fresh) this.letGo(ws, kind);
@@ -597,15 +623,27 @@ export class Huddle {
     // The tab answers the offer it has before it's made another.
     if (before?.offered) return;
     const publications = this.publications(ws, kind, only);
-    const heard = (before?.heard ?? []).filter(({ from }) => publications.has(from));
+    let heard = (before?.heard ?? []).filter(({ from }) => publications.has(from));
+    let unsized = before?.unsized;
     try {
       if (before && heard.length < before.heard.length) {
         const stale = before.heard.filter(({ from }) => !publications.has(from));
         await this.cut(app.appId, [{ sessionId: before.sessionId, mids: midsOf(stale) }]);
         if (ws.readyState !== WebSocket.OPEN) return;
-        changeConnections(ws, kind, (connections) => ({ ...connections, receiving: { sessionId: before.sessionId, heard } }));
+        changeConnections(ws, kind, (connections) => ({ ...connections, receiving: { ...before, heard } }));
       }
-      const wanted = [...publications].flatMap(([from, { tracks }]) => tracks.filter(({ kind }) => !heard.some((track) => track.from === from && track.kind === kind)).map(({ kind }) => ({ from, kind })));
+      const resized = before ? await this.resized(app, { ...before, heard }, small) : null;
+      if (before && resized) {
+        if (ws.readyState !== WebSocket.OPEN) return;
+        ({ heard, unsized } = resized);
+        changeConnections(ws, kind, (connections) => ({ ...connections, receiving: { ...before, heard, ...(unsized && { unsized }), ...(resized.offer !== null && { offered: [] }) } }));
+        // The session takes nothing more until the tab has answered, which is when the tab asks again, for anyone new.
+        if (resized.offer !== null) return send(ws, { type: "huddle.offer", kind, sdp: resized.offer, tracks: [] });
+      }
+      const size = unsized ? undefined : CAMERA_SIZES[small ? "small" : "large"];
+      const wanted = [...publications].flatMap(([from, { tracks, sized }]) =>
+        tracks.filter(({ kind }) => !heard.some((track) => track.from === from && track.kind === kind)).map(({ kind }) => ({ from, kind, ...(sized && size && { size }) })),
+      );
       if (wanted.length === 0) return send(ws, { type: "huddle.listening", kind });
 
       const asked = wanted.slice(0, TRACKS_PER_REQUEST);
@@ -614,17 +652,18 @@ export class Huddle {
         this.env,
         app,
         sessionId,
-        asked.map(({ from, kind }) => ({ sessionId: from, trackName: kind })),
+        asked.map(({ from, kind, size }) => ({ sessionId: from, trackName: kind, ...(size && { rid: size }) })),
       );
-      const offered = pulled.tracks.flatMap(({ sessionId: from, trackName, mid }) => asked.filter((track) => track.from === from && track.kind === trackName).map(({ kind }) => ({ mid, from, kind })));
+      const offered = pulled.tracks.flatMap(({ sessionId: from, trackName, mid }) => asked.filter((track) => track.from === from && track.kind === trackName).map((track) => ({ mid, ...track })));
       // They left while the SFU answered, so it sends them nothing of this.
       if (ws.readyState !== WebSocket.OPEN) return this.cut(app.appId, [{ sessionId, mids: midsOf(offered) }]);
       this.republish(
         kind,
         pulled.missing.filter(({ code }) => code === NOT_PUBLISHED).map(({ sessionId }) => sessionId),
       );
+      if (this.wontSize(pulled.missing)) unsized = true;
       // The session waits for the tab's answer to whatever it offers, even an offer of nobody.
-      changeConnections(ws, kind, (connections) => ({ ...connections, receiving: pulled.offer === null ? { sessionId, heard } : { sessionId, heard, offered } }));
+      changeConnections(ws, kind, (connections) => ({ ...connections, receiving: { sessionId, heard, ...(pulled.offer !== null && { offered }), ...(unsized && { unsized }) } }));
       if (pulled.offer === null) return send(ws, { type: "huddle.listening", kind });
       // As the others publish now, which the SFU's answer may have taken long enough to change.
       const current = this.publications(ws, kind, only);
@@ -645,16 +684,68 @@ export class Huddle {
     if (!app) return;
     const { receiving } = connectionsOf(attachmentOf(ws), kind);
     if (!receiving?.offered) return send(ws, { type: "error", message: NO_OFFER });
-    const { sessionId, heard, offered } = receiving;
+    const { offered, ...answered } = receiving;
     try {
-      await acceptAnswer(this.env, app, sessionId, sdp);
+      await acceptAnswer(this.env, app, answered.sessionId, sdp);
     } catch (error) {
       this.letGo(ws, kind);
       throw error;
     }
     if (ws.readyState !== WebSocket.OPEN) return;
-    changeConnections(ws, kind, (connections) => ({ ...connections, receiving: { sessionId, heard: [...heard, ...offered] } }));
+    changeConnections(ws, kind, (connections) => ({ ...connections, receiving: { ...answered, heard: [...answered.heard, ...offered] } }));
     send(ws, { type: "huddle.listening", kind });
+  }
+
+  /**
+   * Has the SFU send a receiving connection the cameras it hears in the other size than its tab shows
+   * them in, `small` or not, in that one from now, and answers what's left of the connection then,
+   * with the SFU's offer, should the change take one: null when nothing changed.
+   *
+   * A camera the SFU won't make smaller stays as large as it was, to be asked for again with the tab's
+   * next round. One it won't make larger is closed, and no longer heard, and the connection asks for
+   * no sizes from then on, so that the round asks for the camera anew, as the SFU would send it: a tab
+   * that shows cameras large isn't left with a small picture of one. The same goes for the small ones
+   * on a connection that asks for no sizes already. Nothing else the round does waits on a change.
+   */
+  private async resized(app: HuddleApp, { sessionId, heard, unsized }: Receiving, small: boolean): Promise<(Pick<Receiving, "heard" | "unsized"> & { offer: string | null }) | null> {
+    const size = CAMERA_SIZES[small ? "small" : "large"];
+    const outgrown = heard.filter((track) => track.size !== undefined && track.size !== size).slice(0, TRACKS_PER_REQUEST);
+    if (outgrown.length === 0) return null;
+    const { offer, refused } = unsized ? { offer: null, refused: outgrown } : await this.resizedBySfu(app, sessionId, outgrown, size);
+    const leftSmall = small ? [] : refused;
+    if (leftSmall.length > 0) await this.cut(app.appId, [{ sessionId, mids: midsOf(leftSmall) }]);
+    if (refused.length === outgrown.length && leftSmall.length === 0 && offer === null) return null;
+    const changed = (track: Heard) => outgrown.includes(track) && !refused.includes(track);
+    return {
+      heard: heard.filter((track) => !leftSmall.includes(track)).map((track) => (changed(track) ? { ...track, size } : track)),
+      ...((unsized || leftSmall.length > 0) && { unsized: true as const }),
+      offer,
+    };
+  }
+
+  /** Asks the SFU to send a session the cameras `outgrown` in `size`, and answers its offer, should the change take one, and the cameras it left as they were: all of them, where it refused the request. */
+  private async resizedBySfu(app: HuddleApp, sessionId: string, outgrown: Heard[], size: CameraSize): Promise<{ offer: string | null; refused: Heard[] }> {
+    try {
+      const { offer, refused } = await resizeTracks(
+        this.env,
+        app,
+        sessionId,
+        outgrown.map(({ mid, from, kind }) => ({ mid, sessionId: from, trackName: kind, rid: size })),
+      );
+      if (refused[0]) console.warn("The Realtime SFU didn't change the size of a huddle's camera:", refused[0].code);
+      return { offer, refused: outgrown.filter(({ mid }) => refused.some((track) => track.mid === mid)) };
+    } catch (error) {
+      if (!(error instanceof SfuError)) throw error;
+      console.warn("Changing the size of a huddle's cameras failed:", logged(error));
+      return { offer: null, refused: outgrown };
+    }
+  }
+
+  /** Whether the SFU found a camera among those it was asked for and didn't offer, and wouldn't send it in the size asked for, which it says once. */
+  private wontSize(missing: Array<{ rid?: string; code: string }>): boolean {
+    const refused = missing.find(({ rid, code }) => rid !== undefined && code !== NOT_PUBLISHED);
+    if (refused) console.warn("The Realtime SFU didn't send a huddle's camera in the size asked for:", refused.code);
+    return refused !== undefined;
   }
 
   /** Forgets `ws`'s receiving connection for `kind`, having the SFU close what it received on it, for its tab to start a fresh one. */
@@ -685,14 +776,15 @@ export class Huddle {
 
   /**
    * What the others in the huddle publish of `kind` that can be received, by the session each publishes
-   * it on: everyone's, or with `only`, that of the people it names.
+   * it on, and whether it's a camera the SFU takes in both sizes: everyone's, or with `only`, that of
+   * the people it names.
    */
-  private publications(except: WebSocket, kind: HuddleTrackKind, only: UserId[] | null): Map<string, { userId: UserId; tracks: HuddleTrack[] }> {
-    const publications = new Map<string, { userId: UserId; tracks: HuddleTrack[] }>();
+  private publications(except: WebSocket, kind: HuddleTrackKind, only: UserId[] | null): Map<string, Publication> {
+    const publications = new Map<string, Publication>();
     for (const { socket, attachment } of this.members()) {
       const { publishing } = connectionsOf(attachment, kind);
       const { id } = attachment.user;
-      if (socket !== except && publishing && isConnected(publishing) && (only === null || only.includes(id))) publications.set(publishing.sessionId, { userId: id, tracks: publishing.tracks });
+      if (socket !== except && publishing && isConnected(publishing) && (only === null || only.includes(id))) publications.set(publishing.sessionId, { userId: id, tracks: publishing.tracks, sized: publishing.sized === true });
     }
     return publications;
   }
