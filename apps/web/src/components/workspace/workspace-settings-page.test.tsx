@@ -481,8 +481,10 @@ describe("Community settings page", () => {
 describe("Version", () => {
   /** Ember 0.2's page on GitHub, with its notes. */
   const NOTES = "https://github.com/NYLLON-SOFTWARE/ember-cloudflare/releases/tag/v0.2.0";
+  /** The time the tests run at: noon, so that a minute before it or after it is the same day, whenever they're run. */
+  const NOW = new Date("2026-10-12T12:00:00");
   /** When GitHub named the newest release to the Worker, just now, and what the card says of it. */
-  const CHECKED_AT = new Date().toISOString();
+  const CHECKED_AT = NOW.toISOString();
   const LAST_CHECKED = `Last checked today at ${timeLabel(new Date(CHECKED_AT))}.`;
   const card = () => screen.findByRole("region", { name: /^Ember \d(?!.* is out to try$)/ });
   /** The box under it that offers a beta to try, apart from it. */
@@ -496,6 +498,12 @@ describe("Version", () => {
     newestBeta: null,
     copy,
   });
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+  });
+  afterEach(() => vi.useRealTimers());
+
   /** The card's links, by name, which each open in a new tab. */
   function linksIn(shown: HTMLElement): Record<string, string | null> {
     const links = within(shown).getAllByRole("link");
