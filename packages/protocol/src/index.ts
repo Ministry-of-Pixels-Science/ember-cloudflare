@@ -473,6 +473,11 @@ export interface Account {
    * until an administrator turns it off, which keeps huddles to voices.
    */
   huddleCameras: boolean;
+  /**
+   * Whether people may share their screen in a huddle, as the Huddles tab's Screen sharing switch says.
+   * On until an administrator turns it off.
+   */
+  huddleScreens: boolean;
 }
 
 /** What `GET /api/account` answers for workspace settings. */
@@ -740,6 +745,7 @@ export interface AccountSettings {
   hideTranslationButtons?: boolean;
   restrictRoomCreation?: boolean;
   huddleCameras?: boolean;
+  huddleScreens?: boolean;
   joinLink?: boolean;
   openSignUp?: boolean;
   memberfulJoin?: boolean;
@@ -2052,6 +2058,7 @@ const SETTING_NAMES: Record<keyof AccountSettings, string> = {
   hideTranslationButtons: "Hide translation buttons",
   restrictRoomCreation: "Must be admin to create new rooms",
   huddleCameras: "Cameras",
+  huddleScreens: "Screen sharing",
   joinLink: "Join link",
   openSignUp: "Open",
   memberfulJoin: "Memberful",

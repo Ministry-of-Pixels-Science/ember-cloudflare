@@ -13,7 +13,7 @@ const ada: User = { id: "ada", name: "Ada Lovelace" };
 const sam: User = { id: "sam", name: "Sam Rivera" };
 const priya: User = { id: "priya", name: "Priya Patel" };
 const general: Room = { id: "general", name: "general", kind: "open", icon: null };
-const inHuddle = (user: User, muted = false): HuddlePerson => ({ user, muted, audio: true, video: false });
+const inHuddle = (user: User, muted = false): HuddlePerson => ({ user, muted, audio: true, video: false, screen: false });
 const huddle = (changes: Partial<JoinedHuddle> = {}): JoinedHuddle => ({
   roomId: "general",
   connected: true,
@@ -23,15 +23,18 @@ const huddle = (changes: Partial<JoinedHuddle> = {}): JoinedHuddle => ({
   microphone: true,
   camera: null,
   watched: new Map(),
+  screen: null,
+  screens: new Map(),
   open: false,
   ...changes,
 });
-/** A camera that's on, as much of one as the bar reads. */
+/** A camera that's on, as much of one as the bar reads, and a screen that's shared. */
 const CAMERA = {} as MediaStream;
+const SCREEN = {} as MediaStream;
 
 /** The bar of the huddle this tab is in, with what the huddle's controls were asked. */
 function renderBar(joined: JoinedHuddle = huddle(), room: Room | null = general) {
-  const controls = { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setOpen: vi.fn() };
+  const controls = { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn() };
   act(() => showHuddle(joined, controls));
   const user = userEvent.setup();
   const view = render(<HuddleBar huddle={joined} room={room} meId="ada" />);
@@ -43,6 +46,16 @@ function CamerasOff({ children }: { children: ReactNode }) {
   return <AccountContext value={{ ...useAccount(), huddleCameras: false }}>{children}</AccountContext>;
 }
 
+/** And one whose administrator has screen sharing off. */
+function ScreensOff({ children }: { children: ReactNode }) {
+  return <AccountContext value={{ ...useAccount(), huddleScreens: false }}>{children}</AccountContext>;
+}
+
+/** Has the browser be one that can share a screen, which jsdom's isn't, as a phone's isn't. */
+function browserSharesScreens() {
+  Object.defineProperty(navigator, "mediaDevices", { value: { getDisplayMedia: vi.fn() }, configurable: true });
+}
+
 const bar = () => screen.getByRole("region");
 const state = () => bar().querySelector("[aria-live]");
 
@@ -50,6 +63,7 @@ afterEach(() => {
   act(() => showHuddle(null));
   history.replaceState(null, "", "/");
   vi.unstubAllGlobals();
+  Reflect.deleteProperty(navigator, "mediaDevices");
 });
 
 describe("The huddle bar", () => {
@@ -91,6 +105,22 @@ describe("The huddle bar", () => {
     const crowd = Array.from({ length: 5 }, (_, index) => inHuddle({ id: `u${index}`, name: `Person${index} Smith` }));
     rerender(<HuddleBar huddle={huddle({ people: [...crowd, inHuddle(ada)] })} room={general} meId="ada" />);
     expect(state()).toHaveTextContent("Person0, Person1, Person2, and 2 others are in the huddle");
+  });
+
+  it("says who shares a screen in place of who's in it, since only the huddle opened shows one", () => {
+    const sharing = (...users: User[]) => [...users.map((user) => ({ ...inHuddle(user), screen: true })), inHuddle(ada)];
+    const { rerender } = renderBar(huddle({ people: sharing(sam) }));
+    expect(state()).toHaveTextContent("Sam is sharing a screen");
+    expect(screen.getByRole("button", { name: "Huddle in general Sam is sharing a screen" })).toHaveAttribute("title", "Open huddle");
+    rerender(<HuddleBar huddle={huddle({ people: sharing(sam, priya) })} room={general} meId="ada" />);
+    expect(state()).toHaveTextContent("Sam and Priya are sharing screens");
+    // Your own is shared from when the browser shares it, whatever the room has said of it yet.
+    rerender(<HuddleBar huddle={huddle({ screen: SCREEN })} room={general} meId="ada" />);
+    expect(state()).toHaveTextContent("You're sharing your screen");
+    rerender(<HuddleBar huddle={huddle({ screen: SCREEN, people: [{ ...inHuddle(ada), screen: true }, ...sharing(sam)] })} room={general} meId="ada" />);
+    expect(state()).toHaveTextContent("Sam and you are sharing screens");
+    rerender(<HuddleBar huddle={huddle({ connected: false, people: sharing(sam) })} room={general} meId="ada" />);
+    expect(state()).toHaveTextContent("Reconnecting…");
   });
 
   it("says that it's connecting until the room lets the tab in, and reconnecting while its connection is down", () => {
@@ -193,6 +223,46 @@ describe("The huddle bar's camera", () => {
     );
     await user.click(screen.getByRole("button", { name: "Turn off camera" }));
     expect(setCamera).toHaveBeenCalledExactlyOnceWith(false);
+  });
+});
+
+describe("The huddle bar's screen", () => {
+  it("shares the screen in a browser that can share one, which phones leave out", async () => {
+    browserSharesScreens();
+    const { setScreen, user } = renderBar();
+    const share = screen.getByRole("button", { name: "Share screen" });
+    expect(share).toHaveClass("bg-hover", "max-md:hidden");
+    expect(share).toHaveAttribute("title", "Share screen");
+    await user.click(share);
+    expect(setScreen).toHaveBeenCalledExactlyOnceWith(true);
+  });
+
+  it("stops sharing it once it's shared, filled in ink until then", async () => {
+    const { setScreen, user } = renderBar(huddle({ screen: SCREEN }));
+    const stop = screen.getByRole("button", { name: "Stop sharing screen" });
+    expect(stop).toHaveClass("bg-foreground", "text-background");
+    await user.click(stop);
+    expect(setScreen).toHaveBeenCalledExactlyOnceWith(false);
+  });
+
+  it("has no button for it in a browser that can't share a screen, nor while an administrator has screen sharing off, but to stop one that's shared still", async () => {
+    const { setScreen, user, rerender } = renderBar();
+    expect(screen.queryByRole("button", { name: /screen/ })).not.toBeInTheDocument();
+    browserSharesScreens();
+    rerender(
+      <ScreensOff>
+        <HuddleBar huddle={huddle()} room={general} meId="ada" />
+      </ScreensOff>,
+    );
+    expect(screen.queryByRole("button", { name: /screen/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Turn on camera" })).toBeInTheDocument();
+    rerender(
+      <ScreensOff>
+        <HuddleBar huddle={huddle({ screen: SCREEN })} room={general} meId="ada" />
+      </ScreensOff>,
+    );
+    await user.click(screen.getByRole("button", { name: "Stop sharing screen" }));
+    expect(setScreen).toHaveBeenCalledExactlyOnceWith(false);
   });
 });
 

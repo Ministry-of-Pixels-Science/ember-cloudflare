@@ -1,5 +1,5 @@
 import { CloseCode, ROOM_PROTOCOL, type Me, type RoomId, type ServerFrame } from "@ember/protocol";
-import { CAMERAS_FULL, CAMERAS_OFF, HUDDLE_FAILED, HuddleCloseCode, MAX_HUDDLE_CAMERAS, MAX_HUDDLE_PEOPLE, type HuddlePerson, type HuddleTrackKind } from "@ember/protocol/huddles";
+import { CAMERAS_FULL, CAMERAS_OFF, HUDDLE_FAILED, HuddleCloseCode, MAX_HUDDLE_CAMERAS, MAX_HUDDLE_PEOPLE, SCREENS_FULL, SCREENS_OFF, type HuddlePerson, type HuddleTrackKind } from "@ember/protocol/huddles";
 import { evictDurableObject, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HUDDLE_HEADER, type ChatRoom } from "../src/chat-room";
@@ -21,10 +21,12 @@ import {
   OTHER_APP,
   publishCamera,
   publishMicrophone,
+  publishScreen,
   reached,
   ring,
   setUp,
   switchCameras,
+  switchScreens,
   watch,
   welcomed,
   type HuddleSocket,
@@ -37,7 +39,7 @@ import { api, connect, createRoom, freshDeploy, freshRoom, post, roomStub, settl
 // says it is, and the stand-in passes it on.
 
 /** Someone in a huddle as the others hear of them: unmuted, and not to be listened to yet, but for `changes`. */
-const person = ({ user }: Session, changes: Partial<Omit<HuddlePerson, "user">> = {}): HuddlePerson => ({ user, muted: false, audio: false, video: false, ...changes });
+const person = ({ user }: Session, changes: Partial<Omit<HuddlePerson, "user">> = {}): HuddlePerson => ({ user, muted: false, audio: false, video: false, screen: false, ...changes });
 
 /** Publishes `client`'s microphone, answering the session the SFU carries it on. */
 async function publishing(sfu: StandInSfu, client: HuddleSocket, sdp?: string): Promise<string> {
@@ -48,6 +50,12 @@ async function publishing(sfu: StandInSfu, client: HuddleSocket, sdp?: string): 
 /** Publishes `client`'s camera, answering the session the SFU carries it on. */
 async function showing(sfu: StandInSfu, client: HuddleSocket, sdp?: string): Promise<string> {
   await publishCamera(client, sdp);
+  return sfu.publishers.at(-1)!;
+}
+
+/** Publishes the screen `client` shares, answering the session the SFU carries it on. */
+async function sharing(sfu: StandInSfu, client: HuddleSocket, sdp?: string): Promise<string> {
+  await publishScreen(client, sdp);
   return sfu.publishers.at(-1)!;
 }
 
@@ -77,6 +85,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const microphone = (sdp: string) => ({ type: "huddle.publish", sdp, tracks: [{ mid: "0", kind: "audio" }] }) as const;
 const camera = (sdp: string) => ({ type: "huddle.publish", sdp, tracks: [{ mid: "0", kind: "video" }] }) as const;
+const screen = (sdp: string) => ({ type: "huddle.publish", sdp, tracks: [{ mid: "0", kind: "screen" }] }) as const;
 /** As many people as `count`, let into `room`'s huddle as the Worker sends each on, and welcomed. */
 async function crowd(room: RoomId, count: number): Promise<HuddleSocket[]> {
   const authorizedAt = Date.now();
@@ -88,6 +97,8 @@ async function crowd(room: RoomId, count: number): Promise<HuddleSocket[]> {
 const failed = (frame: string, kind: HuddleTrackKind = "audio") => ({ type: "error", message: HUDDLE_FAILED, failed: frame, kind });
 /** What a tab hears of a camera the room won't publish while an administrator has cameras off. */
 const CAMERA_OFF = { type: "error", message: CAMERAS_OFF, failed: "huddle.publish", kind: "video", refused: true };
+/** And of a screen, while one has screen sharing off. */
+const SCREEN_OFF = { type: "error", message: SCREENS_OFF, failed: "huddle.publish", kind: "screen", refused: true };
 
 beforeEach(freshDeploy);
 afterEach(() => {
@@ -274,12 +285,13 @@ describe("A room's huddle", () => {
       { type: "huddle.publish", sdp: "", tracks: [{ mid: "0", kind: "audio" }] },
       { type: "huddle.publish", sdp: "an offer", tracks: [] },
       { type: "huddle.publish", sdp: "an offer", tracks: [{ mid: "0#audio", kind: "audio" }] },
-      { type: "huddle.publish", sdp: "an offer", tracks: [{ mid: "0", kind: "screen" }] },
+      { type: "huddle.publish", sdp: "an offer", tracks: [{ mid: "0", kind: "slides" }] },
       { type: "huddle.publish", sdp: "an offer", tracks: [{ mid: "0", kind: "audio" }, { mid: "1", kind: "video" }] },
       { type: "huddle.listen", fresh: "yes" },
-      { type: "huddle.listen", kind: "screen" },
+      { type: "huddle.listen", kind: "slides" },
       { type: "huddle.listen", kind: "video", watch: "everyone" },
-      { type: "huddle.unpublish", kind: "screen" },
+      { type: "huddle.listen", kind: "screen", watch: ["u1", "u2", "u3"] },
+      { type: "huddle.unpublish", kind: "slides" },
       { type: "huddle.answer" },
       { type: "message.create", clientMessageId: "c1", body: "Hello" },
     ];
@@ -908,7 +920,7 @@ describe("Cameras in a huddle", () => {
     await vi.waitFor(() => expect(cameras.slice(0, 8).map((id) => closedOn(sfu, id))).toEqual(cameras.slice(0, 8).map(() => ["0"])));
     await reached(watcher);
     const changed = watcher.log.slice(heard).filter(({ type }) => type === "huddle.changed");
-    expect(changed).toEqual(sockets.slice(0, 8).map((_, n) => ({ type: "huddle.changed", person: { user: { id: `person-${n}`, name: `Person ${n}` }, muted: false, audio: true, video: false } })));
+    expect(changed).toEqual(sockets.slice(0, 8).map((_, n) => ({ type: "huddle.changed", person: { user: { id: `person-${n}`, name: `Person ${n}` }, muted: false, audio: true, video: false, screen: false } })));
     expect(await stillShown()).toBe(2);
     // And the rest at the next.
     await ring(room);
@@ -951,7 +963,7 @@ describe("Cameras in a huddle", () => {
     expect((await remembered(room))[0]!.cameras?.publishing).toBeUndefined();
   });
 
-  it("lets cameras go on when the Workspace says nothing of them, as one from before they could be turned off does", async () => {
+  it("lets cameras go on, and screens be shared, when the Workspace says nothing of them, as one from before they could be turned off does", async () => {
     const { ada, sfu } = await huddlesOn();
     const room = await freshRoom("cameras-unsaid");
     const adas = await welcomed(room, ada);
@@ -963,8 +975,10 @@ describe("Cameras in a huddle", () => {
     });
     await ring(room);
     await showing(sfu, adas);
+    await sharing(sfu, adas);
     await ring(room);
-    expect((await remembered(room))[0]!.cameras?.publishing).toBeDefined();
+    const [hers] = await remembered(room);
+    expect([hers!.cameras?.publishing, hers!.screens?.publishing]).toEqual([expect.anything(), expect.anything()]);
     expect(adas.pending("error")).toEqual([]);
   });
 
@@ -1149,6 +1163,266 @@ describe("Cameras in a huddle", () => {
     expect(closedOn(sfu, voices)).toEqual([]);
     expect((await watch(graces, [ada.user.id, linus.user.id], true))!.tracks).toHaveLength(2);
     expect(newest(sfu)).not.toBe(pictures);
+  });
+});
+
+describe("Screens shared in a huddle", () => {
+  it("publishes the screen a tab shares on a session of its own, beside its microphone's and its camera's, and has the others hear they can watch it once its connection has connected", async () => {
+    const { ada, sfu } = await huddlesOn();
+    const room = await freshRoom("screen");
+    const grace = await signIn("Grace");
+    const adas = await welcomed(room, ada);
+    const graces = await welcomed(room, grace);
+    const voice = await publishing(sfu, adas);
+    const picture = await showing(sfu, adas);
+    await graces.next("huddle.changed");
+    await graces.next("huddle.changed");
+    const asked = sfu.asked.length;
+
+    adas.send(screen("Ada's screen"));
+    expect(await adas.next("huddle.published")).toEqual({ type: "huddle.published", kind: "screen", sdp: "answer to Ada's screen" });
+    const shared = sfu.publishers.at(-1)!;
+    expect([voice, picture]).not.toContain(shared);
+    expect(sfu.asked.slice(asked)).toEqual([
+      { appId: APP.appId, method: "POST", path: "/sessions/new", body: null },
+      {
+        appId: APP.appId,
+        method: "POST",
+        path: `/sessions/${shared}/tracks/new`,
+        sessionId: shared,
+        body: { sessionDescription: { type: "offer", sdp: "Ada's screen" }, tracks: [{ location: "local", mid: "0", trackName: "screen" }] },
+      },
+    ]);
+    // Nobody can watch it until her tab says that connection has connected, which saying so of her camera's isn't.
+    adas.send({ type: "huddle.connected", kind: "video" });
+    await reached(adas, graces);
+    expect(graces.pending("huddle.changed")).toEqual([]);
+    adas.send({ type: "huddle.connected", kind: "screen" });
+    expect(await graces.next("huddle.changed")).toEqual({ type: "huddle.changed", person: person(ada, { audio: true, video: true, screen: true }) });
+    expect((await (await joinHuddle(room, await signIn("Linus"))).next("huddle.welcome")).people[0]).toEqual(person(ada, { audio: true, video: true, screen: true }));
+
+    // None of it touched what carries her voice or her camera.
+    expect([closedOn(sfu, voice), closedOn(sfu, picture)]).toEqual([[], []]);
+    expect((await remembered(room))[0]).toMatchObject({
+      publishing: { sessionId: voice },
+      cameras: { publishing: { sessionId: picture } },
+      screens: { publishing: { sessionId: shared, tracks: [{ mid: "0", kind: "screen" }], connectedAt: expect.any(Number) as number } },
+    });
+
+    // She stops sharing: the others hear they can't watch it, and the SFU closes it alone.
+    adas.send({ type: "huddle.unpublish", kind: "screen" });
+    expect(await graces.next("huddle.changed")).toEqual({ type: "huddle.changed", person: person(ada, { audio: true, video: true }) });
+    await vi.waitFor(() => expect(closedOn(sfu, shared)).toEqual(["0"]));
+    expect([closedOn(sfu, voice), closedOn(sfu, picture)]).toEqual([[], []]);
+    expect((await remembered(room))[0]!.screens).toEqual({});
+  });
+
+  it("offers a tab the screens it asks to watch, on a session of its own, has the SFU close one it no longer asks for, and keeps it all while the room hibernates", async () => {
+    const { ada, sfu } = await huddlesOn();
+    const room = await freshRoom("watching-screens");
+    const [grace, linus] = [await signIn("Grace"), await signIn("Linus")];
+    const adas = await welcomed(room, ada);
+    const graces = await welcomed(room, grace);
+    const linuses = await welcomed(room, linus);
+    for (const socket of [adas, graces]) await publishMicrophone(socket);
+    await showing(sfu, adas);
+    const fromAda = await sharing(sfu, adas);
+    await sharing(sfu, graces);
+    await listen(linuses, true);
+    const voices = newest(sfu);
+    await watch(linuses, [ada.user.id], true);
+    const pictures = newest(sfu);
+
+    // Asked for nobody's, he's offered nobody's, and the SFU is asked nothing.
+    const asked = sfu.asked.length;
+    expect(await watch(linuses, [], false, "screen")).toBeNull();
+    expect(sfu.asked).toHaveLength(asked);
+
+    expect(await watch(linuses, [ada.user.id], false, "screen")).toEqual({ type: "huddle.offer", kind: "screen", sdp: expect.any(String) as string, tracks: [{ mid: "0", kind: "screen", userId: ada.user.id }] });
+    const screens = newest(sfu);
+    expect([voices, pictures]).not.toContain(screens);
+    // Her screen, and not her camera, which is another session's.
+    expect(sfu.asked.at(-2)).toMatchObject({ path: `/sessions/${screens}/tracks/new`, body: { tracks: [{ location: "remote", sessionId: fromAda, trackName: "screen" }] } });
+    expect((await watch(linuses, [ada.user.id, grace.user.id], false, "screen"))!.tracks).toEqual([{ mid: "1", kind: "screen", userId: grace.user.id }]);
+
+    const before = await remembered(room);
+    await evictDurableObject(roomStub(room));
+    expect(await remembered(room)).toEqual(before);
+    expect(before[2]).toMatchObject({
+      receiving: { sessionId: voices, heard: [{ kind: "audio" }, { kind: "audio" }] },
+      cameras: { receiving: { sessionId: pictures, heard: [{ kind: "video" }] } },
+      screens: { receiving: { sessionId: screens, heard: [{ mid: "0", from: fromAda, kind: "screen" }, { mid: "1", kind: "screen" }] } },
+    });
+
+    // Asking for Grace's alone has the SFU close Ada's, and nothing he hears or watches of their cameras.
+    expect(await watch(linuses, [grace.user.id], false, "screen")).toBeNull();
+    expect(closedOn(sfu, screens)).toEqual(["0"]);
+    expect([closedOn(sfu, voices), closedOn(sfu, pictures)]).toEqual([[], []]);
+  });
+
+  it("shows two screens, and refuses the next until one of them stops", async () => {
+    const { sfu } = await huddlesOn();
+    const room = await freshRoom("screens-full");
+    const [first, second, third, fourth] = (await crowd(room, 4)) as [HuddleSocket, HuddleSocket, HuddleSocket, HuddleSocket];
+    await publishScreen(first);
+    await publishScreen(second);
+
+    // One more is refused before the SFU is asked anything, which its tab hears as its screen not being shared.
+    const asked = sfu.asked.length;
+    third.send(screen("one screen too many"));
+    expect(await third.next("error")).toEqual({ type: "error", message: SCREENS_FULL, failed: "huddle.publish", kind: "screen", refused: true });
+    expect(sfu.asked).toHaveLength(asked);
+    // Their camera is another matter, and so is a screen shared anew from a tab that shares one.
+    await publishCamera(third);
+    await publishScreen(first, "the first screen again");
+
+    // Once one stops there's room for one, and only one, even when two ask while the SFU answers the first.
+    first.send({ type: "huddle.unpublish", kind: "screen" });
+    await reached(first);
+    const started = sfu.askedTo(/sessions\/new$/).length;
+    const release = sfu.hold(/sessions\/new$/);
+    third.send(screen("the screen after"));
+    await vi.waitFor(() => expect(sfu.askedTo(/sessions\/new$/)).toHaveLength(started + 1));
+    await publishScreen(fourth);
+    release();
+    expect(await third.next("error")).toMatchObject({ message: SCREENS_FULL, kind: "screen", refused: true });
+    // What the SFU made for it meanwhile is closed.
+    await vi.waitFor(() => expect(closedOn(sfu, newest(sfu))).toEqual(["0"]));
+    expect((await remembered(room)).map(({ screens }) => screens?.publishing !== undefined)).toEqual([false, true, false, true]);
+  });
+
+  it("stops the screens people share once its check hears that an administrator has screen sharing off, ahead of the cameras a check takes down with them", async () => {
+    const { ada, sfu } = await huddlesOn();
+    const room = await freshRoom("screens-off");
+    const sockets = await crowd(room, 10);
+    const cameras: string[] = [];
+    for (const socket of sockets) cameras.push(await showing(sfu, socket));
+    // The last two to have joined share their screens.
+    const sharers = sockets.slice(8);
+    const shared = [await sharing(sfu, sharers[0]!), await sharing(sfu, sharers[1]!)];
+    const watcher = sockets[0]!;
+    await reached(watcher);
+    const heard = watcher.log.length;
+    const stillOn = async () => {
+      const everyone = await remembered(room);
+      return [everyone.filter(({ screens }) => screens?.publishing).length, everyone.filter(({ cameras }) => cameras?.publishing).length];
+    };
+
+    // Each tab hears why its screen stopped, the others that they can't watch it, and the SFU closes it. The cameras stay on.
+    await switchScreens(ada, false);
+    await ring(room);
+    for (const socket of sharers) expect(await socket.next("error")).toEqual(SCREEN_OFF);
+    await vi.waitFor(() => expect(shared.map((id) => closedOn(sfu, id))).toEqual([["0"], ["0"]]));
+    await reached(watcher);
+    const changed = watcher.log.slice(heard).filter(({ type }) => type === "huddle.changed");
+    expect(changed).toEqual([8, 9].map((n) => ({ type: "huddle.changed", person: { user: { id: `person-${n}`, name: `Person ${n}` }, muted: false, audio: false, video: true, screen: false } })));
+    expect(await stillOn()).toEqual([0, 10]);
+    expect(cameras.map((id) => closedOn(sfu, id))).toEqual(cameras.map(() => []));
+
+    // One that asks is refused before the SFU is asked anything.
+    const asked = sfu.asked.length;
+    sharers[0]!.send(screen("a screen while they're off"));
+    expect(await sharers[0]!.next("error")).toEqual(SCREEN_OFF);
+    expect(sfu.asked).toHaveLength(asked);
+
+    // On again, screens are shared as before.
+    await switchScreens(ada, true);
+    await ring(room);
+    const again = [await sharing(sfu, sharers[0]!, "a screen once they're on"), await sharing(sfu, sharers[1]!, "another")];
+    expect(await stillOn()).toEqual([2, 10]);
+
+    // With cameras off as well, a check takes down eight in all, the screens first, and the next the cameras left.
+    await switchScreens(ada, false);
+    await switchCameras(ada, false);
+    await ring(room);
+    for (const socket of sharers) expect(await socket.next("error")).toEqual(SCREEN_OFF);
+    for (const socket of sockets.slice(0, 6)) expect(await socket.next("error")).toEqual(CAMERA_OFF);
+    await vi.waitFor(() => expect(again.map((id) => closedOn(sfu, id))).toEqual([["0"], ["0"]]));
+    expect(await stillOn()).toEqual([0, 4]);
+    await ring(room);
+    for (const socket of sockets.slice(6)) expect(await socket.next("error")).toEqual(CAMERA_OFF);
+    expect(await stillOn()).toEqual([0, 0]);
+  });
+
+  it("refuses a screen the SFU was still answering for when its check heard that screen sharing is off", async () => {
+    const { ada, sfu } = await huddlesOn();
+    const room = await freshRoom("screens-off-late");
+    const adas = await welcomed(room, ada);
+    const started = sfu.askedTo(/sessions\/new$/).length;
+    const release = sfu.hold(/sessions\/new$/);
+    adas.send(screen("Ada's screen"));
+    await vi.waitFor(() => expect(sfu.askedTo(/sessions\/new$/)).toHaveLength(started + 1));
+    await switchScreens(ada, false);
+    // Nothing of hers is shared for the check to stop.
+    await ring(room);
+    release();
+    expect(await adas.next("error")).toEqual(SCREEN_OFF);
+    // What the SFU made for it meanwhile is closed.
+    await vi.waitFor(() => expect(closedOn(sfu, newest(sfu))).toEqual(["0"]));
+    expect((await remembered(room))[0]!.screens?.publishing).toBeUndefined();
+  });
+
+  it("has the SFU close everything a tab sent and received, on all six of its connections, once it leaves", async () => {
+    const { ada, sfu } = await huddlesOn();
+    const room = await freshRoom("leaving-screens");
+    const grace = await signIn("Grace");
+    const adas = await welcomed(room, ada);
+    const graces = await welcomed(room, grace);
+    const adasOwn = [await publishing(sfu, adas), await showing(sfu, adas), await sharing(sfu, adas)];
+    const gracesOwn = [await publishing(sfu, graces), await showing(sfu, graces), await sharing(sfu, graces)];
+    await listen(graces, true);
+    gracesOwn.push(newest(sfu));
+    await watch(graces, [ada.user.id], true);
+    gracesOwn.push(newest(sfu));
+    await watch(graces, [ada.user.id], true, "screen");
+    gracesOwn.push(newest(sfu));
+    expect(new Set(gracesOwn).size).toBe(6);
+
+    graces.leave();
+    await vi.waitFor(() => expect(gracesOwn.map((id) => closedOn(sfu, id))).toEqual(gracesOwn.map(() => ["0"])));
+    expect(adasOwn.map((id) => closedOn(sfu, id))).toEqual([[], [], []]);
+    expect(await adas.next("huddle.left")).toEqual({ type: "huddle.left", userId: grace.user.id });
+    expect(await kept(room, "huddleUnclosed")).toBeUndefined();
+  });
+
+  it("has the SFU close microphones, then cameras, then screens when a huddle ends with its room", async () => {
+    const { ada, sfu } = await huddlesOn();
+    const grace = await signIn("Grace");
+    const room = (await createRoom("Short-lived", { as: ada })).id;
+    const adas = await welcomed(room, ada);
+    const graces = await welcomed(room, grace);
+    const adasScreen = await sharing(sfu, adas);
+    const [adasVoice, adasPicture] = [await publishing(sfu, adas), await showing(sfu, adas)];
+    const gracesVoice = await publishing(sfu, graces);
+    await watch(graces, [ada.user.id], true, "screen");
+    const asked = sfu.asked.length;
+
+    expect((await api(`/api/rooms/${room}`, { method: "DELETE", headers: { Cookie: ada.cookie } })).status).toBe(204);
+    await vi.waitFor(() => expect(sfu.asked).toHaveLength(asked + 4));
+    await sleep(20);
+    expect(sfu.asked.slice(asked).map(({ path }) => path)).toEqual([adasVoice, gracesVoice, adasPicture, adasScreen].map((id) => `/sessions/${id}/tracks/close`));
+  });
+
+  it("asks the SFU about a tab's screen without waiting on its camera, and tells it which of the two the SFU refused", async () => {
+    const { ada, sfu } = await huddlesOn();
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const room = await freshRoom("screen-in-turn");
+    const adas = await welcomed(room, ada);
+
+    const release = sfu.hold(/sessions\/new$/);
+    adas.send(camera("Ada's camera"));
+    await vi.waitFor(() => expect(sfu.askedTo(/sessions\/new$/)).toHaveLength(1));
+    adas.send(screen("Ada's screen"));
+    expect(await adas.next("huddle.published")).toEqual({ type: "huddle.published", kind: "screen", sdp: "answer to Ada's screen" });
+    release();
+    expect(await adas.next("huddle.published")).toEqual({ type: "huddle.published", kind: "video", sdp: "answer to Ada's camera" });
+
+    // A screen the SFU doesn't take isn't shared, and her camera stays as it was.
+    sfu.refuse(/tracks\/new$/);
+    adas.send(screen("Ada's second screen"));
+    expect(await adas.next("error")).toEqual(failed("huddle.publish", "screen"));
+    expect(warned).toHaveBeenLastCalledWith("A huddle's huddle.publish failed:", "The Realtime SFU answered 500 (internal_error)");
+    expect((await remembered(room))[0]).toMatchObject({ cameras: { publishing: { tracks: [{ kind: "video" }] } }, screens: { publishing: { tracks: [{ kind: "screen" }] } } });
   });
 });
 
@@ -1373,6 +1647,39 @@ describe("The room's check of its huddle", () => {
     await vi.waitFor(() => expect(closedOn(sfu, fromAda)).toEqual(["0"]));
     expect(graces.ws.readyState).toBe(WebSocket.OPEN);
     expect(await remembered(room)).toMatchObject([{ user: grace.user }]);
+  });
+
+  it("takes out six of the unheard a check, and asks the SFU about all their connections no more than the rest of a check leaves an event", async () => {
+    const { sfu } = await huddlesOn();
+    const room = await freshRoom("unheard-crowd");
+    const sockets = await crowd(room, 8);
+    const everyone = sockets.map((_, n) => `person-${n}`);
+    // Everyone sends and receives all a tab can: a microphone and a camera, the others' voices and cameras, and the screens the first two share.
+    for (const socket of sockets) {
+      await publishMicrophone(socket);
+      await publishCamera(socket);
+    }
+    for (const socket of sockets.slice(0, 2)) await publishScreen(socket);
+    for (const socket of sockets) {
+      await listen(socket, true);
+      await watch(socket, everyone, true);
+      await watch(socket, everyone.slice(0, 2), true, "screen");
+    }
+    const openedAt = Math.max(...(await remembered(room)).map(({ openedAt }) => openedAt));
+    const asked = sfu.asked.length;
+
+    // The first six to have joined: six connections each for the two who share, and five for the rest.
+    await checkAt(room, openedAt + HUDDLE_SILENT_MS + 1);
+    for (const socket of sockets.slice(0, 6)) expect(await socket.closed).toMatchObject({ code: CloseCode.Reconnect });
+    await vi.waitFor(() => expect(sfu.asked.length - asked).toBe(2 * 6 + 4 * 5));
+    await sleep(20);
+    expect(sfu.asked.slice(asked).every(({ path }) => path.endsWith("/tracks/close"))).toBe(true);
+    expect(sfu.asked.length - asked).toBe(32);
+    expect((await remembered(room)).map(({ user }) => user.id)).toEqual(["person-6", "person-7"]);
+    // And the rest at the next.
+    await checkAt(room, openedAt + HUDDLE_SILENT_MS + 1);
+    for (const socket of sockets.slice(6)) expect(await socket.closed).toMatchObject({ code: CloseCode.Reconnect });
+    expect(await remembered(room)).toEqual([]);
   });
 
   it("ends a huddle once huddles are turned off, or run through another app", async () => {

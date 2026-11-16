@@ -1,9 +1,10 @@
 import type { Room, UserId } from "@ember/protocol";
-import { Microphone, MicrophoneMute, VideoCamera, VideoCameraOff } from "@/components/icons/iconoir";
-import { useCamerasAllowed } from "@/hooks/use-account";
+import { Microphone, MicrophoneMute, ModernTv, VideoCamera, VideoCameraOff } from "@/components/icons/iconoir";
+import { useCamerasAllowed, useScreensAllowed } from "@/hooks/use-account";
 import { useNameOf } from "@/hooks/use-directory";
 import { roomName } from "@/lib/directs";
-import { leaveHuddle, muteHuddle, showHuddleCamera, type JoinedHuddle } from "@/lib/huddle-store";
+import { sharesScreens } from "@/lib/huddle-devices";
+import { leaveHuddle, muteHuddle, shareHuddleScreen, showHuddleCamera, type JoinedHuddle } from "@/lib/huddle-store";
 import { muteShortcut } from "@/lib/keyboard";
 import { cn } from "@/lib/utils";
 import { ShortcutTooltip } from "./shortcut-tooltip";
@@ -48,6 +49,23 @@ export function CameraTool({ huddle, className }: { huddle: JoinedHuddle; classN
   return (
     <button type="button" title={label} aria-label={label} onClick={() => showHuddleCamera(!on)} className={cn(TOOL, on ? TOOL_ON : TOOL_OFF, className)}>
       {on ? <VideoCamera /> : <VideoCameraOff />}
+    </button>
+  );
+}
+
+/**
+ * Shares the tab's screen in its huddle, which has the browser ask what to share, or stops sharing it.
+ * It's there in a browser that can share one, which a phone's can't, and while an administrator has
+ * screen sharing off, only to stop one that's shared still.
+ */
+export function ScreenTool({ huddle, className }: { huddle: JoinedHuddle; className?: string }) {
+  const allowed = useScreensAllowed();
+  const shared = huddle.screen !== null;
+  if (!shared && !(allowed && sharesScreens())) return null;
+  const label = shared ? "Stop sharing screen" : "Share screen";
+  return (
+    <button type="button" title={label} aria-label={label} onClick={() => shareHuddleScreen(!shared)} className={cn(TOOL, shared ? TOOL_ON : TOOL_OFF, className)}>
+      <ModernTv />
     </button>
   );
 }

@@ -43,7 +43,7 @@ import { CustomDomainSettings } from "./custom-domain-settings";
 import { EmberVersion } from "./ember-version";
 import { EmailSettings, sendsEmail } from "./email-settings";
 import { EmailSetup } from "./email-setup";
-import { HuddleCameras, HuddlesSettings } from "./huddles-settings";
+import { HuddlesSettings, HuddleSwitches } from "./huddles-settings";
 import { HuddlesSetup } from "./huddles-setup";
 import { InviteByEmail } from "./invite-by-email";
 import { InviteLink } from "./invite-link";
@@ -645,7 +645,7 @@ export function WorkspaceSettingsPage({
           (settings.canAdminister ? (
             <>
               <HuddlesSettings huddles={settings.huddles} onSetUp={() => setSettingUpHuddles(true)} onStopped={() => showHuddles(null)} onFailed={onFailed} />
-              {settings.huddles !== null && <HuddleCameras saveSwitch={saveSwitch} />}
+              {settings.huddles !== null && <HuddleSwitches saveSwitch={saveSwitch} />}
               {settingUpHuddles && (
                 <HuddlesSetup
                   huddles={settings.huddles}

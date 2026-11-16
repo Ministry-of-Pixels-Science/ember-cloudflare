@@ -252,23 +252,30 @@ export async function listen(client: HuddleSocket, fresh = false) {
   return offer;
 }
 
-/** Publishes `client`'s camera with the offer `sdp`, on the connection a tab keeps for it, and says that the connection has connected. */
-export async function publishCamera(client: HuddleSocket, sdp = "a camera's offer"): Promise<void> {
-  client.send({ type: "huddle.publish", sdp, tracks: [{ mid: "0", kind: "video" }] });
+/** Publishes what `client` shows of `kind` with the offer `sdp`, on the connection a tab keeps for it, and says that the connection has connected. */
+async function publishShown(client: HuddleSocket, kind: "video" | "screen", sdp: string): Promise<void> {
+  client.send({ type: "huddle.publish", sdp, tracks: [{ mid: "0", kind }] });
   await client.next("huddle.published");
-  client.send({ type: "huddle.connected", kind: "video" });
+  client.send({ type: "huddle.connected", kind });
   await reached(client);
 }
 
+/** Publishes `client`'s camera, as `publishShown` does. */
+export const publishCamera = (client: HuddleSocket, sdp = "a camera's offer") => publishShown(client, "video", sdp);
+
+/** Publishes the screen `client` shares, as `publishShown` does. */
+export const publishScreen = (client: HuddleSocket, sdp = "a screen's offer") => publishShown(client, "screen", sdp);
+
 /**
- * Has `client` ask to watch the cameras of `people`, and nobody else's, on a `fresh` connection if said,
- * and answer the offer it's made, which this answers: null when it's made none.
+ * Has `client` ask to watch the cameras of `people`, or their screens if `kind` says so, and nobody
+ * else's, on a `fresh` connection if said, and answer the offer it's made, which this answers: null when
+ * it's made none.
  */
-export async function watch(client: HuddleSocket, people: UserId[], fresh = false) {
-  client.send({ type: "huddle.listen", kind: "video", watch: people, ...(fresh && { fresh: true }) });
+export async function watch(client: HuddleSocket, people: UserId[], fresh = false, kind: "video" | "screen" = "video") {
+  client.send({ type: "huddle.listen", kind, watch: people, ...(fresh && { fresh: true }) });
   const offer = await client.next("huddle.offer", "huddle.listening");
   if (offer.type === "huddle.listening") return null;
-  client.send({ type: "huddle.answer", kind: "video", sdp: `answer to ${offer.sdp}` });
+  client.send({ type: "huddle.answer", kind, sdp: `answer to ${offer.sdp}` });
   await client.next("huddle.listening");
   return offer;
 }
@@ -291,6 +298,12 @@ export async function giveKeys(administrator: Session, app = APP): Promise<void>
 /** Turns Cameras on or off as `administrator`, as its switch on the Huddles tab does. */
 export async function switchCameras(administrator: Session, huddleCameras: boolean): Promise<void> {
   const response = await api("/api/account", { method: "PATCH", headers: { Cookie: administrator.cookie }, body: JSON.stringify({ settings: { huddleCameras } }) });
+  expect(response.status, await response.clone().text()).toBe(200);
+}
+
+/** Turns Screen sharing on or off as `administrator`, as its switch on the Huddles tab does. */
+export async function switchScreens(administrator: Session, huddleScreens: boolean): Promise<void> {
+  const response = await api("/api/account", { method: "PATCH", headers: { Cookie: administrator.cookie }, body: JSON.stringify({ settings: { huddleScreens } }) });
   expect(response.status, await response.clone().text()).toBe(200);
 }
 

@@ -80,6 +80,7 @@ const account = (changes: Partial<Account> = {}): Account => ({
   navigationIcons: {},
   huddles: false,
   huddleCameras: true,
+  huddleScreens: true,
   ...changes,
 });
 

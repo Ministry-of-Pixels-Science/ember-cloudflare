@@ -1,6 +1,6 @@
 import type { DirectoryUser, Room, User } from "@ember/protocol";
 import type { HuddlePerson } from "@ember/protocol/huddles";
-import { act, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
@@ -13,7 +13,7 @@ const ada: User = { id: "ada", name: "Ada Lovelace" };
 const sam: User = { id: "sam", name: "Sam Rivera" };
 const priya: User = { id: "priya", name: "Priya Patel" };
 const general: Room = { id: "general", name: "general", kind: "open", icon: null };
-const inHuddle = (user: User, changes: Partial<HuddlePerson> = {}): HuddlePerson => ({ user, muted: false, audio: true, video: false, ...changes });
+const inHuddle = (user: User, changes: Partial<HuddlePerson> = {}): HuddlePerson => ({ user, muted: false, audio: true, video: false, screen: false, ...changes });
 const huddle = (changes: Partial<JoinedHuddle> = {}): JoinedHuddle => ({
   roomId: "general",
   connected: true,
@@ -23,16 +23,19 @@ const huddle = (changes: Partial<JoinedHuddle> = {}): JoinedHuddle => ({
   microphone: true,
   camera: null,
   watched: new Map(),
+  screen: null,
+  screens: new Map(),
   open: true,
   ...changes,
 });
-/** A camera's stream, as much of one as a tile reads: jsdom has none. */
+/** A camera's stream, or a shared screen's, as much of one as a tile reads: jsdom has none. */
 const camera = () => ({}) as MediaStream;
+const shared = () => ({}) as MediaStream;
 const crowd = (count: number) => Array.from({ length: count }, (_, index) => inHuddle({ id: `u${index}`, name: `Person ${index}` }));
 
 /** The huddle this tab is in, opened, with what the huddle's controls were asked. */
 function renderView(joined: JoinedHuddle = huddle(), room: Room | null = general) {
-  const controls = { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setOpen: vi.fn() };
+  const controls = { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn() };
   act(() => showHuddle(joined, controls));
   const user = userEvent.setup();
   const view = render(<HuddleView huddle={joined} room={room} meId="ada" />);
@@ -44,8 +47,40 @@ function CamerasOff({ children }: { children: ReactNode }) {
   return <AccountContext value={{ ...useAccount(), huddleCameras: false }}>{children}</AccountContext>;
 }
 
+/** And one whose administrator has screen sharing off. */
+function ScreensOff({ children }: { children: ReactNode }) {
+  return <AccountContext value={{ ...useAccount(), huddleScreens: false }}>{children}</AccountContext>;
+}
+
+/** Has the browser be one that can share a screen, which jsdom's isn't, as a phone's isn't. */
+function browserSharesScreens() {
+  Object.defineProperty(navigator, "mediaDevices", { value: { getDisplayMedia: vi.fn() }, configurable: true });
+}
+
+/** Has the huddle measure `space` as its own, which jsdom, laying nothing out, leaves to the test. Answers what tells it that its window changed. */
+function measuring(space: { width: number; height: number }) {
+  vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(() => space.width);
+  vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(() => space.height);
+  let resized = () => {};
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      constructor(callback: () => void) {
+        resized = callback;
+      }
+      observe() {}
+      disconnect() {}
+    },
+  );
+  return () => act(() => resized());
+}
+
 const opened = () => screen.getByRole("region");
-const tiles = () => within(screen.getByRole("list", { name: "In the huddle" })).getAllByRole("listitem");
+const list = () => screen.getByRole("list", { name: "In the huddle" });
+const tiles = () => within(list()).getAllByRole("listitem");
+/** The screen the huddle shows large, while it shows one, and the shape of the frame around its picture: how wide it is for its height. */
+const stage = () => screen.queryByRole("figure");
+const shape = () => parseFloat((stage()!.querySelector("figcaption")!.nextElementSibling as HTMLElement).style.aspectRatio);
 const count = () => opened().querySelector("header [aria-live]");
 
 let play: MockInstance<HTMLMediaElement["play"]>;
@@ -58,6 +93,8 @@ beforeEach(() => {
 afterEach(() => {
   act(() => showHuddle(null));
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  Reflect.deleteProperty(navigator, "mediaDevices");
 });
 
 describe("The huddle opened", () => {
@@ -175,33 +212,151 @@ describe("The tiles of a huddle", () => {
   });
 
   it("lays the tiles out as large as shows them all in the space it measures, and again as its window changes", () => {
-    // jsdom lays nothing out, and gives nothing any padding, so the space is the test's.
-    let [width, height] = [1000, 500];
-    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(() => width);
-    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(() => height);
-    let resized = () => {};
-    vi.stubGlobal(
-      "ResizeObserver",
-      class {
-        constructor(callback: () => void) {
-          resized = callback;
-        }
-        observe() {}
-        disconnect() {}
-      },
-    );
+    const space = { width: 1000, height: 500 };
+    const resized = measuring(space);
     renderView(huddle({ people: [...crowd(3), inHuddle(ada)] }));
-    const list = screen.getByRole("list", { name: "In the huddle" });
     // Four people in 1000 by 500: two rows of two, 4 by 3.
-    expect(list).toHaveStyle({ gridTemplateColumns: "repeat(2, 325px)" });
+    expect(list()).toHaveStyle({ gridTemplateColumns: "repeat(2, 325px)" });
     for (const tile of tiles()) expect(tile).toHaveClass("aspect-[4/3]");
 
     // A phone held upright has them square.
-    [width, height] = [296, 500];
-    act(() => resized());
-    expect(list).toHaveStyle({ gridTemplateColumns: "repeat(2, 142px)" });
+    Object.assign(space, { width: 296, height: 500 });
+    resized();
+    expect(list()).toHaveStyle({ gridTemplateColumns: "repeat(2, 142px)" });
     for (const tile of tiles()) expect(tile).toHaveClass("aspect-square");
-    vi.unstubAllGlobals();
+  });
+});
+
+describe("A screen shared in a huddle", () => {
+  const sharing = (changes: Partial<JoinedHuddle> = {}) => huddle({ people: [inHuddle(sam, { screen: true }), inHuddle(ada), inHuddle(priya, { screen: true })], ...changes });
+
+  it("shows someone else's large, all of it, in the shape of most screens, under whose it is, and everyone's tiles in a strip beside it", () => {
+    measuring({ width: 866, height: 560 });
+    const sams = shared();
+    renderView(sharing({ screens: new Map([["sam", sams]]) }));
+    const picture = within(stage()!).getByLabelText<HTMLVideoElement>("Sam Rivera's screen");
+    expect(picture.srcObject).toBe(sams);
+    expect(picture).toHaveProperty("muted", true);
+    expect(picture).toHaveClass("object-contain");
+    expect(picture).not.toHaveClass("-scale-x-100");
+    expect(stage()!.querySelector("figcaption")).toHaveTextContent("Sam Rivera's screen");
+    // As wide as the strip leaves it, and in the middle with the strip.
+    expect(stage()).toHaveStyle({ width: "664px" });
+    expect(stage()).toHaveClass("my-auto", "ml-auto");
+    expect(shape()).toBe(16 / 9);
+    // A screen that's shared and that the tab has yet to be offered, as Priya's, shows nowhere.
+    expect(tiles().map((tile) => tile.textContent)).toEqual(["Sam Rivera", "Ada Lovelace (you)", "Priya Patel"]);
+    // The strip is as wide as shows its three tiles one above another, and scrolls by itself, in rows as tall as its tiles.
+    expect(list()).toHaveStyle({ gridTemplateColumns: "repeat(1, minmax(0, 190px))" });
+    expect(list()).toHaveClass("my-auto", "mr-auto", "max-h-full", "auto-rows-max", "overflow-y-auto");
+    // A list kept from shrinking would grow by the width of a scrollbar that takes room, past the window's edge.
+    expect(list()).not.toHaveClass("shrink-0");
+    expect(list().parentElement).not.toHaveClass("flex-col", "overflow-auto");
+    for (const tile of tiles()) expect(tile).toHaveClass("aspect-[4/3]");
+  });
+
+  it("has the tiles under the screen where that shows it larger than beside them, as on a phone held upright, laid out in what it leaves them", () => {
+    const space = { width: 866, height: 560 };
+    const resized = measuring(space);
+    renderView(sharing({ screens: new Map([["sam", shared()]]) }));
+    expect(list().parentElement).not.toHaveClass("flex-col");
+
+    Object.assign(space, { width: 366, height: 690 });
+    resized();
+    // The screen is as wide as the phone, and the tiles under it are two to a row, square, as a phone's are by themselves.
+    expect(list().parentElement).toHaveClass("flex-col");
+    expect(stage()).toHaveStyle({ width: "366px" });
+    expect(stage()).toHaveClass("mx-auto");
+    expect(list()).toHaveStyle({ gridTemplateColumns: "repeat(2, minmax(0, 177px))" });
+    expect(list()).toHaveClass("flex-1", "auto-rows-max", "overflow-y-auto");
+    for (const tile of tiles()) expect(tile).toHaveClass("aspect-square");
+  });
+
+  it("gives the screen its picture's own shape once the browser knows it, and whenever that changes, and the next it shows large the shape of most until its own is known", async () => {
+    measuring({ width: 866, height: 560 });
+    const both = new Map([
+      ["sam", shared()],
+      ["priya", shared()],
+    ]);
+    const { user } = renderView(sharing({ screens: both }));
+    /** Has the browser say the size of the picture that shows large, as it does at its first frame, or when a later frame's is another. */
+    const sized = (width: number, height: number, said: "loadedmetadata" | "resize") => {
+      const picture = stage()!.querySelector("video")!;
+      Object.defineProperties(picture, { videoWidth: { value: width, configurable: true }, videoHeight: { value: height, configurable: true } });
+      fireEvent(picture, new Event(said));
+    };
+    expect(stage()).toHaveStyle({ width: "680px" });
+    expect(list()).toHaveStyle({ gridTemplateColumns: "repeat(1, minmax(0, 174px))" });
+    // A window that's taller than it's wide shows as tall as the huddle has room for, under its caption, which leaves the tiles room for two to a row.
+    sized(800, 1000, "loadedmetadata");
+    expect(shape()).toBe(0.8);
+    expect(stage()).toHaveStyle({ width: "425px" });
+    expect(list()).toHaveStyle({ gridTemplateColumns: "repeat(2, minmax(0, 208px))" });
+    // Its person makes it wider.
+    sized(1600, 1000, "resize");
+    expect(shape()).toBe(1.6);
+    expect(stage()).toHaveStyle({ width: "680px" });
+    expect(list()).toHaveStyle({ gridTemplateColumns: "repeat(1, minmax(0, 174px))" });
+    // A picture with no size yet says nothing of its shape.
+    sized(0, 0, "resize");
+    expect(shape()).toBe(1.6);
+
+    await user.click(screen.getByRole("button", { name: "Show Priya Patel's screen larger" }));
+    expect(shape()).toBe(16 / 9);
+  });
+
+  it("shows a second among the tiles, first of them, which a click shows large in place of the other for as long as it's shared", async () => {
+    const [sams, priyas] = [shared(), shared()];
+    const both = new Map([
+      ["sam", sams],
+      ["priya", priyas],
+    ]);
+    const { user, rerender } = renderView(sharing({ screens: both }));
+    // Whoever joined first shows large.
+    expect(within(stage()!).getByLabelText<HTMLVideoElement>("Sam Rivera's screen").srcObject).toBe(sams);
+    expect(tiles().map((tile) => tile.textContent)).toEqual(["Priya Patel's screen", "Sam Rivera", "Ada Lovelace (you)", "Priya Patel"]);
+    const small = within(tiles()[0]!).getByLabelText<HTMLVideoElement>("Priya Patel's screen");
+    expect(small.srcObject).toBe(priyas);
+    expect(small).toHaveClass("object-contain");
+
+    await user.click(within(tiles()[0]!).getByRole("button", { name: "Show Priya Patel's screen larger" }));
+    expect(within(stage()!).getByLabelText<HTMLVideoElement>("Priya Patel's screen").srcObject).toBe(priyas);
+    expect(tiles().map((tile) => tile.textContent)).toEqual(["Sam Rivera's screen", "Sam Rivera", "Ada Lovelace (you)", "Priya Patel"]);
+    expect(within(tiles()[0]!).getByRole("button", { name: "Show Sam Rivera's screen larger" })).toBeInTheDocument();
+
+    // Once hers is no longer shared, his shows large again, and the tiles are people only.
+    rerender(<HuddleView huddle={sharing({ screens: new Map([["sam", sams]]) })} room={general} meId="ada" />);
+    expect(within(stage()!).getByLabelText<HTMLVideoElement>("Sam Rivera's screen").srcObject).toBe(sams);
+    expect(tiles()).toHaveLength(3);
+    // And with none shared, it's the tiles as they were, as large as shows them all.
+    rerender(<HuddleView huddle={sharing()} room={general} meId="ada" />);
+    expect(stage()).not.toBeInTheDocument();
+    expect(list()).toHaveClass("m-auto");
+    expect(list().parentElement).toHaveClass("overflow-auto");
+  });
+
+  it("shows you your own among the tiles, first of them and never large, as the others see it", () => {
+    const space = { width: 1000, height: 500 };
+    measuring(space);
+    const [yours, sams] = [shared(), shared()];
+    const { rerender } = renderView();
+    expect(list()).toHaveStyle({ gridTemplateColumns: "repeat(2, 420px)" });
+    rerender(<HuddleView huddle={huddle({ screen: yours })} room={general} meId="ada" />);
+    expect(stage()).not.toBeInTheDocument();
+    expect(tiles().map((tile) => tile.textContent)).toEqual(["Your screen", "Sam Rivera", "Ada Lovelace (you)"]);
+    const picture = within(tiles()[0]!).getByLabelText<HTMLVideoElement>("Your screen");
+    expect(picture.srcObject).toBe(yours);
+    expect(picture).toHaveClass("object-contain");
+    expect(picture).not.toHaveClass("-scale-x-100");
+    expect(within(tiles()[0]!).queryByRole("button")).not.toBeInTheDocument();
+    // It's a tile like the others, so the two people's are laid out as three: two rows in 1000 by 500, where they had one.
+    expect(list()).toHaveStyle({ gridTemplateColumns: "repeat(2, 325px)" });
+
+    // Beside someone else's, which shows large, it's first in the strip, which is as wide as shows the three.
+    rerender(<HuddleView huddle={huddle({ screen: yours, people: [inHuddle(sam, { screen: true }), inHuddle(ada)], screens: new Map([["sam", sams]]) })} room={general} meId="ada" />);
+    expect(within(stage()!).getByLabelText<HTMLVideoElement>("Sam Rivera's screen").srcObject).toBe(sams);
+    expect(tiles().map((tile) => tile.textContent)).toEqual(["Your screen", "Sam Rivera", "Ada Lovelace (you)"]);
+    expect(list()).toHaveStyle({ gridTemplateColumns: "repeat(1, minmax(0, 211px))" });
   });
 });
 
@@ -255,6 +410,51 @@ describe("The buttons along the base of a huddle", () => {
       </Unsaid>,
     );
     expect(screen.getByRole("button", { name: "Turn on camera" })).toBeInTheDocument();
+  });
+
+  it("shares the screen and stops sharing it, in a browser that can share one", async () => {
+    browserSharesScreens();
+    const { setScreen, user, rerender } = renderView();
+    await user.click(screen.getByRole("button", { name: "Share screen" }));
+    rerender(<HuddleView huddle={huddle({ screen: shared() })} room={general} meId="ada" />);
+    const stop = screen.getByRole("button", { name: "Stop sharing screen" });
+    expect(stop).toHaveClass("bg-foreground", "text-background");
+    await user.click(stop);
+    expect(setScreen.mock.calls).toEqual([[true], [false]]);
+  });
+
+  it("has no button to share a screen in a browser that can't, as a phone's, nor while an administrator has screen sharing off, but to stop one that's shared still", async () => {
+    const { setScreen, user, rerender } = renderView();
+    expect(screen.queryByRole("button", { name: /screen/ })).not.toBeInTheDocument();
+    browserSharesScreens();
+    rerender(
+      <ScreensOff>
+        <HuddleView huddle={huddle()} room={general} meId="ada" />
+      </ScreensOff>,
+    );
+    expect(screen.queryByRole("button", { name: /screen/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Turn on camera" })).toBeInTheDocument();
+    rerender(
+      <ScreensOff>
+        <HuddleView huddle={huddle({ screen: shared() })} room={general} meId="ada" />
+      </ScreensOff>,
+    );
+    await user.click(screen.getByRole("button", { name: "Stop sharing screen" }));
+    expect(setScreen.mock.calls).toEqual([[false]]);
+  });
+
+  it("keeps its button to share a screen under a workspace that says nothing of screen sharing, as one told of by an older Worker does", () => {
+    function Unsaid({ children }: { children: ReactNode }) {
+      return <AccountContext value={{ ...useAccount(), huddleScreens: undefined as unknown as boolean }}>{children}</AccountContext>;
+    }
+    browserSharesScreens();
+    const { rerender } = renderView();
+    rerender(
+      <Unsaid>
+        <HuddleView huddle={huddle()} room={general} meId="ada" />
+      </Unsaid>,
+    );
+    expect(screen.getByRole("button", { name: "Share screen" })).toBeInTheDocument();
   });
 
   it("leaves on Leave, the last of its buttons", async () => {
