@@ -331,9 +331,9 @@ describe("Sign in with email and password", () => {
 
 describe("Version", () => {
   it("is APP_VERSION, else GIT_REVISION, else the release, counting blank values as unset", async () => {
-    expect((await bootstrap()).version).toBe("0.5 beta 4");
+    expect((await bootstrap()).version).toBe("0.5 beta 5");
     expect((await bootstrap({ APP_VERSION: "1.2.3", GIT_REVISION: "abc123" })).version).toBe("1.2.3");
     expect((await bootstrap({ APP_VERSION: "", GIT_REVISION: "abc123" })).version).toBe("abc123");
-    expect((await bootstrap({ APP_VERSION: " ", GIT_REVISION: " " })).version).toBe("0.5 beta 4");
+    expect((await bootstrap({ APP_VERSION: " ", GIT_REVISION: " " })).version).toBe("0.5 beta 5");
   });
 });
