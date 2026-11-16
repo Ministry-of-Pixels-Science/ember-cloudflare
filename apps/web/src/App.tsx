@@ -48,7 +48,8 @@ const isSameAccount = (a: Account, b: Account) =>
   a.emailDomains.length === b.emailDomains.length &&
   a.emailDomains.every((domain, index) => domain === b.emailDomains[index]) &&
   NAVIGATION_SLOTS.every((slot) => a.navigationIcons[slot] === b.navigationIcons[slot]) &&
-  a.huddles === b.huddles;
+  a.huddles === b.huddles &&
+  a.huddleCameras === b.huddleCameras;
 
 export function App() {
   // Undefined until the server says whether Ember is set up.

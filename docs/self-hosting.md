@@ -1179,6 +1179,12 @@ microphone and its camera to the SFU, and hears and sees the others from it, ove
 its way there with Cloudflare's STUN server (`stun.cloudflare.com:3478`).
 What the SFU charges is in [What it costs](#what-it-costs).
 
+While huddles are on, the tab has a Cameras card under the first, whose switch is on until an
+administrator turns it off. Off, huddles are voices only: the preview has no camera switch and the
+huddle no camera button, a camera that's on goes off, which its person is told, and the room refuses
+any camera it's asked to show, and takes down whichever a tab left on, eight every half minute.
+Turning it on again gives the switch and the button back, and nobody's camera comes on by itself.
+
 ### A preview from GitHub Actions
 
 The Preview workflow (`.github/workflows/preview.yml`) deploys `main` to a Worker named
@@ -1398,7 +1404,8 @@ pages had them in October 2026:
   it, so five people talking for an hour are sent under half a GB between them, and the free 1,000 GB
   carry about 2,000 such hours a month. A camera is up to 500 kbps to each person who has the huddle
   open, so the same five with their cameras on throughout are sent up to 4.5 GB more in the hour, and
-  the free 1,000 GB carry about 200 such hours a month.
+  the free 1,000 GB carry about 200 such hours a month. Turning Cameras off under Huddles keeps
+  huddles to voices.
 
 Cloudflare's pages have the details: [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/),
 [Durable Objects pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/),

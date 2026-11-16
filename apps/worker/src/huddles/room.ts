@@ -1,6 +1,7 @@
 import { CloseCode, type RoomId, type User, type UserId } from "@ember/protocol";
 import {
   CAMERAS_FULL,
+  CAMERAS_OFF,
   HUDDLE_FAILED,
   HUDDLE_TRACK_KINDS,
   HuddleCloseCode,
@@ -16,7 +17,7 @@ import {
 import type { Env } from "../env";
 import { CLOSE_REASONS, closedAtOnce, closeTooLarge, isTooLarge, MAX_ROOM_FRAME_SIZE } from "../sockets";
 import { workspace } from "../workspace";
-import { acceptAnswer, closeTracks, publishTracks, pullTracks, SfuError, startSession, TRACKS_PER_REQUEST, type SfuApp } from "./sfu";
+import { acceptAnswer, closeTracks, publishTracks, pullTracks, SfuError, startSession, TRACKS_PER_REQUEST, type HuddleApp, type SfuApp } from "./sfu";
 
 // A room's huddle, which the room's Durable Object keeps beside its own sockets (src/chat-room.ts): who's
 // in it, and what each of them publishes and receives at Cloudflare's Realtime SFU, which carries what
@@ -66,10 +67,13 @@ const FRAMES_WAITING = 4;
 
 /**
  * The most people one check takes out for being unheard. The SFU is asked about each of them once for
- * every connection their tab had, four at most, so that these and the sessions asked about again fit
- * the 50 requests an event may make.
+ * every connection their tab had, four at most, so that these, the sessions asked about again and the
+ * cameras taken down fit the 50 requests an event may make.
  */
 const REMOVED_PER_CHECK = 8;
+
+/** The most cameras one check takes down once cameras are off, each of which the SFU is asked about once. */
+const CAMERAS_DOWN_PER_CHECK = 8;
 
 /** The most sessions one check asks the SFU again to close tracks on. */
 const RETRIED_PER_CHECK = 10;
@@ -220,6 +224,12 @@ const personOf = ({ user, muted, publishing, cameras }: HuddleAttachment): Huddl
 
 const midsOf = (tracks: Array<{ mid: string }>) => tracks.map(({ mid }) => mid);
 
+/** Whether an administrator has cameras off in the huddles `app` runs. A Workspace from before they could be turned off says nothing of them. */
+const camerasOff = (app: HuddleApp) => app.cameras === false;
+
+/** Tells a tab that the room won't publish its `kind`, however often it's asked, and why. */
+const refuse = (ws: WebSocket, kind: HuddleTrackKind, message: string) => send(ws, { type: "error", message, failed: "huddle.publish", kind, refused: true });
+
 /** Every track of a pair of connections that the SFU carries: what the tab publishes, and what it receives or has been offered. */
 function sessionsOf({ publishing, receiving }: Connections): Session[] {
   const sessions: Session[] = [];
@@ -248,8 +258,8 @@ function send(ws: WebSocket, frame: HuddleServerFrame): void {
 const logged = (error: unknown) => (error instanceof SfuError ? error.message : error instanceof Error ? error.name : "unknown error");
 
 export class Huddle {
-  /** The SFU app huddles run through, as the Workspace last said, and when it did. */
-  private known: { app: SfuApp | null; at: number } | null = null;
+  /** The SFU app huddles run through, and whether cameras may go on in them, as the Workspace last said, and when it did. */
+  private known: { app: HuddleApp | null; at: number } | null = null;
   /** What each socket's frames for its sending connections wait behind, and those for its receiving connections. */
   private readonly sending = noLines();
   private readonly receiving = noLines();
@@ -410,7 +420,10 @@ export class Huddle {
       // Asked afresh, so turning huddles off ends one within a check. Unanswered, the huddle goes on.
       const app = await this.appNow(true).catch(() => undefined);
       if (app === null || (app && members.some(({ attachment }) => attachment.appId !== app.appId))) this.end(app ? CloseCode.Reconnect : HuddleCloseCode.Off);
-      else for (const { socket } of members.filter((member) => this.isSilent(member, now)).slice(0, REMOVED_PER_CHECK)) this.remove(socket, CloseCode.Reconnect);
+      else {
+        for (const { socket } of members.filter((member) => this.isSilent(member, now)).slice(0, REMOVED_PER_CHECK)) this.remove(socket, CloseCode.Reconnect);
+        if (app && camerasOff(app)) this.takeCamerasDown();
+      }
     }
     const reported = await this.report();
     const unclosed = await this.closeUnclosed(now);
@@ -455,21 +468,23 @@ export class Huddle {
    * Publishes a tab's track on a new session, with the offer its sending connection made for it, and
    * sends it the SFU's answer. The track goes by its kind, which is how the others' sessions ask for
    * it. What the tab published of that kind before, on a connection it has given up, is closed. A
-   * camera past as many as a huddle shows is refused, which its tab hears.
+   * camera is refused while cameras are off, or past as many as a huddle shows, which its tab hears.
    */
   private async publish(ws: WebSocket, offer: string, track: HuddleTrack): Promise<void> {
     const { kind } = track;
     const app = await this.appOf(ws);
     if (!app) return;
-    if (this.showsEveryCamera(ws, kind)) return send(ws, { type: "error", message: CAMERAS_FULL, failed: "huddle.publish", kind, refused: true });
+    const refused = this.refusalOf(ws, kind, app);
+    if (refused) return refuse(ws, kind, refused);
     const sessionId = await startSession(this.env, app);
     const answer = await publishTracks(this.env, app, sessionId, offer, [{ mid: track.mid, trackName: kind }]);
     const published = [{ sessionId, mids: [track.mid] }];
     // They left while the SFU answered, so nothing of theirs stays published.
     if (ws.readyState !== WebSocket.OPEN) return this.cut(app.appId, published);
-    // The last camera a huddle shows may have gone on while the SFU answered.
-    if (this.showsEveryCamera(ws, kind)) {
-      send(ws, { type: "error", message: CAMERAS_FULL, failed: "huddle.publish", kind, refused: true });
+    // The last camera a huddle shows may have gone on while the SFU answered, or a check have heard that cameras are off.
+    const late = this.refusalOf(ws, kind, this.known?.app ?? app);
+    if (late) {
+      refuse(ws, kind, late);
       return this.cut(app.appId, published);
     }
     const earlier = connectionsOf(attachmentOf(ws), kind).publishing;
@@ -481,10 +496,28 @@ export class Huddle {
     this.ctx.waitUntil(this.cut(app.appId, sessionsOf({ publishing: earlier })));
   }
 
-  /** Whether a track of `kind` from `ws`'s tab would be one camera more than a huddle shows, counting those the others have published. */
-  private showsEveryCamera(ws: WebSocket, kind: HuddleTrackKind): boolean {
-    if (kind !== "video") return false;
-    return this.members().filter(({ socket, attachment }) => socket !== ws && attachment.cameras?.publishing).length >= MAX_HUDDLE_CAMERAS;
+  /**
+   * Why the room won't publish a track of `kind` from `ws`'s tab, or null while it will: cameras are off,
+   * or this would be one camera more than a huddle shows, counting those the others have published.
+   */
+  private refusalOf(ws: WebSocket, kind: HuddleTrackKind, app: HuddleApp): string | null {
+    if (kind !== "video") return null;
+    if (camerasOff(app)) return CAMERAS_OFF;
+    const others = this.members().filter(({ socket, attachment }) => socket !== ws && attachment.cameras?.publishing);
+    return others.length >= MAX_HUDDLE_CAMERAS ? CAMERAS_FULL : null;
+  }
+
+  /**
+   * Takes down cameras that are on though an administrator has turned cameras off, a few a check, as if
+   * the room had refused them: each one's tab hears why, and turns its camera off. A tab that heard
+   * cameras go off has taken its own down already.
+   */
+  private takeCamerasDown(): void {
+    const showing = this.members().filter(({ attachment }) => attachment.cameras?.publishing);
+    for (const { socket } of showing.slice(0, CAMERAS_DOWN_PER_CHECK)) {
+      this.unpublish(socket, "video");
+      refuse(socket, "video", CAMERAS_OFF);
+    }
   }
 
   /** Has the others hear that they can listen to `ws`'s person, or watch them, now that the sending connection for `kind` has connected. */
@@ -632,7 +665,7 @@ export class Huddle {
    * The SFU app `ws`'s huddle runs through, for a frame to ask the SFU as. Once huddles are off, or run
    * through another app than the huddle's, the huddle ends, and this answers null.
    */
-  private async appOf(ws: WebSocket): Promise<SfuApp | null> {
+  private async appOf(ws: WebSocket): Promise<HuddleApp | null> {
     const app = await this.appNow();
     if (ws.readyState !== WebSocket.OPEN) return null;
     if (app?.appId === attachmentOf(ws).appId) return app;
@@ -641,7 +674,7 @@ export class Huddle {
   }
 
   /** The SFU app huddles run through, or null while they're off, as the Workspace said within `APP_KEPT_MS`, or says now. */
-  private async appNow(fresh = false): Promise<SfuApp | null> {
+  private async appNow(fresh = false): Promise<HuddleApp | null> {
     if (!fresh && this.known && Date.now() - this.known.at < APP_KEPT_MS) return this.known.app;
     const app = await workspace(this.env).huddleApp();
     this.known = { app, at: Date.now() };

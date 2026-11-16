@@ -288,6 +288,12 @@ export async function giveKeys(administrator: Session, app = APP): Promise<void>
   expect(response.status, await response.clone().text()).toBe(200);
 }
 
+/** Turns Cameras on or off as `administrator`, as its switch on the Huddles tab does. */
+export async function switchCameras(administrator: Session, huddleCameras: boolean): Promise<void> {
+  const response = await api("/api/account", { method: "PATCH", headers: { Cookie: administrator.cookie }, body: JSON.stringify({ settings: { huddleCameras } }) });
+  expect(response.status, await response.clone().text()).toBe(200);
+}
+
 /**
  * Sets Ember up with huddles on: Ada, its administrator, has given it an SFU app's keys, which a
  * stand-in for the SFU took, and has been asked nothing since.

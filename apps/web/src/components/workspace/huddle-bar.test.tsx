@@ -2,7 +2,9 @@ import type { DirectoryUser, Room, User } from "@ember/protocol";
 import type { HuddlePerson } from "@ember/protocol/huddles";
 import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { AccountContext, useAccount } from "@/hooks/use-account";
 import { PeopleContext } from "@/hooks/use-directory";
 import { showHuddle, type JoinedHuddle } from "@/lib/huddle-store";
 import { HuddleBar } from "./huddle-bar";
@@ -34,6 +36,11 @@ function renderBar(joined: JoinedHuddle = huddle(), room: Room | null = general)
   const user = userEvent.setup();
   const view = render(<HuddleBar huddle={joined} room={room} meId="ada" />);
   return { ...controls, user, ...view };
+}
+
+/** A workspace whose administrator has cameras off in huddles. */
+function CamerasOff({ children }: { children: ReactNode }) {
+  return <AccountContext value={{ ...useAccount(), huddleCameras: false }}>{children}</AccountContext>;
 }
 
 const bar = () => screen.getByRole("region");
@@ -167,6 +174,24 @@ describe("The huddle bar's camera", () => {
     const camera = screen.getByRole("button", { name: "Turn off camera" });
     expect(camera).toHaveClass("bg-foreground", "text-background");
     await user.click(camera);
+    expect(setCamera).toHaveBeenCalledExactlyOnceWith(false);
+  });
+
+  it("has no camera button while an administrator has cameras off, but to turn off a camera that's on still", async () => {
+    const { setCamera, user, rerender } = renderBar();
+    rerender(
+      <CamerasOff>
+        <HuddleBar huddle={huddle()} room={general} meId="ada" />
+      </CamerasOff>,
+    );
+    expect(screen.queryByRole("button", { name: /camera/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Mute microphone" })).toBeInTheDocument();
+    rerender(
+      <CamerasOff>
+        <HuddleBar huddle={huddle({ camera: CAMERA })} room={general} meId="ada" />
+      </CamerasOff>,
+    );
+    await user.click(screen.getByRole("button", { name: "Turn off camera" }));
     expect(setCamera).toHaveBeenCalledExactlyOnceWith(false);
   });
 });

@@ -1,8 +1,10 @@
 import { useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import type { LiveHuddle, Me, SharedRoom } from "@ember/protocol";
+import { CAMERAS_OFF } from "@ember/protocol/huddles";
 import { Field } from "@/components/field";
 import { Microphone, MicrophoneMute, VideoCamera, VideoCameraOff, Xmark } from "@/components/icons/iconoir";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
+import { useCamerasAllowed } from "@/hooks/use-account";
 import { PeopleContext } from "@/hooks/use-directory";
 import { useHuddle } from "@/hooks/use-huddle";
 import { joinHuddle } from "@/lib/huddle";
@@ -83,11 +85,13 @@ interface OpeningCamera {
 /**
  * The camera the preview has open, which it asks the browser for only once its switch turns it on: null
  * while it's off, and `refused` once there's none to use. It closes with the preview, unless the huddle
- * took it. `opened` hears of each one, when the browser names the cameras.
+ * took it. `opened` hears of each one, when the browser names the cameras. An administrator who turns
+ * cameras off, so that they're no longer `allowed`, takes down the one that's on, which `takenDown` says.
  */
-function usePreviewCamera(opened: () => void) {
+function usePreviewCamera(opened: () => void, allowed: boolean) {
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [refused, setRefused] = useState(false);
+  const [takenDown, setTakenDown] = useState(false);
   const open = useRef<MediaStream | null>(null);
   // What the browser was asked last, until it answers: its answer to anything else is closed again.
   const opening = useRef<OpeningCamera | null>(null);
@@ -102,6 +106,7 @@ function usePreviewCamera(opened: () => void) {
     async (deviceId: string | null) => {
       turnOff();
       setRefused(false);
+      setTakenDown(false);
       const asking = (opening.current = { answer: openCamera(deviceId), taken: false });
       const camera = await asking.answer;
       // The huddle's now, to show once it's open.
@@ -125,6 +130,13 @@ function usePreviewCamera(opened: () => void) {
     [],
   );
 
+  // Cameras turned off take down the one that's on, or that the browser is still opening.
+  useEffect(() => {
+    if (allowed || (!stream && !opening.current)) return;
+    turnOff();
+    setTakenDown(true);
+  }, [allowed, stream, turnOff]);
+
   // A camera unplugged while it's previewed goes off.
   useEffect(() => {
     const track = stream?.getVideoTracks()[0];
@@ -143,7 +155,7 @@ function usePreviewCamera(opened: () => void) {
     open.current = null;
     return taken;
   };
-  return { stream, refused, turnOn, turnOff, take };
+  return { stream, refused, takenDown, turnOn, turnOff, take };
 }
 
 /** The devices to choose among, led by the one that's open where the browser's list leaves it out. */
@@ -194,13 +206,15 @@ interface Props {
  * picture over the switches that mute your microphone and turn your camera on, what to speak, listen
  * and be seen through, then Cancel and Start Huddle or Join Huddle. Opening it asks the browser for the
  * microphone, so the huddle starts with it open, or listening only when there's none. The camera stays
- * off, and unasked for, until its switch turns it on, when the picture is its own.
+ * off, and unasked for, until its switch turns it on, when the picture is its own. It has no switch
+ * while an administrator has cameras off.
  */
 export function HuddlePreview({ room, me, live, onClose }: Props) {
   const people = useContext(PeopleContext);
   const joined = useHuddle();
   const { stream, devices, ask, list, take } = usePreviewMicrophone();
-  const camera = usePreviewCamera(list);
+  const camerasAllowed = useCamerasAllowed();
+  const camera = usePreviewCamera(list, camerasAllowed);
   const [muted, setMuted] = useState(false);
   const [speakerId, setSpeakerId] = useState(() => rememberedDevice("speaker") ?? "");
   const title = useRef<HTMLHeadingElement>(null);
@@ -222,6 +236,8 @@ export function HuddlePreview({ room, me, live, onClose }: Props) {
   const speakers = devices.speakers.some(({ deviceId }) => deviceId === "default") ? devices.speakers : [{ deviceId: "", label: "System default" }, ...devices.speakers];
   const speaker = speakers.find(({ deviceId }) => deviceId === speakerId)?.deviceId ?? speakers[0]!.deviceId;
   const silent = muted || !stream;
+  // Why the camera is off though its switch was turned on: the browser has none to give, or an administrator turned cameras off meanwhile.
+  const cameraNote = camerasAllowed ? camera.refused && NO_CAMERA : camera.takenDown && CAMERAS_OFF;
 
   const chooseMicrophone = (deviceId: string) => {
     rememberDevice("microphone", deviceId);
@@ -266,13 +282,15 @@ export function HuddlePreview({ room, me, live, onClose }: Props) {
             <PreviewSwitch label={silent ? "Unmute microphone" : "Mute microphone"} on={!silent} disabled={!stream} onClick={() => setMuted(!muted)}>
               {silent ? <MicrophoneMute /> : <Microphone />}
             </PreviewSwitch>
-            <PreviewSwitch
-              label={camera.stream ? "Turn off camera" : "Turn on camera"}
-              on={camera.stream !== null}
-              onClick={() => (camera.stream ? camera.turnOff() : void camera.turnOn(rememberedDevice("camera")))}
-            >
-              {camera.stream ? <VideoCamera /> : <VideoCameraOff />}
-            </PreviewSwitch>
+            {camerasAllowed && (
+              <PreviewSwitch
+                label={camera.stream ? "Turn off camera" : "Turn on camera"}
+                on={camera.stream !== null}
+                onClick={() => (camera.stream ? camera.turnOff() : void camera.turnOn(rememberedDevice("camera")))}
+              >
+                {camera.stream ? <VideoCamera /> : <VideoCameraOff />}
+              </PreviewSwitch>
+            )}
           </div>
         </div>
 
@@ -316,9 +334,9 @@ export function HuddlePreview({ room, me, live, onClose }: Props) {
         <p role="status" className="mt-5 leading-[1.65] text-muted-foreground empty:mt-0">
           {stream === undefined ? ASKING_FOR_MICROPHONE : stream === null ? NO_MICROPHONE : null}
         </p>
-        {camera.refused && (
+        {cameraNote && (
           <p role="alert" className={cn("leading-[1.65] text-muted-foreground", stream ? "mt-5" : "mt-2.5")}>
-            {NO_CAMERA}
+            {cameraNote}
           </p>
         )}
 

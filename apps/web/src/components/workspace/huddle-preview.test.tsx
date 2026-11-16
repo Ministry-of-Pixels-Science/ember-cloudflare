@@ -1,7 +1,10 @@
 import type { DirectoryUser, LiveHuddle, Me, SharedRoom } from "@ember/protocol";
+import { CAMERAS_OFF } from "@ember/protocol/huddles";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AccountContext, useAccount } from "@/hooks/use-account";
 import { PeopleContext } from "@/hooks/use-directory";
 import { joinHuddle } from "@/lib/huddle";
 import { NO_CAMERA } from "@/lib/huddle-devices";
@@ -156,6 +159,26 @@ async function previewWithCamera(live?: LiveHuddle) {
   return shown;
 }
 const optionsOf = (select: HTMLSelectElement) => [...select.options].map((option) => option.textContent);
+
+/** A workspace whose administrator has cameras on in huddles, or off. */
+function Cameras({ allowed, children }: { allowed: boolean; children: ReactNode }) {
+  return <AccountContext value={{ ...useAccount(), huddleCameras: allowed }}>{children}</AccountContext>;
+}
+
+/** The preview in such a workspace, once the browser has answered for the microphone, and the call that turns cameras off there, or on again. */
+async function previewWhereCameras(allowed: boolean) {
+  const page = (cameras: boolean) => (
+    <Cameras allowed={cameras}>
+      <PeopleContext value={PEOPLE}>
+        <HuddlePreview room={general} me={ada} live={undefined} onClose={vi.fn()} />
+      </PeopleContext>
+    </Cameras>
+  );
+  const user = userEvent.setup();
+  const { rerender } = render(page(allowed));
+  await waitFor(() => expect(screen.getByRole("status")).toBeEmptyDOMElement());
+  return { user, allowCameras: (cameras: boolean) => rerender(page(cameras)) };
+}
 
 describe("Starting a huddle", () => {
   it("asks the browser for the microphone as it opens, and waits for its answer", async () => {
@@ -473,6 +496,46 @@ describe("A huddle's camera", () => {
     await waitFor(() => expect(microphoneSelect()).toHaveValue("mic-2"));
     expect(media.opened[1]!.track.stopped).toBe(false);
     expect(picture().srcObject).toBe(media.opened[1]);
+  });
+
+  it("has no camera switch while an administrator has cameras off, and starts without one", async () => {
+    const { user } = await previewWhereCameras(false);
+    expect(screen.getByRole("button", { name: "Mute microphone" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /camera/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Start Huddle" }));
+    expect(joinHuddle).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ camera: null }));
+    expect(media.asked).toEqual([{ audio: true }]);
+  });
+
+  it("closes the camera, and says why, when an administrator turns cameras off, until they turn them on again", async () => {
+    const { user, allowCameras } = await previewWhereCameras(true);
+    await user.click(screen.getByRole("button", { name: "Turn on camera" }));
+    await screen.findByRole("button", { name: "Turn off camera" });
+    allowCameras(false);
+    expect(media.opened[1]!.track.stopped).toBe(true);
+    expect(preview().querySelector("video")).toBeNull();
+    expect(preview().querySelectorAll("img")).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: /camera/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Camera" })).not.toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(CAMERAS_OFF);
+
+    allowCameras(true);
+    expect(screen.getByRole("button", { name: "Turn on camera" })).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("closes a camera the browser was still opening as cameras were turned off, and starts without it", async () => {
+    const { user, allowCameras } = await previewWhereCameras(true);
+    media.pending = true;
+    await user.click(screen.getByRole("button", { name: "Turn on camera" }));
+    allowCameras(false);
+    await media.answer();
+    expect(media.opened[1]!.track.stopped).toBe(true);
+    expect(preview().querySelector("video")).toBeNull();
+    expect(screen.getByRole("alert")).toHaveTextContent(CAMERAS_OFF);
+    await user.click(screen.getByRole("button", { name: "Start Huddle" }));
+    expect(joinHuddle).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ camera: null }));
   });
 });
 
