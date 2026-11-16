@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { OPENGRAPH_EMBED_CONTENT_TYPE } from "./attachments";
 import { autoLink } from "./autolink";
 import { plainText, prepareBody } from "./body";
+import { displayBody } from "./display";
 import { MAX_ATTRIBUTES, ParseLimitError } from "./markup";
 import { mentionSgid, userIdsIn } from "./mentions";
 import { parseHtml } from "./parse";
@@ -196,6 +198,21 @@ describe("Rich text, safely", () => {
       SLOW_TEST_MS,
     );
   }
+
+  it(
+    "shows a link's long preview in the first few of a body's many divs, not in each",
+    () => {
+      // A copy in each div, as Campfire shows a message that's only a link, would come to 50 MB
+      const content = `<div class='og-embed__title'><a href='https://example.com/a'>t</a></div><div class='og-embed__image'><img src='https://example.com/${"a".repeat(49_000)}'></div>`;
+      const preview = `<action-text-attachment content-type="${OPENGRAPH_EMBED_CONTENT_TYPE}" content="${content}"></action-text-attachment>`;
+      const stored = prepareBody(parseHtml, `<div>https://example.com/a</div>${"<div></div>".repeat(1_000)}${preview}`, none)!;
+      let shown = "";
+      expectQuick("1,000 divs and a link's preview of 49 KB", () => (shown = JSON.stringify(displayBody(parseHtml, stored.html, stored.plainText, ""))));
+      // The preview itself, after the two copies there's room for
+      expect(shown.split('"kind":"preview"').length - 1).toBe(3);
+    },
+    SLOW_TEST_MS,
+  );
 
   it("unescapes a value of many entities in linear time", () => {
     expectQuick("1 MB of &s", () => cgiUnescapeHtml("&".repeat(1_000_000)));
