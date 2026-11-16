@@ -825,6 +825,73 @@ describe("Bot cards", () => {
     });
   });
 
+  it("shows Cloudflare's status page's incidents and maintenances, with their latest update, a maintenance in blue with its window", async () => {
+    // As https://www.cloudflarestatus.com/docs/notifications shows its generic webhook's body.
+    const { administrator, bot, general } = await withBot();
+    const inRoom = await connect(general, administrator);
+    const meta = { rule_id: "pol_1", rule_name: "All", destination_id: "ch_1", destination_name: "Ember", unsubscribe: "https://www.cloudflarestatus.com/notifications/unsubscribe?token=t" };
+    const incident = {
+      name: "Elevated API Errors",
+      status: "investigating",
+      impact: "major",
+      incident_type: "incident",
+      notification_type: "new",
+      shortlink: "https://www.cloudflarestatus.com/incidents/abc123",
+      scheduled_for: null,
+      scheduled_until: null,
+      updated_at: "2026-05-15T10:00:00Z",
+      components: [{ id: "c1", name: "API" }, { id: "c2", name: "Workers KV" }],
+      latest_update: { id: "u1", status: "investigating", body: "We are investigating elevated error rates in our EU region.", created_at: "2026-05-15T10:00:00Z" },
+    };
+    expect(await answerTo(bot.key, general, { meta, incident })).toEqual(OK);
+    const { message } = await inRoom.next("message.created");
+    expect(message.cards).toEqual([
+      {
+        source: "attachment",
+        color: "#e67e22",
+        parts: [
+          { kind: "title", text: "Elevated API Errors", href: "https://www.cloudflarestatus.com/incidents/abc123" },
+          { kind: "text", html: "<p>We are investigating elevated error rates in our EU region.</p>" },
+          {
+            kind: "fields",
+            fields: [
+              { title: "Status", html: "<p>Investigating</p>", short: true },
+              { title: "Impact", html: "<p>Major</p>", short: true },
+              { title: "Components", html: "<p>API, Workers KV</p>", short: false },
+            ],
+          },
+          { kind: "footer", at: Date.parse("2026-05-15T10:00:00Z") / 1000 },
+        ],
+      },
+    ]);
+
+    const maintenance = {
+      ...incident,
+      name: "Scheduled maintenance in AMS",
+      incident_type: "maintenance",
+      impact: "none",
+      status: "scheduled",
+      scheduled_for: "2026-05-20T02:00:00Z",
+      scheduled_until: "2026-05-20T06:00:00Z",
+      latest_update: { status: "scheduled", body: "Traffic might be re-routed.", created_at: "2026-05-15T12:00:00Z" },
+    };
+    expect(await answerTo(bot.key, general, { meta, incident: maintenance })).toEqual(OK);
+    const { message: scheduled } = await inRoom.next("message.created");
+    expect(scheduled.cards?.[0]).toMatchObject({ color: "#3498db" });
+    expect(scheduled.cards?.[0]?.parts).toContainEqual({
+      kind: "fields",
+      fields: [
+        { title: "Status", html: "<p>Scheduled</p>", short: true },
+        { title: "Window", html: "<p>2026-05-20 02:00 UTC – 2026-05-20 06:00 UTC</p>", short: false },
+        { title: "Components", html: "<p>API, Workers KV</p>", short: false },
+      ],
+    });
+
+    expect(await answerTo(bot.key, general, { meta, incident: { ...maintenance, status: "completed", latest_update: { status: "completed", body: "Done." } } })).toEqual(OK);
+    const { message: completed } = await inRoom.next("message.created");
+    expect(completed.cards?.[0]).toMatchObject({ color: "#2fcc66" });
+  });
+
   it("shows a Statuspage component's change of status as a line in its new status's color", async () => {
     const { administrator, bot, general } = await withBot();
     const inRoom = await connect(general, administrator);

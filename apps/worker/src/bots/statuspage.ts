@@ -1,12 +1,14 @@
 import { parseParts, showsAnything, type Card, type CardField, type CardPart } from "@ember/protocol";
 import { cardAddress } from "@ember/richtext";
-import { escapeText, plainTextHtml } from "./mrkdwn";
+import { escapeText, plainTextHtml, utcTime } from "./mrkdwn";
 
 // What Atlassian Statuspage's webhooks send (https://support.atlassian.com/statuspage/docs/enable-webhook-notifications/),
 // which pages such as githubstatus.com offer their subscribers: its own JSON, with no `text`, so tools that only
-// know Statuspage can post to a bot's Slack-compatible address. An incident shows as a card of its name, linked,
-// its latest update, its status, impact and affected components, in a bar the color of its impact, green once it's
-// resolved; a component's change of status shows as a line.
+// know Statuspage can post to a bot's Slack-compatible address. Cloudflare's status page sends the same `{ meta, incident }`
+// from its generic webhook (https://www.cloudflarestatus.com/docs/notifications), with the incident's `latest_update`
+// in place of its list of updates. An incident shows as a card of its name, linked, its latest update, its status,
+// impact and affected components, in a bar the color of its impact, green once it's resolved, and a maintenance as one
+// in blue with its window; a component's change of status shows as a line.
 
 type Payload = Record<string, unknown>;
 
@@ -34,16 +36,22 @@ export function statuspageCard(payload: Payload): Card | null {
   return null;
 }
 
-/** An incident: its name linked to its shortlink, its latest update, its status, impact and the components it affects. */
+/**
+ * An incident: its name linked to its shortlink, its latest update, its status, impact and the components it
+ * affects; or a maintenance, which Statuspage gives the impact `maintenance` and Cloudflare the `incident_type`, with
+ * its window in place of its impact.
+ */
 function incidentCard(incident: Payload): Card | null {
-  const update = latestUpdate(listOf(incident.incident_updates));
+  const update = latestUpdate([...listOf(incident.incident_updates), incident.latest_update]);
   const status = stringOf(update?.status) || stringOf(incident.status);
-  const impact = stringOf(incident.impact_override) || stringOf(incident.impact);
+  const maintenance = incident.incident_type === "maintenance" || incident.impact === "maintenance";
+  const impact = maintenance ? "maintenance" : stringOf(incident.impact_override) || stringOf(incident.impact);
   const name = stringOf(incident.name).trim();
   const href = addressOf(incident.shortlink);
   const fields: CardField[] = [
     ...field("Status", label(status), true),
-    ...field("Impact", label(impact), true),
+    ...field("Impact", maintenance ? "" : label(impact), true),
+    ...field("Window", windowOf(incident.scheduled_for, incident.scheduled_until), false),
     ...field("Components", componentsOf(update, incident), false),
   ];
   const body = plainTextHtml(stringOf(update?.body), false);
@@ -90,6 +98,14 @@ function componentsOf(update: Payload | undefined, incident: Payload): string {
     isObject(component) && stringOf(component.name) ? [[stringOf(component.name), stringOf(component.status)]] : [],
   );
   return (affected.length > 0 ? affected : listed).map(([name, status]) => (status ? `${name} (${label(status)})` : name!)).join(", ");
+}
+
+/** A maintenance's window, from when it's scheduled until when, in UTC, or "" for an incident, which has none. */
+function windowOf(from: unknown, until: unknown): string {
+  const start = secondsOf(from);
+  if (start === undefined) return "";
+  const end = secondsOf(until);
+  return end === undefined ? utcTime(start) : `${utcTime(start)} – ${utcTime(end)}`;
 }
 
 /** A field of `title` over `value`, or none when there's no value. */
