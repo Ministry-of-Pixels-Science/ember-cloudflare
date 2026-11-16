@@ -51,6 +51,26 @@ export function watchHuddle(listener: () => void): () => void {
   return () => void listeners.delete(listener);
 }
 
+// Who's speaking changes several times a second, so it's kept apart from the huddle, for only what
+// shows it to hear of.
+let speaking: ReadonlySet<UserId> = new Set();
+const speakingListeners = new Set<() => void>();
+
+/** Hears whenever who's speaking in the tab's huddle changes, until the function returned is called. */
+export function watchSpeaking(listener: () => void): () => void {
+  speakingListeners.add(listener);
+  return () => void speakingListeners.delete(listener);
+}
+
+/** Whether `userId` is speaking in the tab's huddle now, as far as the tab can hear. */
+export const isSpeaking = (userId: UserId) => speaking.has(userId);
+
+/** Shows who's speaking in the tab's huddle. The huddle's own code calls this. */
+export function showSpeaking(who: ReadonlySet<UserId>): void {
+  speaking = who;
+  for (const listener of speakingListeners) listener();
+}
+
 /** The huddle the tab is in, or null. */
 export const joinedHuddle = () => joined;
 

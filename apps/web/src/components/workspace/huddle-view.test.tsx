@@ -6,7 +6,7 @@ import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { AccountContext, useAccount } from "@/hooks/use-account";
 import { PeopleContext } from "@/hooks/use-directory";
-import { showHuddle, type JoinedHuddle } from "@/lib/huddle-store";
+import { showHuddle, showSpeaking, type JoinedHuddle } from "@/lib/huddle-store";
 import { HuddleView } from "./huddle-view";
 
 const ada: User = { id: "ada", name: "Ada Lovelace" };
@@ -92,6 +92,7 @@ beforeEach(() => {
 
 afterEach(() => {
   act(() => showHuddle(null));
+  act(() => showSpeaking(new Set()));
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   Reflect.deleteProperty(navigator, "mediaDevices");
@@ -167,6 +168,37 @@ describe("The tiles of a huddle", () => {
     expect(within(first!).getByRole("img", { name: "Muted" })).toBeInTheDocument();
     expect(within(second!).getByRole("img", { name: "Muted" })).toBeInTheDocument();
     expect(within(third!).queryByRole("img", { name: "Muted" })).not.toBeInTheDocument();
+  });
+
+  it("rings whoever is speaking in green, over their picture, which it says for those who can't see it, but nobody who's muted", () => {
+    renderView(huddle({ people: [inHuddle(sam), inHuddle(ada), inHuddle(priya, { muted: true })], watched: new Map([["sam", camera()]]) }));
+    const ring = (tile: HTMLElement | undefined) => within(tile!).queryByRole("img", { name: "Speaking" });
+    for (const tile of tiles()) {
+      expect(tile).not.toHaveClass("border-transparent");
+      expect(ring(tile)).not.toBeInTheDocument();
+    }
+
+    act(() => showSpeaking(new Set(["sam", "priya"])));
+    const [first, second, third] = tiles();
+    // In the tile's edge's place, and drawn last, so over the camera's picture, where a click goes through it.
+    expect(first).toHaveClass("border-transparent");
+    expect(ring(first)).toHaveClass("pointer-events-none", "absolute", "inset-0", "border-2", "border-positive");
+    expect(first!.lastElementChild).toBe(ring(first));
+    expect(first!.querySelector("video")).toBeInTheDocument();
+    // Its name stays as it was.
+    expect(first).toHaveTextContent(/^Sam Rivera$/);
+    expect(second).not.toHaveClass("border-transparent");
+    expect(ring(second)).not.toBeInTheDocument();
+    // Whatever was heard of Priya as she muted.
+    expect(third).not.toHaveClass("border-transparent");
+    expect(ring(third)).not.toBeInTheDocument();
+
+    act(() => showSpeaking(new Set(["ada"])));
+    expect(tiles().map((tile) => [tile.classList.contains("border-transparent"), ring(tile) !== null])).toEqual([
+      [false, false],
+      [true, true],
+      [false, false],
+    ]);
   });
 
   it("shows someone's camera in place of their avatar, playing without sound", () => {

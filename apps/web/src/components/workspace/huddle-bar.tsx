@@ -1,7 +1,9 @@
 import { useEffect, useRef } from "react";
 import type { Room, UserId } from "@ember/protocol";
+import type { HuddlePerson } from "@ember/protocol/huddles";
 import { Expand, Headset } from "@/components/icons/iconoir";
 import { useNameOf } from "@/hooks/use-directory";
+import { useIsSpeaking } from "@/hooks/use-huddle";
 import { inTheHuddle, sharingScreens } from "@/lib/huddle-people";
 import { openHuddle, type JoinedHuddle } from "@/lib/huddle-store";
 import { cn } from "@/lib/utils";
@@ -10,6 +12,12 @@ import { UserAvatar } from "./user-avatar";
 
 /** How many of the huddle's faces the bar shows. */
 const MAX_FACES = 4;
+
+/** One of the huddle's faces on its bar, ringed in green, over the faces beside it, while its person speaks. */
+function Face({ person }: { person: HuddlePerson }) {
+  const speaking = useIsSpeaking(person);
+  return <UserAvatar user={person.user} className={cn("size-7 rounded-full ring-2", speaking ? "relative ring-positive" : "ring-background")} />;
+}
 
 interface Props {
   huddle: JoinedHuddle;
@@ -59,8 +67,8 @@ export function HuddleBar({ huddle, room, meId }: Props) {
         </span>
       </button>
       <span aria-hidden title={names.join(", ")} className="flex shrink-0 -space-x-1.5 max-md:hidden">
-        {huddle.people.slice(0, MAX_FACES).map(({ user }) => (
-          <UserAvatar key={user.id} user={user} className="size-7 rounded-full ring-2 ring-background" />
+        {huddle.people.slice(0, MAX_FACES).map((person) => (
+          <Face key={person.user.id} person={person} />
         ))}
       </span>
       <div className="ml-auto flex shrink-0 items-center gap-1.5">
