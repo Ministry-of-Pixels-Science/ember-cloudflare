@@ -16,11 +16,11 @@ import { UserAvatar } from "./user-avatar";
 // you type, without asking the server.
 
 /** Campfire's `.btn`. */
-const BUTTON = "inline-flex cursor-pointer items-center justify-center gap-[0.5em] rounded-[9px] border bg-background px-[1.1em] py-[0.5em] font-medium text-foreground";
+export const BUTTON = "inline-flex cursor-pointer items-center justify-center gap-[0.5em] rounded-[9px] border bg-background px-[1.1em] py-[0.5em] font-medium text-foreground";
 /** The footer's buttons, 44px tall for fingers and at 500px wide and below. */
 const FOOTER_BUTTON = "min-h-[42px] px-4 py-2.5 touch:min-h-11 upto-500px:min-h-11";
-/** Show more people, and Try again. */
-const MORE_BUTTON = "m-2 px-3 py-2 text-[13px] touch:min-h-11";
+/** Show more people, and Try again, here and wherever else people are listed to pick from. */
+export const MORE_BUTTON = "m-2 px-3 py-2 text-[13px] touch:min-h-11";
 
 /**
  * A link's click that opens New direct message in place: a plain click on the rail's DMs and the

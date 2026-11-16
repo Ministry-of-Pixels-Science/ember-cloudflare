@@ -188,7 +188,7 @@ function PreviewSwitch({ label, on, disabled, onClick, children }: SwitchProps) 
 }
 
 /** Keeps a button's words on one line beside the other button, on a phone 320px wide too. */
-const ON_ONE_LINE = "whitespace-nowrap upto-480px:px-4";
+export const ON_ONE_LINE = "whitespace-nowrap upto-480px:px-4";
 
 interface Props {
   room: Room;

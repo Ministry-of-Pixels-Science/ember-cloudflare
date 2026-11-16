@@ -22,7 +22,7 @@ import { ANSWER_TIMEOUT_MS, CAMERA_BITRATE, joinHuddle, LISTEN_AGAIN_MS, PUBLISH
 import { CAMERA_WENT_OFF, NO_CAMERA, NO_OTHER_CAMERA, NO_OTHER_MICROPHONE, NO_OTHER_SPEAKER, NO_SCREEN, STILL_NO_MICROPHONE } from "./huddle-devices";
 import { MUSIC_AFTER_MS } from "./huddle-sounds";
 import { MEASURED_EVERY_MS, SPEAKING_LEVEL } from "./huddle-speaking";
-import { chooseHuddleDevice, hearHuddle, isSpeaking, joinedHuddle, leaveHuddle, muteHuddle, openHuddle, shareHuddleScreen, showHuddleCamera, switchHuddleCamera, takeCamerasSmall, watchHuddle, watchSpeaking } from "./huddle-store";
+import { chooseHuddleDevice, hearHuddle, inviteToHuddle, isSpeaking, joinedHuddle, leaveHuddle, muteHuddle, openHuddle, shareHuddleScreen, showHuddleCamera, switchHuddleCamera, takeCamerasSmall, watchHuddle, watchSpeaking } from "./huddle-store";
 
 /** Stands in for the browser's WebSocket; tests play the room and the network. */
 class FakeSocket {
@@ -3240,6 +3240,38 @@ describe("Whoever a huddle is told to invite", () => {
     expect(room.take()).toEqual([]);
     expect(FakeConnection.all).toHaveLength(1);
     stop();
+  });
+});
+
+describe("Whoever someone in a huddle invites", () => {
+  it("is who the room is asked to invite, whoever else is in the huddle, as often as they're invited", async () => {
+    const room = await joined([person(grace)]);
+    room.take();
+    expect(inviteToHuddle([linus.id])).toBe(true);
+    expect(inviteToHuddle([linus.id, "u4"])).toBe(true);
+    expect(room.take()).toEqual([
+      { type: "huddle.invite", userIds: [linus.id] },
+      { type: "huddle.invite", userIds: [linus.id, "u4"] },
+    ]);
+  });
+
+  it("isn't invited while the huddle's socket is down, which it says, nor once the room lets the tab back in", async () => {
+    const room = await joined([person(grace)]);
+    room.drop();
+    expect(inviteToHuddle([linus.id])).toBe(false);
+    await wait(500);
+    socket().open();
+    expect((await welcomed([person(grace)])).take().map(({ type }) => type)).not.toContain("huddle.invite");
+    expect(inviteToHuddle([linus.id])).toBe(true);
+  });
+
+  it("isn't invited by a tab that's in no huddle, which it says", async () => {
+    expect(inviteToHuddle([linus.id])).toBe(false);
+    const room = await joined();
+    leaveHuddle();
+    room.take();
+    expect(inviteToHuddle([linus.id])).toBe(false);
+    expect(room.take()).toEqual([]);
   });
 });
 

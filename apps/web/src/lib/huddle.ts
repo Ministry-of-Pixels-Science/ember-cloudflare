@@ -54,7 +54,8 @@ import { reconnectingSocket } from "./reconnecting-socket";
 // the speaker the voices use.
 //
 // A huddle in a direct message rings the others in it: the tab that starts one asks the room to invite
-// them, and their tabs show the invitation and ring (huddle-invitations.ts).
+// them, and their tabs show the invitation and ring (huddle-invitations.ts). Anyone in a huddle asks
+// the same for whoever they pick of the room's people, from Invite people.
 //
 // A camera goes out in two sizes at once (simulcast) from a browser known to send them, and each tab
 // that watches is sent the one it says it shows: the small one for small tiles, so that a huddle of
@@ -764,6 +765,9 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId, invit
     },
     switchCamera() {
       void showOtherCamera();
+    },
+    invite(userIds) {
+      return socket.send({ type: "huddle.invite", userIds });
     },
   };
 
