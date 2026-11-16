@@ -73,14 +73,18 @@ export function parseHuddlesSetup(data: unknown): HuddlesSetup | { error: string
 // agree with on what's sent, which the room passes between them. A tab keeps two connections to the SFU
 // for the voices, one it sends its microphone on and one it receives the others on, so that neither's
 // changes wait on the other's, and two more like them for the cameras, from when it first shows or
-// watches one, so that a camera turning on or off changes nothing the voices travel on. A frame about
-// a connection says which pair it's of by the `kind` of track the pair carries.
+// watches one, so that a camera turning on or off changes nothing the voices travel on. The screens
+// people share go on two more again, for the same reason. A frame about a connection says which pair
+// it's of by the `kind` of track the pair carries.
 
 /** The most people a huddle takes. */
 export const MAX_HUDDLE_PEOPLE = 50;
 
 /** The most cameras a huddle shows at once, as Slack's does. */
 export const MAX_HUDDLE_CAMERAS = 25;
+
+/** The most screens people share in a huddle at once, as in Slack's. */
+export const MAX_HUDDLE_SCREENS = 2;
 
 /** What a huddle closes a socket with, besides the codes a room closes one with (`CloseCode`). None is one to connect again after. */
 export const HuddleCloseCode = {
@@ -93,11 +97,11 @@ export const HuddleCloseCode = {
 } as const;
 export type HuddleCloseCode = (typeof HuddleCloseCode)[keyof typeof HuddleCloseCode];
 
-/** What a track in a huddle carries: someone's microphone, or their camera. */
-export type HuddleTrackKind = "audio" | "video";
+/** What a track in a huddle carries: someone's microphone, their camera, or the screen they share. */
+export type HuddleTrackKind = "audio" | "video" | "screen";
 
 /** The kinds of track, the microphone's first. */
-export const HUDDLE_TRACK_KINDS: readonly HuddleTrackKind[] = ["audio", "video"];
+export const HUDDLE_TRACK_KINDS: readonly HuddleTrackKind[] = ["audio", "video", "screen"];
 
 /** A track a tab publishes: the media section of its offer that carries it, by its `mid`, and what it carries. */
 export interface HuddleTrack {
@@ -119,6 +123,8 @@ export interface HuddlePerson {
   audio: boolean;
   /** Whether they can be watched: their camera is on, and their tab has connected to the SFU with it. */
   video: boolean;
+  /** Whether their screen can be watched: they share it, and their tab has connected to the SFU with it. */
+  screen: boolean;
 }
 
 /**
@@ -134,22 +140,23 @@ export interface LiveHuddle {
 /** What a tab sends on its huddle's socket. Leaving the huddle is closing the socket. */
 export type HuddleClientFrame =
   /**
-   * Publishes the tab's microphone or its camera, as the one track says, with the offer the sending
-   * connection for that kind makes for it, which `huddle.published` answers. A tab whose sending
-   * connection has failed publishes again from a new one, and only once the room has answered the last,
-   * so that each answer is to the offer it waits on.
+   * Publishes the tab's microphone, its camera or the screen its person shares, as the one track says,
+   * with the offer the sending connection for that kind makes for it, which `huddle.published` answers.
+   * A tab whose sending connection has failed publishes again from a new one, and only once the room has
+   * answered the last, so that each answer is to the offer it waits on.
    */
   | { type: "huddle.publish"; sdp: string; tracks: [HuddleTrack] }
   /** The tab's sending connection for `kind` has connected, so the others can listen to what it publishes, or watch it. */
   | { type: "huddle.connected"; kind: HuddleTrackKind }
-  /** The tab publishes its `kind` no longer, as when its person turns their camera off, and has closed the connection it sent on. */
+  /** The tab publishes its `kind` no longer, as when its person turns their camera off or stops sharing their screen, and has closed the connection it sent on. */
   | { type: "huddle.unpublish"; kind: HuddleTrackKind }
   /**
    * Asks to hear everyone the tab doesn't hear yet, which `huddle.offer` answers, or `huddle.listening`
    * when there's nobody new. `fresh` says the tab has no receiving connection: as it joins, and whenever
-   * the one it had has failed. A tab asks again only once the room has answered. For cameras, `watch`
-   * names whose the tab is to see, as many as a huddle shows, and the room stops sending it anyone
-   * else's: a tab watches only while it shows the huddle open, and whoever asks for nobody watches nobody.
+   * the one it had has failed. A tab asks again only once the room has answered. For cameras and for
+   * screens, `watch` names whose the tab is to see, as many as a huddle shows, and the room stops
+   * sending it anyone else's: a tab watches only while it shows the huddle open, and whoever asks for
+   * nobody watches nobody.
    */
   | { type: "huddle.listen"; kind: HuddleTrackKind; fresh?: true; watch?: UserId[] }
   /** The answer the tab's receiving connection for `kind` makes to a `huddle.offer`. */
@@ -165,8 +172,9 @@ export type HuddleServerFrame =
   | { type: "huddle.joined"; person: HuddlePerson }
   /**
    * Someone muted or unmuted, can be listened to or watched now, or can't be: they've turned their camera
-   * off, their tab is publishing again, or they've joined from another one. A tab asks to hear whoever it
-   * can listen to and doesn't, and to see whoever it's to watch and doesn't.
+   * off or stopped sharing their screen, their tab is publishing again, or they've joined from another
+   * one. A tab asks to hear whoever it can listen to and doesn't, and to see whoever it's to watch and
+   * doesn't.
    */
   | { type: "huddle.changed"; person: HuddlePerson }
   | { type: "huddle.left"; userId: UserId }
@@ -198,7 +206,7 @@ export type HuddleServerFrame =
    * `huddle.listen` or `huddle.answer` the room has let go of the tab's receiving connection, so the tab
    * starts a fresh one. After a failed `huddle.publish` it publishes again, from a new sending
    * connection, unless the room `refused`: it won't publish that however often it's asked, as it won't
-   * one camera more than a huddle shows, and `message` tells the tab's person why.
+   * one camera or one screen more than a huddle shows, and `message` tells the tab's person why.
    */
   | { type: "error"; message: string; failed?: HuddleClientFrame["type"]; kind?: HuddleTrackKind; refused?: true }
   | { type: "pong" };
@@ -223,6 +231,12 @@ export const CAMERAS_OFF = "Cameras are turned off for huddles here.";
 /** Why the room won't show someone's camera while the huddle shows as many as one does. */
 export const CAMERAS_FULL = `${MAX_HUDDLE_CAMERAS} cameras are on in this huddle, which is as many as one shows. Yours can go on once someone turns theirs off.`;
 
+/** Why the room won't show someone's screen while an administrator has screen sharing off, which their tab tells them as theirs stops. */
+export const SCREENS_OFF = "Screen sharing is turned off for huddles here.";
+
+/** Why the room won't show someone's screen while as many people share theirs as a huddle shows. */
+export const SCREENS_FULL = `${MAX_HUDDLE_SCREENS} people are sharing their screens in this huddle, which is as many as one shows. You can share yours once one of them stops.`;
+
 /** The most characters a session description can have: one for a tab hearing a full huddle is a fraction of this. */
 export const MAX_SDP_LENGTH = 500_000;
 
@@ -239,7 +253,7 @@ const isKind = (value: unknown): value is HuddleTrackKind => HUDDLE_TRACK_KINDS.
  */
 const kindOf = (value: unknown): HuddleTrackKind | null => (value === undefined ? "audio" : isKind(value) ? value : null);
 
-/** The one track a `huddle.publish` names, by its `mid` and its kind, or null when it can't be that: a connection sends a microphone or a camera. */
+/** The one track a `huddle.publish` names, by its `mid` and its kind, or null when it can't be that: a connection sends a microphone, a camera or a screen. */
 function trackOf(value: unknown): [HuddleTrack] | null {
   if (!Array.isArray(value) || value.length !== 1) return null;
   const track: unknown = value[0];
@@ -250,20 +264,25 @@ function trackOf(value: unknown): [HuddleTrack] | null {
 
 const isUserId = (value: unknown): value is UserId => typeof value === "string" && value.length > 0 && value.length <= MAX_ID_LENGTH;
 
-/** Whose cameras a `huddle.listen` asks to see, each named once, or null when they can't be that. A tab that names none asks for nobody's. */
-function watchOf(value: unknown): UserId[] | null {
+/** The most people a `huddle.listen` names: as many as a huddle shows the screens of, or the cameras. */
+const mostWatched = (kind: HuddleTrackKind) => (kind === "screen" ? MAX_HUDDLE_SCREENS : MAX_HUDDLE_CAMERAS);
+
+/** Whose cameras or screens a `huddle.listen` asks to see, `most` of them, each named once, or null when they can't be that. A tab that names none asks for nobody's. */
+function watchOf(value: unknown, most: number): UserId[] | null {
   if (value === undefined) return [];
-  if (!Array.isArray(value) || value.length > MAX_HUDDLE_CAMERAS || !value.every(isUserId)) return null;
+  if (!Array.isArray(value) || value.length > most || !value.every(isUserId)) return null;
   return new Set(value).size === value.length ? value : null;
 }
 
-/** What a `huddle.listen` asks, or null when it can't be one. Only cameras are asked for by name. */
+/** What a `huddle.listen` asks, or null when it can't be one. Cameras and screens are asked for by name, and voices aren't. */
 function listenOf(frame: Record<string, unknown>): HuddleClientFrame | null {
-  const [kind, watch] = [kindOf(frame.kind), watchOf(frame.watch)];
-  if (kind === null || watch === null || (frame.fresh !== undefined && frame.fresh !== true)) return null;
+  const kind = kindOf(frame.kind);
+  if (kind === null || (frame.fresh !== undefined && frame.fresh !== true)) return null;
+  const watch = watchOf(frame.watch, mostWatched(kind));
+  if (watch === null) return null;
   const listen: Extract<HuddleClientFrame, { type: "huddle.listen" }> = { type: "huddle.listen", kind };
   if (frame.fresh) listen.fresh = true;
-  if (kind === "video") listen.watch = watch;
+  if (kind !== "audio") listen.watch = watch;
   return listen;
 }
 

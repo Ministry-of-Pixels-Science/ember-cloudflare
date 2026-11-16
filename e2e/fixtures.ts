@@ -365,6 +365,19 @@ export async function shownPicture(image: Locator): Promise<{ type: string | nul
 }
 
 /**
+ * Whether an opened huddle's tiles, the items of `list`, keep clear of one another, with each one's
+ * avatar inside it and clear of the name under it, which only a browser's own layout says.
+ */
+export function huddleTilesKeepClear(list: Locator): Promise<boolean> {
+  return list.evaluate((list) => {
+    const apart = (a: DOMRect, b: DOMRect) => a.right <= b.left + 0.5 || b.right <= a.left + 0.5 || a.bottom <= b.top + 0.5 || b.bottom <= a.top + 0.5;
+    const tiles = [...list.children].map((tile) => ({ box: tile.getBoundingClientRect(), avatar: tile.querySelector("img")?.getBoundingClientRect(), name: tile.querySelector(":scope > span")!.getBoundingClientRect() }));
+    const avatarIsFine = ({ box, avatar, name }: (typeof tiles)[number]) => !avatar || (avatar.top >= box.top && apart(avatar, name));
+    return tiles.every((tile, index) => avatarIsFine(tile) && tiles.slice(index + 1).every((other) => apart(tile.box, other.box)));
+  });
+}
+
+/**
  * Another person in a room, connected over a real WebSocket from the test runner. Use it to
  * seed messages and presence without driving a second browser.
  */

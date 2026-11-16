@@ -1153,24 +1153,43 @@ new one.
 
 ### Huddles
 
-A huddle is a room's call, by voice and by camera, laid out as Slack's is. The headphones at the top
-of a room start its huddle, or join the one going on, and show the rest of the room how many are in
-it. So does the room's row in the sidebar, which ends with the faces of the first two people in the
-huddle, the headphones and how many are in it, and says who they are under a pointer. Starting or
-joining goes by a preview, which asks the browser for a microphone and offers a choice of it and,
-where the browser has one, of the speaker; without a microphone you join to listen. The preview's
-camera switch turns your camera on, which asks the browser for one only then, shows you its picture
-and offers a choice of camera.
+A huddle is a room's call, by voice, by camera and by the screens people share, laid out as Slack's
+is. The headphones at the top of a room start its huddle, or join the one going on, and show the rest
+of the room how many are in it. So does the room's row in the sidebar, which ends with the faces of
+the first two people in the huddle, the headphones and how many are in it, and says who they are
+under a pointer. Starting or joining goes by a preview, which asks the browser for a microphone and
+offers a choice of it and, where the browser has one, of the speaker; without a microphone you join
+to listen. The preview's camera switch turns your camera on, which asks the browser for one only
+then, shows you its picture and offers a choice of camera.
 
 The huddle opens as you join it, over the page beside the sidebar, or over all of a phone's: a tile
 for each person, with their camera's picture, or their avatar while it's off, their name, and a mark
-while they're muted, as large as shows everyone in the window, and the microphone, the camera and
-Leave along its base. Minimizing it, or going to any page, leaves a bar along the window's base, which
-follows you from page to page with the microphone, the camera, the button that opens the huddle
-again, and Leave; a phone's bar has the microphone and Leave, and opens the huddle at its name.
-Cameras are 640 by 360 at up to 500 kbps, and up to 25 can be on in a huddle at once. Your browser is
-sent the others' only while you have the huddle open, and a camera's picture isn't kept in step with
-its person's voice, which travels apart from it.
+while they're muted, as large as shows everyone in the window, and the microphone, the camera, the
+screen and Leave along its base. Where the huddle is beside the sidebar, as on a computer, an arrow
+beside the microphone opens a menu of the microphones to speak through and, where the browser can
+choose one, the speakers to play the huddle through, and an arrow beside the camera a menu of the
+cameras. The huddle changes to the one chosen without leaving, as muted as it was, and this
+browser's next huddle starts with it. Someone who joined to listen can take up a microphone there,
+and choosing a camera while yours is off turns it on. Minimizing it, or going to any page, leaves a
+bar along the window's base, which follows you from page to page with the microphone, the camera,
+the screen, the button that opens the huddle again, and Leave; a phone's bar has the microphone and
+Leave, and opens the huddle at its name. Whoever is speaking has a green ring round their tile, and
+round their face on the bar. Your browser tells who by how loud each voice it plays is, and your own
+by your microphone, so nothing more is sent for it, and nobody muted shows as speaking. Cameras are
+640 by 360 at up to 500 kbps, and up to 25 can be on in a huddle at once. Your browser is sent the
+others' only while you have the huddle open, and a camera's picture isn't kept in step with its
+person's voice, which travels apart from it.
+
+Share screen, beside the camera, has your browser ask which screen, window or tab to share, and
+shares it until you stop it there or in your browser. Two people can share at once, as in Slack's
+huddles, and a third is told so before their browser asks them anything. Everyone else sees a shared
+screen large, all of it, in its own shape, under whose it is, with the huddle's tiles small beside
+it, or under it, as on a phone held upright, whichever shows the screen larger. The tiles scroll by
+themselves once there are more than fit there. A second screen shows among the tiles, first of them,
+and a click on it shows it large in place of the other. Your own shows among your tiles, as the
+others see it. A screen is sent as large as 1920 by 1080, at up to 15 frames a second and 1.5 Mbps,
+without its sound, and only to those who have the huddle open: once it's minimized, its bar says
+who's sharing. A phone's browser has no screen to share, so phones watch.
 
 A sound plays as someone joins the huddle, yourself included, and another as someone leaves it. While
 you're the only one in it, quiet music plays on a loop, as Slack's does, from five seconds after you
@@ -1182,7 +1201,7 @@ you're looking at, and Ctrl+Shift+Space (⌘⇧Space) mutes and unmutes. The arr
 copies the huddle's link, which opens the room at the preview, or the huddle once you're in it. A
 huddle takes up to 50 people and ends when the last of them leaves. A tab is in one huddle at a time,
 and joining a room's huddle from another tab or device leaves it in the first. DMs have no huddles
-yet, and there's no screen sharing yet.
+yet.
 
 An administrator turns huddles on under Huddles in community settings, with the switch on its card.
 Huddles run through Cloudflare's [Realtime SFU](https://developers.cloudflare.com/realtime/sfu/),
@@ -1198,15 +1217,19 @@ off forgets them, which ends any huddle going on within half a minute. Setting E
 huddles too: once it has made the administrator's account, Set up Ember asks whether to turn them
 on, and takes the same two steps before it opens Ember, or Not now, which leaves them to community
 settings. The secret stays in the Worker, which alone asks the SFU's API: a browser sends its
-microphone and its camera to the SFU, and hears and sees the others from it, over WebRTC, and finds
-its way there with Cloudflare's STUN server (`stun.cloudflare.com:3478`).
+microphone, its camera and the screen it shares to the SFU, and hears and sees the others from it,
+over WebRTC, and finds its way there with Cloudflare's STUN server (`stun.cloudflare.com:3478`).
 What the SFU charges is in [What it costs](#what-it-costs).
 
-While huddles are on, the tab has a Cameras card under the first, whose switch is on until an
-administrator turns it off. Off, huddles are voices only: the preview has no camera switch and the
-huddle no camera button, a camera that's on goes off, which its person is told, and the room refuses
-any camera it's asked to show, and takes down whichever a tab left on, eight every half minute.
-Turning it on again gives the switch and the button back, and nobody's camera comes on by itself.
+While huddles are on, the tab has a second card under the first, with a switch for each thing people
+may do in a huddle, Cameras and Screen sharing, each on until an administrator turns it off. With
+Cameras off, the preview has no camera switch and the huddle no camera button, a camera that's on
+goes off, which its person is told, and the room refuses any camera it's asked to show. With Screen
+sharing off, the huddle has no button to share a screen, a screen that's shared stops being, which
+its person is told, and the room refuses any it's asked to show. With both off, huddles are voices
+only. The room takes down whichever cameras and screens a tab left on, eight every half minute.
+Turning a switch on again gives its buttons back, and nobody's camera comes on, or screen is shared,
+by itself.
 
 ### A preview from GitHub Actions
 
@@ -1427,8 +1450,9 @@ pages had them in October 2026:
   it, so five people talking for an hour are sent under half a GB between them, and the free 1,000 GB
   carry about 2,000 such hours a month. A camera is up to 500 kbps to each person who has the huddle
   open, so the same five with their cameras on throughout are sent up to 4.5 GB more in the hour, and
-  the free 1,000 GB carry about 200 such hours a month. Turning Cameras off under Huddles keeps
-  huddles to voices.
+  the free 1,000 GB carry about 200 such hours a month. A shared screen is up to 1.5 Mbps to each
+  person who has the huddle open, so one shared with the other four throughout is up to 2.7 GB more
+  in the hour. Turning Cameras and Screen sharing off under Huddles keeps huddles to voices.
 
 Cloudflare's pages have the details: [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/),
 [Durable Objects pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/),

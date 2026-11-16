@@ -32,6 +32,17 @@ export function inTheHuddle(others: string[]): string {
 }
 
 /**
+ * Who shares a screen in a huddle, for someone in it, by the names of the others who do, and whether
+ * they do themselves: "Sam is sharing a screen", "You're sharing your screen", "Sam and you are sharing
+ * screens". Null while nobody does.
+ */
+export function sharingScreens(others: string[], you: boolean): string | null {
+  if (others.length === 0) return you ? "You're sharing your screen" : null;
+  if (others.length === 1 && !you) return `${firstName(others[0]!)} is sharing a screen`;
+  return `${toSentence([...others.map(firstName), ...(you ? ["you"] : [])])} are sharing screens`;
+}
+
+/**
  * Who's in a room's huddle, for anyone in the room: `others` are the names known of the `count` people in
  * it besides them, and `you` says they're in it too, when it's as `inTheHuddle` says it. For someone who
  * isn't, "Sam and Priya are in the huddle". Whoever has no name known is counted, "Sam and 2 others are

@@ -3,7 +3,7 @@ import { MUSIC_AFTER_MS } from "./huddle-sounds";
 import type { HuddleSpeaker } from "./huddle-speaker";
 
 /** Stands in for the huddle's speaker, which plays nothing here: the tests say what it was asked to play. */
-const speaker = { play: vi.fn<HuddleSpeaker["play"]>(), stop: vi.fn<HuddleSpeaker["stop"]>(), playOnce: vi.fn<HuddleSpeaker["playOnce"]>(), stopAll: vi.fn() } satisfies HuddleSpeaker;
+const speaker = { play: vi.fn<HuddleSpeaker["play"]>(), stop: vi.fn<HuddleSpeaker["stop"]>(), playOnce: vi.fn<HuddleSpeaker["playOnce"]>(), use: vi.fn(), stopAll: vi.fn() } satisfies HuddleSpeaker;
 
 const wait = (ms: number) => vi.advanceTimersByTimeAsync(ms);
 const settled = () => wait(0);

@@ -4,7 +4,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { CloseCode, startingInvolvement, type Account, type Bot, type DirectoryUser, type DirectRoom, type Me, type Message, type Room, type RoomId, type RoomSettings, type SharedRoom, type SidebarRoom, type TimelinePage, type WorkspaceServerFrame, type WorkspaceSettings } from "@ember/protocol";
 import type { AgentSettings, AvailableAgent } from "@ember/protocol/agents";
 import { THINKING_LEVELS, type AssistantSettings } from "@ember/protocol/assistant";
-import { CAMERAS_OFF } from "@ember/protocol/huddles";
+import { CAMERAS_OFF, SCREENS_OFF } from "@ember/protocol/huddles";
 import { FlashProvider } from "@/components/flash";
 import { AccountContext } from "@/hooks/use-account";
 import { SHIPPED_MODELS } from "@/hooks/use-offered-models";
@@ -44,7 +44,7 @@ const roomList = (listed: Room[], favorites: RoomId[] = [], sharedOrder: RoomId[
 });
 const generalSettings: RoomSettings = { room: rooms[0]!, canAdminister: true, people: [{ ...ada, member: true }] };
 const workspaceSettings: WorkspaceSettings = {
-  account: { name: "Analytical Engines", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true },
+  account: { name: "Analytical Engines", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true },
   joinCode: "aB3d-Ef5h-iJ7k",
   canAdminister: false,
   memberfulSite: null,
@@ -546,12 +546,19 @@ describe("Link to a message", () => {
     }
   }
 
+  beforeEach(() => {
+    RoomSocket.last = null;
+  });
+
+  /** The socket of the room that shows, once the room has opened it, which it does in an effect that can run after its heading shows. */
+  const roomSocket = () => waitFor(() => RoomSocket.last ?? expect.fail("The room hasn't opened its socket"));
+
   it("goes to the message whose permalink is followed while the room is away, once the room lets the page in", async () => {
     vi.stubGlobal("WebSocket", RoomSocket);
     showWorkspace("/rooms/general");
     await roomHeading();
+    const room = await roomSocket();
     act(() => navigate("/rooms/general/@m1"));
-    const room = RoomSocket.last!;
     expect(room.sent).toEqual([]);
     room.letIn();
     expect(room.sent).toContainEqual({ type: "history.around", messageId: "m1" });
@@ -561,7 +568,7 @@ describe("Link to a message", () => {
     vi.stubGlobal("WebSocket", RoomSocket);
     showWorkspace("/rooms/general/@m1");
     await roomHeading();
-    const room = RoomSocket.last!;
+    const room = await roomSocket();
     const linked: Message = { id: "m1", clientMessageId: "c1", roomId: "general", creator: ada, body: "<p>Linked</p>", plainText: "Linked", mentions: [], createdAt: "2026-10-14T08:00:00.000Z", updatedAt: "2026-10-14T08:00:00.000Z", editedAt: null, boosts: [] };
     room.letIn({ messages: [linked], hasNewer: true, around: "m1" });
 
@@ -578,7 +585,7 @@ describe("Link to a message", () => {
     showWorkspace("/rooms/general/threads/m1");
     await roomHeading();
     const thread = screen.getByRole("complementary", { name: "Thread" });
-    const room = RoomSocket.last!;
+    const room = await roomSocket();
     room.letIn();
     act(() => room.onmessage?.({ data: JSON.stringify({ type: "error", message: "You can only edit your own messages", failed: "message.update" }) }));
     expect(within(thread).getByRole("alert")).toHaveTextContent("You can only edit your own messages");
@@ -591,7 +598,7 @@ describe("Link to a message", () => {
     showWorkspace("/rooms/general/messages/m1");
     expect(await roomHeading()).toHaveTextContent("general");
     expect(location.pathname).toBe("/rooms/general/@m1");
-    expect(RoomSocket.last!.url).toContain("&around=m1");
+    expect((await roomSocket()).url).toContain("&around=m1");
     expect(railCurrent()).toEqual(["Home"]);
   });
 
@@ -2443,7 +2450,9 @@ describe("Huddles", () => {
     leave: vi.fn(() => showHuddle(null)),
     setMuted: vi.fn(),
     setCamera: vi.fn(),
+    setScreen: vi.fn(),
     setOpen: vi.fn((open: boolean) => showHuddle({ ...joinedHuddle()!, open })),
+    setDevice: vi.fn(),
   } satisfies HuddleControls;
   /** Joins `roomId`'s huddle as the preview would, without a microphone or a camera. */
   const join = (roomId: string) => act(() => joinHuddle({ roomId, muted: false, microphone: null, camera: null, speakerId: "" }));
@@ -2461,7 +2470,7 @@ describe("Huddles", () => {
     // Joining lets the tab into the huddle at once, alone, and shows it opened.
     vi.mocked(joinHuddle).mockImplementation(({ roomId, muted }) =>
       showHuddle(
-        { roomId, connected: true, you: ada, people: [{ user: ada, muted, audio: false, video: false }], muted, microphone: true, camera: null, watched: new Map(), open: true },
+        { roomId, connected: true, you: ada, people: [{ user: ada, muted, audio: false, video: false, screen: false }], muted, microphone: true, microphoneId: "", speakerId: "", camera: null, watched: new Map(), screen: null, screens: new Map(), open: true },
         controls,
       ),
     );
@@ -2766,6 +2775,32 @@ describe("Huddles", () => {
     // They stay in the huddle, which has no camera button now.
     expect(within(opened()!).queryByRole("button", { name: /camera/ })).not.toBeInTheDocument();
     expect(within(opened()!).getByRole("button", { name: "Mute microphone" })).toBeInTheDocument();
+  });
+
+  it("stops the tab's sharing of its screen, and says why, once an administrator turns screen sharing off, leaving its camera on", async () => {
+    const { showAccount } = showWorkspace("/rooms/general", ada, HUDDLES_ON);
+    await roomHeading();
+    join("general");
+    act(() => showHuddle({ ...joinedHuddle()!, camera: {} as MediaStream, screen: {} as MediaStream }));
+    expect(within(opened()!).getByRole("button", { name: "Stop sharing screen" })).toBeInTheDocument();
+    controls.setScreen.mockImplementationOnce(() => showHuddle({ ...joinedHuddle()!, screen: null }));
+
+    showAccount({ ...HUDDLES_ON, huddleScreens: false });
+    expect(controls.setScreen.mock.calls).toEqual([[false]]);
+    expect(controls.setCamera).not.toHaveBeenCalled();
+    expect(await screen.findByRole("alert")).toHaveTextContent(SCREENS_OFF);
+    // They stay in the huddle, with their camera on, and with no button to share a screen now.
+    expect(within(opened()!).queryByRole("button", { name: /screen/ })).not.toBeInTheDocument();
+    expect(within(opened()!).getByRole("button", { name: "Turn off camera" })).toBeInTheDocument();
+  });
+
+  it("has nothing to say of screen sharing turned off to a tab that shares none", async () => {
+    const { showAccount } = showWorkspace("/rooms/general", ada, HUDDLES_ON);
+    await roomHeading();
+    join("general");
+    showAccount({ ...HUDDLES_ON, huddleScreens: false });
+    expect(controls.setScreen).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("has nothing to say of cameras turned off to a tab whose camera is off, and gives its button back once they're on again", async () => {

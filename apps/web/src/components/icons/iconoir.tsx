@@ -661,6 +661,18 @@ export function Minus(props: IconoirIconProps) {
   );
 }
 
+export function ModernTv(props: IconoirIconProps) {
+  return (
+    <IconoirIcon name="modern-tv" {...props}>
+      <path d="M7 21L17 21" {...LINE} />
+      <path
+        d="M2 16.4V3.6C2 3.26863 2.26863 3 2.6 3H21.4C21.7314 3 22 3.26863 22 3.6V16.4C22 16.7314 21.7314 17 21.4 17H2.6C2.26863 17 2 16.7314 2 16.4Z"
+        {...OUTLINE}
+      />
+    </IconoirIcon>
+  );
+}
+
 export function MoreHoriz(props: IconoirIconProps) {
   return (
     <IconoirIcon name="more-horiz" {...props}>
@@ -726,6 +738,14 @@ export function NavArrowRight(props: IconoirIconProps) {
   return (
     <IconoirIcon name="nav-arrow-right" {...props}>
       <path d="M9 6L15 12L9 18" {...LINE} />
+    </IconoirIcon>
+  );
+}
+
+export function NavArrowUp(props: IconoirIconProps) {
+  return (
+    <IconoirIcon name="nav-arrow-up" {...props}>
+      <path d="M6 15L12 9L18 15" {...LINE} />
     </IconoirIcon>
   );
 }

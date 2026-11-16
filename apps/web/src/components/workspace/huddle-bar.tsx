@@ -1,15 +1,23 @@
 import { useEffect, useRef } from "react";
 import type { Room, UserId } from "@ember/protocol";
+import type { HuddlePerson } from "@ember/protocol/huddles";
 import { Expand, Headset } from "@/components/icons/iconoir";
 import { useNameOf } from "@/hooks/use-directory";
-import { inTheHuddle } from "@/lib/huddle-people";
+import { useIsSpeaking } from "@/hooks/use-huddle";
+import { inTheHuddle, sharingScreens } from "@/lib/huddle-people";
 import { openHuddle, type JoinedHuddle } from "@/lib/huddle-store";
 import { cn } from "@/lib/utils";
-import { CameraTool, LeaveButton, MicrophoneTool, TOOL, TOOL_OFF, useHuddleName, waitingToJoin } from "./huddle-tools";
+import { CameraTool, LeaveButton, MicrophoneTool, ScreenTool, TOOL, TOOL_OFF, useHuddleName, waitingToJoin } from "./huddle-tools";
 import { UserAvatar } from "./user-avatar";
 
 /** How many of the huddle's faces the bar shows. */
 const MAX_FACES = 4;
+
+/** One of the huddle's faces on its bar, ringed in green, over the faces beside it, while its person speaks. */
+function Face({ person }: { person: HuddlePerson }) {
+  const speaking = useIsSpeaking(person);
+  return <UserAvatar user={person.user} className={cn("size-7 rounded-full ring-2", speaking ? "relative ring-positive" : "ring-background")} />;
+}
 
 interface Props {
   huddle: JoinedHuddle;
@@ -21,14 +29,20 @@ interface Props {
 /**
  * The huddle this tab is in, minimized: a bar the whole width of the window, along its base, whatever
  * page shows above it, as Slack's is. The huddle's name and who's in it, which open it, their faces, the
- * microphone, the camera and the button that opens it, which phones leave to the huddle opened, and
- * Leave, in red and in words, last.
+ * microphone, the camera, the screen and the button that opens it, which phones leave to the huddle
+ * opened, and Leave, in red and in words, last. A screen someone shares shows only in the huddle opened,
+ * so the bar says who shares one in place of who's in it.
  */
 export function HuddleBar({ huddle, room, meId }: Props) {
   const nameOf = useNameOf();
   const name = useHuddleName(room, meId);
   const names = huddle.people.map(({ user }) => nameOf(user));
-  const others = huddle.people.filter(({ user }) => user.id !== huddle.you?.id).map(({ user }) => nameOf(user));
+  const theOthers = huddle.people.filter(({ user }) => user.id !== huddle.you?.id);
+  const others = theOthers.map(({ user }) => nameOf(user));
+  const sharing = sharingScreens(
+    theOthers.filter(({ screen }) => screen).map(({ user }) => nameOf(user)),
+    huddle.screen !== null,
+  );
   const open = () => openHuddle(true);
   // The button that minimized the huddle went with it, and left the focus nowhere, so the one that opens it again takes it.
   const opener = useRef<HTMLButtonElement>(null);
@@ -48,18 +62,19 @@ export function HuddleBar({ huddle, room, meId }: Props) {
           {/* The space parts the two lines for screen readers, which hear the button as one. */}
           <span className="block truncate text-[15px] leading-5 font-semibold">{name}</span>{" "}
           <span aria-live="polite" className="block truncate text-xs leading-4 text-muted-foreground">
-            {waitingToJoin(huddle) ?? inTheHuddle(others)}
+            {waitingToJoin(huddle) ?? sharing ?? inTheHuddle(others)}
           </span>
         </span>
       </button>
       <span aria-hidden title={names.join(", ")} className="flex shrink-0 -space-x-1.5 max-md:hidden">
-        {huddle.people.slice(0, MAX_FACES).map(({ user }) => (
-          <UserAvatar key={user.id} user={user} className="size-7 rounded-full ring-2 ring-background" />
+        {huddle.people.slice(0, MAX_FACES).map((person) => (
+          <Face key={person.user.id} person={person} />
         ))}
       </span>
       <div className="ml-auto flex shrink-0 items-center gap-1.5">
         <MicrophoneTool huddle={huddle} />
         <CameraTool huddle={huddle} className="max-md:hidden" />
+        <ScreenTool huddle={huddle} className="max-md:hidden" />
         <span aria-hidden className="mx-1 h-6 w-px bg-border max-md:hidden" />
         <button type="button" title="Open huddle" aria-label="Open huddle" onClick={open} className={cn(TOOL, TOOL_OFF, "max-md:hidden")}>
           <Expand />
