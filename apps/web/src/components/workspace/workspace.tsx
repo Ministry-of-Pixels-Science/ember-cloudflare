@@ -13,6 +13,7 @@ import { useHuddle } from "@/hooks/use-huddle";
 import { useMounted } from "@/hooks/use-mounted";
 import { useReleaseCheck } from "@/hooks/use-release-check";
 import { useSidebar } from "@/hooks/use-sidebar";
+import { agentsToAsk } from "@/lib/agents";
 import { ApiError, dismissInvitation, isSignedOut, startDirect } from "@/lib/api";
 import { hearHuddle, leaveHuddle, muteHuddle, OPEN_HUDDLE, openHuddle, showHuddleCamera } from "@/lib/huddle-store";
 import { whenIdle } from "@/lib/idle";
@@ -27,7 +28,7 @@ import { afterNavigating, messagePath, navigate, pageMark, roomPath, routeOf, us
 import { HuddlesContext, NO_HUDDLES, type Huddles } from "./huddle-button";
 import { MovedNotice } from "./moved-notice";
 import { KeyboardShortcutsDialog } from "./keyboard-shortcuts-dialog";
-import { NewDirectDialog } from "./new-direct-dialog";
+import { NewDirectDialog, startedWithout } from "./new-direct-dialog";
 import { Notices } from "./notices";
 import { DrawerOpen, PageHeader } from "./page-header";
 import { Rail, type RailPage } from "./rail";
@@ -331,6 +332,16 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
     if (route.page === "new-direct") openNewDirect(null);
   }, [route]);
 
+  // Available Agents, while it's open, with the sidebar's row that opened it, which gets focus back, and
+  // how many of them the row says there are, once the people directory lists everyone. On a phone, the
+  // drawer closes as it opens.
+  const [agentsList, setAgentsList] = useState<{ opener: HTMLElement } | null>(null);
+  const openAgents = (opener: HTMLElement) => {
+    setDrawerOpen(false);
+    setAgentsList({ opener });
+  };
+  const agents = useMemo(() => (directory.loaded ? agentsToAsk(directory.people.values(), me) : 0), [directory.loaded, directory.people, me]);
+
   // The search box, while it's open, with what it opened with. On a phone, the drawer closes as it opens.
   const [searchBox, setSearchBox] = useState<SearchBoxOptions | null>(null);
   const openSearch = useCallback((options: SearchBoxOptions) => {
@@ -404,6 +415,13 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
   const huddlePreviewFailed = useCallback(
     (error: unknown) => {
       setHuddlePreview(null);
+      failed(error);
+    },
+    [failed],
+  );
+  const agentsListFailed = useCallback(
+    (error: unknown) => {
+      setAgentsList(null);
       failed(error);
     },
     [failed],
@@ -642,8 +660,11 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
       huddles={huddlesOn ? liveHuddles : NO_HUDDLES}
       currentRoomId={currentRoomId}
       unreadOnly={unreadOnly}
+      agents={agents}
+      agentsOpen={agentsList !== null}
       onSelect={select}
       onNewDirect={openNewDirect}
+      onOpenAgents={openAgents}
       onStarred={starredRooms}
       onSessionChanged={onSessionChanged}
     />
@@ -873,7 +894,7 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
           {newDirect && (
             <NewDirectDialog
               opener={newDirect.opener}
-              meId={me.id}
+              me={me}
               reloadPeople={directory.reload}
               askForRoom={askForRoom}
               onClose={(startedShown) => {
@@ -882,7 +903,29 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
                 // opening it would.
                 if (startedShown) roomView.current?.focusComposer();
               }}
+              onLeftOut={(people) => flash("alert", startedWithout(people.map((person) => person.name)))}
               onFailed={failed}
+            />
+          )}
+          {agentsList && (
+            <RarePage
+              show={({ AvailableAgentsDialog }) => (
+                <AvailableAgentsDialog
+                  me={me}
+                  rooms={rooms ?? NO_ROOMS}
+                  opener={agentsList.opener}
+                  onClose={(started) => {
+                    setAgentsList(null);
+                    // The dialog kept focus while the page went to the DM it started, whose composer takes it
+                    // now, as opening the DM would give it.
+                    if (started) roomView.current?.focusComposer();
+                  }}
+                  onStartDirect={startDirectWith}
+                  onFailed={agentsListFailed}
+                />
+              )}
+              loading={null}
+              onFailed={agentsListFailed}
             />
           )}
           <KeyboardShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />

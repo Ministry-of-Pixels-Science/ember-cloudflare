@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Me, SidebarRoom } from "@ember/protocol";
-import { AGENT_CHANGED, agentCannotSearchWith, AGENTS_FORBIDDEN, NAME_TAKEN, type AgentSettings, type AgentTrialAnswer, type NewAgent } from "@ember/protocol/agents";
+import { ACCESS_REFUSED, AGENT_CHANGED, agentCannotSearchWith, AGENTS_FORBIDDEN, NAME_TAKEN, type AgentSettings, type AgentTrialAnswer, type NewAgent } from "@ember/protocol/agents";
 import {
   ASSISTANT_MODELS,
   ASSISTANT_OFF,
@@ -24,7 +24,18 @@ import { agentSettingsPath, leave, navigate, NEW_AGENT_PATH } from "@/hooks/use-
 import { ApiError } from "@/lib/api";
 import { dateLabel } from "@/lib/messages";
 import { AGENTS_PATH } from "./agent-list";
-import { AGENT_CHANGES, AGENT_EXPLAINED, AgentSettingsPage, cannotSearch, CONFIRM_DELETE_AGENT, INSTRUCTIONS_EXPLAINED, NewAgentPage, tryExplained } from "./agent-page";
+import {
+  accessExplained,
+  AGENT_CHANGES,
+  AGENT_EXPLAINED,
+  AgentSettingsPage,
+  cannotSearch,
+  CONFIRM_DELETE_AGENT,
+  INSTRUCTIONS_EXPLAINED,
+  NewAgentPage,
+  roomsExplained,
+  tryExplained,
+} from "./agent-page";
 import { toolsExplained } from "./agent-tools";
 import { searchingWith } from "./ember-settings";
 import { cautionFor, PLACEHOLDER_MEANINGS } from "./prompt-preview";
@@ -75,6 +86,7 @@ const RECAP: AgentSettings = {
   model: SONNET,
   modelName: "Claude Sonnet 5.5",
   webTools: [],
+  access: "everyone",
   rooms: [{ id: DESIGN.id, name: "design" }],
   instructions: "Sum up the conversation so far as decisions and to-dos.",
   promptTemplate: null,
@@ -85,6 +97,9 @@ const RECAP: AgentSettings = {
   changedBy: { id: ada.id, name: "Ada Lovelace" },
   changedAt: "2026-11-09T12:00:00.000Z",
 };
+
+/** Recap kept to administrators' direct messages with it, and so in no room. */
+const HIDDEN: AgentSettings = { ...RECAP, access: "admin-dms", rooms: [] };
 
 /** Recap on a model Ember no longer offers, kept since before, which can't search the web. */
 const KEPT: AgentSettings = { ...RECAP, model: GLM.id, modelName: GLM.name, format: GLM.format };
@@ -170,8 +185,11 @@ const instructionsField = () => screen.getByRole("textbox", { name: "Instruction
 const modelMenu = () => screen.getByRole("combobox", { name: "Model" });
 const level = (dial: "Thinking" | "Answer length", name: string) => within(screen.getByRole("group", { name: dial })).getByRole("radio", { name });
 const webSwitch = () => screen.getByRole("switch", { name: "Search the web" });
-const everyRoom = () => screen.getByRole("radio", { name: "Every room open to everyone, as @ember is, new ones too" });
+const rooms = () => screen.getByRole("group", { name: "Rooms" });
+const everyRoom = () => screen.getByRole("radio", { name: "Every room" });
 const chosenRooms = () => screen.getByRole("radio", { name: "Only the rooms I choose" });
+const adminsOnly = () => screen.getByRole("switch", { name: "Admins only" });
+const adminDms = () => screen.getByRole("switch", { name: "Only available in admin DMs" });
 const tryIt = () => screen.getByRole("region", { name: "Try it" });
 const question = () => within(tryIt()).getByRole("textbox", { name: "Question" });
 const status = () => screen.getAllByRole("status").at(-1)!;
@@ -198,6 +216,19 @@ async function fillIn(user: ReturnType<typeof userEvent.setup>) {
   await user.type(instructionsField(), "Sum up the conversation so far as decisions and to-dos.");
 }
 
+/** What New agent sends once it's filled in, and nothing else is changed. */
+const FILLED_IN: NewAgent = {
+  name: "Recap",
+  description: "Sums up threads into decisions and to-dos.",
+  instructions: "Sum up the conversation so far as decisions and to-dos.",
+  model: SONNET,
+  thinking: "low",
+  length: "medium",
+  webSearch: false,
+  access: "everyone",
+  rooms: null,
+};
+
 /** The requests the page has sent, with what they sent: JSON as it was, or a form's fields. */
 const requests = () =>
   vi.mocked(fetch).mock.calls.map(([input, init]) => {
@@ -223,7 +254,7 @@ afterEach(() => {
 });
 
 describe("New agent", () => {
-  it("is titled New agent, with Go Back to the AI assistant tab, starting on @ember's model at the levels people start at, off the web, in every open room", async () => {
+  it("is titled New agent, with Go Back to the AI assistant tab, starting on @ember's model at the levels people start at, off the web, in every open room, for everyone to ask", async () => {
     showNewAgent();
     expect(document.title).toBe("New agent");
     expect(screen.getByRole("link", { name: "Go Back" })).toHaveAttribute("href", AGENTS_PATH);
@@ -244,6 +275,12 @@ describe("New agent", () => {
     expect(webSwitch()).toBeEnabled();
     expect(everyRoom()).toBeChecked();
     expect(screen.queryAllByRole("checkbox")).toEqual([]);
+    expect(rooms()).toHaveAccessibleDescription(roomsExplained("the agent", "everyone"));
+    expect(screen.getByRole("region", { name: "Admin access" })).toHaveTextContent("Keep the agent for administrators.");
+    expect(adminsOnly()).not.toBeChecked();
+    expect(adminsOnly()).toHaveAccessibleDescription(accessExplained("the agent").adminsOff);
+    expect(adminDms()).not.toBeChecked();
+    expect(adminDms()).toHaveAccessibleDescription(accessExplained("the agent").dmsOff);
     expect(screen.getByRole("img", { name: "The agent's avatar" })).toHaveAttribute("src", defaultBotAvatar);
     expect(tryIt()).toHaveTextContent(tryExplained("the agent"));
     expect(screen.queryByRole("button", { name: /Delete/ })).toBeNull();
@@ -288,12 +325,85 @@ describe("New agent", () => {
           thinking: "off",
           length: "long",
           webSearch: true,
+          access: "everyone",
           rooms: [DESIGN.id],
         } satisfies NewAgent,
       ],
     ]);
     act(() => made());
     await wentBack();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("keeps the agent for administrators to ask with Admins only, in the rooms it's put in", async () => {
+    const { user } = showNewAgent();
+    await fillIn(user);
+    await user.click(adminsOnly());
+    expect(adminsOnly()).toBeChecked();
+    expect(adminsOnly()).toHaveAccessibleDescription(accessExplained("Recap").adminsOn);
+    expect(adminDms()).not.toBeChecked();
+    expect(rooms()).toHaveAccessibleDescription(roomsExplained("Recap", "admins"));
+    expect(everyRoom()).toBeChecked();
+    await user.click(screen.getByRole("button", { name: "Create agent" }));
+    await wentBack();
+    expect(sent()).toEqual([["POST /api/account/agents", { ...FILLED_IN, access: "admins" }]]);
+  });
+
+  it("keeps the agent to administrators' direct messages with Only available in admin DMs, which holds Admins only on and takes it out of every room", async () => {
+    const { user } = showNewAgent();
+    await fillIn(user);
+    await user.click(chosenRooms());
+    await user.click(screen.getByRole("checkbox", { name: "design" }));
+    await user.click(adminDms());
+
+    expect(adminDms()).toBeChecked();
+    expect(adminDms()).toHaveAccessibleDescription(accessExplained("Recap").dmsOn);
+    expect(adminsOnly()).toBeChecked();
+    expect(adminsOnly()).toBeDisabled();
+    expect(adminsOnly()).toHaveAccessibleDescription(accessExplained("Recap").adminsKept);
+    // It's in no room, so neither choice is its, and the rooms chosen wait.
+    expect(rooms()).toBeDisabled();
+    expect(rooms()).toHaveAccessibleDescription(roomsExplained("Recap", "admin-dms"));
+    expect(everyRoom()).not.toBeChecked();
+    expect(chosenRooms()).not.toBeChecked();
+    expect(screen.queryAllByRole("checkbox")).toEqual([]);
+
+    await user.click(screen.getByRole("button", { name: "Create agent" }));
+    await wentBack();
+    expect(sent()).toEqual([["POST /api/account/agents", { ...FILLED_IN, access: "admin-dms", rooms: [] }]]);
+  });
+
+  it("puts Admins only and the rooms back as they were left once Only available in admin DMs is off again", async () => {
+    const { user } = showNewAgent();
+    await fillIn(user);
+    await user.click(chosenRooms());
+    await user.click(screen.getByRole("checkbox", { name: "design" }));
+    await user.click(adminDms());
+    await user.click(adminDms());
+    expect(adminsOnly()).not.toBeChecked();
+    expect(adminsOnly()).toBeEnabled();
+    expect(rooms()).toBeEnabled();
+    expect(chosenRooms()).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "design" })).toBeChecked();
+
+    // Admins only stays on when it was on before.
+    await user.click(adminsOnly());
+    await user.click(adminDms());
+    await user.click(adminDms());
+    expect(adminsOnly()).toBeChecked();
+    await user.click(screen.getByRole("button", { name: "Create agent" }));
+    await wentBack();
+    expect(sent()).toEqual([["POST /api/account/agents", { ...FILLED_IN, access: "admins", rooms: [DESIGN.id] }]]);
+  });
+
+  it("says why the server refused who can ask it under the switches, until one turns", async () => {
+    serve({ sent: () => refused(422, ACCESS_REFUSED, "access") });
+    const { user, onFailed } = showNewAgent();
+    await fillIn(user);
+    await user.click(screen.getByRole("button", { name: "Create agent" }));
+    expect(await within(screen.getByRole("region", { name: "Admin access" })).findByRole("alert")).toHaveTextContent(ACCESS_REFUSED);
+    expect(onFailed).not.toHaveBeenCalled();
+    await user.click(adminsOnly());
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
@@ -716,6 +826,8 @@ describe("An agent's settings", () => {
     expect(chosenRooms()).toBeChecked();
     expect(screen.getByRole("checkbox", { name: "design" })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: "research" })).not.toBeChecked();
+    expect(adminsOnly()).not.toBeChecked();
+    expect(adminDms()).not.toBeChecked();
     expect(screen.getByRole("img", { name: "Recap's avatar" })).toHaveAttribute("src", RECAP.avatarUrl);
     expect(screen.queryByRole("button", { name: "Remove avatar" })).toBeNull();
     expect(screen.getByText(`Ada Lovelace last changed Recap on ${dateLabel(new Date(RECAP.changedAt))}.`)).toBeInTheDocument();
@@ -892,6 +1004,57 @@ describe("An agent's settings", () => {
     act(() => navigate("/rooms/general"));
     // Nothing's changed, so nothing asks.
     expect(location.pathname).toBe("/rooms/general");
+  });
+
+  it("keeps the agent for administrators, or lets everyone ask it again, saving only that", async () => {
+    serve({ loaded: () => answer({ ...RECAP, access: "admins" }) });
+    const { user } = showSettings();
+    await loaded();
+    expect(adminsOnly()).toBeChecked();
+    expect(adminsOnly()).toBeEnabled();
+    expect(adminDms()).not.toBeChecked();
+    await user.click(adminsOnly());
+    expect(adminsOnly()).toHaveAccessibleDescription(accessExplained("Recap").adminsOff);
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await wentBack();
+    expect(sent()).toEqual([[`PATCH /api/account/agents/${RECAP.id}`, { access: "everyone" }]]);
+  });
+
+  it("takes the agent out of its rooms as it's kept to administrators' direct messages", async () => {
+    const { user } = showSettings();
+    await loaded();
+    await user.click(adminDms());
+    expect(rooms()).toBeDisabled();
+    expect(screen.queryAllByRole("checkbox")).toEqual([]);
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await wentBack();
+    expect(sent()).toEqual([[`PATCH /api/account/agents/${RECAP.id}`, { access: "admin-dms", rooms: [] }]]);
+  });
+
+  it("shows one kept to administrators' direct messages in no room, which stays for administrators only once it's let into rooms", async () => {
+    serve({ loaded: () => answer(HIDDEN) });
+    const { user } = showSettings();
+    await loaded();
+    expect(adminDms()).toBeChecked();
+    expect(adminsOnly()).toBeChecked();
+    expect(adminsOnly()).toBeDisabled();
+    expect(rooms()).toBeDisabled();
+    expect(rooms()).toHaveAccessibleDescription(roomsExplained("Recap", "admin-dms"));
+    act(() => navigate("/rooms/general"));
+    // Nothing's changed, so nothing asks.
+    expect(location.pathname).toBe("/rooms/general");
+    act(() => navigate(agentSettingsPath(RECAP.id)));
+
+    await user.click(adminDms());
+    expect(adminsOnly()).toBeChecked();
+    expect(adminsOnly()).toBeEnabled();
+    // In no room still, until one is chosen.
+    expect(chosenRooms()).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "design" })).not.toBeChecked();
+    await user.click(everyRoom());
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await wentBack();
+    expect(sent()).toEqual([[`PATCH /api/account/agents/${RECAP.id}`, { access: "admins", rooms: null }]]);
   });
 
   it("takes away the avatar an administrator uploaded with Remove avatar, once it's saved", async () => {

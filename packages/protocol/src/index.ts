@@ -218,9 +218,18 @@ export interface DirectoryUser extends User {
    * once it's deleted, as its answers stay. Left out for anyone else.
    */
   agent?: true;
+  /**
+   * Whether they're an AI agent only administrators can ask, as Admin access on its page sets it, which
+   * nobody else is offered to mention or to write to. Left out for anyone else. One only administrators'
+   * direct messages reach is listed to administrators alone.
+   */
+  adminsOnly?: true;
 }
 
-/** What `GET /api/users` answers: everyone in the workspace, deactivated, banned and suspended people too. */
+/**
+ * What `GET /api/users` answers: everyone in the workspace, deactivated, banned and suspended people too,
+ * but, for anyone who isn't an administrator, the AI agents only administrators' direct messages reach.
+ */
 export interface Directory {
   users: DirectoryUser[];
 }
@@ -329,7 +338,7 @@ export interface RoomPerson extends User {
   member: boolean;
 }
 
-/** What `GET /api/rooms/new` answers for the New room forms: everyone active, by name. */
+/** What `GET /api/rooms/new` answers for the New room forms: everyone active who can be put in a room, by name (`RoomSettings.people`). */
 export interface NewRoomForm {
   people: User[];
 }
@@ -352,7 +361,7 @@ export interface RoomSettings {
   room: SharedRoom;
   /** Whether you can change the room, as administrators and its creator can. Others see it read-only. */
   canAdminister: boolean;
-  /** Everyone active, by name. */
+  /** Everyone active who can be put in a room, by name: all but the AI agents only administrators' direct messages reach. */
   people: RoomPerson[];
 }
 
@@ -1703,9 +1712,15 @@ export type WorkspaceServerFrame =
   | { type: "room.read"; roomId: RoomId }
   /**
    * Someone changed, as the people directory now lists them: they changed their profile, or an
-   * administrator gave them another role, removed them, banned them or lifted their ban. Sent to everyone.
+   * administrator gave them another role, removed them, banned them or lifted their ban. Sent to everyone,
+   * but of an AI agent only administrators' direct messages reach, which only administrators hear.
    */
   | { type: "user.updated"; user: DirectoryUser }
+  /**
+   * An AI agent the people directory no longer lists to them, as an administrator has kept it to
+   * administrators' direct messages. Sent to everyone but administrators.
+   */
+  | { type: "user.gone"; userId: UserId }
   /**
    * A room of theirs as it is now, sent to everyone in it when it's made, renamed, given another icon,
    * opened to everyone or made private, and to whoever a change puts in it, and to everyone in a DM

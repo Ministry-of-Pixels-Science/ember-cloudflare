@@ -191,7 +191,7 @@ Objects, D1 or speed call for something else.
   Ember allows, so turning `EMBER_GUEST_SIGN_IN` off keeps them out without deleting anyone. Unless
   they're administrators, they aren't given the join link's code, since an account they made with it
   would stay.
-- **Usernames are unique, in lowercase.** `users.username` (workspace migration 0063) keeps the one
+- **Usernames are unique, in lowercase.** `users.username` (workspace migration 0064) keeps the one
   someone picked, by which typing @ finds them, or null while they have none, under a unique index,
   which takes any number of nulls. The Worker keeps each in lowercase, without spaces or a leading @,
   so the index tells apart only usernames people would, and refuses one that's @ember's name or an
@@ -576,6 +576,15 @@ Objects, D1 or speed call for something else.
   in the `assistant` setting, beside the API token, at most 20 of them, so they're forgotten with
   the token when Ember AI is turned off. A pick that's no longer among them is kept, and followed
   again once the model is added back.
+- **Who can ask an AI agent is a column of its person.** Campfire has no AI agents.
+  `users.agent_access` (workspace migration 0063) is null for an agent anyone can ask, and for
+  everyone who isn't an agent, `'admins'` for one only administrators can ask, and `'admin-dms'` for
+  one only their direct messages reach, which is in no other room. It's on `users` rather than
+  `agents` so that it outlasts the agent: deleting an agent deletes its row in `agents` and keeps its
+  person, whose answers stay, and one that only administrators were told of stays untold. The
+  statements that list people, such as the directory's and the mention prompt's, and the one that
+  finds who answers a question, check it against the asker's role in SQL, so nobody is sent a person
+  they aren't told of.
 
 ## Writing SQL here
 

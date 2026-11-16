@@ -90,7 +90,9 @@ would. It searches the web too, when you let it, listing the pages its answer ca
 GPT and Grok search the room for what was said before. Administrators set how long it may think and
 write, and each person picks their own levels on their profile. Administrators can add agents of their
 own too, each with its instructions, model and rooms, such as one that sums up long threads or drafts
-replies in Support, and people mention or DM them just the same.
+replies in Support, and people mention or DM them just the same. Available Agents, in everyone's
+sidebar, lists the agents they can ask, with what each does and the rooms it's in, and administrators
+can keep an agent for themselves, in its rooms or only in their own DMs with it.
 
 ### Find anything
 
