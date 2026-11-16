@@ -24,7 +24,7 @@ const EMAIL_LINK_TOKEN = "Gr-_em".repeat(7) + "D";
 /** Where joining with Ada's email address sends the browser. */
 const ADA_SIGNS_IN = "/session/new?email_address=ada%40example.com";
 /** The workspace as it's set up. */
-const EMBER: Account = { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false };
+const EMBER: Account = { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true };
 /** What the deployment's Set up Ember form suggests. */
 const PLACEHOLDERS = { name: "Grace Hopper", emailAddress: "grace@example.com" };
 const general = { id: "general", name: "general", kind: "open", icon: null };
@@ -753,6 +753,26 @@ describe("Huddles", () => {
     expect(huddleButton()).toBeInTheDocument();
     act(() => WorkspaceSocket.all[0]!.receive({ type: "account.updated", account: EMBER }));
     expect(huddleButton()).not.toBeInTheDocument();
+  });
+
+  it("takes the camera's switch from the preview a huddle starts from, and gives it back, as the workspace socket says cameras go off and on", async () => {
+    const withHuddles = { ...EMBER, huddles: true };
+    const cameraSwitch = () => screen.queryByRole("button", { name: "Turn on camera" });
+    WorkspaceSocket.all = [];
+    vi.stubGlobal("WebSocket", WorkspaceSocket);
+    serve({ signedIn: true, account: withHuddles });
+    render(<App />);
+    await roomHeading();
+    await waitFor(() => expect(WorkspaceSocket.all).toHaveLength(1));
+    act(() => WorkspaceSocket.all[0]!.welcome(ada, withHuddles));
+    await userEvent.setup().click(huddleButton()!);
+    expect(await screen.findByRole("dialog", { name: "Start a huddle in general" })).toBeInTheDocument();
+    expect(cameraSwitch()).toBeInTheDocument();
+
+    act(() => WorkspaceSocket.all[0]!.receive({ type: "account.updated", account: { ...withHuddles, huddleCameras: false } }));
+    expect(cameraSwitch()).not.toBeInTheDocument();
+    act(() => WorkspaceSocket.all[0]!.receive({ type: "account.updated", account: withHuddles }));
+    expect(cameraSwitch()).toBeInTheDocument();
   });
 });
 

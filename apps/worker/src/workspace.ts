@@ -122,7 +122,7 @@ import { openDb, type Db } from "./db";
 import { alreadyAMemberEmail, emailDomainLinkEmail, invitationEmail, passwordResetCodeEmail, testEmail } from "./emails";
 import { guestSignIn, type Env } from "./env";
 import { pictureObjects, type StoredPicture } from "./files/pictures";
-import type { SfuApp } from "./huddles/sfu";
+import type { HuddleApp, SfuApp } from "./huddles/sfu";
 import { alphanumeric, sortableId } from "./ids";
 import { sendEmail, sendEmails, senderOf, type Sender } from "./mail";
 import {
@@ -374,6 +374,7 @@ const accountOf = (
     emailDomainSignUp,
     emailDomains,
     navigationIcons,
+    huddleCameras,
     updatedAt,
     storedLogo,
   }: JoinableAccount,
@@ -394,6 +395,7 @@ const accountOf = (
   emailDomains: emailDomainSignUp ? emailDomains : [],
   navigationIcons,
   huddles,
+  huddleCameras,
 });
 
 /** The parts of the account that Ember AI's settings are made of. */
@@ -1282,7 +1284,7 @@ export class Workspace extends DurableObject<Env> {
   ): Promise<Account | AccountRefusal | "forbidden" | null> {
     return this.administerAccount(credentials, async (account) => {
       // Only what differs is written.
-      const { hideTranslationButtons, restrictRoomCreation, joinLink, openSignUp, emailDomainSignUp } = settings ?? {};
+      const { hideTranslationButtons, restrictRoomCreation, huddleCameras, joinLink, openSignUp, emailDomainSignUp } = settings ?? {};
       const memberful = memberfulChange(account, settings ?? {});
       const icons = changedNavigationIcons(account.navigationIcons, navigationIcons ?? {});
       const moving = customDomain !== undefined && customDomain !== account.customDomain;
@@ -1292,6 +1294,7 @@ export class Workspace extends DurableObject<Env> {
         ...(tagline !== undefined && tagline !== account.tagline && { tagline }),
         ...(hideTranslationButtons !== undefined && hideTranslationButtons !== account.hideTranslationButtons && { hideTranslationButtons }),
         ...(restrictRoomCreation !== undefined && restrictRoomCreation !== account.restrictRoomCreation && { restrictRoomCreation }),
+        ...(huddleCameras !== undefined && huddleCameras !== account.huddleCameras && { huddleCameras }),
         ...(moving && { customDomain }),
         ...(!sameDomains(otherAddresses, account.otherAddresses) && { otherAddresses }),
         ...(joinLink !== undefined && joinLink !== account.joinLink && { joinLink }),
@@ -1741,13 +1744,15 @@ export class Workspace extends DurableObject<Env> {
   }
 
   /**
-   * The Realtime SFU app huddles run through, with its secret opened, for a room to ask the SFU as, or
-   * null while huddles are off. Rooms ask as a huddle goes on, so turning huddles off, or changing the
-   * app, ends the ones under way. The secret goes no further than the room's memory.
+   * The Realtime SFU app huddles run through, with its secret opened, for a room to ask the SFU as, and
+   * whether cameras may go on in them, or null while huddles are off. Rooms ask as a huddle goes on, so
+   * turning huddles off, or changing the app, ends the ones under way, and turning cameras off takes
+   * down the ones that are on. The secret goes no further than the room's memory.
    */
-  async huddleApp(): Promise<SfuApp | null> {
+  async huddleApp(): Promise<HuddleApp | null> {
     const account = await this.joinableAccount();
-    return account && this.openedHuddleApp(account);
+    const app = account && (await this.openedHuddleApp(account));
+    return account && app && { ...app, cameras: account.huddleCameras };
   }
 
   /** The SFU app `account` keeps the keys of, with its secret opened, or null while it keeps none or the secret doesn't open. */

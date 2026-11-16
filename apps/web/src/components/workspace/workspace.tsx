@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { ASSISTANT_ID, searchOfQuery, startingInvolvement, type Account, type DirectRoom, type Favorites, type Me, type Room, type RoomId, type SidebarRoom, type User } from "@ember/protocol";
+import { CAMERAS_OFF } from "@ember/protocol/huddles";
 import { useFlash } from "@/components/flash";
 import { Xmark } from "@/components/icons/iconoir";
 import { MainContent, SkipLink } from "@/components/main-content";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetClose, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
-import { useAccount } from "@/hooks/use-account";
+import { useAccount, useCamerasAllowed } from "@/hooks/use-account";
 import { useAppBadge } from "@/hooks/use-app-badge";
 import { DirectoryLoaded, PeopleContext, useDirectory } from "@/hooks/use-directory";
 import { useHuddle } from "@/hooks/use-huddle";
@@ -13,7 +14,7 @@ import { useMounted } from "@/hooks/use-mounted";
 import { useReleaseCheck } from "@/hooks/use-release-check";
 import { useSidebar } from "@/hooks/use-sidebar";
 import { ApiError, dismissInvitation, isSignedOut, startDirect } from "@/lib/api";
-import { hearHuddleEnd, leaveHuddle, muteHuddle } from "@/lib/huddle-store";
+import { hearHuddle, leaveHuddle, muteHuddle, OPEN_HUDDLE, openHuddle, showHuddleCamera } from "@/lib/huddle-store";
 import { whenIdle } from "@/lib/idle";
 import { opensFind, opensShortcuts, togglesHuddle, togglesMute } from "@/lib/keyboard";
 import { lastRoomVisited } from "@/lib/last-room";
@@ -22,7 +23,7 @@ import { loadPage } from "@/lib/page";
 import { updateOf } from "@/lib/release-check";
 import { markedUnread } from "@/lib/room-list";
 import { cn } from "@/lib/utils";
-import { afterNavigating, messagePath, navigate, pageMark, roomPath, routeOf, useHash, useRoute, type Route } from "@/hooks/use-route";
+import { afterNavigating, messagePath, navigate, pageMark, roomPath, routeOf, useHash, useRoute, useVisit, type Route } from "@/hooks/use-route";
 import { HuddlesContext, NO_HUDDLES, type Huddles } from "./huddle-button";
 import { MovedNotice } from "./moved-notice";
 import { KeyboardShortcutsDialog } from "./keyboard-shortcuts-dialog";
@@ -339,7 +340,9 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
 
   // The huddle this tab is in, and the preview one is started or joined from, while it's open, by its room.
   const huddle = useHuddle();
+  const huddleRoom = (huddle && rooms?.find((r) => r.id === huddle.roomId)) ?? null;
   const huddlesOn = useAccount().huddles;
+  const camerasAllowed = useCamerasAllowed();
   const [huddlePreview, setHuddlePreview] = useState<RoomId | null>(null);
   // Whether the keyboard shortcuts dialog is open.
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
@@ -355,9 +358,25 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
 
   const flash = useFlash();
   const mounted = useMounted();
-  // Why the room ended this tab's huddle, when it does. Whoever's signed in next starts in none.
-  useEffect(() => hearHuddleEnd((why) => flash("alert", why)), [flash]);
+  // What this tab's huddle has to say: why the room ended it, or why its camera stays off. Whoever's
+  // signed in next starts in none.
+  useEffect(() => hearHuddle((what) => flash("alert", what)), [flash]);
   useEffect(() => leaveHuddle, []);
+  // An administrator who turns cameras off takes down the one this tab shows, and its person is told
+  // why. The room takes down whichever are on still at its next check.
+  const showsCameraUnallowed = !camerasAllowed && huddle?.camera != null;
+  useEffect(() => {
+    if (!showsCameraUnallowed) return;
+    showHuddleCamera(false);
+    flash("alert", CAMERAS_OFF);
+  }, [showsCameraUnallowed, flash]);
+  // The huddle opened covers the page, so going to a page, the one shown included, minimizes it to its
+  // bar: all but the visit its own link ends in, which opens it.
+  const visit = useVisit();
+  const opensHuddle = useRef(-1);
+  useEffect(() => {
+    openHuddle(opensHuddle.current === visit);
+  }, [visit]);
   // What connecting a Memberful account came to, as the address Memberful sent this browser back to says.
   useEffect(() => {
     const message = takeMemberfulFlash();
@@ -593,12 +612,13 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
     window.addEventListener("keydown", listener);
     return () => window.removeEventListener("keydown", listener);
   }, []);
-  // A huddle's link shows its room and offers the huddle, unless the tab is in it. The address becomes
-  // the room's, so that loading the page again, or coming back to it, doesn't offer it again.
+  // A huddle's link shows its room and offers the huddle, or opens it once the tab is in it. The address
+  // becomes the room's, so that loading the page again, or coming back to it, doesn't offer it again.
   const followHuddleLink = useEffectEvent((room: Room) => {
     if (!huddlesOn) flash("alert", "Huddles are turned off.");
     else if (room.kind !== "direct" && huddle?.roomId !== room.id) setHuddlePreview(room.id);
     navigate(roomPath(room.id), { replace: true });
+    if (huddle?.roomId === room.id) opensHuddle.current = pageMark();
   });
   const huddleLinked = route.page === "room" && route.huddle === true && !goneRoom ? room : null;
   useLayoutEffect(() => {
@@ -785,10 +805,10 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
             "relative grid h-dvh grid-cols-[calc(var(--spacing-rail)+env(safe-area-inset-left))_var(--spacing-sidebar)_minmax(0,1fr)] grid-rows-[var(--spacing-header)_minmax(0,1fr)] overflow-clip bg-surface max-md:grid-cols-[minmax(0,1fr)] max-md:grid-rows-[calc(56px+env(safe-area-inset-top))_minmax(0,1fr)]",
             settings && "[--spacing-sidebar:244px] max-md:grid-rows-[calc(56px+env(safe-area-inset-top))_auto_minmax(0,1fr)]",
             // A thread open beside its room, from 1180px wide, which takes 420px of the room's width.
-            "min-[1180px]:has-[>[data-thread]]:grid-cols-[calc(var(--spacing-rail)+env(safe-area-inset-left))_var(--spacing-sidebar)_minmax(0,1fr)_420px]",
+            "min-[1180px]:has-[[data-thread]]:grid-cols-[calc(var(--spacing-rail)+env(safe-area-inset-left))_var(--spacing-sidebar)_minmax(0,1fr)_420px]",
           )}
         >
-          <SkipLink />
+          <SkipLink to={huddle?.open ? OPEN_HUDDLE : undefined} />
           <div className="contents max-md:hidden [&>*]:row-span-2" onClick={showAllForLink}>
             {rail}
             {!settings && (
@@ -839,7 +859,13 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
             )}
           </SheetContent>
 
-          {page()}
+          {/* The page, placed in the grid as if it were its own, with nothing of it to reach while the huddle opened covers it. */}
+          <div className="contents" inert={huddle?.open === true}>
+            {page()}
+          </div>
+          {huddle?.open && (
+            <RarePage show={({ HuddleView }) => <HuddleView huddle={huddle} room={huddleRoom} meId={me.id} />} loading={null} onFailed={failed} />
+          )}
           <Notices>
             <MovedNotice />
             <UpdatedNotice />
@@ -868,12 +894,8 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
               onFailed={huddlePreviewFailed}
             />
           )}
-          {huddle && (
-            <RarePage
-              show={({ HuddleBar }) => <HuddleBar huddle={huddle} room={rooms?.find((r) => r.id === huddle.roomId) ?? null} meId={me.id} />}
-              loading={null}
-              onFailed={failed}
-            />
+          {huddle && !huddle.open && (
+            <RarePage show={({ HuddleBar }) => <HuddleBar huddle={huddle} room={huddleRoom} meId={me.id} />} loading={null} onFailed={failed} />
           )}
         </div>
       </DrawerOpen>

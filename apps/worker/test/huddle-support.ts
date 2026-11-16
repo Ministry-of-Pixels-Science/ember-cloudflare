@@ -1,4 +1,4 @@
-import type { NewWorkspace, RoomId } from "@ember/protocol";
+import type { NewWorkspace, RoomId, UserId } from "@ember/protocol";
 import { huddleSocketQuery, type HuddleClientFrame, type HuddleServerFrame, type HuddleSocketParams } from "@ember/protocol/huddles";
 import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { expect, vi } from "vitest";
@@ -252,6 +252,27 @@ export async function listen(client: HuddleSocket, fresh = false) {
   return offer;
 }
 
+/** Publishes `client`'s camera with the offer `sdp`, on the connection a tab keeps for it, and says that the connection has connected. */
+export async function publishCamera(client: HuddleSocket, sdp = "a camera's offer"): Promise<void> {
+  client.send({ type: "huddle.publish", sdp, tracks: [{ mid: "0", kind: "video" }] });
+  await client.next("huddle.published");
+  client.send({ type: "huddle.connected", kind: "video" });
+  await reached(client);
+}
+
+/**
+ * Has `client` ask to watch the cameras of `people`, and nobody else's, on a `fresh` connection if said,
+ * and answer the offer it's made, which this answers: null when it's made none.
+ */
+export async function watch(client: HuddleSocket, people: UserId[], fresh = false) {
+  client.send({ type: "huddle.listen", kind: "video", watch: people, ...(fresh && { fresh: true }) });
+  const offer = await client.next("huddle.offer", "huddle.listening");
+  if (offer.type === "huddle.listening") return null;
+  client.send({ type: "huddle.answer", kind: "video", sdp: `answer to ${offer.sdp}` });
+  await client.next("huddle.listening");
+  return offer;
+}
+
 const founder = { name: "Ada Lovelace", emailAddress: "ada@example.com", password: "analytical engine" };
 
 /** Sets Ember up with Ada as its administrator, signed in. */
@@ -264,6 +285,12 @@ export async function setUp(): Promise<Session> {
 /** Gives Ember `app`'s keys as `administrator`, as Set up huddles does. */
 export async function giveKeys(administrator: Session, app = APP): Promise<void> {
   const response = await api("/api/account/huddles", { method: "PUT", headers: { Cookie: administrator.cookie }, body: JSON.stringify(app) });
+  expect(response.status, await response.clone().text()).toBe(200);
+}
+
+/** Turns Cameras on or off as `administrator`, as its switch on the Huddles tab does. */
+export async function switchCameras(administrator: Session, huddleCameras: boolean): Promise<void> {
+  const response = await api("/api/account", { method: "PATCH", headers: { Cookie: administrator.cookie }, body: JSON.stringify({ settings: { huddleCameras } }) });
   expect(response.status, await response.clone().text()).toBe(200);
 }
 

@@ -2,7 +2,9 @@ import type { DirectoryUser, Room, User } from "@ember/protocol";
 import type { HuddlePerson } from "@ember/protocol/huddles";
 import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { AccountContext, useAccount } from "@/hooks/use-account";
 import { PeopleContext } from "@/hooks/use-directory";
 import { showHuddle, type JoinedHuddle } from "@/lib/huddle-store";
 import { HuddleBar } from "./huddle-bar";
@@ -11,7 +13,7 @@ const ada: User = { id: "ada", name: "Ada Lovelace" };
 const sam: User = { id: "sam", name: "Sam Rivera" };
 const priya: User = { id: "priya", name: "Priya Patel" };
 const general: Room = { id: "general", name: "general", kind: "open", icon: null };
-const inHuddle = (user: User, muted = false): HuddlePerson => ({ user, muted, audio: true });
+const inHuddle = (user: User, muted = false): HuddlePerson => ({ user, muted, audio: true, video: false });
 const huddle = (changes: Partial<JoinedHuddle> = {}): JoinedHuddle => ({
   roomId: "general",
   connected: true,
@@ -19,17 +21,26 @@ const huddle = (changes: Partial<JoinedHuddle> = {}): JoinedHuddle => ({
   people: [inHuddle(sam), inHuddle(ada)],
   muted: false,
   microphone: true,
+  camera: null,
+  watched: new Map(),
+  open: false,
   ...changes,
 });
+/** A camera that's on, as much of one as the bar reads. */
+const CAMERA = {} as MediaStream;
 
-/** The bar of the huddle this tab is in, whose controls are `leave` and `setMuted`. */
+/** The bar of the huddle this tab is in, with what the huddle's controls were asked. */
 function renderBar(joined: JoinedHuddle = huddle(), room: Room | null = general) {
-  const leave = vi.fn();
-  const setMuted = vi.fn();
-  act(() => showHuddle(joined, { leave, setMuted }));
+  const controls = { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setOpen: vi.fn() };
+  act(() => showHuddle(joined, controls));
   const user = userEvent.setup();
   const view = render(<HuddleBar huddle={joined} room={room} meId="ada" />);
-  return { leave, setMuted, user, ...view };
+  return { ...controls, user, ...view };
+}
+
+/** A workspace whose administrator has cameras off in huddles. */
+function CamerasOff({ children }: { children: ReactNode }) {
+  return <AccountContext value={{ ...useAccount(), huddleCameras: false }}>{children}</AccountContext>;
 }
 
 const bar = () => screen.getByRole("region");
@@ -42,14 +53,36 @@ afterEach(() => {
 });
 
 describe("The huddle bar", () => {
-  it("names the huddle's room and who's in it, on a link to the room", async () => {
-    const { user } = renderBar();
+  it("names the huddle's room and who's in it, on a button that opens the huddle", async () => {
+    const { setOpen, user } = renderBar();
     expect(bar()).toHaveAccessibleName("Huddle in general");
     expect(state()).toHaveTextContent("Sam and you are in the huddle");
-    const link = screen.getByRole("link", { name: "Huddle in general Sam and you are in the huddle" });
-    expect(link).toHaveAttribute("href", "/rooms/general");
-    await user.click(link);
-    expect(location.pathname).toBe("/rooms/general");
+    const name = screen.getByRole("button", { name: "Huddle in general Sam and you are in the huddle" });
+    expect(name).toHaveAttribute("title", "Open huddle");
+    await user.click(name);
+    expect(setOpen).toHaveBeenCalledExactlyOnceWith(true);
+  });
+
+  it("opens the huddle from the button before Leave, too, which phones leave out", async () => {
+    const { setOpen, user } = renderBar();
+    const open = screen.getByRole("button", { name: "Open huddle" });
+    expect(open).toHaveClass("max-md:hidden");
+    expect(screen.getAllByRole("button").at(-2)).toBe(open);
+    await user.click(open);
+    expect(setOpen).toHaveBeenCalledExactlyOnceWith(true);
+  });
+
+  it("takes the focus when nothing has it, as when the button that minimized the huddle went with it", () => {
+    renderBar();
+    expect(screen.getByRole("button", { name: /^Huddle in general/ })).toHaveFocus();
+  });
+
+  it("leaves the focus with whatever has it", () => {
+    const composer = document.body.appendChild(document.createElement("textarea"));
+    composer.focus();
+    renderBar();
+    expect(composer).toHaveFocus();
+    composer.remove();
   });
 
   it("says when nobody else is in it, and counts past three others", () => {
@@ -123,6 +156,43 @@ describe("The huddle bar's microphone", () => {
     expect(mute).toHaveAttribute("aria-keyshortcuts", "Meta+Shift+Space");
     await user.hover(mute);
     expect(screen.getByRole("tooltip")).toHaveTextContent("Mute microphone⌘⇧Space");
+  });
+});
+
+describe("The huddle bar's camera", () => {
+  it("turns the camera on, which phones leave to the huddle opened", async () => {
+    const { setCamera, user } = renderBar();
+    const camera = screen.getByRole("button", { name: "Turn on camera" });
+    expect(camera).toHaveClass("bg-hover", "max-md:hidden");
+    expect(camera).toHaveAttribute("title", "Turn on camera");
+    await user.click(camera);
+    expect(setCamera).toHaveBeenCalledExactlyOnceWith(true);
+  });
+
+  it("turns it off once it's on, filled in ink until then", async () => {
+    const { setCamera, user } = renderBar(huddle({ camera: CAMERA }));
+    const camera = screen.getByRole("button", { name: "Turn off camera" });
+    expect(camera).toHaveClass("bg-foreground", "text-background");
+    await user.click(camera);
+    expect(setCamera).toHaveBeenCalledExactlyOnceWith(false);
+  });
+
+  it("has no camera button while an administrator has cameras off, but to turn off a camera that's on still", async () => {
+    const { setCamera, user, rerender } = renderBar();
+    rerender(
+      <CamerasOff>
+        <HuddleBar huddle={huddle()} room={general} meId="ada" />
+      </CamerasOff>,
+    );
+    expect(screen.queryByRole("button", { name: /camera/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Mute microphone" })).toBeInTheDocument();
+    rerender(
+      <CamerasOff>
+        <HuddleBar huddle={huddle({ camera: CAMERA })} room={general} meId="ada" />
+      </CamerasOff>,
+    );
+    await user.click(screen.getByRole("button", { name: "Turn off camera" }));
+    expect(setCamera).toHaveBeenCalledExactlyOnceWith(false);
   });
 });
 

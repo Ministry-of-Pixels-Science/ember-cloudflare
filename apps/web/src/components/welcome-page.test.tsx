@@ -19,7 +19,7 @@ const workspace: Omit<Bootstrap, "user"> = {
   signInWithMemberful: true,
   turnstileSiteKey: null,
   passwordResetCodes: false,
-  account: { name: "Fernwood", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: false, openSignUp: false, memberfulJoin: true, memberfulSignIn: true, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false },
+  account: { name: "Fernwood", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: false, openSignUp: false, memberfulJoin: true, memberfulSignIn: true, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true },
   version: "0.1",
   vapidPublicKey: null,
   platform: CHROME_MAC,

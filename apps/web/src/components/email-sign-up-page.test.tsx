@@ -48,6 +48,7 @@ const workspace: Omit<Bootstrap, "user"> = {
     emailDomains: DOMAINS,
     navigationIcons: {},
     huddles: false,
+    huddleCameras: true,
   },
   version: "0.1",
   vapidPublicKey: null,
