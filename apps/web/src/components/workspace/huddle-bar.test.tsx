@@ -21,6 +21,8 @@ const huddle = (changes: Partial<JoinedHuddle> = {}): JoinedHuddle => ({
   people: [inHuddle(sam), inHuddle(ada)],
   muted: false,
   microphone: true,
+  microphoneId: "",
+  speakerId: "",
   camera: null,
   watched: new Map(),
   screen: null,
@@ -34,7 +36,7 @@ const SCREEN = {} as MediaStream;
 
 /** The bar of the huddle this tab is in, with what the huddle's controls were asked. */
 function renderBar(joined: JoinedHuddle = huddle(), room: Room | null = general) {
-  const controls = { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn() };
+  const controls = { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setDevice: vi.fn() };
   act(() => showHuddle(joined, controls));
   const user = userEvent.setup();
   const view = render(<HuddleBar huddle={joined} room={room} meId="ada" />);
@@ -174,6 +176,13 @@ describe("The huddle bar", () => {
 
     act(() => showSpeaking(new Set(["ada"])));
     expect(faces().map((face) => face.classList.contains("ring-positive"))).toEqual([false, false, true]);
+  });
+
+  it("has no arrows beside its buttons, which choose among devices only in the huddle opened", () => {
+    renderBar();
+    expect(screen.queryByRole("button", { name: "Microphone and speaker" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Camera" })).not.toBeInTheDocument();
+    for (const name of ["Mute microphone", "Turn on camera"]) expect(screen.getByRole("button", { name })).not.toHaveClass("md:rounded-r-none");
   });
 });
 

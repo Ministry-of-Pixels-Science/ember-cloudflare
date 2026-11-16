@@ -1,6 +1,6 @@
 import type { DirectoryUser, Room, User } from "@ember/protocol";
 import type { HuddlePerson } from "@ember/protocol/huddles";
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
@@ -21,6 +21,8 @@ const huddle = (changes: Partial<JoinedHuddle> = {}): JoinedHuddle => ({
   people: [inHuddle(sam), inHuddle(ada)],
   muted: false,
   microphone: true,
+  microphoneId: "",
+  speakerId: "",
   camera: null,
   watched: new Map(),
   screen: null,
@@ -35,7 +37,7 @@ const crowd = (count: number) => Array.from({ length: count }, (_, index) => inH
 
 /** The huddle this tab is in, opened, with what the huddle's controls were asked. */
 function renderView(joined: JoinedHuddle = huddle(), room: Room | null = general) {
-  const controls = { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn() };
+  const controls = { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setDevice: vi.fn() };
   act(() => showHuddle(joined, controls));
   const user = userEvent.setup();
   const view = render(<HuddleView huddle={joined} room={room} meId="ada" />);
@@ -429,6 +431,35 @@ describe("The buttons along the base of a huddle", () => {
     );
     await user.click(screen.getByRole("button", { name: "Turn off camera" }));
     expect(setCamera.mock.calls).toEqual([[false]]);
+  });
+
+  it("has an arrow beside the microphone and one beside the camera, on a computer, each of a piece with its button and lit as it is, which opens the menu of its devices", async () => {
+    Object.defineProperty(navigator, "mediaDevices", { value: Object.assign(new EventTarget(), { enumerateDevices: async () => [] }), configurable: true });
+    const { user } = renderView();
+    const [microphones, cameras] = [screen.getByRole("button", { name: "Microphone and speaker" }), screen.getByRole("button", { name: "Camera" })];
+    for (const arrow of [microphones, cameras]) expect(arrow).toHaveClass("max-md:hidden", "rounded-l-none");
+    for (const name of ["Mute microphone", "Turn on camera"]) expect(screen.getByRole("button", { name })).toHaveClass("md:rounded-r-none");
+    expect(microphones).toHaveClass("bg-foreground", "text-background");
+    expect(cameras).toHaveClass("bg-hover");
+
+    await user.click(cameras);
+    expect(await screen.findByRole("menu")).toHaveAccessibleName("Camera");
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+    await user.click(microphones);
+    expect(await screen.findByRole("menu")).toHaveAccessibleName("Microphone and speaker");
+  });
+
+  it("has no arrow beside the camera while an administrator has cameras off, who leaves none to choose", () => {
+    const { rerender } = renderView();
+    rerender(
+      <CamerasOff>
+        <HuddleView huddle={huddle({ camera: camera() })} room={general} meId="ada" />
+      </CamerasOff>,
+    );
+    expect(screen.getByRole("button", { name: "Turn off camera" })).not.toHaveClass("md:rounded-r-none");
+    expect(screen.queryByRole("button", { name: "Camera" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Microphone and speaker" })).toBeInTheDocument();
   });
 
   it("keeps its camera button under a workspace that says nothing of cameras, as one told of by an older Worker does", () => {

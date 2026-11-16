@@ -8,7 +8,7 @@ import { useCamerasAllowed } from "@/hooks/use-account";
 import { PeopleContext } from "@/hooks/use-directory";
 import { useHuddle } from "@/hooks/use-huddle";
 import { joinHuddle } from "@/lib/huddle";
-import { cameraOf, closeDevice, listDevices, microphoneOf, NO_CAMERA, NO_DEVICES, openCamera, openMicrophone, rememberDevice, rememberedDevice, watchDevices } from "@/lib/huddle-devices";
+import { cameraOf, closeDevice, listDevices, microphoneOf, NO_CAMERA, NO_DEVICES, openCamera, openMicrophone, rememberDevice, rememberedDevice, speakerChoices, watchDevices, withOpen } from "@/lib/huddle-devices";
 import { inItNow } from "@/lib/huddle-people";
 import { cn } from "@/lib/utils";
 import { HuddlePicture } from "./huddle-picture";
@@ -158,11 +158,6 @@ function usePreviewCamera(opened: () => void, allowed: boolean) {
   return { stream, refused, takenDown, turnOn, turnOff, take };
 }
 
-/** The devices to choose among, led by the one that's open where the browser's list leaves it out. */
-function withOpen(listed: MediaDeviceInfo[], deviceId: string, open: MediaStreamTrack | undefined): Pick<MediaDeviceInfo, "deviceId" | "label">[] {
-  return listed.some((device) => device.deviceId === deviceId) ? listed : [{ deviceId, label: open?.label ?? "" }, ...listed];
-}
-
 interface SwitchProps {
   label: string;
   /** Whether what it switches is on, which fills it. */
@@ -232,8 +227,7 @@ export function HuddlePreview({ room, me, live, onClose }: Props) {
   const microphones = withOpen(devices.microphones, microphone, stream?.getAudioTracks()[0]);
   const shown = cameraOf(camera.stream);
   const cameras = withOpen(devices.cameras, shown, camera.stream?.getVideoTracks()[0]);
-  // A browser that lists its own choice of speaker has it first, and the others get one to choose.
-  const speakers = devices.speakers.some(({ deviceId }) => deviceId === "default") ? devices.speakers : [{ deviceId: "", label: "System default" }, ...devices.speakers];
+  const speakers = speakerChoices(devices.speakers);
   const speaker = speakers.find(({ deviceId }) => deviceId === speakerId)?.deviceId ?? speakers[0]!.deviceId;
   const silent = muted || !stream;
   // Why the camera is off though its switch was turned on: the browser has none to give, or an administrator turned cameras off meanwhile.

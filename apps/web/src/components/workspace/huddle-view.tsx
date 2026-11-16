@@ -197,7 +197,8 @@ interface Props {
 /**
  * The huddle this tab is in, opened, inside Ember, over the page beside the sidebar, and over all of a
  * phone's: its name and how many are in it, a tile for each of them, as large as shows them all, and
- * along its base the microphone, the camera, the screen and Leave, where Slack has them. While someone
+ * along its base the microphone, the camera, the screen and Leave, where Slack has them, the first two
+ * with an arrow that chooses which microphone, speaker or camera the huddle uses. While someone
  * else shares a screen it shows that large, and the tiles in what it leaves them, beside it or under
  * it, as on a phone held upright, whichever shows the screen larger. The screen that shows is the
  * one this tab's person chose among the tiles, while it's shared and the tab has it to show, or else
@@ -279,8 +280,8 @@ export function HuddleView({ huddle, room, meId }: Props) {
 
       <footer className="grid grid-cols-[1fr_auto_1fr] items-center gap-3 border-t bg-background px-4 pt-3 pb-[max(12px,env(safe-area-inset-bottom))] max-md:flex max-md:justify-between max-md:gap-1.5 max-md:px-2.5">
         <div className="col-start-2 flex gap-1.5">
-          <MicrophoneTool huddle={huddle} />
-          <CameraTool huddle={huddle} />
+          <MicrophoneTool huddle={huddle} devices />
+          <CameraTool huddle={huddle} devices />
           <ScreenTool huddle={huddle} />
         </div>
         <div className="flex justify-end">

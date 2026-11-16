@@ -584,8 +584,8 @@ describe("Joining a huddle", () => {
   });
 
   it("says that it leaves the huddle this tab is in", async () => {
-    const elsewhere = { roomId: "other", connected: true, you: ada, people: [], muted: false, microphone: true, camera: null, watched: new Map(), screen: null, screens: new Map(), open: false };
-    act(() => showHuddle(elsewhere, { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn() }));
+    const elsewhere = { roomId: "other", connected: true, you: ada, people: [], muted: false, microphone: true, microphoneId: "", speakerId: "", camera: null, watched: new Map(), screen: null, screens: new Map(), open: false };
+    act(() => showHuddle(elsewhere, { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setDevice: vi.fn() }));
     const { unmount } = await openedPreview();
     expect(preview()).toHaveAccessibleDescription("Everyone in general can join once it starts. Starting it leaves the huddle you're in now.");
     unmount();

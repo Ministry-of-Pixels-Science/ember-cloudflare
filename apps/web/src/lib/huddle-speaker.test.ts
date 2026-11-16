@@ -176,3 +176,73 @@ describe("What a huddle's speaker plays once", () => {
     expect(play.mock.contexts).toEqual([voice, sound, sound]);
   });
 });
+
+describe("Another speaker chosen for a huddle", () => {
+  it("plays what the huddle plays now, and what it plays after, until the system's is chosen again", () => {
+    const setSinkId = choosesSpeakers();
+    const speaker = huddleSpeaker("");
+    const [voice, later, sound] = [audio(), audio(), audio()];
+    speaker.play(voice);
+    expect(setSinkId).not.toHaveBeenCalled();
+
+    speaker.use("headphones");
+    expect(setSinkId.mock.calls).toEqual([["headphones"]]);
+    speaker.play(later);
+    speaker.playOnce(sound);
+    expect(setSinkId.mock.calls).toEqual([["headphones"], ["headphones"], ["headphones"]]);
+    expect(setSinkId.mock.contexts).toEqual([voice, later, sound]);
+
+    setSinkId.mockClear();
+    speaker.use("");
+    expect(setSinkId.mock.calls).toEqual([[""], [""]]);
+    expect(setSinkId.mock.contexts).toEqual([voice, later]);
+    speaker.playOnce(sound);
+    expect(setSinkId.mock.calls).toEqual([[""], [""], [""]]);
+    speaker.stopAll();
+  });
+
+  it("gives way to the system's speaker for as long as it's unplugged, where the one the huddle began with is nothing to it now", async () => {
+    const setSinkId = choosesSpeakers();
+    const changeTo = lists("default", "headphones", "monitor");
+    const speaker = huddleSpeaker("headphones");
+    speaker.play(audio());
+    speaker.use("monitor");
+    setSinkId.mockClear();
+
+    await changeTo("default", "monitor");
+    expect(setSinkId.mock.calls).toEqual([["monitor"]]);
+    await changeTo("default");
+    expect(setSinkId.mock.calls).toEqual([["monitor"], [""]]);
+    await changeTo("default", "monitor");
+    expect(setSinkId.mock.calls).toEqual([["monitor"], [""], ["monitor"]]);
+    speaker.stopAll();
+  });
+
+  it("is followed as it's unplugged by a huddle that began on the system's speaker, which asked nothing of the browser's speakers", async () => {
+    const setSinkId = choosesSpeakers();
+    const changeTo = lists("default", "headphones");
+    const speaker = huddleSpeaker("");
+    speaker.play(audio());
+    await changeTo("default", "headphones");
+    expect(setSinkId).not.toHaveBeenCalled();
+
+    speaker.use("headphones");
+    await changeTo("default");
+    expect(setSinkId.mock.calls).toEqual([["headphones"], [""]]);
+    speaker.stopAll();
+  });
+
+  it("is the one played through when it's chosen while the browser says whether the one before is there still", async () => {
+    const setSinkId = choosesSpeakers();
+    const changeTo = lists("default", "headphones", "monitor");
+    const speaker = huddleSpeaker("headphones");
+    speaker.play(audio());
+
+    // The one before is unplugged, and another chosen before the browser has listed what's left.
+    const listed = changeTo("default", "monitor");
+    speaker.use("monitor");
+    await listed;
+    expect(setSinkId.mock.calls).toEqual([["headphones"], ["monitor"]]);
+    speaker.stopAll();
+  });
+});

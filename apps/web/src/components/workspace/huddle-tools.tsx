@@ -7,12 +7,19 @@ import { sharesScreens } from "@/lib/huddle-devices";
 import { leaveHuddle, muteHuddle, shareHuddleScreen, showHuddleCamera, type JoinedHuddle } from "@/lib/huddle-store";
 import { muteShortcut } from "@/lib/keyboard";
 import { cn } from "@/lib/utils";
+import { CameraMenu, MicrophoneMenu } from "./huddle-device-menu";
 import { ShortcutTooltip } from "./shortcut-tooltip";
 
 /** A huddle button: a 40px square, 44px for fingers, filled in ink while what it switches is on. */
 export const TOOL = "grid h-10 min-w-10 cursor-pointer place-items-center rounded-lg touch:h-11 touch:min-w-11 disabled:cursor-default disabled:opacity-50 [&_svg]:size-5";
 export const TOOL_OFF = "bg-hover text-foreground enabled:hover:bg-foreground/12";
 export const TOOL_ON = "bg-foreground text-background";
+/**
+ * A huddle button with an arrow beside it, and the arrow, which opens the menu of the devices the
+ * button uses. The two are one shape, parted by a line. Phones leave the arrow out, as Slack's do.
+ */
+const BESIDE_ARROW = "md:rounded-r-none";
+const ARROW = "min-w-6 rounded-l-none border-l border-background max-md:hidden [&_svg]:size-3.5";
 
 /** What the tab's huddle is called, on its bar and opened: by its room, or just Huddle once the room isn't among this person's. */
 export function useHuddleName(room: Room | null, meId: UserId): string {
@@ -23,33 +30,60 @@ export function useHuddleName(room: Room | null, meId: UserId): string {
 /** What a huddle says in place of who's in it, until the room has let the tab in, and while its connection to the room is down. */
 export const waitingToJoin = (huddle: JoinedHuddle) => (huddle.connected ? null : huddle.you ? "Reconnecting…" : "Connecting…");
 
-/** Mutes the tab's microphone in its huddle, or unmutes it, and says so when it has none. */
-export function MicrophoneTool({ huddle }: { huddle: JoinedHuddle }) {
+interface ToolProps {
+  huddle: JoinedHuddle;
+  /** Whether it has the arrow beside it that chooses among its devices, as it does in the huddle opened. */
+  devices?: boolean;
+  className?: string;
+}
+
+/**
+ * Mutes the tab's microphone in its huddle, or unmutes it, and says so when it has none. Its arrow
+ * chooses the microphone, and the speaker the huddle plays through.
+ */
+export function MicrophoneTool({ huddle, devices = false }: ToolProps) {
   const silent = huddle.muted || !huddle.microphone;
   const label = !huddle.microphone ? "No microphone" : huddle.muted ? "Unmute microphone" : "Mute microphone";
-  return (
+  const look = silent ? TOOL_OFF : TOOL_ON;
+  const tool = (
     <ShortcutTooltip label={label} shortcut={muteShortcut()}>
-      <button type="button" aria-label={label} disabled={!huddle.microphone} onClick={() => muteHuddle(!huddle.muted)} className={cn(TOOL, silent ? TOOL_OFF : TOOL_ON)}>
+      <button type="button" aria-label={label} disabled={!huddle.microphone} onClick={() => muteHuddle(!huddle.muted)} className={cn(TOOL, look, devices && BESIDE_ARROW)}>
         {silent ? <MicrophoneMute /> : <Microphone />}
       </button>
     </ShortcutTooltip>
+  );
+  if (!devices) return tool;
+  return (
+    <span className="flex">
+      {tool}
+      <MicrophoneMenu huddle={huddle} className={cn(TOOL, look, ARROW)} />
+    </span>
   );
 }
 
 /**
  * Turns the tab's camera on in its huddle, which has the browser ask for it the first time, or off.
- * While an administrator has cameras off there's none to turn on, so it's there only to turn off one
- * that's on still.
+ * Its arrow chooses the camera. While an administrator has cameras off there's none to turn on or to
+ * choose, so it's there only to turn off one that's on still.
  */
-export function CameraTool({ huddle, className }: { huddle: JoinedHuddle; className?: string }) {
+export function CameraTool({ huddle, devices = false, className }: ToolProps) {
   const allowed = useCamerasAllowed();
   const on = huddle.camera !== null;
   if (!allowed && !on) return null;
   const label = on ? "Turn off camera" : "Turn on camera";
-  return (
-    <button type="button" title={label} aria-label={label} onClick={() => showHuddleCamera(!on)} className={cn(TOOL, on ? TOOL_ON : TOOL_OFF, className)}>
+  const look = on ? TOOL_ON : TOOL_OFF;
+  const chooses = devices && allowed;
+  const tool = (
+    <button type="button" title={label} aria-label={label} onClick={() => showHuddleCamera(!on)} className={cn(TOOL, look, chooses && BESIDE_ARROW, className)}>
       {on ? <VideoCamera /> : <VideoCameraOff />}
     </button>
+  );
+  if (!chooses) return tool;
+  return (
+    <span className="flex">
+      {tool}
+      <CameraMenu huddle={huddle} className={cn(TOOL, look, ARROW)} />
+    </span>
   );
 }
 
