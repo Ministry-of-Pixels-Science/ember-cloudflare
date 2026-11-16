@@ -7,9 +7,11 @@ import {
   HUDDLE_FAILED,
   HUDDLE_TRACK_KINDS,
   HuddleCloseCode,
+  INVITED_TOO_OFTEN,
   MAX_HUDDLE_CAMERAS,
   MAX_HUDDLE_PEOPLE,
   MAX_HUDDLE_SCREENS,
+  NOBODY_INVITED,
   parseHuddleClientFrame,
   SCREENS_FULL,
   SCREENS_OFF,
@@ -57,6 +59,8 @@ import { acceptAnswer, closeTracks, publishTracks, pullTracks, resizeTracks, Sfu
 //
 // The room tells the Workspace who's in the huddle as they join and leave, and the Workspace tells
 // everyone in the room, in the huddle or not, so their sidebars and the room's header can show it.
+// Someone in the huddle invites others into it through the Workspace too (`huddle.invite`), which
+// knows who's in the room, and has every tab of theirs.
 
 /**
  * The tag on a huddle's sockets, besides the tags a room's own sockets carry. Nobody's id has a colon in
@@ -79,6 +83,10 @@ const APP_KEPT_MS = 30_000;
 
 /** How many of a socket's frames for one of its connections can wait behind the one the SFU is answering. */
 const FRAMES_WAITING = 4;
+
+/** How often a tab may invite people into the huddle in a minute: each time has the Workspace read who of them is in the room. */
+export const INVITES_A_MINUTE = 20;
+const MINUTE_MS = 60_000;
 
 /**
  * The most people one check takes out for being unheard. The SFU is asked about each of them once for
@@ -210,6 +218,8 @@ export interface HuddleAttachment {
   cameras?: Connections;
   /** The pair that carries the screens people share, once the tab has shared its own or watched another's. */
   screens?: Connections;
+  /** How often the tab has invited people into the huddle in the minute that started at `since`, once it has. */
+  inviting?: { since: number; count: number };
   /** Set once the room has closed the socket itself, having told the others whatever they're to hear of it. */
   revoked?: true;
 }
@@ -423,6 +433,8 @@ export class Huddle {
         return this.inTurn(this.receiving, frame.kind, ws, frame.type, () => this.listen(ws, frame.kind, frame.fresh === true, frame.kind === "audio" ? null : (frame.watch ?? []), frame.small === true));
       case "huddle.answer":
         return this.inTurn(this.receiving, frame.kind, ws, frame.type, () => this.answer(ws, frame.kind, frame.sdp));
+      case "huddle.invite":
+        return this.invite(ws, frame.userIds);
     }
   }
 
@@ -537,6 +549,29 @@ export class Huddle {
   private mute(ws: WebSocket, muted: boolean): void {
     if (attachmentOf(ws).muted === muted) return;
     this.broadcast({ type: "huddle.changed", person: personOf(change(ws, (attachment) => ({ ...attachment, muted }))) }, ws);
+  }
+
+  /**
+   * Invites into the huddle the people `ws`'s person names, but for whoever is in it already: the
+   * Workspace tells those of them who are in the room, on every tab they have open. A tab that has
+   * invited people as often as one may in a minute hears that nobody more is, and so does one whose
+   * invitation the Workspace couldn't be given.
+   */
+  private async invite(ws: WebSocket, userIds: UserId[]): Promise<void> {
+    const now = Date.now();
+    const { user, roomId, inviting } = attachmentOf(ws);
+    const minute = inviting && now - inviting.since < MINUTE_MS ? inviting : { since: now, count: 0 };
+    if (minute.count >= INVITES_A_MINUTE) return send(ws, { type: "error", message: INVITED_TOO_OFTEN, failed: "huddle.invite" });
+    change(ws, (attachment) => ({ ...attachment, inviting: { since: minute.since, count: minute.count + 1 } }));
+    const inIt = new Set(this.members().map(({ attachment }) => attachment.user.id));
+    const invited = userIds.filter((userId) => !inIt.has(userId));
+    if (invited.length === 0) return;
+    try {
+      await workspace(this.env).inviteToHuddle(roomId, user.id, invited);
+    } catch (error) {
+      console.warn("Inviting people into a huddle failed:", logged(error));
+      send(ws, { type: "error", message: NOBODY_INVITED, failed: "huddle.invite" });
+    }
   }
 
   /**

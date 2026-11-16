@@ -6,6 +6,7 @@ import {
   HuddleCloseCode,
   MAX_HUDDLE_CAMERAS,
   MAX_HUDDLE_SCREENS,
+  NOBODY_INVITED,
   RELAY_TTL_S,
   SCREENS_FULL,
   SCREENS_OFF,
@@ -3198,6 +3199,47 @@ describe("A huddle's relay", () => {
     await settled();
     expect(reached()).toEqual([DIRECT, DIRECT]);
     expect(room.take()).toEqual([{ type: "huddle.answer", kind: "audio", sdp: "answer to offer:0" }]);
+  });
+});
+
+describe("Whoever a huddle is told to invite", () => {
+  const types = (room: FakeSocket) => room.take().map(({ type }) => type);
+
+  it("is invited once the room lets the tab into a huddle with nobody else in it, as starting one in a direct message does", async () => {
+    const room = await joined([], { roomId: "direct-1", invite: [grace.id, linus.id] });
+    expect(room.take()).toContainEqual({ type: "huddle.invite", userIds: [grace.id, linus.id] });
+  });
+
+  it("isn't invited into a huddle someone else is in already", async () => {
+    const room = await joined([person(grace)], { roomId: "direct-1", invite: [grace.id, linus.id] });
+    expect(types(room)).not.toContain("huddle.invite");
+  });
+
+  it("is nobody unless the tab is told so, as in a shared room, whose huddle invites no one", async () => {
+    expect(types(await joined())).not.toContain("huddle.invite");
+  });
+
+  it("is invited the once, and not again as the room lets the tab back in after its socket dropped", async () => {
+    const room = await joined([], { invite: [grace.id] });
+    expect(types(room)).toContain("huddle.invite");
+    room.drop();
+    await wait(500);
+    socket().open();
+    expect(types(await welcomed())).not.toContain("huddle.invite");
+  });
+
+  it("is said not to have been when the room couldn't invite anyone, which leaves the huddle as it is", async () => {
+    const said = vi.fn();
+    const stop = hearHuddle(said);
+    const room = await joined([], { invite: [grace.id] });
+    room.take();
+    room.receive({ type: "error", message: NOBODY_INVITED, failed: "huddle.invite" });
+    await settled();
+    expect(said).toHaveBeenCalledExactlyOnceWith(NOBODY_INVITED);
+    expect(joinedHuddle()).toMatchObject({ connected: true });
+    expect(room.take()).toEqual([]);
+    expect(FakeConnection.all).toHaveLength(1);
+    stop();
   });
 });
 

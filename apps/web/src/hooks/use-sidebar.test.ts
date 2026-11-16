@@ -412,6 +412,24 @@ describe("Huddles in your rooms", () => {
     socket().receive({ type: "room.huddle", roomId: design.id, huddle: null });
     expect(result.current.list?.huddles).toEqual({ [general.id]: { ...huddle, userIds: [ada.id] } });
   });
+
+  it("tells of each invitation into a huddle the workspace socket brings, when it came, and of each that's answered", async () => {
+    const onInvitation = vi.fn();
+    const { result } = renderHook(() => useSidebar(ada, () => {}, undefined, undefined, undefined, onInvitation));
+    await settle();
+    socket().connect();
+    await settle();
+    const shown = result.current.list;
+
+    vi.setSystemTime("2026-11-16T09:00:00.000Z");
+    socket().receive({ type: "huddle.invited", roomId: "direct-1", by: grace.id });
+    expect(onInvitation).toHaveBeenCalledExactlyOnceWith({ type: "invited", roomId: "direct-1", by: grace.id, at: Date.parse("2026-11-16T09:00:00.000Z") });
+    socket().receive({ type: "huddle.answered", roomId: "direct-1" });
+    expect(onInvitation).toHaveBeenLastCalledWith({ type: "over", roomId: "direct-1" });
+    expect(onInvitation).toHaveBeenCalledTimes(2);
+    // Neither changes the rooms listed.
+    expect(result.current.list).toBe(shown);
+  });
 });
 
 describe("Make or revoke administrators", () => {

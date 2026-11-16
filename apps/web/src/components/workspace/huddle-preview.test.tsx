@@ -1,5 +1,5 @@
-import type { DirectoryUser, LiveHuddle, Me, SharedRoom } from "@ember/protocol";
-import { CAMERAS_OFF } from "@ember/protocol/huddles";
+import type { DirectoryUser, DirectRoom, LiveHuddle, Me, Room, SharedRoom } from "@ember/protocol";
+import { CAMERAS_OFF, MAX_HUDDLE_INVITED } from "@ember/protocol/huddles";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
@@ -16,7 +16,13 @@ vi.mock("@/lib/huddle", () => ({ joinHuddle: vi.fn() }));
 const general: SharedRoom = { id: "general", name: "general", kind: "open", icon: null };
 const ada: Me = { id: "ada", name: "Ada Lovelace", administrator: false };
 const person = (id: string, name: string): DirectoryUser => ({ id, name, bio: null, role: "member", status: "active", avatarUrl: `/users/${id}/avatar` });
-const PEOPLE = new Map([person("sam", "Sam Rivera"), person("priya", "Priya Patel"), person("ada", "Ada Lovelace")].map((listed) => [listed.id, listed]));
+/** A bot that posts the deploys, as the people directory lists it. */
+const DEPLOYS: DirectoryUser = { ...person("deploys", "Deploys"), role: "bot" };
+/** Someone who was deactivated, and is still in the direct messages they were in. */
+const GRACE: DirectoryUser = { ...person("grace", "Grace Hopper"), status: "deactivated" };
+const PEOPLE = new Map([person("sam", "Sam Rivera"), person("priya", "Priya Patel"), person("ada", "Ada Lovelace"), DEPLOYS, GRACE].map((listed) => [listed.id, listed]));
+/** Ada's direct message with `others`, who are named here as they were when it started. */
+const directWith = (...others: string[]): DirectRoom => ({ id: "direct-1", kind: "direct", members: ["ada", ...others].map((id) => ({ id, name: `Was ${id}` })), activeAt: "2026-11-10T09:00:00.000Z" });
 const huddleOf = (...userIds: string[]): LiveHuddle => ({ startedAt: "2026-11-10T09:00:00.000Z", userIds });
 
 /** A microphone's track, or a camera's, as much of one as the preview and the tests read. */
@@ -131,20 +137,20 @@ afterEach(() => {
 /** A browser that can play through a speaker it's told, as Chrome and Firefox can. */
 const withSpeakerChoice = () => Object.defineProperty(HTMLMediaElement.prototype, "setSinkId", { value: vi.fn(), configurable: true });
 
-function renderPreview(live?: LiveHuddle) {
+function renderPreview(live?: LiveHuddle, room: Room = general) {
   const onClose = vi.fn();
   const user = userEvent.setup();
   const view = render(
     <PeopleContext value={PEOPLE}>
-      <HuddlePreview room={general} me={ada} live={live} onClose={onClose} />
+      <HuddlePreview room={room} me={ada} live={live} onClose={onClose} />
     </PeopleContext>,
   );
   return { onClose, user, ...view };
 }
 
 /** The preview once the browser has answered for the microphone. */
-async function openedPreview(live?: LiveHuddle) {
-  const shown = renderPreview(live);
+async function openedPreview(live?: LiveHuddle, room?: Room) {
+  const shown = renderPreview(live, room);
   await waitFor(() => expect(screen.getByRole("status")).toBeEmptyDOMElement());
   return shown;
 }
@@ -208,7 +214,8 @@ describe("Starting a huddle", () => {
   it("starts the huddle with the microphone it has open, which the huddle closes from then on", async () => {
     const { onClose, user, unmount } = await openedPreview();
     await user.click(screen.getByRole("button", { name: "Start Huddle" }));
-    expect(joinHuddle).toHaveBeenCalledExactlyOnceWith({ roomId: "general", muted: false, microphone: media.opened[0], camera: null, speakerId: "" });
+    // A shared room's huddle invites nobody: everyone in the room can see it's going on.
+    expect(joinHuddle).toHaveBeenCalledExactlyOnceWith({ roomId: "general", muted: false, microphone: media.opened[0], camera: null, speakerId: "", invite: [] });
     expect(onClose).toHaveBeenCalledTimes(1);
     unmount();
     expect(media.opened[0]!.track.stopped).toBe(false);
@@ -230,7 +237,7 @@ describe("Starting a huddle", () => {
     expect(screen.getByRole("button", { name: "Unmute microphone" })).toBeDisabled();
     expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Start Huddle" }));
-    expect(joinHuddle).toHaveBeenCalledExactlyOnceWith({ roomId: "general", muted: false, microphone: null, camera: null, speakerId: "" });
+    expect(joinHuddle).toHaveBeenCalledExactlyOnceWith({ roomId: "general", muted: false, microphone: null, camera: null, speakerId: "", invite: [] });
   });
 
   it.each(["Cancel", "the × in its corner", "Escape"])("closes the microphone when it's left by %s", async (way) => {
@@ -376,7 +383,7 @@ describe("A huddle's camera", () => {
   it("starts the huddle with the camera it has open, which the huddle closes from then on", async () => {
     const { user, unmount } = await previewWithCamera();
     await user.click(screen.getByRole("button", { name: "Start Huddle" }));
-    expect(joinHuddle).toHaveBeenCalledExactlyOnceWith({ roomId: "general", muted: false, microphone: media.opened[0], camera: media.opened[1], speakerId: "" });
+    expect(joinHuddle).toHaveBeenCalledExactlyOnceWith({ roomId: "general", muted: false, microphone: media.opened[0], camera: media.opened[1], speakerId: "", invite: [] });
     unmount();
     expect(media.opened[1]!.track.stopped).toBe(false);
   });
@@ -605,5 +612,47 @@ describe("Joining a huddle", () => {
     unmount();
     await openedPreview(huddleOf("sam"));
     expect(preview()).toHaveAccessibleDescription("Sam is in it now. Joining it leaves the huddle you're in now.");
+  });
+});
+
+describe("A huddle in a direct message", () => {
+  it("is with the other person in it, whom starting it invites", async () => {
+    const { user } = await openedPreview(undefined, directWith("priya"));
+    expect(preview()).toHaveAccessibleName("Start a huddle with Priya Patel");
+    expect(preview()).toHaveAccessibleDescription("Priya is invited once it starts.");
+    await user.click(screen.getByRole("button", { name: "Start Huddle" }));
+    expect(joinHuddle).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ roomId: "direct-1", invite: ["priya"] }));
+  });
+
+  it("invites everyone else in a group's, but for its bots and whoever can no longer sign in", async () => {
+    const { user } = await openedPreview(undefined, directWith("priya", "deploys", "sam", "grace"));
+    expect(preview()).toHaveAccessibleName("Start a huddle with Priya Patel, Deploys, Sam Rivera, and Grace Hopper");
+    expect(preview()).toHaveAccessibleDescription("Priya and Sam are invited once it starts.");
+    await user.click(screen.getByRole("button", { name: "Start Huddle" }));
+    expect(joinHuddle).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ invite: ["priya", "sam"] }));
+  });
+
+  it("invites as many of a large group's as one invitation names, and says how many", async () => {
+    const others = Array.from({ length: MAX_HUDDLE_INVITED + 1 }, (_, index) => `member-${index}`);
+    const { user } = await openedPreview(undefined, directWith("priya", "sam", ...others));
+    expect(preview()).toHaveAccessibleDescription(`Priya, Sam, Was, and ${MAX_HUDDLE_INVITED - 3} others are invited once it starts.`);
+    await user.click(screen.getByRole("button", { name: "Start Huddle" }));
+    expect(joinHuddle).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ invite: ["priya", "sam", ...others.slice(0, MAX_HUDDLE_INVITED - 2)] }));
+  });
+
+  it("says who's in the one going on, and still names the others for the huddle to invite if it has ended by then", async () => {
+    const { user } = await openedPreview(huddleOf("priya"), directWith("priya"));
+    expect(preview()).toHaveAccessibleName("Join the huddle with Priya Patel");
+    expect(preview()).toHaveAccessibleDescription("Priya is in it now.");
+    await user.click(screen.getByRole("button", { name: "Join Huddle" }));
+    expect(joinHuddle).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ roomId: "direct-1", invite: ["priya"] }));
+  });
+
+  it("invites nobody again when the only person in it moves it here from another tab or device", async () => {
+    const { user } = await openedPreview(huddleOf("ada"), directWith("priya"));
+    expect(preview()).toHaveAccessibleName("Join the huddle with Priya Patel");
+    expect(preview()).toHaveAccessibleDescription("You're in it in another tab or on another device, and joining here leaves it there.");
+    await user.click(screen.getByRole("button", { name: "Join Huddle" }));
+    expect(joinHuddle).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ roomId: "direct-1", invite: [] }));
   });
 });

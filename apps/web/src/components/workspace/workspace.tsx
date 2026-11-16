@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useReducer, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { ASSISTANT_ID, searchOfQuery, startingInvolvement, type Account, type DirectRoom, type Favorites, type Me, type Room, type RoomId, type SidebarRoom, type User } from "@ember/protocol";
 import { CAMERAS_OFF, SCREENS_OFF } from "@ember/protocol/huddles";
 import { useFlash } from "@/components/flash";
@@ -14,7 +14,9 @@ import { useMounted } from "@/hooks/use-mounted";
 import { useReleaseCheck } from "@/hooks/use-release-check";
 import { useSidebar } from "@/hooks/use-sidebar";
 import { agentsToAsk } from "@/lib/agents";
-import { ApiError, dismissInvitation, isSignedOut, startDirect } from "@/lib/api";
+import { answerHuddleInvitation, ApiError, dismissInvitation, isSignedOut, startDirect } from "@/lib/api";
+import { invitationsReducer, NO_INVITATIONS } from "@/lib/huddle-invitations";
+import { hasHuddles } from "@/lib/huddle-people";
 import { hearHuddle, leaveHuddle, muteHuddle, OPEN_HUDDLE, openHuddle, shareHuddleScreen, showHuddleCamera } from "@/lib/huddle-store";
 import { whenIdle } from "@/lib/idle";
 import { opensFind, opensShortcuts, togglesHuddle, togglesMute } from "@/lib/keyboard";
@@ -25,7 +27,7 @@ import { updateOf } from "@/lib/release-check";
 import { markedUnread } from "@/lib/room-list";
 import { cn } from "@/lib/utils";
 import { afterNavigating, messagePath, navigate, pageMark, roomPath, routeOf, useHash, useRoute, useVisit, type Route } from "@/hooks/use-route";
-import { HuddlesContext, NO_HUDDLES, type Huddles } from "./huddle-button";
+import { HuddlesContext, joinsNoHuddle, NO_HUDDLES, type Huddles } from "./huddle-button";
 import { MovedNotice } from "./moved-notice";
 import { KeyboardShortcutsDialog } from "./keyboard-shortcuts-dialog";
 import { NewDirectDialog, startedWithout } from "./new-direct-dialog";
@@ -274,7 +276,9 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
   // The people directory loads again whenever the sidebar does by itself, and follows whoever the
   // workspace socket says has changed.
   const directory = useDirectory();
-  const { list, answered, change: changeRooms, refresh, askForRoom } = useSidebar(me, onSessionChanged, directory, accountHeard, shownRoomGone);
+  // The invitations into huddles that ring in this tab, as the workspace socket brings them and says they're answered.
+  const [invitations, changeInvitations] = useReducer(invitationsReducer, NO_INVITATIONS);
+  const { list, answered, change: changeRooms, refresh, askForRoom } = useSidebar(me, onSessionChanged, directory, accountHeard, shownRoomGone, changeInvitations);
   const [drawerOpen, setDrawerOpen] = useState(false);
   // New direct message, while it's open, with the link that opened it, which gets focus back, or null
   // when its address did.
@@ -361,12 +365,23 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
   const closeHuddlePreview = useCallback(() => setHuddlePreview(null), []);
   const liveHuddles = list?.huddles ?? NO_HUDDLES;
   const huddles = useMemo<Huddles>(() => ({ live: liveHuddles, preview: setHuddlePreview }), [liveHuddles]);
-  // Only a room that's still this person's, and only while huddles are on, has a preview to show.
-  const previewedRoom = huddlePreview !== null && huddlesOn ? rooms?.find((r) => r.id === huddlePreview) : undefined;
-  const previewed = previewedRoom?.kind === "direct" ? undefined : previewedRoom;
+  // Whether a room has huddles, once they're on: any shared room, and a direct message with someone to huddle with.
+  const offersHuddle = (r: Room) => huddlesOn && hasHuddles(r, me.id, (user) => joinsNoHuddle(user, directory.people.get(user.id)));
+  // Only a room that's still this person's, and only while it has huddles, has a preview to show.
+  const previewedRoom = huddlePreview !== null ? rooms?.find((r) => r.id === huddlePreview) : undefined;
+  const previewed = previewedRoom && offersHuddle(previewedRoom) ? previewedRoom : undefined;
   useEffect(() => {
     if (huddlePreview !== null && rooms !== null && !previewed) setHuddlePreview(null);
   }, [huddlePreview, rooms, previewed]);
+  // An invitation rings until this tab sees it has no more reason to: huddles are off, its room is no
+  // longer this person's, they're in its huddle, here or elsewhere, or the huddle is over.
+  const roomIds = useMemo(() => (rooms ? new Set(rooms.map(({ id }) => id)) : null), [rooms]);
+  const joinedRoomId = huddle?.roomId ?? null;
+  useEffect(() => {
+    changeInvitations({ type: "seen", on: huddlesOn, meId: me.id, roomIds, live: liveHuddles, joinedRoomId });
+  }, [invitations, huddlesOn, me.id, roomIds, liveHuddles, joinedRoomId]);
+  // Someone in a huddle already, in this tab or anywhere else, is shown an invitation without its ring.
+  const inAHuddle = huddle !== null || Object.values(liveHuddles).some(({ userIds }) => userIds.includes(me.id));
 
   const flash = useFlash();
   const mounted = useMounted();
@@ -426,6 +441,27 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
       failed(error);
     },
     [failed],
+  );
+  const invitationOver = useCallback((roomId: RoomId) => changeInvitations({ type: "over", roomId }), []);
+  // An invitation answered stops ringing here at once, and in this person's other tabs once the Workspace
+  // has heard, where one it never hears of rings on until it gives up.
+  const answerInvitation = useCallback(
+    (roomId: RoomId) => {
+      invitationOver(roomId);
+      answerHuddleInvitation(roomId).catch((error: unknown) => isSignedOut(error) && failed(error));
+    },
+    [invitationOver, failed],
+  );
+  // Joining goes by the huddle's preview, as it does from the room, so a click on an invitation that
+  // has just come opens no microphone. A room the list doesn't have, as one made while this tab wasn't
+  // connected, has its preview once the list asked for again has come.
+  const joinInvited = useCallback(
+    (roomId: RoomId) => {
+      answerInvitation(roomId);
+      if (roomIds?.has(roomId) ?? true) return setHuddlePreview(roomId);
+      refresh().then(() => mounted.current && setHuddlePreview(roomId), failed);
+    },
+    [answerInvitation, roomIds, refresh, failed, mounted],
   );
   const agentsListFailed = useCallback(
     (error: unknown) => {
@@ -618,7 +654,7 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
     if (togglesMute(event) && huddle) return pressed(() => muteHuddle(!huddle.muted));
     if (!togglesHuddle(event) || (event.target instanceof Element && event.target.closest("[role=dialog]"))) return;
     if (huddle) return pressed(leaveHuddle);
-    if (!huddlesOn || !room || room.kind === "direct" || goneRoom) return;
+    if (!room || !offersHuddle(room) || goneRoom) return;
     pressed(() => setHuddlePreview(room.id));
   });
   // Cmd+/ or Ctrl+/ opens the keyboard shortcuts: from the composer too, which has no
@@ -642,7 +678,7 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
   // becomes the room's, so that loading the page again, or coming back to it, doesn't offer it again.
   const followHuddleLink = useEffectEvent((room: Room) => {
     if (!huddlesOn) flash("alert", "Huddles are turned off.");
-    else if (room.kind !== "direct" && huddle?.roomId !== room.id) setHuddlePreview(room.id);
+    else if (offersHuddle(room) && huddle?.roomId !== room.id) setHuddlePreview(room.id);
     navigate(roomPath(room.id), { replace: true });
     if (huddle?.roomId === room.id) opensHuddle.current = pageMark();
   });
@@ -899,6 +935,22 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
             <MovedNotice />
             <UpdatedNotice />
           </Notices>
+          {huddlesOn && invitations.length > 0 && (
+            <RarePage
+              show={({ HuddleInvitations }) => (
+                <HuddleInvitations
+                  invitations={invitations}
+                  rooms={rooms ?? NO_ROOMS}
+                  quiet={inAHuddle}
+                  onJoin={joinInvited}
+                  onDecline={answerInvitation}
+                  onUnanswered={invitationOver}
+                />
+              )}
+              loading={null}
+              onFailed={failed}
+            />
+          )}
           {newDirect && (
             <NewDirectDialog
               opener={newDirect.opener}

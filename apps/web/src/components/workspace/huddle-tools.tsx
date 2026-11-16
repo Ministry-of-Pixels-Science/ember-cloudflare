@@ -5,6 +5,7 @@ import { useCamerasAllowed, useScreensAllowed } from "@/hooks/use-account";
 import { useNameOf } from "@/hooks/use-directory";
 import { roomName } from "@/lib/directs";
 import { listDevices, sharesScreens, watchDevices } from "@/lib/huddle-devices";
+import { huddlePlace } from "@/lib/huddle-people";
 import { leaveHuddle, muteHuddle, shareHuddleScreen, showHuddleCamera, switchHuddleCamera, type JoinedHuddle } from "@/lib/huddle-store";
 import { muteShortcut } from "@/lib/keyboard";
 import { cn } from "@/lib/utils";
@@ -24,10 +25,14 @@ const ARROW = "min-w-6 rounded-l-none border-l border-background max-md:hidden [
 /** What a phone has in the camera's arrow's place. */
 const IN_ARROWS_PLACE = "md:hidden";
 
-/** What the tab's huddle is called, on its bar and opened: by its room, or just Huddle once the room isn't among this person's. */
+/**
+ * What the tab's huddle is called, on its bar and opened: by its room, "Huddle in Launch", by who it's
+ * with in a direct message, "Huddle with Priya Patel", or just Huddle once the room isn't among this
+ * person's.
+ */
 export function useHuddleName(room: Room | null, meId: UserId): string {
   const nameOf = useNameOf();
-  return room ? `Huddle in ${roomName(room, meId, nameOf)}` : "Huddle";
+  return room ? `Huddle ${huddlePlace(room, roomName(room, meId, nameOf))}` : "Huddle";
 }
 
 /** What a huddle says in place of who's in it, until the room has let the tab in, and while its connection to the room is down. */

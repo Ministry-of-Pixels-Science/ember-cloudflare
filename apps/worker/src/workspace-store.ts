@@ -1556,6 +1556,14 @@ const KEEP_REPORT_TIME = `UPDATE rooms SET huddle_reported_at = ?2 WHERE id = ?1
 /** When the report kept of a room's huddle was made. */
 const HUDDLE_REPORTED_AT = `SELECT huddle_reported_at FROM rooms WHERE id = ?`;
 
+/**
+ * Who of the people a JSON list ?2 names an invitation into room ?1's huddle reaches: those in the room,
+ * active, who hear its @mentions of them or more, since an invitation names them as a mention does.
+ */
+export const HUDDLE_INVITEES = `SELECT memberships.user_id FROM memberships JOIN users ON users.id = memberships.user_id
+  WHERE memberships.room_id = ?1 AND memberships.user_id IN (SELECT value FROM json_each(?2))
+    AND memberships.involvement IN ('everything', 'mentions') AND users.status = ${ACTIVE}`;
+
 /** A room's huddle, as its row keeps it. */
 const HUDDLE = `SELECT huddle_started_at, huddle_user_ids FROM rooms WHERE id = ?`;
 
@@ -3725,6 +3733,11 @@ export class WorkspaceStore {
     ])) as [Array<{ huddle_reported_at: number }>, unknown[], UserIdRow[], unknown[]];
     if (before && before.huddle_reported_at >= at) return { memberIds: null, outdatedBy: before.huddle_reported_at };
     return { memberIds: changed.length > 0 ? userIdsOf(members) : null, outdatedBy: null };
+  }
+
+  /** Who of `userIds` an invitation into room `roomId`'s huddle reaches: those in the room who hear its @mentions of them or more. */
+  async huddleInvitees(roomId: RoomId, userIds: UserId[]): Promise<UserId[]> {
+    return userIdsOf(await this.db.all<UserIdRow>(HUDDLE_INVITEES, roomId, JSON.stringify(userIds)));
   }
 
   /** The huddle going on in a room, or null when none is. */

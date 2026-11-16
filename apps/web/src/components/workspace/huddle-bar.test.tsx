@@ -139,9 +139,9 @@ describe("The huddle bar", () => {
     expect(bar()).toHaveAccessibleName("Huddle");
   });
 
-  it("names a DM by the others in it", () => {
+  it("names a DM's by who it's with", () => {
     renderBar(huddle(), { id: "direct-1", kind: "direct", members: [ada, priya], activeAt: "2026-11-10T09:00:00.000Z" });
-    expect(bar()).toHaveAccessibleName("Huddle in Priya Patel");
+    expect(bar()).toHaveAccessibleName("Huddle with Priya Patel");
   });
 
   it("shows the first four faces, named as the directory has them now", () => {

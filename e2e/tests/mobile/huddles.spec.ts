@@ -1,13 +1,15 @@
-import type { LiveHuddle, User } from "@ember/protocol";
+import type { DirectRoom, LiveHuddle, Sidebar, SidebarRoom, User } from "@ember/protocol";
 import type { HuddleClientFrame, HuddleServerFrame } from "@ember/protocol/huddles";
-import type { Page } from "@playwright/test";
-import { changeTheWorkspace, huddleTilesKeepClear, isolateRoom, listing, openRoom, signInAs, type TestRoom } from "../../fixtures";
+import type { APIRequestContext, Page } from "@playwright/test";
+import { changeTheWorkspace, cookieHeader, editorField, huddleTilesKeepClear, isolateRoom, listing, openRoom, signInAs, type Session, type Tells, type TestRoom } from "../../fixtures";
+import { auditScreen } from "./audits";
 import { expect, hasDrawerLayout, test } from "./fixtures";
 
-// A room's huddle on a phone: its button in the room's header, the preview it starts from, and the
-// huddle the tab is in, opened and as its bar, which switches between the phone's cameras and keeps its
-// screen awake. The main test server has no huddles, whose keys Cloudflare would be asked about, so
-// these pages are told that huddles are on, and the huddle a tab joins is the test's own.
+// A huddle on a phone: its button in the header of a room or a DM, the preview it starts from, the
+// invitation into one, and the huddle the tab is in, opened and as its bar, which switches between the
+// phone's cameras and keeps its screen awake. The main test server has no huddles, whose keys
+// Cloudflare would be asked about, so these pages are told that huddles are on, and the huddle a tab
+// joins is the test's own.
 
 /** A huddle's socket, for `page.routeWebSocket`. */
 const HUDDLE_SOCKET = /\/api\/rooms\/[^/]+\/huddle/;
@@ -25,12 +27,34 @@ test.beforeEach(async ({ page, session }) => {
 
 /**
  * Opens `room`, the only one its page lists, on a page told that huddles are on wherever the server
- * says whether they are, and that `huddle`, given one, is going on in the room.
+ * says whether they are, and that `huddle`, given one, is going on in the room. Answers how to tell the
+ * page what the Workspace would.
  */
-async function openRoomWithHuddlesOn(page: Page, room: TestRoom, huddle?: LiveHuddle): Promise<void> {
+async function openRoomWithHuddlesOn(page: Page, room: TestRoom, huddle?: LiveHuddle): Promise<Tells> {
   await isolateRoom(page, room, { huddle });
-  await changeTheWorkspace(page, (account) => ({ ...account, huddles: true }), listing([room.id]));
+  const tell = await changeTheWorkspace(page, (account) => ({ ...account, huddles: true }), listing([room.id]));
   await openRoom(page, room);
+  return tell;
+}
+
+/**
+ * Opens the DM `session`'s person has with `other`, which its page lists after `room`, on a page told
+ * that huddles are on, and that `huddle`, given one, is going on in the DM.
+ */
+async function openDirectWithHuddlesOn(page: Page, request: APIRequestContext, room: TestRoom, session: Session, other: User, huddle?: LiveHuddle): Promise<void> {
+  const started = await request.post("/api/directs", { data: { userIds: [other.id] }, headers: { Cookie: cookieHeader(session) } });
+  expect(started.status(), await started.text()).toBe(201);
+  const { room: direct } = (await started.json()) as { room: DirectRoom };
+  const rooms: SidebarRoom[] = [
+    { ...room, kind: "open", icon: null, unread: false, involvement: "mentions" },
+    { ...direct, unread: false, involvement: "everything" },
+  ];
+  await page.route("**/api/sidebar", (route) =>
+    route.fulfill({ json: { rooms, favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: huddle ? { [direct.id]: huddle } : {} } satisfies Sidebar }),
+  );
+  await changeTheWorkspace(page, (account) => ({ ...account, huddles: true }), listing([room.id]));
+  await page.goto(`/rooms/${direct.id}`);
+  await expect(page.getByRole("log", { name: `Messages with ${other.name}` })).not.toHaveAttribute("aria-busy");
 }
 
 /** The room's header. */
@@ -183,6 +207,80 @@ test("the sidebar's row of a room with a huddle going on, which ends with who's 
   await expect(mark.getByText("3", { exact: true })).toBeVisible();
   expect((await row.getByText(room.name, { exact: true }).boundingBox())!.width).toBeGreaterThan(40);
   await screenIsFine();
+});
+
+test("a DM's huddle button fits the phone, and so does its row in the sidebar, which ends with who's in its huddle", async ({ page, request, room, session, participant, screenIsFine }) => {
+  // With someone whose name is long, who's in the DM's huddle.
+  const grace = (await participant("Grace Brewster Murray Hopper, Rear Admiral")).session.user;
+  await openDirectWithHuddlesOn(page, request, room, session, grace, { startedAt: new Date().toISOString(), userIds: [grace.id] });
+  await expect(header(page).getByRole("button", { name: "Join huddle, 1 in it" })).toBeVisible();
+  // Under 430px the header has no room for Search as well, as a room's hasn't, and her name keeps its first few letters.
+  await expect(header(page).getByRole("link", { name: "Search messages" })).toBeVisible({ visible: page.viewportSize()!.width >= 430 });
+  expect((await header(page).getByRole("heading", { level: 1 }).boundingBox())!.width).toBeGreaterThan(40);
+  await screenIsFine();
+
+  if (hasDrawerLayout(page)) await page.getByRole("button", { name: "Open conversations" }).tap();
+  const row = page.getByRole("region", { name: "DMs" }).getByRole("link", { name: `Direct message with ${grace.name}`, exact: true });
+  const mark = row.locator("[title]");
+  await expect(mark).toHaveAttribute("title", "Grace is in the huddle");
+  // Her face, the headphones and how many are in it, with her name before them.
+  await expect(mark.locator("img")).toHaveCount(1);
+  await expect(mark.getByText("1", { exact: true })).toBeVisible();
+  expect((await row.getByText(grace.name).boundingBox())!.width).toBeGreaterThan(40);
+  await screenIsFine();
+});
+
+test("an invitation into a huddle fits the phone, under the header of the page it came to, with Decline and Join easy to tap", async ({ page, room, participant, screenIsFine }) => {
+  // From someone whose name is long, into a room's huddle, which is the longer an invitation says.
+  const grace = (await participant("Grace Brewster Murray Hopper, Rear Admiral")).session.user;
+  const tell = await openRoomWithHuddlesOn(page, room);
+  tell({ type: "huddle.invited", roomId: room.id, by: grace.id });
+  const invitation = page.getByRole("group", { name: `${grace.name} invites you to a huddle in ${room.name}`, exact: true });
+  await expect(invitation).toBeInViewport({ ratio: 1 });
+  const [under, shown] = [(await header(page).boundingBox())!, (await invitation.boundingBox())!];
+  expect(shown.y).toBeGreaterThanOrEqual(under.y + under.height);
+  await screenIsFine();
+  // What's beside it is the page's still, where a tap goes through to it.
+  await editorField(page, "Write a message").tap({ trial: true });
+
+  await invitation.getByRole("button", { name: "Decline", exact: true }).tap();
+  await expect(invitation).toHaveCount(0);
+});
+
+test("more invitations than the phone is tall enough for are a scroll away, under the header, whose buttons stay in reach", async ({ page, room, participant, safeArea }) => {
+  const grace = (await participant("Grace Hopper")).session.user;
+  // Into rooms of this page's own, more of them than any phone shows at once, the last into the room it has open.
+  const names = Array.from({ length: 8 }, (_, index) => `Launch ${index + 1}`);
+  const others = names.map((name, index): SidebarRoom => ({ id: `invited-${index + 1}`, name, kind: "open", icon: null, unread: false, involvement: "mentions" }));
+  const rooms: SidebarRoom[] = [{ ...room, kind: "open", icon: null, unread: false, involvement: "mentions" }, ...others];
+  await page.route("**/api/sidebar", (route) => route.fulfill({ json: { rooms, favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: {} } satisfies Sidebar }));
+  const tell = await changeTheWorkspace(page, (account) => ({ ...account, huddles: true }), listing([room.id]));
+  await openRoom(page, room);
+  for (const { id } of [...others, room]) tell({ type: "huddle.invited", roomId: id, by: grace.id });
+  const into = (name: string) => page.getByRole("group", { name: `${grace.name} invites you to a huddle in ${name}`, exact: true });
+  await expect(page.getByRole("region", { name: "Huddle invitations" }).getByRole("group")).toHaveCount(rooms.length);
+  const [first, last] = [into(names[0]!), into(room.name)];
+  await expect(first).toBeInViewport({ ratio: 1 });
+  await expect(last).not.toBeInViewport();
+  // They cover the page under them for as long as they ring, so what's asked of the screen leaves out
+  // that each of the page's controls is easy to tap: none of them is cut off where no scrolling reaches.
+  const stacked = await auditScreen(page, safeArea);
+  expect.soft(stacked.overflow, "Nothing is cut off or pushed off the side of the screen").toEqual([]);
+  expect.soft(stacked.safeArea, "Nothing sits under the notch, rounded corners or home indicator").toEqual([]);
+  const startHuddle = header(page).getByRole("button", { name: "Start huddle", exact: true });
+  await startHuddle.tap({ trial: true });
+
+  // A wheel over one scrolls them, as a finger on one does, and under the header, not over it.
+  await first.hover();
+  await page.mouse.wheel(0, 4000);
+  await expect(last).toBeInViewport({ ratio: 1 });
+  await expect(first).not.toBeInViewport();
+  await startHuddle.tap({ trial: true });
+  const scrolled = await auditScreen(page, safeArea);
+  expect.soft(scrolled.overflow, "Nothing is cut off or pushed off the side of the screen").toEqual([]);
+  expect.soft(scrolled.safeArea, "Nothing sits under the notch, rounded corners or home indicator").toEqual([]);
+  await last.getByRole("button", { name: "Decline", exact: true }).tap();
+  await expect(last).toHaveCount(0);
 });
 
 test("the preview a huddle starts from, with its microphone and speaker to choose, and its camera once that's on, fits the phone", async ({ page, room, screenIsFine }) => {

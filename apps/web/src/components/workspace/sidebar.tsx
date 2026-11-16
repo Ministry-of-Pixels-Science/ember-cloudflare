@@ -65,7 +65,7 @@ interface Props {
  * chose: held, the row can be dragged among the other starred rows, or moved with Alt and an arrow
  * (`useStarOrder`). The DMs follow, only the ones they're in, as the project's owner chose, rather than
  * Campfire's people to start one with too, latest active first, and a DM's row shows who else is in it.
- * A room or DM marked unread is bold with a dot at the end of its row, and a room with a huddle going on
+ * A room or DM marked unread is bold with a dot at the end of its row, and one with a huddle going on
  * ends its row with who's in it. With Activity on, only the unread rows show, and with none it says
  * everything's read; with it off and nothing to list, it says it found nothing. Under them all,
  * Available Agents says how many AI agents this person can ask, and opens the list of them, as the
@@ -192,6 +192,7 @@ export function Sidebar({
             meId={meId}
             current={room.id === currentRoomId}
             unreadId={markedUnread(room, currentRoomId) ? unreadId : null}
+            huddle={huddles[room.id]}
             onClick={(event) => select(event, room.id)}
           />
         ))}
@@ -240,9 +241,10 @@ interface HuddleMarkProps {
 }
 
 /**
- * What a room's row ends with while a huddle is going on in it, as Slack's does: the faces of the first
- * two people in it, the headphones and how many are in it, in green. Hovering it says who they are, in
- * the words that follow it, hidden, for the row to say to screen readers, which the mark is hidden from.
+ * What a room's row, or a DM's, ends with while a huddle is going on in it, as Slack's does: the faces
+ * of the first two people in it, the headphones and how many are in it, in green. Hovering it says who
+ * they are, in the words that follow it, hidden, for the row to say to screen readers, which the mark is
+ * hidden from.
  */
 function HuddleMark({ huddle, meId, wordsId, className }: HuddleMarkProps) {
   const people = useContext(PeopleContext);
@@ -275,23 +277,27 @@ interface DirectRowProps {
   current: boolean;
   /** The element saying the DM is unread, when it's marked so, or null. */
   unreadId: string | null;
+  /** The huddle going on in it, if one is. */
+  huddle: LiveHuddle | undefined;
   onClick: (event: MouseEvent) => void;
 }
 
 /**
  * A DM's row: the avatar of the one other person in it, or of up to four in a group, at 24px or 14px
  * each, then their names, or yours in a DM with yourself, and the agent badge in a DM with an AI agent
- * alone.
+ * alone. It ends with who's in its huddle while one is going on, as a room's does.
  */
-function DirectRow({ room, meId, current, unreadId, onClick }: DirectRowProps) {
+function DirectRow({ room, meId, current, unreadId, huddle, onClick }: DirectRowProps) {
   const nameOf = useNameOf();
   const isWithAgent = useIsWithAgent();
   const members = membersShown(room, meId);
+  // The words for who's in its huddle, which come with its mark.
+  const inHuddleId = useId();
   return (
     <a
       href={roomPath(room.id)}
       aria-current={current ? "page" : undefined}
-      aria-describedby={unreadId ?? undefined}
+      aria-describedby={[huddle && inHuddleId, unreadId].filter(Boolean).join(" ") || undefined}
       onClick={onClick}
       className={cn(ROW, unreadId && "font-[650]")}
     >
@@ -310,6 +316,7 @@ function DirectRow({ room, meId, current, unreadId, onClick }: DirectRowProps) {
         <span className="sr-only">Direct message with</span> {members.map((member) => `${nameOf(member)}${member.id === meId ? " (you)" : ""}`).join(", ")}
         {isWithAgent(room) && <AgentBadge className="ms-0.5" />}
       </span>
+      {huddle && <HuddleMark huddle={huddle} meId={meId} wordsId={inHuddleId} />}
       {unreadId && <span aria-hidden="true" className="size-[7px] shrink-0 rounded-full bg-foreground" />}
     </a>
   );

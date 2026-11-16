@@ -1812,6 +1812,29 @@ export class Workspace extends DurableObject<Env> {
   }
 
   /**
+   * Invites into room `roomId`'s huddle the people `userIds` names, as the room says `by`, who's in it,
+   * does: each of them who's in the room, and hears its @mentions of them or more, is told on every tab
+   * they have open, where it rings. Nobody else is told, so nobody hears of a room they aren't in, and
+   * nothing is kept of an invitation: one that reaches no tab is lost.
+   */
+  async inviteToHuddle(roomId: RoomId, by: UserId, userIds: UserId[]): Promise<void> {
+    this.tell(await this.store.huddleInvitees(roomId, userIds), { type: "huddle.invited", roomId, by });
+  }
+
+  /**
+   * The person `credentials` signs in has answered an invitation into room `roomId`'s huddle, joining
+   * from it or declining it: every tab of theirs hears so, and rings no longer. Nothing is kept of an
+   * invitation, so there's none to check this against, and they alone hear of it. Answers whether they
+   * did, which they can't without a valid session.
+   */
+  async answerHuddleInvitation(credentials: Credentials, roomId: RoomId): Promise<boolean> {
+    const user = await this.authenticate(credentials);
+    if (!user) return false;
+    this.tell([user.id], { type: "huddle.answered", roomId });
+    return true;
+  }
+
+  /**
    * Turns Ember AI on as the person `credentials` signs in, asking AI Gateway as `chosen` says, which the
    * Worker has had the model answer a test question with, its API token sealed under SESSION_SECRET
    * (`seal`), or changes it while it's on, or turns it off with null, answering Ember AI as the AI
