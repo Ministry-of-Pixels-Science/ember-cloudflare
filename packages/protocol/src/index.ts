@@ -2214,8 +2214,6 @@ const MAILBOX_ADDRESS =
 
 /** Whether `address` is an email address Ember can send from or to, as `MAILBOX_ADDRESS` has them, no longer than Ember keeps. */
 export const isEmailAddress = (address: string) => address.length <= MAX_EMAIL_ADDRESS_LENGTH && MAILBOX_ADDRESS.test(address);
-/** A name, in quotes or not, then an address in angle brackets. */
-const NAMED_MAILBOX = /^(.*?)\s*<([^<>]*)>$/s;
 /** What a From line's name can't hold: line breaks and other control characters, quotes, backslashes and angle brackets. */
 const NOT_IN_A_NAME = /[\u0000-\u001f\u007f"\\<>]/;
 /** What has a From line put its name in quotes, since the line's syntax would read it otherwise. */
@@ -2225,16 +2223,28 @@ const QUOTED_IN_A_NAME = /[()[\]:;@,.]/;
 export const EMAIL_FROM_REFUSED = "From must be an email address, such as ember@example.com, or a name and one, such as Ember <ember@example.com>";
 
 /**
+ * The name, in quotes or not, and the address in angle brackets that `typed` ends with, each as typed,
+ * or null when it isn't written so. Split at its last "<" rather than by a pattern, which would try
+ * every place the name could end, and so take a long run of spaces the square of its length to refuse.
+ */
+function namedMailboxOf(typed: string): { name: string; address: string } | null {
+  const open = typed.lastIndexOf("<");
+  if (open === -1 || !typed.endsWith(">")) return null;
+  const address = typed.slice(open + 1, -1);
+  return address.includes(">") ? null : { name: typed.slice(0, open), address };
+}
+
+/**
  * The mailbox `text` gives, as an administrator types a From address: an email address, or a name, in
  * quotes or not, and an address in angle brackets. Null for anything else, as for an address Ember can't
  * send from, or a name a From line can't hold.
  */
 export function mailboxOf(text: string): Mailbox | null {
   const typed = text.trim();
-  const named = NAMED_MAILBOX.exec(typed);
-  const given = named?.[1]?.trim() ?? "";
+  const named = namedMailboxOf(typed);
+  const given = named?.name.trim() ?? "";
   const name = /^".*"$/s.test(given) ? given.slice(1, -1).trim() : given;
-  const address = named ? named[2]!.trim() : typed;
+  const address = named ? named.address.trim() : typed;
   if (!isEmailAddress(address)) return null;
   if (name.length > MAX_USER_NAME_LENGTH || NOT_IN_A_NAME.test(name)) return null;
   return { name: name || null, address };

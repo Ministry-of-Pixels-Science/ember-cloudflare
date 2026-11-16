@@ -625,6 +625,14 @@ describe("Sending email", () => {
     expect(mailboxOf(text)).toBeNull();
   });
 
+  it("reads a From address with a long run of spaces in the time it takes to read it once", () => {
+    const spaces = " ".repeat(1_000_000);
+    // Minutes, were each place the name could end tried against the spaces after it.
+    expect(mailboxOf(`a${spaces}a`)).toBeNull();
+    expect(parseAccountChanges({ emailFrom: `a${spaces}a` })).toBe(EMAIL_FROM_REFUSED);
+    expect(mailboxOf(`Ember${spaces}<${spaces}ember@example.com${spaces}>`)).toEqual({ name: "Ember", address: "ember@example.com" });
+  });
+
   it("writes a From address with its name in quotes where a From line needs them", () => {
     expect(mailboxText({ name: null, address: "ember@example.com" })).toBe("ember@example.com");
     expect(mailboxText({ name: "Ember", address: "ember@example.com" })).toBe("Ember <ember@example.com>");
