@@ -71,9 +71,10 @@ export async function openCamera(deviceId: string | null): Promise<MediaStream |
   }
 }
 
-/** What someone in a huddle is told once the browser won't open the microphone, or the camera, they chose in place of theirs. */
+/** What someone in a huddle is told once the browser won't open the microphone, or the camera, they chose in place of theirs, or play through the speaker they chose. */
 export const NO_OTHER_MICROPHONE = "Ember couldn't use that microphone. Nothing has changed.";
 export const NO_OTHER_CAMERA = "Ember couldn't use that camera. Nothing has changed.";
+export const NO_OTHER_SPEAKER = "Ember couldn't use that speaker. Nothing has changed.";
 /** And what someone who only listens in one is told once the browser has no microphone for them still. */
 export const STILL_NO_MICROPHONE = "Ember has no microphone to use. To speak, let this site use your microphone in your browser's settings, then choose it again.";
 

@@ -13,7 +13,7 @@ import {
   type OfferedHuddleTrack,
 } from "@ember/protocol/huddles";
 import { socketUrl } from "./api";
-import { cameraOf, closeDevice, microphoneOf, NO_CAMERA, NO_OTHER_CAMERA, NO_OTHER_MICROPHONE, NO_SCREEN, openCamera, openMicrophone, openScreen, rememberDevice, rememberedDevice, STILL_NO_MICROPHONE } from "./huddle-devices";
+import { cameraOf, closeDevice, microphoneOf, NO_CAMERA, NO_OTHER_CAMERA, NO_OTHER_MICROPHONE, NO_OTHER_SPEAKER, NO_SCREEN, openCamera, openMicrophone, openScreen, rememberDevice, rememberedDevice, STILL_NO_MICROPHONE } from "./huddle-devices";
 import { huddleSounds } from "./huddle-sounds";
 import { huddleSpeaker, type HuddleSpeaker } from "./huddle-speaker";
 import { whoSpeaks, type HuddleSpeaking } from "./huddle-speaking";
@@ -585,9 +585,7 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
     setDevice(kind, deviceId) {
       if (kind === "microphone") return void speakThrough(deviceId);
       if (kind === "camera") return void showThrough(deviceId);
-      rememberDevice("speaker", deviceId);
-      speaker.use(deviceId);
-      show({ speakerId: deviceId });
+      void playThrough(deviceId);
     },
   };
 
@@ -632,6 +630,18 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
     show({ microphone: true, microphoneId: microphoneOf(opened) });
     // A tab the room has yet to let in, or let back in, publishes it with the room's welcome.
     if (huddle.connected) void sending.audio.swap();
+  }
+
+  /**
+   * Plays the huddle through another speaker, which this browser's next huddle starts with, once the
+   * browser plays through it. One it won't play through changes nothing, which the tab's person is told.
+   */
+  async function playThrough(deviceId: string) {
+    const played = await speaker.use(deviceId);
+    if (over) return;
+    if (!played) return tellOfHuddle(NO_OTHER_SPEAKER);
+    rememberDevice("speaker", deviceId);
+    show({ speakerId: deviceId });
   }
 
   /** Turns the camera on: asks the browser for one, which asks the person the first time, and shows it. */

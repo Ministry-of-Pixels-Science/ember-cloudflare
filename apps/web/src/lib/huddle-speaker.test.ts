@@ -6,9 +6,10 @@ const settled = () => new Promise((resolve) => setTimeout(resolve));
 const audio = () => document.createElement("audio");
 const box = () => document.querySelector<HTMLElement>("[data-huddle-voices]");
 
-/** A browser that can choose a speaker, as Safari can't: each `<audio>` says the one it was last told to play through. */
-function choosesSpeakers() {
+/** A browser that can choose a speaker, as Safari can't: each `<audio>` says the one it was last told to play through, which is never `refused`. */
+function choosesSpeakers(refused?: string) {
   const setSinkId = vi.fn(async function (this: HTMLMediaElement, deviceId: string) {
+    if (deviceId === refused) throw new DOMException("Refused", "NotAllowedError");
     Object.defineProperty(this, "sinkId", { configurable: true, value: deviceId });
   });
   Object.defineProperty(HTMLMediaElement.prototype, "setSinkId", { configurable: true, value: setSinkId });
@@ -198,6 +199,54 @@ describe("Another speaker chosen for a huddle", () => {
     expect(setSinkId.mock.contexts).toEqual([voice, later]);
     speaker.playOnce(sound);
     expect(setSinkId.mock.calls).toEqual([[""], [""], [""]]);
+    speaker.stopAll();
+  });
+
+  it("answers that the huddle plays through it once the browser does, and at once with nothing playing, or in a browser that can't choose a speaker", async () => {
+    const speaker = huddleSpeaker("");
+    speaker.play(audio());
+    await expect(speaker.use("headphones")).resolves.toBe(true);
+
+    const setSinkId = choosesSpeakers();
+    await expect(speaker.use("monitor")).resolves.toBe(true);
+    expect(setSinkId).toHaveBeenCalledExactlyOnceWith("monitor");
+    speaker.stopAll();
+    const idle = huddleSpeaker("");
+    await expect(idle.use("headphones")).resolves.toBe(true);
+    expect(setSinkId).toHaveBeenCalledOnce();
+    idle.stopAll();
+  });
+
+  it("leaves the huddle on the one before when the browser won't play through it, and says so", async () => {
+    const setSinkId = choosesSpeakers("broken");
+    const changeTo = lists("default", "headphones", "broken");
+    const speaker = huddleSpeaker("");
+    const [voice, later] = [audio(), audio()];
+    speaker.play(voice);
+    await expect(speaker.use("headphones")).resolves.toBe(true);
+    setSinkId.mockClear();
+
+    await expect(speaker.use("broken")).resolves.toBe(false);
+    expect(setSinkId.mock.calls).toEqual([["broken"], ["headphones"]]);
+    expect(setSinkId.mock.contexts).toEqual([voice, voice]);
+    // What it plays after goes through the one before, which is the one it follows as it's unplugged.
+    speaker.play(later);
+    expect(setSinkId.mock.calls).toEqual([["broken"], ["headphones"], ["headphones"]]);
+    await changeTo("default", "broken");
+    expect(setSinkId.mock.calls.slice(3)).toEqual([[""], [""]]);
+    speaker.stopAll();
+  });
+
+  it("is the one played through when it's chosen while the browser refuses the one before", async () => {
+    const setSinkId = choosesSpeakers("broken");
+    const speaker = huddleSpeaker("");
+    speaker.play(audio());
+
+    const refused = speaker.use("broken");
+    const taken = speaker.use("headphones");
+    await expect(refused).resolves.toBe(false);
+    await expect(taken).resolves.toBe(true);
+    expect(setSinkId.mock.calls).toEqual([["broken"], ["headphones"]]);
     speaker.stopAll();
   });
 

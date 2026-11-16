@@ -3,9 +3,13 @@ import { listsSpeaker, watchDevices } from "./huddle-devices";
 /** What a browser takes for the person's touch, and lets a sound or a video play from. A tap is one at its click, and not as the finger lands. */
 export const TOUCHES = ["click", "keydown"] as const;
 
-/** Plays `audio` through the speaker `deviceId`, or the system's for none. Safari has no way to choose one, and plays through the system's. */
-function playThrough(audio: HTMLAudioElement, deviceId: string): void {
-  if (typeof audio.setSinkId === "function") void audio.setSinkId(deviceId).catch(() => {});
+/** Plays `audio` through the speaker `deviceId`, or the system's for none, and answers whether the browser would. Safari has no way to choose one, and plays through the system's. */
+async function playThrough(audio: HTMLAudioElement, deviceId: string): Promise<boolean> {
+  if (typeof audio.setSinkId !== "function") return true;
+  return audio.setSinkId(deviceId).then(
+    () => true,
+    () => false,
+  );
 }
 
 /** What a huddle plays its `<audio>`s through: the others' voices, its music and its sounds. */
@@ -16,8 +20,11 @@ export interface HuddleSpeaker {
   stop(audio: HTMLAudioElement): void;
   /** Plays `audio` once, from its start, without the page: a sound that's over before anything could change for it. */
   playOnce(audio: HTMLAudioElement): void;
-  /** Plays through the speaker `deviceId` from now, or the system's when that's empty. */
-  use(deviceId: string): void;
+  /**
+   * Plays through the speaker `deviceId` from now, or the system's when that's empty, and answers
+   * whether the browser would: one it won't play through leaves the huddle on the one before.
+   */
+  use(deviceId: string): Promise<boolean>;
   /** Stops all it plays until stopped, for good. What plays once plays out. */
   stopAll(): void;
 }
@@ -37,16 +44,17 @@ export function huddleSpeaker(speakerId: string): HuddleSpeaker {
   let chosen = speakerId;
   /** The speaker they play through now: the one chosen, or the system's while that's unplugged. */
   let speaker = chosen;
-  const playAllThrough = (deviceId: string) => {
+  const playAllThrough = async (deviceId: string) => {
     speaker = deviceId;
-    for (const audio of playing) playThrough(audio, speaker);
+    const played = await Promise.all([...playing].map((audio) => playThrough(audio, deviceId)));
+    return played.every(Boolean);
   };
   const followSpeaker = async () => {
     const followed = chosen;
     if (!followed) return;
     const listed = await listsSpeaker(followed);
     // Another chosen meanwhile is the one to play through.
-    if (chosen === followed) playAllThrough(listed ? followed : "");
+    if (chosen === followed) void playAllThrough(listed ? followed : "");
   };
   const stopWatching = watchDevices(() => void followSpeaker());
   /**
@@ -54,7 +62,7 @@ export function huddleSpeaker(speakerId: string): HuddleSpeaker {
    * may have played last through a speaker that has been unplugged since, or plugged back in.
    */
   const through = (audio: HTMLAudioElement) => {
-    if ((audio.sinkId ?? "") !== speaker) playThrough(audio, speaker);
+    if ((audio.sinkId ?? "") !== speaker) void playThrough(audio, speaker);
   };
   const playRefused = () => {
     for (const audio of playing) if (audio.paused) void audio.play().catch(() => {});
@@ -83,9 +91,16 @@ export function huddleSpeaker(speakerId: string): HuddleSpeaker {
       // Refused, it plays nothing: by the person's next touch, the moment has passed.
       void audio.play().catch(() => {});
     },
-    use(deviceId) {
+    async use(deviceId) {
+      const [was, through] = [chosen, speaker];
       chosen = deviceId;
-      playAllThrough(deviceId);
+      const played = await playAllThrough(deviceId);
+      // Refused, it's back on the one before, unless another was chosen meanwhile, which is the one to play through.
+      if (!played && chosen === deviceId) {
+        chosen = was;
+        void playAllThrough(through);
+      }
+      return played;
     },
     stopAll() {
       for (const audio of [...playing]) stop(audio);

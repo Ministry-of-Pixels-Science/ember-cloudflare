@@ -15,7 +15,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { audioEngine } from "@/test-audio-engine";
 import { ANSWER_TIMEOUT_MS, CAMERA_BITRATE, joinHuddle, LISTEN_AGAIN_MS, PUBLISH_AGAIN_MS, SCREEN_BITRATE } from "./huddle";
-import { NO_CAMERA, NO_OTHER_CAMERA, NO_OTHER_MICROPHONE, NO_SCREEN, STILL_NO_MICROPHONE } from "./huddle-devices";
+import { NO_CAMERA, NO_OTHER_CAMERA, NO_OTHER_MICROPHONE, NO_OTHER_SPEAKER, NO_SCREEN, STILL_NO_MICROPHONE } from "./huddle-devices";
 import { MUSIC_AFTER_MS } from "./huddle-sounds";
 import { MEASURED_EVERY_MS, SPEAKING_LEVEL } from "./huddle-speaking";
 import { chooseHuddleDevice, hearHuddle, isSpeaking, joinedHuddle, leaveHuddle, muteHuddle, openHuddle, shareHuddleScreen, showHuddleCamera, watchHuddle, watchSpeaking } from "./huddle-store";
@@ -2035,6 +2035,9 @@ describe("Choosing another device in a huddle", () => {
       chooseHuddleDevice("speaker", "headphones");
       expect(setSinkId).toHaveBeenCalledExactlyOnceWith("headphones");
       expect(madeOn(setSinkId)).toEqual([grace.id]);
+      // Shown, and kept for the next huddle, once the browser plays through it.
+      expect(joinedHuddle()).toMatchObject({ speakerId: "" });
+      await settled();
       expect(joinedHuddle()).toMatchObject({ speakerId: "headphones" });
       expect(localStorage.getItem("ember:huddle-speaker")).toBe("headphones");
       await offeredRound(["1", linus]);
@@ -2045,9 +2048,57 @@ describe("Choosing another device in a huddle", () => {
       setSinkId.mockClear();
       chooseHuddleDevice("speaker", "");
       expect(setSinkId.mock.calls).toEqual([[""], [""]]);
+      await settled();
       expect(joinedHuddle()).toMatchObject({ speakerId: "" });
       expect(localStorage.getItem("ember:huddle-speaker")).toBeNull();
     } finally {
+      delete (HTMLMediaElement.prototype as { setSinkId?: unknown }).setSinkId;
+    }
+  });
+
+  it("keeps the speaker it has, and says so, when the browser won't play through the one chosen", async () => {
+    const setSinkId = vi.fn(async (deviceId: string) => {
+      if (deviceId === "monitor") throw new DOMException("Refused", "NotAllowedError");
+    });
+    Object.defineProperty(HTMLMediaElement.prototype, "setSinkId", { configurable: true, value: setSinkId });
+    const said = vi.fn();
+    const stop = hearHuddle(said);
+    try {
+      await joined([person(grace)]);
+      await offeredRound(["0", grace]);
+      chooseHuddleDevice("speaker", "headphones");
+      await settled();
+      setSinkId.mockClear();
+
+      chooseHuddleDevice("speaker", "monitor");
+      await settled();
+      expect(said).toHaveBeenCalledExactlyOnceWith(NO_OTHER_SPEAKER);
+      // Back through the one before, which the huddle shows still, and this browser's next huddle starts with.
+      expect(setSinkId.mock.calls).toEqual([["monitor"], ["headphones"]]);
+      expect(joinedHuddle()).toMatchObject({ speakerId: "headphones" });
+      expect(localStorage.getItem("ember:huddle-speaker")).toBe("headphones");
+    } finally {
+      stop();
+      delete (HTMLMediaElement.prototype as { setSinkId?: unknown }).setSinkId;
+    }
+  });
+
+  it("forgets a speaker chosen as the tab leaves, which its next huddle doesn't start with", async () => {
+    const setSinkId = vi.fn(async () => {});
+    Object.defineProperty(HTMLMediaElement.prototype, "setSinkId", { configurable: true, value: setSinkId });
+    const said = vi.fn();
+    const stop = hearHuddle(said);
+    try {
+      await joined([person(grace)]);
+      await offeredRound(["0", grace]);
+
+      chooseHuddleDevice("speaker", "headphones");
+      leaveHuddle();
+      await settled();
+      expect(localStorage.getItem("ember:huddle-speaker")).toBeNull();
+      expect(said).not.toHaveBeenCalled();
+    } finally {
+      stop();
       delete (HTMLMediaElement.prototype as { setSinkId?: unknown }).setSinkId;
     }
   });
