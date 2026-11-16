@@ -140,6 +140,25 @@ describe("What a huddle's speaker plays until it's stopped", () => {
     expect(play).toHaveBeenCalledTimes(1);
   });
 
+  it("plays at the person's next touch what the browser won't play again as the page shows, though it played it before", async () => {
+    const speaker = huddleSpeaker("");
+    const voice = audio();
+    speaker.play(voice);
+    await settled();
+    // Nothing was refused, so a touch has nothing to play.
+    document.body.click();
+    expect(play.mock.contexts).toEqual([voice]);
+
+    // The browser stopped it with the page hidden, and won't play it again until the page is touched.
+    play.mockRejectedValueOnce(new DOMException("play() failed", "NotAllowedError"));
+    shows("hidden");
+    shows("visible");
+    await settled();
+    expect(play.mock.contexts).toEqual([voice, voice]);
+    document.body.click();
+    expect(play.mock.contexts).toEqual([voice, voice, voice]);
+  });
+
   it("stops for good with the huddle, which takes its box out of the page", () => {
     const speaker = huddleSpeaker("");
     const [voice, music] = [audio(), audio()];
