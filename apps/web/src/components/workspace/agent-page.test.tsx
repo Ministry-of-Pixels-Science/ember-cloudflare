@@ -553,7 +553,7 @@ describe("New agent", () => {
     await user.type(await loaded(), "Recap");
     const preview = screen.getByText("What Ember adds around them").closest("details")!;
     expect(preview).toHaveTextContent(`You are Recap, an AI agent in the team chat "Analytical Engines". People ask you things by mentioning @Recap in a room or a thread`);
-    expect(preview).toHaveTextContent("Answer the last one, which Ada Lovelace wrote, in at most about 400 words.");
+    expect(preview).toHaveTextContent(`Answer the last one, which "Ada Lovelace" wrote, in at most about 400 words.`);
     expect(preview).toHaveTextContent("You can't search the web or open links.");
   });
 
@@ -727,7 +727,7 @@ describe("What Ember adds around them", () => {
     await user.click(modify());
     await user.clear(templateBox());
     await user.paste(SCRIBE);
-    expect(around()).toHaveTextContent("You are Recap, the scribe of Analytical Engines. Your instructions Answer Ada Lovelace in at most 400 words.");
+    expect(around()).toHaveTextContent(`You are Recap, the scribe of Analytical Engines. Your instructions Answer "Ada Lovelace" in at most 400 words.`);
     expect(within(around()).getByText("Modified")).toBeInTheDocument();
     expect(useEmbersOwn()).toBeEnabled();
 

@@ -354,7 +354,7 @@ test.describe("Ember AI", () => {
     await expect(save).toBeDisabled();
     await card.getByText("What Ember adds around them").click();
     await expect(card.locator("details")).toContainText('You are Ember, the AI assistant in the team chat');
-    await expect(card.locator("details")).toContainText("Answer the last one, which Ada Lovelace wrote, as a helpful teammate would");
+    await expect(card.locator("details")).toContainText(`Answer the last one, which "Ada Lovelace" wrote, as a helpful teammate would`);
 
     await instructions.fill("Answer in British English.");
     await save.click();
@@ -393,7 +393,7 @@ test.describe("Ember AI", () => {
 
     // Without instructions added, nor the space they'd take.
     await askEmber(page, "Colour or color?");
-    expect(gateway.asked.at(-1)!.body.system).toMatch(/^You are Ember, the scribe of [^\n]+\.\n\nYou're asked in the room "general"\. Answer Ada Lovelace in at most [\d,]+ words\.$/);
+    expect(gateway.asked.at(-1)!.body.system).toMatch(/^You are Ember, the scribe of [^\n]+\.\n\nYou're asked in the room "general"\. Answer "Ada Lovelace" in at most [\d,]+ words\.$/);
   });
 
   test("the administrator turns Ember AI off, once they're sure", async ({ page, request }) => {
