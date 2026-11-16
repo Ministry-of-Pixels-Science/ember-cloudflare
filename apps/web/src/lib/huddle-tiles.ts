@@ -17,6 +17,8 @@ const STRIP_SHARE = 0.22;
 const STRIP_WIDEST = 220;
 /** The most a shared screen takes of the height, its caption included, with the tiles under it. */
 const SCREEN_SHARE = 0.6;
+/** How tall the smaller of the two sizes a camera is sent in is: half as tall as a camera's picture. */
+const SMALL_PICTURE = 180;
 
 export interface TilesLayout {
   /** How many tiles go in a row. */
@@ -37,6 +39,9 @@ export function tilesLayout(count: number, width: number, height: number): Tiles
   const square = width < UPRIGHT_PHONE;
   return { ...largest(count, width, height, { shape: square ? 1 : 4 / 3, widest: WIDEST, tied: Math.ceil(Math.sqrt(count)) }), square };
 }
+
+/** Whether tiles laid out so are no taller than the smaller of the sizes a camera is sent in, which is then all they show of one. */
+export const showsCamerasSmall = ({ width, square }: Pick<TilesLayout, "width" | "square">) => (square ? width : (width * 3) / 4) <= SMALL_PICTURE;
 
 interface Tiles {
   /** How wide a tile is for its height, and the widest it gets. */

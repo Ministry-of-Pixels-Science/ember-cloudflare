@@ -97,6 +97,15 @@ export const HuddleCloseCode = {
 } as const;
 export type HuddleCloseCode = (typeof HuddleCloseCode)[keyof typeof HuddleCloseCode];
 
+/**
+ * The sizes a camera's picture is sent in where its browser sends two at once (simulcast), by the names
+ * its connection gives them, their RIDs: as large as the camera takes it, and at half that width and
+ * height, for whoever shows it in a tile no larger. Where the SFU can't send the size it's asked for,
+ * it sends the next in the alphabet's order, so the large one is the first of them.
+ */
+export const CAMERA_SIZES = { large: "a", small: "b" } as const;
+export type CameraSize = (typeof CAMERA_SIZES)[keyof typeof CAMERA_SIZES];
+
 /** What a track in a huddle carries: someone's microphone, their camera, or the screen they share. */
 export type HuddleTrackKind = "audio" | "video" | "screen";
 
@@ -156,9 +165,11 @@ export type HuddleClientFrame =
    * the one it had has failed. A tab asks again only once the room has answered. For cameras and for
    * screens, `watch` names whose the tab is to see, as many as a huddle shows, and the room stops
    * sending it anyone else's: a tab watches only while it shows the huddle open, and whoever asks for
-   * nobody watches nobody.
+   * nobody watches nobody. For cameras, `small` says that the tab shows them in tiles no larger than the
+   * smaller of a camera's sizes, which is the one the room then has the SFU send it of each camera
+   * that's sent in both, those it watches already included.
    */
-  | { type: "huddle.listen"; kind: HuddleTrackKind; fresh?: true; watch?: UserId[] }
+  | { type: "huddle.listen"; kind: HuddleTrackKind; fresh?: true; watch?: UserId[]; small?: true }
   /** The answer the tab's receiving connection for `kind` makes to a `huddle.offer`. */
   | { type: "huddle.answer"; kind: HuddleTrackKind; sdp: string }
   /** The person has muted their microphone, or unmuted it. */
@@ -274,16 +285,44 @@ function watchOf(value: unknown, most: number): UserId[] | null {
   return new Set(value).size === value.length ? value : null;
 }
 
-/** What a `huddle.listen` asks, or null when it can't be one. Cameras and screens are asked for by name, and voices aren't. */
+/** Whether `value` is something a frame says only when it's so: `true`, or left out. */
+const isSaidOrNot = (value: unknown): value is true | undefined => value === undefined || value === true;
+
+/** What a `huddle.listen` asks, or null when it can't be one. Cameras and screens are asked for by name, and voices aren't, and only cameras come in sizes. */
 function listenOf(frame: Record<string, unknown>): HuddleClientFrame | null {
   const kind = kindOf(frame.kind);
-  if (kind === null || (frame.fresh !== undefined && frame.fresh !== true)) return null;
+  if (kind === null || !isSaidOrNot(frame.fresh) || !isSaidOrNot(frame.small)) return null;
   const watch = watchOf(frame.watch, mostWatched(kind));
   if (watch === null) return null;
   const listen: Extract<HuddleClientFrame, { type: "huddle.listen" }> = { type: "huddle.listen", kind };
   if (frame.fresh) listen.fresh = true;
   if (kind !== "audio") listen.watch = watch;
+  if (kind === "video" && frame.small) listen.small = true;
   return listen;
+}
+
+/** The names in a list of them that a session description gives after `direction`, as `a=simulcast:send b;a` does, each without the mark of one that starts paused. */
+function namedAfter(line: string, direction: string): string[] {
+  const words = line.split(" ");
+  const at = words.indexOf(direction);
+  return at < 0 ? [] : (words[at + 1] ?? "").split(";").map((name) => name.replace(/^~/, ""));
+}
+
+/**
+ * Whether the session description `sdp` carries the track of its media section `mid` in both of a
+ * camera's sizes, and in no other: as a tab's offer says of what its browser sends (`send`), and the
+ * SFU's answer of what it takes (`recv`).
+ */
+export function carriesBothSizes(sdp: string, mid: string, direction: "send" | "recv"): boolean {
+  // What a description says before its first media section, it says of no track.
+  const sections = sdp.split(/^(?=m=)/m).filter((section) => section.startsWith("m="));
+  const simulcast = sections
+    .map((section) => section.split(/\r?\n/))
+    .find((lines) => lines.includes(`a=mid:${mid}`))
+    ?.find((line) => line.startsWith("a=simulcast:"));
+  if (!simulcast) return false;
+  const sizes = namedAfter(simulcast.slice("a=simulcast:".length), direction);
+  return sizes.length === 2 && Object.values(CAMERA_SIZES).every((size) => sizes.includes(size));
 }
 
 /** Parses an untrusted frame from a huddle's socket. Returns null for anything malformed. */

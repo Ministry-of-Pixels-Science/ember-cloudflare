@@ -2453,6 +2453,7 @@ describe("Huddles", () => {
     setScreen: vi.fn(),
     setOpen: vi.fn((open: boolean) => showHuddle({ ...joinedHuddle()!, open })),
     setDevice: vi.fn(),
+    setSmall: vi.fn(),
   } satisfies HuddleControls;
   /** Joins `roomId`'s huddle as the preview would, without a microphone or a camera. */
   const join = (roomId: string) => act(() => joinHuddle({ roomId, muted: false, microphone: null, camera: null, speakerId: "" }));

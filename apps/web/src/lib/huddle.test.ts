@@ -1,5 +1,6 @@
 import { CloseCode, type User } from "@ember/protocol";
 import {
+  CAMERA_SIZES,
   CAMERAS_FULL,
   CAMERAS_OFF,
   HuddleCloseCode,
@@ -14,11 +15,11 @@ import {
 } from "@ember/protocol/huddles";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { audioEngine } from "@/test-audio-engine";
-import { ANSWER_TIMEOUT_MS, CAMERA_BITRATE, joinHuddle, LISTEN_AGAIN_MS, PUBLISH_AGAIN_MS, SCREEN_BITRATE } from "./huddle";
+import { ANSWER_TIMEOUT_MS, CAMERA_BITRATE, joinHuddle, LISTEN_AGAIN_MS, PUBLISH_AGAIN_MS, SCREEN_BITRATE, SMALL_CAMERA_BITRATE } from "./huddle";
 import { NO_CAMERA, NO_OTHER_CAMERA, NO_OTHER_MICROPHONE, NO_OTHER_SPEAKER, NO_SCREEN, STILL_NO_MICROPHONE } from "./huddle-devices";
 import { MUSIC_AFTER_MS } from "./huddle-sounds";
 import { MEASURED_EVERY_MS, SPEAKING_LEVEL } from "./huddle-speaking";
-import { chooseHuddleDevice, hearHuddle, isSpeaking, joinedHuddle, leaveHuddle, muteHuddle, openHuddle, shareHuddleScreen, showHuddleCamera, watchHuddle, watchSpeaking } from "./huddle-store";
+import { chooseHuddleDevice, hearHuddle, isSpeaking, joinedHuddle, leaveHuddle, muteHuddle, openHuddle, shareHuddleScreen, showHuddleCamera, takeCamerasSmall, watchHuddle, watchSpeaking } from "./huddle-store";
 
 /** Stands in for the browser's WebSocket; tests play the room and the network. */
 class FakeSocket {
@@ -85,12 +86,14 @@ class FakeTrack extends EventTarget {
     readonly kind: HuddleTrackKind = "audio",
     /** The device it's from, by its id, where the browser says. */
     readonly deviceId = "",
+    /** How large its picture is, where the browser says. */
+    readonly size: { width?: number; height?: number } = {},
   ) {
     super();
   }
 
   getSettings() {
-    return { deviceId: this.deviceId };
+    return { deviceId: this.deviceId, ...this.size };
   }
 
   stop() {
@@ -111,20 +114,39 @@ class FakeStream {
   getVideoTracks = () => this.tracks.filter(({ kind }) => kind === "video");
 }
 
-/** Stands in for what sends a track over a connection, which a browser has send another in its place, unless the connection has closed. */
+/**
+ * Stands in for what sends a track over a connection, which a browser has send another in its place,
+ * unless the connection has closed, and in the sizes the connection was made to send, or what's left
+ * of them: the first alone, once an answer has taken one.
+ */
 class FakeSender {
   readonly #connection: FakeConnection;
+  #sizes: RTCRtpEncodingParameters[];
 
   constructor(
     connection: FakeConnection,
     public track: FakeTrack | null,
+    sizes: RTCRtpEncodingParameters[] = [],
   ) {
     this.#connection = connection;
+    this.#sizes = sizes;
   }
 
   async replaceTrack(track: FakeTrack | null) {
     if (FakeConnection.keepingTracks || this.#connection.connectionState === "closed") throw new DOMException("The connection can't send another track", "InvalidStateError");
     this.track = track;
+  }
+
+  getParameters() {
+    return { encodings: this.#sizes.map((size) => ({ ...size })) };
+  }
+
+  async setParameters({ encodings }: { encodings: RTCRtpEncodingParameters[] }) {
+    this.#sizes = encodings;
+  }
+
+  takeOneSize() {
+    this.#sizes = this.#sizes.slice(0, 1);
   }
 }
 
@@ -147,6 +169,8 @@ class FakeConnection {
   static refusing = false;
   /** Whether the connections refuse to send another track in place of the one they send. */
   static keepingTracks = false;
+  /** Whether the answers the connections are given take one size of a track sent in several, as an SFU that takes no more does. */
+  static takingOneSize = false;
 
   connectionState: RTCPeerConnectionState = "new";
   onconnectionstatechange: (() => void) | null = null;
@@ -159,7 +183,7 @@ class FakeConnection {
   }
 
   addTransceiver(track: FakeTrack, { direction, sendEncodings }: RTCRtpTransceiverInit) {
-    const transceiver: FakeTransceiver = { mid: null, direction, ...(sendEncodings && { sendEncodings }), sender: new FakeSender(this, track), receiver: { track: new FakeTrack() } };
+    const transceiver: FakeTransceiver = { mid: null, direction, ...(sendEncodings && { sendEncodings }), sender: new FakeSender(this, track, sendEncodings), receiver: { track: new FakeTrack() } };
     this.transceivers.push(transceiver);
     return transceiver;
   }
@@ -184,7 +208,10 @@ class FakeConnection {
   async setRemoteDescription(description: RTCSessionDescriptionInit) {
     this.refuseIfTold();
     this.remoteDescription = description;
-    if (description.type !== "offer") return;
+    if (description.type !== "offer") {
+      if (FakeConnection.takingOneSize) for (const sender of this.getSenders()) sender.takeOneSize();
+      return;
+    }
     for (const mid of description.sdp!.split(":")[1]!.split(",")) {
       if (!this.transceivers.some((transceiver) => transceiver.mid === mid)) this.transceivers.push({ mid, sender: new FakeSender(this, null), receiver: { track: new FakeTrack() } });
     }
@@ -302,6 +329,22 @@ async function sharedRound(...tracks: Array<[mid: string, user: User]>) {
 let camera: FakeStream;
 const cameraTrack = () => camera.tracks[0]!;
 const asCamera = () => camera as unknown as MediaStream;
+/** A camera's stream from the device `deviceId`, whose picture is as large as the browser says. */
+const cameraFrom = (deviceId: string, width: number, height: number) => new FakeStream([new FakeTrack("video", deviceId, { width, height })]);
+
+/** What Chrome says of itself, which is known to send a camera in two sizes at once, and what Safari says. */
+const CHROME = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36";
+const SAFARI = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15";
+/** The two sizes such a browser sends a camera in: the smaller first, and then the picture whole. */
+const TWO_SIZES = [
+  { rid: CAMERA_SIZES.small, maxBitrate: SMALL_CAMERA_BITRATE, scaleResolutionDownBy: 2 },
+  { rid: CAMERA_SIZES.large, maxBitrate: CAMERA_BITRATE },
+];
+
+/** Has the browser say `userAgent` of itself, with the devices the test has given it. */
+function browserIs(userAgent: string) {
+  vi.stubGlobal("navigator", { userAgent, mediaDevices: navigator.mediaDevices });
+}
 
 /** Has the browser give the tab `camera` when it asks for one, or with `none`, refuse. Answers what the tab asked it. */
 function browserCamera(none = false) {
@@ -344,6 +387,7 @@ beforeEach(() => {
   FakeConnection.offers = 0;
   FakeConnection.refusing = false;
   FakeConnection.keepingTracks = false;
+  FakeConnection.takingOneSize = false;
   microphone = new FakeStream([new FakeTrack("audio", "built-in")]);
   camera = new FakeStream([new FakeTrack("video", "front")]);
   display = new FakeStream([new FakeTrack("video")]);
@@ -1442,6 +1486,259 @@ describe("Watching the others in a huddle", () => {
   });
 });
 
+describe("A camera's sizes in a huddle", () => {
+  /** The tab's camera is on as it joins, and published once the room lets it in: answers the room's socket and the camera's connection. */
+  async function showing() {
+    const room = await joined([], { camera: asCamera() });
+    room.take();
+    return [room, connection()] as const;
+  }
+
+  it("sends a camera in two sizes from a browser known to send them: the smaller first, half as wide and half as tall, and then the picture whole", async () => {
+    camera = cameraFrom("front", 640, 360);
+    browserIs(CHROME);
+    const [, picture] = await showing();
+    expect(picture.transceivers).toEqual([expect.objectContaining({ direction: "sendonly", sendEncodings: TWO_SIZES, sender: { track: cameraTrack() } })]);
+  });
+
+  it.each([
+    ["from any other browser", SAFARI, cameraFrom("front", 640, 360)],
+    ["of a picture too small for two", CHROME, cameraFrom("front", 320, 180)],
+    ["of a picture the browser says no size of", CHROME, new FakeStream([new FakeTrack("video", "front")])],
+  ])("sends it in one size %s", async (_why, userAgent, from) => {
+    camera = from;
+    browserIs(userAgent);
+    const [, picture] = await showing();
+    expect(picture.transceivers[0]!.sendEncodings).toEqual([{ maxBitrate: CAMERA_BITRATE }]);
+  });
+
+  it("leaves both sizes as they are once the SFU's answer has taken both, and the one size of a camera sent in one", async () => {
+    const changed = vi.spyOn(FakeSender.prototype, "setParameters");
+    camera = cameraFrom("front", 640, 360);
+    browserIs(CHROME);
+    const [room, picture] = await showing();
+    room.receive({ type: "huddle.published", kind: "video", sdp: "the SFU's answer" });
+    await settled();
+    expect(picture.getSenders()[0]!.getParameters().encodings).toEqual(TWO_SIZES);
+
+    // One size offered is one size sent, whatever the answer takes of it.
+    FakeConnection.takingOneSize = true;
+    showHuddleCamera(false);
+    camera = cameraFrom("front", 320, 180);
+    browserCamera();
+    showHuddleCamera(true);
+    await settled();
+    room.receive({ type: "huddle.published", kind: "video", sdp: "the SFU's answer" });
+    await settled();
+    expect(connection()).not.toBe(picture);
+    expect(connection().getSenders()[0]!.getParameters().encodings).toEqual([{ maxBitrate: CAMERA_BITRATE }]);
+    expect(changed).not.toHaveBeenCalled();
+  });
+
+  it("sends its camera whole when the SFU's answer takes one size of the two: the smaller, which the browser is left sending, as large as the picture and at as many bits", async () => {
+    FakeConnection.takingOneSize = true;
+    camera = cameraFrom("front", 640, 360);
+    browserIs(CHROME);
+    const [room, picture] = await showing();
+    room.receive({ type: "huddle.published", kind: "video", sdp: "an answer that takes one size" });
+    await settled();
+    expect(picture.getSenders()[0]!.getParameters().encodings).toEqual([{ rid: CAMERA_SIZES.small, maxBitrate: CAMERA_BITRATE, scaleResolutionDownBy: 1 }]);
+    expect(picture.connectionState).toBe("new");
+    expect(room.take()).toEqual([]);
+  });
+
+  it("asks nothing more of a connection whose camera was turned off while the browser took the SFU's answer", async () => {
+    const changed = vi.spyOn(FakeSender.prototype, "setParameters");
+    FakeConnection.takingOneSize = true;
+    camera = cameraFrom("front", 640, 360);
+    browserIs(CHROME);
+    const [room, picture] = await showing();
+    room.receive({ type: "huddle.published", kind: "video", sdp: "an answer that takes one size" });
+    showHuddleCamera(false);
+    await settled();
+    expect(picture.connectionState).toBe("closed");
+    expect(changed).not.toHaveBeenCalled();
+  });
+
+  it("goes on with the huddle when the browser won't send that one size whole", async () => {
+    vi.spyOn(FakeSender.prototype, "setParameters").mockRejectedValue(new DOMException("The connection has closed", "InvalidStateError"));
+    FakeConnection.takingOneSize = true;
+    camera = cameraFrom("front", 640, 360);
+    browserIs(CHROME);
+    const [room, picture] = await showing();
+    room.receive({ type: "huddle.published", kind: "video", sdp: "an answer that takes one size" });
+    await settled();
+    picture.becomes("connected");
+    expect(room.take()).toEqual([{ type: "huddle.connected", kind: "video" }]);
+    expect(joinedHuddle()).toMatchObject({ camera });
+  });
+
+  it("publishes its camera again in one size, whole, once the room couldn't publish it in two, which may be what the SFU wouldn't take, and keeps to one in that huddle", async () => {
+    camera = cameraFrom("front", 640, 360);
+    browserIs(CHROME);
+    const [room, picture] = await showing();
+    expect(picture.transceivers[0]!.sendEncodings).toEqual(TWO_SIZES);
+
+    room.receive({ type: "error", message: "The huddle couldn't connect. Trying again.", failed: "huddle.publish", kind: "video" });
+    await wait(PUBLISH_AGAIN_MS[0]);
+    const whole = connection();
+    expect(whole).not.toBe(picture);
+    expect(whole.transceivers).toEqual([expect.objectContaining({ direction: "sendonly", sendEncodings: [{ maxBitrate: CAMERA_BITRATE }], sender: { track: cameraTrack() } })]);
+    expect(room.take()).toEqual([{ type: "huddle.publish", sdp: "offer 3", tracks: [{ mid: "0", kind: "video" }] }]);
+    room.receive({ type: "huddle.published", kind: "video", sdp: "the SFU's answer" });
+    await settled();
+
+    // Turned off and on again, it goes out in one.
+    showHuddleCamera(false);
+    camera = cameraFrom("front", 640, 360);
+    browserCamera();
+    browserIs(CHROME);
+    showHuddleCamera(true);
+    await settled();
+    expect(connection()).not.toBe(whole);
+    expect(connection().transceivers[0]!.sendEncodings).toEqual([{ maxBitrate: CAMERA_BITRATE }]);
+  });
+
+  it("sends two sizes still of a camera the room refused itself, the huddle showing as many as it does, once it's turned on again", async () => {
+    camera = cameraFrom("front", 640, 360);
+    browserIs(CHROME);
+    const [room] = await showing();
+    room.receive({ type: "error", message: CAMERAS_FULL, failed: "huddle.publish", kind: "video", refused: true });
+    expect(joinedHuddle()).toMatchObject({ camera: null });
+
+    camera = cameraFrom("front", 640, 360);
+    browserCamera();
+    browserIs(CHROME);
+    showHuddleCamera(true);
+    await settled();
+    expect(connection().transceivers[0]!.sendEncodings).toEqual(TWO_SIZES);
+  });
+
+  it("asks for the cameras it watches small once its huddle shows them in small tiles, and large again once it shows them larger", async () => {
+    const room = await joined([person(grace, { video: true })]);
+    await watchedRound(["0", grace]);
+    room.take();
+
+    takeCamerasSmall(true);
+    expect(room.take()).toEqual([{ type: "huddle.listen", kind: "video", watch: [grace.id], small: true }]);
+    // The room has the SFU send her camera in its smaller size, and has nobody to offer.
+    room.receive({ type: "huddle.listening", kind: "video" });
+    await wait(LISTEN_AGAIN_MS[1] * 2);
+    expect(room.take()).toEqual([]);
+    expect([...joinedHuddle()!.watched.keys()]).toEqual([grace.id]);
+    // Said again, it's nothing to ask.
+    takeCamerasSmall(true);
+    expect(room.take()).toEqual([]);
+
+    takeCamerasSmall(false);
+    expect(room.take()).toEqual([{ type: "huddle.listen", kind: "video", watch: [grace.id] }]);
+  });
+
+  it("asks in the size it shows by then, once the round under way is over, when its tiles change size meanwhile", async () => {
+    const room = await joined([person(grace, { video: true })]);
+    await watchedRound(["0", grace]);
+    room.take();
+
+    takeCamerasSmall(true);
+    room.take();
+    takeCamerasSmall(false);
+    expect(room.take()).toEqual([]);
+    room.receive({ type: "huddle.listening", kind: "video" });
+    expect(room.take()).toEqual([{ type: "huddle.listen", kind: "video", watch: [grace.id] }]);
+    // And nothing more once that's answered.
+    room.receive({ type: "huddle.listening", kind: "video" });
+    await wait(LISTEN_AGAIN_MS[1] * 2);
+    expect(room.take()).toEqual([]);
+  });
+
+  it("says nothing of sizes while it watches nobody, and asks small for the first camera that comes on", async () => {
+    const room = await joined([person(grace)]);
+    room.take();
+    takeCamerasSmall(true);
+    expect(room.take()).toEqual([]);
+
+    room.receive({ type: "huddle.changed", person: person(grace, { video: true }) });
+    expect(taken("video")).toEqual([{ type: "huddle.listen", kind: "video", fresh: true, watch: [grace.id], small: true }]);
+  });
+
+  it("says small of cameras alone: never of voices, nor of the screens people share", async () => {
+    const room = await joined([person(grace, { video: true })]);
+    await offeredRound(["0", grace]);
+    room.receive({ type: "huddle.listening", kind: "audio" });
+    await watchedRound(["0", grace]);
+    takeCamerasSmall(true);
+    room.take();
+
+    room.receive({ type: "huddle.joined", person: person(linus) });
+    expect(taken("audio")).toEqual([{ type: "huddle.listen", kind: "audio" }]);
+    room.receive({ type: "huddle.changed", person: person(grace, { video: true, screen: true }) });
+    expect(taken("screen")).toEqual([{ type: "huddle.listen", kind: "screen", fresh: true, watch: [grace.id] }]);
+  });
+
+  it("answers a change of sizes that takes an offer on the connection it has, and goes on showing whom it watched", async () => {
+    const room = await joined([person(grace, { video: true })]);
+    await watchedRound(["0", grace]);
+    const watching = connection();
+    const shown = joinedHuddle()!.watched.get(grace.id);
+    takeCamerasSmall(true);
+    room.take();
+
+    // The SFU's offer carries the camera it sent already, and nobody new.
+    room.receive({ type: "huddle.offer", kind: "video", sdp: "offer:0", tracks: [] });
+    await settled();
+    expect(room.take()).toEqual([{ type: "huddle.answer", kind: "video", sdp: "answer to offer:0" }]);
+    expect(connection()).toBe(watching);
+    expect(joinedHuddle()!.watched.get(grace.id)).toBe(shown);
+    // Then it asks once more, as after any offer, in the size it shows.
+    room.receive({ type: "huddle.listening", kind: "video" });
+    expect(room.take()).toEqual([{ type: "huddle.listen", kind: "video", watch: [grace.id], small: true }]);
+  });
+
+  it("shows a camera it watches from the track it's offered of it anew, which the room does of one the SFU won't make larger", async () => {
+    const room = await joined([person(grace, { video: true })]);
+    await watchedRound(["0", grace]);
+    const watching = connection();
+    takeCamerasSmall(true);
+    room.receive({ type: "huddle.listening", kind: "video" });
+    const small = joinedHuddle()!.watched.get(grace.id)!;
+    takeCamerasSmall(false);
+    room.take();
+
+    // The room has had the SFU close the track it sent of her, and offers her camera again on the connection's next media section.
+    room.receive(pictures(["1", grace]));
+    await settled();
+    expect(room.take()).toEqual([expect.objectContaining({ type: "huddle.answer", kind: "video" })]);
+    expect(connection()).toBe(watching);
+    const large = joinedHuddle()!.watched.get(grace.id)!;
+    expect(large).not.toBe(small);
+    expect(large.getTracks()).toEqual([watching.transceivers.find(({ mid }) => mid === "1")!.receiver.track]);
+    expect([...joinedHuddle()!.watched.keys()]).toEqual([grace.id]);
+  });
+
+  it("keeps to the size its tiles last showed as the huddle closes to its bar and opens again, and as the room lets the tab back in", async () => {
+    const room = await joined([person(grace, { video: true })]);
+    await watchedRound(["0", grace]);
+    takeCamerasSmall(true);
+    room.receive({ type: "huddle.listening", kind: "video" });
+    room.take();
+
+    openHuddle(false);
+    room.receive({ type: "huddle.listening", kind: "video" });
+    openHuddle(true);
+    expect(taken("video")).toEqual([
+      { type: "huddle.listen", kind: "video", watch: [], small: true },
+      { type: "huddle.listen", kind: "video", fresh: true, watch: [grace.id], small: true },
+    ]);
+
+    room.drop();
+    await wait(1_000);
+    socket().open();
+    const again = await welcomed([person(grace, { video: true })]);
+    expect(taken("video")).toEqual([{ type: "huddle.listen", kind: "video", fresh: true, watch: [grace.id], small: true }]);
+    expect(again).not.toBe(room);
+  });
+});
+
 describe("A screen shared in a huddle", () => {
   it("is shared once its person has chosen it: the browser asks them what to share, and the huddle shows it and publishes it from a connection of its own", async () => {
     const asked = browserScreen();
@@ -2161,6 +2458,66 @@ describe("Choosing another device in a huddle", () => {
     await settled();
     expect(asked).not.toHaveBeenCalled();
     expect(joinedHuddle()).toMatchObject({ camera });
+  });
+
+  it("publishes anew a camera chosen in place of one sent in another number of sizes, which its connection wasn't made to send", async () => {
+    camera = cameraFrom("front", 640, 360);
+    const [rear, side] = [cameraFrom("rear", 320, 180), cameraFrom("side", 1280, 720)];
+    browserDevices(rear, side);
+    browserIs(CHROME);
+    const room = await joined([], { camera: asCamera() });
+    const first = await cameraConnected();
+    expect(first.transceivers[0]!.sendEncodings).toEqual(TWO_SIZES);
+
+    // Of a picture too small for two, a connection made for two would send the smaller size alone.
+    chooseHuddleDevice("camera", "rear");
+    await settled();
+    const second = connection();
+    expect(first.connectionState).toBe("closed");
+    expect(second.transceivers).toEqual([expect.objectContaining({ sendEncodings: [{ maxBitrate: CAMERA_BITRATE }], sender: { track: trackOf(rear) } })]);
+    expect(room.take()).toEqual([{ type: "huddle.publish", sdp: "offer 3", tracks: [{ mid: "0", kind: "video" }] }]);
+
+    // And one made for one size would send a larger picture in that one alone.
+    await cameraConnected();
+    chooseHuddleDevice("camera", "side");
+    await settled();
+    expect(second.connectionState).toBe("closed");
+    expect(connection().transceivers).toEqual([expect.objectContaining({ sendEncodings: TWO_SIZES, sender: { track: trackOf(side) } })]);
+    expect(room.take()).toEqual([{ type: "huddle.publish", sdp: "offer 4", tracks: [{ mid: "0", kind: "video" }] }]);
+  });
+
+  it("sends a camera chosen in place of one sent in as many sizes on the connection it has, in both of them", async () => {
+    camera = cameraFrom("front", 640, 360);
+    const rear = cameraFrom("rear", 1280, 720);
+    browserDevices(rear);
+    browserIs(CHROME);
+    const room = await joined([], { camera: asCamera() });
+    const picture = await cameraConnected();
+
+    chooseHuddleDevice("camera", "rear");
+    await settled();
+    expect(connection()).toBe(picture);
+    expect(picture.transceivers[0]!.sender.track).toBe(trackOf(rear));
+    expect(picture.getSenders()[0]!.getParameters().encodings).toEqual(TWO_SIZES);
+    expect(room.take()).toEqual([]);
+  });
+
+  it("sends a camera chosen in a huddle that keeps to one size, the room having failed to publish two, on the connection it has, though the camera would go out in two", async () => {
+    camera = cameraFrom("front", 640, 360);
+    const rear = cameraFrom("rear", 1280, 720);
+    browserDevices(rear);
+    browserIs(CHROME);
+    const room = await joined([], { camera: asCamera() });
+    room.receive({ type: "error", message: "The huddle couldn't connect. Trying again.", failed: "huddle.publish", kind: "video" });
+    await wait(PUBLISH_AGAIN_MS[0]);
+    const whole = await cameraConnected();
+    expect(whole.transceivers[0]!.sendEncodings).toEqual([{ maxBitrate: CAMERA_BITRATE }]);
+
+    chooseHuddleDevice("camera", "rear");
+    await settled();
+    expect(connection()).toBe(whole);
+    expect(whole.transceivers[0]!.sender.track).toBe(trackOf(rear));
+    expect(room.take()).toEqual([]);
   });
 
   it("turns the camera on with the one chosen while it's off", async () => {

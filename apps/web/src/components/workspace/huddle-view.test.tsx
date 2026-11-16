@@ -37,7 +37,7 @@ const crowd = (count: number) => Array.from({ length: count }, (_, index) => inH
 
 /** The huddle this tab is in, opened, with what the huddle's controls were asked. */
 function renderView(joined: JoinedHuddle = huddle(), room: Room | null = general) {
-  const controls = { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setDevice: vi.fn() };
+  const controls = { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setDevice: vi.fn(), setSmall: vi.fn() };
   act(() => showHuddle(joined, controls));
   const user = userEvent.setup();
   const view = render(<HuddleView huddle={joined} room={room} meId="ada" />);
@@ -259,6 +259,45 @@ describe("The tiles of a huddle", () => {
     expect(list()).toHaveStyle({ gridTemplateColumns: "repeat(2, 142px)" });
     for (const tile of tiles()) expect(tile).toHaveClass("aspect-square");
   });
+
+  it("tells the huddle once its tiles are no taller than the smaller of a camera's sizes, and once they're taller again", () => {
+    const space = { width: 1200, height: 700 };
+    const resized = measuring(space);
+    const { setSmall, rerender } = renderView(huddle({ people: [...crowd(3), inHuddle(ada)] }));
+    // Four people in 1200 by 700: tiles as wide as they get, 315px tall.
+    expect(setSmall.mock.calls).toEqual([[false]]);
+
+    // Twenty: five to a row, 221px wide and 165px tall, which the smaller size fills.
+    rerender(<HuddleView huddle={huddle({ people: [...crowd(19), inHuddle(ada)] })} room={general} meId="ada" />);
+    expect(list()).toHaveStyle({ gridTemplateColumns: "repeat(5, 221px)" });
+    expect(setSmall.mock.calls).toEqual([[false], [true]]);
+
+    // In a window twice as tall they're four to a row, and 218px tall.
+    Object.assign(space, { width: 1200, height: 1400 });
+    resized();
+    expect(list()).toHaveStyle({ gridTemplateColumns: "repeat(4, 291px)" });
+    expect(setSmall.mock.calls).toEqual([[false], [true], [false]]);
+  });
+
+  it("says nothing of its tiles' size before it has measured them, and tells the next huddle the tab joins from it", () => {
+    const { setSmall, unmount } = renderView();
+    expect(setSmall).not.toHaveBeenCalled();
+    unmount();
+
+    measuring({ width: 1200, height: 700 });
+    const { rerender } = render(<HuddleView huddle={huddle()} room={general} meId="ada" />);
+    expect(setSmall.mock.calls).toEqual([[false]]);
+    rerender(<HuddleView huddle={huddle({ roomId: "random" })} room={general} meId="ada" />);
+    expect(setSmall.mock.calls).toEqual([[false], [false]]);
+  });
+
+  it("says nothing of its tiles' size either while the room has yet to say who's in the huddle, when it has no tiles", () => {
+    measuring({ width: 1200, height: 700 });
+    const { setSmall, rerender } = renderView(huddle({ connected: false, you: null, people: [] }));
+    expect(setSmall).not.toHaveBeenCalled();
+    rerender(<HuddleView huddle={huddle()} room={general} meId="ada" />);
+    expect(setSmall.mock.calls).toEqual([[false]]);
+  });
 });
 
 describe("A screen shared in a huddle", () => {
@@ -287,6 +326,14 @@ describe("A screen shared in a huddle", () => {
     expect(list()).not.toHaveClass("shrink-0");
     expect(list().parentElement).not.toHaveClass("flex-col", "overflow-auto");
     for (const tile of tiles()) expect(tile).toHaveClass("aspect-[4/3]");
+  });
+
+  it("tells the huddle that the tiles in the strip beside a screen are small, which are no taller than the smaller of a camera's sizes", () => {
+    measuring({ width: 1400, height: 800 });
+    const { setSmall } = renderView(huddle({ people: [inHuddle(sam, { screen: true }), inHuddle(ada)], screens: new Map([["sam", shared()]]) }));
+    // Two tiles as wide as the strip's get, 220px, are 165px tall.
+    expect(list()).toHaveStyle({ gridTemplateColumns: "repeat(1, minmax(0, 220px))" });
+    expect(setSmall.mock.calls).toEqual([[true]]);
   });
 
   it("has the tiles under the screen where that shows it larger than beside them, as on a phone held upright, laid out in what it leaves them", () => {

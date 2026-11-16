@@ -4,6 +4,8 @@ import {
   APP_SECRET_REFUSED,
   appIdOf,
   appSecretOf,
+  CAMERA_SIZES,
+  carriesBothSizes,
   HuddleCloseCode,
   huddleSocketQuery,
   MAX_HUDDLE_CAMERAS,
@@ -18,6 +20,53 @@ import { CloseCode, MAX_ID_LENGTH } from "./index";
 
 const APP_ID = "2a95132c15732412d22c1476fa83f27a";
 const APP_SECRET = "66bcf64aa8907b9f9d90ac17746a77ce394c393b92b3916633dc02846e608ad4";
+
+/** A session description of `sections`, each a media section's lines after its first, as a browser writes one: a line to an end of `\r\n`. */
+const described = (...sections: string[][]) => ["v=0", "o=- 1 2 IN IP4 127.0.0.1", "s=-", "t=0 0", ...sections.flatMap((lines) => ["m=video 9 UDP/TLS/RTP/SAVPF 96", ...lines])].join("\r\n") + "\r\n";
+
+describe("A camera's sizes", () => {
+  it("names the large one first, as the SFU goes down the alphabet from the one it can't send", () => {
+    expect(CAMERA_SIZES).toEqual({ large: "a", small: "b" });
+    expect(CAMERA_SIZES.large < CAMERA_SIZES.small).toBe(true);
+  });
+
+  it("finds that an offer sends a track in both sizes, as Chromium writes one, in whichever order", () => {
+    const offer = described(["a=mid:0", "a=sendonly", "a=rid:b send", "a=rid:a send", "a=simulcast:send b;a"]);
+    expect(carriesBothSizes(offer, "0", "send")).toBe(true);
+    expect(carriesBothSizes(offer.replace("send b;a", "send a;b"), "0", "send")).toBe(true);
+    // A description whose lines end as a file's do, and one a size of which starts paused.
+    expect(carriesBothSizes(offer.replaceAll("\r\n", "\n"), "0", "send")).toBe(true);
+    expect(carriesBothSizes(offer.replace("send b;a", "send b;~a"), "0", "send")).toBe(true);
+  });
+
+  it("finds that an answer takes both, which it says the other way about", () => {
+    const answer = described(["a=mid:0", "a=recvonly", "a=rid:b recv", "a=rid:a recv", "a=simulcast:recv b;a"]);
+    expect(carriesBothSizes(answer, "0", "recv")).toBe(true);
+    expect(carriesBothSizes(answer, "0", "send")).toBe(false);
+    expect(carriesBothSizes(described(["a=mid:0", "a=simulcast:send x;y recv a;b"]), "0", "recv")).toBe(true);
+    expect(carriesBothSizes(described(["a=mid:0", "a=simulcast:recv a;b send x;y"]), "0", "recv")).toBe(true);
+  });
+
+  it("finds one size, other sizes, or more of them, not to be both", () => {
+    const sending = (simulcast: string[]) => carriesBothSizes(described(["a=mid:0", "a=sendonly", ...simulcast]), "0", "send");
+    expect(sending([])).toBe(false);
+    for (const sizes of ["a", "b", "a;a", "f;h", "a;b;c", "f;a;b", "a,b", "a,c;b", "A;B", "", ";", "a;"]) expect(sending([`a=simulcast:send ${sizes}`]), sizes).toBe(false);
+    // Each size has a line of its own, which says nothing of both being sent at once.
+    expect(sending(["a=rid:b send", "a=rid:a send"])).toBe(false);
+    expect(sending(["a=simulcast:send"])).toBe(false);
+    expect(sending(["a=simulcast:recv b;a"])).toBe(false);
+  });
+
+  it("goes by the media section that carries the track", () => {
+    const both = ["a=sendonly", "a=simulcast:send b;a"];
+    const offer = described(["a=mid:0", "a=sendonly"], ["a=mid:1", ...both], ["a=mid:10", "a=sendonly"]);
+    expect(carriesBothSizes(offer, "1", "send")).toBe(true);
+    for (const mid of ["0", "10", "2", "", "1\r\na=simulcast:send b;a"]) expect(carriesBothSizes(offer, mid, "send"), mid).toBe(false);
+    // Said before any media section, it's said of none of them.
+    expect(carriesBothSizes(["v=0", "a=mid:0", "a=simulcast:send b;a", "m=video 9 UDP/TLS/RTP/SAVPF 96", "a=mid:0"].join("\r\n"), "0", "send")).toBe(false);
+    expect(carriesBothSizes("", "0", "send")).toBe(false);
+  });
+});
 
 describe("Set up huddles", () => {
   it("takes an SFU app's ID and its secret, without the spaces around them", () => {
@@ -120,6 +169,16 @@ describe("a huddle's socket", () => {
     for (const watch of ["ada", [7], [""], [null], ["ada", "ada"], ["u".repeat(MAX_ID_LENGTH + 1)], [...everyCamera, "one-more"]]) {
       expect(read({ type: "huddle.listen", kind: "video", watch }), JSON.stringify(watch).slice(0, 40)).toBeNull();
     }
+  });
+
+  it("reads that a tab shows cameras small, which it says only of cameras, and only when it does", () => {
+    expect(read({ type: "huddle.listen", kind: "video", watch: ["ada"], small: true })).toEqual({ type: "huddle.listen", kind: "video", watch: ["ada"], small: true });
+    expect(read({ type: "huddle.listen", kind: "video", fresh: true, watch: ["ada"], small: true })).toEqual({ type: "huddle.listen", kind: "video", fresh: true, watch: ["ada"], small: true });
+    expect(read({ type: "huddle.listen", kind: "video", watch: ["ada"] })).toEqual({ type: "huddle.listen", kind: "video", watch: ["ada"] });
+    // Neither voices nor screens come in sizes.
+    expect(read({ type: "huddle.listen", kind: "audio", small: true })).toEqual({ type: "huddle.listen", kind: "audio" });
+    expect(read({ type: "huddle.listen", kind: "screen", watch: ["ada"], small: true })).toEqual({ type: "huddle.listen", kind: "screen", watch: ["ada"] });
+    for (const small of [false, "true", 1, null, "b"]) expect(read({ type: "huddle.listen", kind: "video", watch: ["ada"], small }), JSON.stringify(small)).toBeNull();
   });
 
   it("reads whose screens a tab asks to see, as many as a huddle shows, which is nobody's unless it names them", () => {

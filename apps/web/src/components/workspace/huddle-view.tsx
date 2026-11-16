@@ -4,8 +4,8 @@ import type { HuddlePerson } from "@ember/protocol/huddles";
 import { Collapse, Headset, MicrophoneMute, NavArrowDown } from "@/components/icons/iconoir";
 import { useNameOf } from "@/hooks/use-directory";
 import { useIsSpeaking } from "@/hooks/use-huddle";
-import { OPEN_HUDDLE, openHuddle, type JoinedHuddle } from "@/lib/huddle-store";
-import { SCREEN_SHAPE, stageLayout, TILE_GAP, tilesLayout } from "@/lib/huddle-tiles";
+import { OPEN_HUDDLE, openHuddle, takeCamerasSmall, type JoinedHuddle } from "@/lib/huddle-store";
+import { SCREEN_SHAPE, showsCamerasSmall, stageLayout, TILE_GAP, tilesLayout } from "@/lib/huddle-tiles";
 import { cn } from "@/lib/utils";
 import { HuddlePicture } from "./huddle-picture";
 import { CameraTool, LeaveButton, MicrophoneTool, ScreenTool, useHuddleName, waitingToJoin } from "./huddle-tools";
@@ -221,6 +221,11 @@ export function HuddleView({ huddle, room, meId }: Props) {
   const tileCount = count + (huddle.screen ? 1 : 0) + Math.max(0, sharing.length - 1);
   const stage = staged && stagedScreen ? { user: staged, stream: stagedScreen, ...stageLayout(tileCount, shape, space.width, space.height) } : null;
   const { columns, width, square } = stage?.tiles ?? tilesLayout(tileCount, space.width, space.height);
+  // The huddle is sent each camera in the size its tiles show, once it has tiles and knows what size they are, as is the next this tab joins from here.
+  const [sized, small] = [tileCount > 0 && space.width > 0, showsCamerasSmall({ width, square })];
+  useEffect(() => {
+    if (sized) takeCamerasSmall(small);
+  }, [sized, small, huddle.roomId]);
   // It covers the page whatever had the focus there, so it takes it as it opens.
   const section = useRef<HTMLElement>(null);
   useEffect(() => section.current?.focus(), []);
