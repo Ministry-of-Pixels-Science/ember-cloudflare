@@ -109,3 +109,41 @@ describe("Make or revoke administrators", () => {
     expect(result.current.people.get("u2")).toEqual(grace);
   });
 });
+
+describe("AI agents kept to administrators' direct messages", () => {
+  const scout: DirectoryUser = { id: "u3", name: "Scout", bio: null, role: "bot", status: "active", avatarUrl: "/users/u3.ghi/avatar?v=20261115120000", agent: true };
+
+  it("takes out whoever the workspace socket says this person is no longer told of, and takes them back as it says they are", async () => {
+    server.users = [ada, scout];
+    const { result } = renderHook(() => useDirectory());
+    await reload(result);
+    act(() => result.current.remove(scout.id));
+    expect([...result.current.people.keys()]).toEqual(["u1"]);
+    // Someone it never listed is as gone.
+    act(() => result.current.remove("u9"));
+    expect([...result.current.people.keys()]).toEqual(["u1"]);
+
+    act(() => result.current.update({ ...scout, adminsOnly: true }));
+    expect(result.current.people.get("u3")).toEqual({ ...scout, adminsOnly: true });
+  });
+
+  it("leaves out someone taken out while a load is on its way, which may have read them before, whatever came of them first", async () => {
+    server.users = [ada, scout];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    vi.mocked(fetch).mockImplementationOnce(async (input, init) => {
+      await held;
+      return answer(input, init);
+    });
+    const { result } = renderHook(() => useDirectory());
+    let loaded!: Promise<void>;
+    act(() => void (loaded = result.current.reload()));
+    act(() => result.current.update({ ...scout, name: "Scout II" }));
+    act(() => result.current.remove(scout.id));
+    await act(async () => {
+      release();
+      await loaded;
+    });
+    expect([...result.current.people.keys()]).toEqual(["u1"]);
+  });
+});

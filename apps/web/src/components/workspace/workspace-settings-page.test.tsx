@@ -148,6 +148,7 @@ const RECAP: Agent = {
   model: "anthropic/claude-sonnet-5.5",
   modelName: "Claude Sonnet 5.5",
   webTools: [],
+  access: "everyone",
   rooms: null,
 };
 
@@ -2128,7 +2129,7 @@ describe("Ember AI", () => {
     // @ember, on the model it saved, then the agents.
     await waitFor(() => expect(within(agentsCard()!).getAllByRole("listitem")).toHaveLength(2));
     const [ember, recap] = within(agentsCard()!).getAllByRole("listitem");
-    expect(ember).toHaveTextContent("Claude Haiku 5.5 · Every open room");
+    expect(ember).toHaveTextContent("Claude Haiku 5.5 · Every room");
     expect(within(ember!).getByRole("link", { name: "Edit Ember" })).toHaveAttribute("href", "/account/agents/ember/edit");
     expect(within(recap!).getByRole("link", { name: "Edit Recap" })).toHaveAttribute("href", `/account/agents/${RECAP.id}/edit`);
     expect(within(agentsCard()!).getByRole("link", { name: "New agent" })).toHaveAttribute("href", "/account/agents/new");
