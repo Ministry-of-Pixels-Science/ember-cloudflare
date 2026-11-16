@@ -121,6 +121,7 @@ import { openDb, type Db } from "./db";
 import { alreadyAMemberEmail, emailDomainLinkEmail, invitationEmail, passwordResetCodeEmail, testEmail } from "./emails";
 import { guestSignIn, type Env } from "./env";
 import { pictureObjects, type StoredPicture } from "./files/pictures";
+import type { RelayKey } from "./huddles/relay";
 import type { HuddleApp, SfuApp } from "./huddles/sfu";
 import { alphanumeric, sortableId } from "./ids";
 import { sendEmail, sendEmails, senderOf, type Sender } from "./mail";
@@ -1729,33 +1730,56 @@ export class Workspace extends DurableObject<Env> {
   async changeHuddles(credentials: Credentials, app: SfuApp | null): Promise<{ huddles: HuddlesSettings | null } | "forbidden" | null> {
     return this.administerAccount(credentials, async (account) => {
       if (app === null && account.huddles === null) return { huddles: null };
-      const huddles = app && { appId: app.appId, sealedAppSecret: await seal(this.env.SESSION_SECRET, "sfu-app-secret", app.appSecret) };
+      // The relay is the account's, by a key of its own, so huddles keep it through a change of app.
+      const huddles = app && { appId: app.appId, sealedAppSecret: await seal(this.env.SESSION_SECRET, "sfu-app-secret", app.appSecret), relay: account.huddles?.relay ?? null };
       await this.publishAccount({ ...account, huddles }, (now) => this.store.changeAccount({ huddles }, now));
-      return { huddles: huddles && { appId: huddles.appId } };
+      return { huddles: await this.huddlesSettings({ huddles }) };
     });
   }
 
   /**
-   * Huddles as the Huddles card shows them: the SFU app they run through, by its ID, while `account` keeps
-   * its keys, or null while it keeps none, or while the app's secret doesn't open under SESSION_SECRET,
-   * as once that's changed, when it's as if huddles were off until an administrator sets them up again.
+   * Gives huddles a relay as the person `credentials` signs in, by the TURN key `key`, which the Worker
+   * has had Cloudflare make a relay's servers with, its API token sealed under SESSION_SECRET (`seal`),
+   * or changes the key they have one by, or takes it away with null, which forgets the key, answering
+   * huddles as the Huddles tab then shows them: "off" for a key given while huddles are off, which is
+   * kept with the app they run through, "forbidden" unless they're an administrator, or null without a
+   * valid session. A room asks what huddles run through afresh as a tab joins, so whoever joins one from
+   * then on goes by the relay, or without it. Pages show nothing of it, so no socket hears of it.
    */
-  private async huddlesSettings(account: Pick<JoinableAccount, "huddles">): Promise<HuddlesSettings | null> {
-    const app = await this.openedHuddleApp(account);
-    return app && { appId: app.appId };
+  async changeHuddleRelay(credentials: Credentials, key: RelayKey | null): Promise<{ huddles: HuddlesSettings | null } | "off" | "forbidden" | null> {
+    return this.administerAccount(credentials, async (account) => {
+      const { huddles: saved } = account;
+      if (saved === null || (await this.openedHuddleApp(account)) === null) return key === null ? { huddles: null } : "off";
+      if (key === null && saved.relay === null) return { huddles: await this.huddlesSettings(account) };
+      const relay = key && { keyId: key.keyId, sealedApiToken: await seal(this.env.SESSION_SECRET, "turn-key-api-token", key.apiToken) };
+      const huddles = { ...saved, relay };
+      return { huddles: await this.huddlesSettings(await this.saveAccount({ ...account, huddles }, (now) => this.store.changeAccount({ huddles }, now))) };
+    });
   }
 
   /**
-   * The Realtime SFU app huddles run through, with its secret opened, for a room to ask the SFU as, and
-   * whether cameras may go on in them and screens be shared, or null while huddles are off. Rooms ask
-   * as a huddle goes on, so turning huddles off, or changing the app, ends the ones under way, and
-   * turning cameras or screen sharing off takes down the ones that are on. The secret goes no further
-   * than the room's memory.
+   * Huddles as the Huddles tab shows them: the SFU app they run through, by its ID, while `account` keeps
+   * its keys, or null while it keeps none, or while the app's secret doesn't open under SESSION_SECRET,
+   * as once that's changed, when it's as if huddles were off until an administrator sets them up again.
+   * With it, the TURN key their relay goes by, by its ID, while its API token opens.
+   */
+  private async huddlesSettings(account: Pick<JoinableAccount, "huddles">): Promise<HuddlesSettings | null> {
+    const app = await this.openedHuddleApp(account);
+    return app && { appId: app.appId, relayKeyId: (await this.openedRelay(account))?.keyId ?? null };
+  }
+
+  /**
+   * The Realtime SFU app huddles run through, with its secret opened, for a room to ask the SFU as,
+   * whether cameras may go on in them and screens be shared, and the TURN key their relay goes by, with
+   * its API token opened, for the room to ask Cloudflare for the relay's servers as, or null while
+   * huddles are off. Rooms ask as a huddle goes on, so turning huddles off, or changing the app, ends
+   * the ones under way, and turning cameras or screen sharing off takes down the ones that are on. The
+   * secret and the token go no further than the room's memory.
    */
   async huddleApp(): Promise<HuddleApp | null> {
     const account = await this.joinableAccount();
     const app = account && (await this.openedHuddleApp(account));
-    return account && app && { ...app, cameras: account.huddleCameras, screens: account.huddleScreens };
+    return account && app && { ...app, cameras: account.huddleCameras, screens: account.huddleScreens, relay: await this.openedRelay(account) };
   }
 
   /** The SFU app `account` keeps the keys of, with its secret opened, or null while it keeps none or the secret doesn't open. */
@@ -1764,6 +1788,14 @@ export class Workspace extends DurableObject<Env> {
     const appSecret = await unseal(this.env.SESSION_SECRET, "sfu-app-secret", saved.sealedAppSecret);
     if (appSecret === null) console.error("The SFU app secret Ember was given doesn't open under SESSION_SECRET, so huddles are off.");
     return appSecret === null ? null : { appId: saved.appId, appSecret };
+  }
+
+  /** The TURN key `account`'s huddles have their relay by, with its API token opened, or null while they have none or the token doesn't open. */
+  private async openedRelay({ huddles: saved }: Pick<JoinableAccount, "huddles">): Promise<RelayKey | null> {
+    if (!saved?.relay) return null;
+    const apiToken = await unseal(this.env.SESSION_SECRET, "turn-key-api-token", saved.relay.sealedApiToken);
+    if (apiToken === null) console.error("The TURN key's API token Ember was given doesn't open under SESSION_SECRET, so huddles have no relay.");
+    return apiToken === null ? null : { keyId: saved.relay.keyId, apiToken };
   }
 
   /**

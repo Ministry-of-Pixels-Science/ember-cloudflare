@@ -27,7 +27,7 @@ import {
 } from "@ember/protocol";
 import { formatOf, TOP_LEVELS, modelName, type AssistantChanges, type AssistantSettings, type NewAssistantModel } from "@ember/protocol/assistant";
 import type { Agent, Agents } from "@ember/protocol/agents";
-import type { HuddlesSetup } from "@ember/protocol/huddles";
+import { RELAY_WITHOUT_HUDDLES, type HuddleRelaySetup, type HuddlesSetup } from "@ember/protocol/huddles";
 import type { MemberfulKeysChange, MemberfulSaved } from "@ember/protocol/memberful";
 import { FlashProvider } from "@/components/flash";
 import { Sheet } from "@/components/ui/sheet";
@@ -266,10 +266,18 @@ function serve(settings: WorkspaceSettings, { saved, regenerated, roleChanged, r
         return Response.json({ memberfulSite: site, memberfulWebhooks: true, memberfulKeys: "saved", memberfulSiteKept: settings.memberfulSiteKept } satisfies MemberfulSaved);
       }
       case "PUT /api/account/huddles":
-        huddles = { appId: (JSON.parse(String(init?.body)) as HuddlesSetup).appId };
+        // The relay's TURN key is the account's, so it's kept through a change of app.
+        huddles = { appId: (JSON.parse(String(init?.body)) as HuddlesSetup).appId, relayKeyId: huddles?.relayKeyId ?? null };
         return Response.json({ huddles });
       case "DELETE /api/account/huddles":
         huddles = null;
+        return Response.json({ huddles });
+      case "PUT /api/account/huddles/relay":
+        if (huddles === null) return Response.json({ error: RELAY_WITHOUT_HUDDLES }, { status: 409 });
+        huddles = { ...huddles, relayKeyId: (JSON.parse(String(init?.body)) as HuddleRelaySetup).keyId };
+        return Response.json({ huddles });
+      case "DELETE /api/account/huddles/relay":
+        if (huddles !== null) huddles = { ...huddles, relayKeyId: null };
         return Response.json({ huddles });
       case "POST /api/invitations": {
         const { emailAddresses } = JSON.parse(String(init?.body)) as { emailAddresses: string[] };
@@ -2233,6 +2241,10 @@ describe("Set up huddles", () => {
   /** The card under it, which says whether cameras may go on in a huddle, and after that, whether screens may be shared. */
   const camerasCard = () => within(screen.getByRole("region", { name: "Huddles" })).queryByRole("region", { name: "Cameras" });
   const screensRow = () => within(screen.getByRole("region", { name: "Huddles" })).queryByRole("region", { name: "Screen sharing" });
+  /** And the last, which says whether huddles have a relay. */
+  const relayCard = () => within(screen.getByRole("region", { name: "Huddles" })).queryByRole("region", { name: "Relay for strict networks" });
+  /** A TURN key's ID and its API token, as an administrator copies them from Cloudflare's dashboard. */
+  const KEY = { keyId: "5b1e9a0c7d3f4e2a8b6c1d0e9f7a3b5c", apiToken: "9f3c5a7e1b2d4f6a8c0e2b4d6f8a1c3e5b7d9f0a2c4e6b8d0f1a3c5e7b9d2f4a" };
 
   it("gives administrators the Huddles tab's card, whose switch sets up huddles with an SFU app's keys", async () => {
     const { user } = showPage();
@@ -2240,8 +2252,9 @@ describe("Set up huddles", () => {
     expect(card).toHaveTextContent("Huddles let people in a room talk to each other live.");
     const huddlesSwitch = within(card).getByRole("switch", { name: "Audio and video chat" });
     expect(huddlesSwitch).not.toBeChecked();
-    // What people may do in a huddle waits for huddles.
+    // What people may do in a huddle waits for huddles, as their relay does.
     expect(camerasCard()).not.toBeInTheDocument();
+    expect(relayCard()).not.toBeInTheDocument();
 
     await user.click(huddlesSwitch);
     const setup = await screen.findByRole("dialog", { name: "Set up huddles" });
@@ -2255,6 +2268,7 @@ describe("Set up huddles", () => {
     expect(huddlesSwitch).toBeChecked();
     expect(fetch).toHaveBeenCalledWith("/api/account/huddles", expect.objectContaining({ method: "PUT", body: JSON.stringify(APP) }));
     expect(camerasCard()).toBeInTheDocument();
+    expect(relayCard()).toBeInTheDocument();
 
     await user.click(within(card).getByRole("button", { name: "Change keys" }));
     expect(await screen.findByRole("textbox", { name: "App ID" })).toHaveValue(APP.appId);
@@ -2272,7 +2286,7 @@ describe("Set up huddles", () => {
   });
 
   it("turns huddles off once the administrator confirms", async () => {
-    serve({ ...asAdministrator, huddles: { appId: APP.appId } });
+    serve({ ...asAdministrator, huddles: { appId: APP.appId, relayKeyId: null } });
     vi.spyOn(window, "confirm").mockReturnValue(true);
     const { user } = showPage();
     const card = await huddlesCard();
@@ -2284,10 +2298,82 @@ describe("Set up huddles", () => {
     expect(card).toHaveTextContent("Huddles let people in a room talk to each other live.");
     expect(fetch).toHaveBeenCalledWith("/api/account/huddles", expect.objectContaining({ method: "DELETE" }));
     expect(camerasCard()).not.toBeInTheDocument();
+    expect(relayCard()).not.toBeInTheDocument();
+  });
+
+  it("gives administrators a relay card while huddles are on, whose switch sets up the relay with a TURN key", async () => {
+    serve({ ...asAdministrator, huddles: { appId: APP.appId, relayKeyId: null } });
+    const { user } = showPage();
+    await huddlesCard();
+    const relay = relayCard()!;
+    expect(relay).toHaveTextContent("Some networks, like an office's or a hotel's, block the way huddles connect.");
+    const relaySwitch = within(relay).getByRole("switch", { name: "Relay for strict networks" });
+    expect(relaySwitch).not.toBeChecked();
+    // Last on the tab, under what people may do in a huddle.
+    expect(screensRow()!.compareDocumentPosition(relay) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    await user.click(relaySwitch);
+    const setup = await screen.findByRole("dialog", { name: "Set up the relay" });
+    expect(within(setup).getByRole("link", { name: "Open Cloudflare's dashboard" })).toHaveAttribute("href", "https://dash.cloudflare.com/?to=/:account/calls");
+    await user.type(within(setup).getByRole("textbox", { name: "TURN Token ID" }), KEY.keyId);
+    await user.type(within(setup).getByRole("textbox", { name: "API Token" }), KEY.apiToken);
+    await user.click(within(setup).getByRole("button", { name: "Save" }));
+    await user.click(await screen.findByRole("button", { name: "Done" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(relay).toHaveTextContent(`People whose network blocks huddles connect through Cloudflare's TURN service, by the TURN key ${KEY.keyId} in your Cloudflare account.`);
+    expect(relaySwitch).toBeChecked();
+    expect(fetch).toHaveBeenCalledWith("/api/account/huddles/relay", expect.objectContaining({ method: "PUT", body: JSON.stringify(KEY) }));
+    // The app huddles run through is as it was.
+    expect(await huddlesCard()).toHaveTextContent(`Huddles run through the Realtime SFU app ${APP.appId} in your Cloudflare account.`);
+
+    await user.click(within(relay).getByRole("button", { name: "Change key" }));
+    expect(await screen.findByRole("textbox", { name: "TURN Token ID" })).toHaveValue(KEY.keyId);
+    expect(screen.getByText("Ember has a TURN key already. Give another's to relay through it instead.")).toBeInTheDocument();
+  });
+
+  it("opens Cloudflare's dashboard at the account Ember is deployed to when the switch sets up the relay", async () => {
+    serve({ ...asAdministrator, huddles: { appId: APP.appId, relayKeyId: null }, cloudflareAccountId: "0123456789abcdef0123456789abcdef" });
+    const { user } = showPage();
+    await huddlesCard();
+    await user.click(within(relayCard()!).getByRole("switch", { name: "Relay for strict networks" }));
+    expect(await screen.findByRole("link", { name: "Open Cloudflare's dashboard" })).toHaveAttribute("href", "https://dash.cloudflare.com/0123456789abcdef0123456789abcdef/calls");
+  });
+
+  it("takes the relay away once the administrator confirms, and leaves huddles on", async () => {
+    serve({ ...asAdministrator, huddles: { appId: APP.appId, relayKeyId: KEY.keyId } });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const { user } = showPage();
+    const card = await huddlesCard();
+    const relay = relayCard()!;
+    expect(relay).toHaveTextContent(`by the TURN key ${KEY.keyId} in your Cloudflare account.`);
+    await user.click(within(relay).getByRole("switch", { name: "Relay for strict networks" }));
+    await waitFor(() => expect(within(relay).queryByRole("button", { name: "Change key" })).not.toBeInTheDocument());
+    expect(within(relay).getByRole("switch", { name: "Relay for strict networks" })).not.toBeChecked();
+    expect(within(relay).getByRole("switch", { name: "Relay for strict networks" })).toBeEnabled();
+    expect(relay).toHaveTextContent("Some networks, like an office's or a hotel's, block the way huddles connect.");
+    expect(fetch).toHaveBeenCalledWith("/api/account/huddles/relay", expect.objectContaining({ method: "DELETE" }));
+    expect(within(card).getByRole("switch", { name: "Audio and video chat" })).toBeChecked();
+    expect(camerasCard()).toBeInTheDocument();
+  });
+
+  it("keeps the relay's TURN key through a change of the app huddles run through", async () => {
+    serve({ ...asAdministrator, huddles: { appId: APP.appId, relayKeyId: KEY.keyId } });
+    const another = { appId: "f".repeat(32), appSecret: "0".repeat(64) };
+    const { user } = showPage();
+    const card = await huddlesCard();
+    await user.click(within(card).getByRole("button", { name: "Change keys" }));
+    const setup = await screen.findByRole("dialog", { name: "Set up huddles" });
+    await user.clear(within(setup).getByRole("textbox", { name: "App ID" }));
+    await user.type(within(setup).getByRole("textbox", { name: "App ID" }), another.appId);
+    await user.type(within(setup).getByRole("textbox", { name: "App Secret" }), another.appSecret);
+    await user.click(within(setup).getByRole("button", { name: "Save" }));
+    await user.click(await screen.findByRole("button", { name: "Done" }));
+    expect(card).toHaveTextContent(`Huddles run through the Realtime SFU app ${another.appId} in your Cloudflare account.`);
+    expect(relayCard()).toHaveTextContent(`by the TURN key ${KEY.keyId} in your Cloudflare account.`);
   });
 
   it("gives administrators a Cameras card under it while huddles are on, whose switch keeps huddles to voices, saved at once with no notice", async () => {
-    serve({ ...asAdministrator, huddles: { appId: APP.appId } });
+    serve({ ...asAdministrator, huddles: { appId: APP.appId, relayKeyId: null } });
     const { onAccountChanged, user } = showPage();
     await huddlesCard();
     const cameras = camerasCard()!;
@@ -2306,7 +2392,7 @@ describe("Set up huddles", () => {
   });
 
   it("follows the workspace socket, for a Cameras switch moved in another tab", async () => {
-    serve({ ...asAdministrator, huddles: { appId: APP.appId } });
+    serve({ ...asAdministrator, huddles: { appId: APP.appId, relayKeyId: null } });
     showPage();
     await huddlesCard();
     const camerasSwitch = within(camerasCard()!).getByRole("switch", { name: "Cameras" });
@@ -2315,7 +2401,7 @@ describe("Set up huddles", () => {
   });
 
   it("has Screen sharing under Cameras in that card, whose switch keeps people from sharing their screens, saved at once with no notice, and follows the workspace socket", async () => {
-    serve({ ...asAdministrator, huddles: { appId: APP.appId } });
+    serve({ ...asAdministrator, huddles: { appId: APP.appId, relayKeyId: null } });
     const { onAccountChanged, user } = showPage();
     await huddlesCard();
     const screens = screensRow()!;
@@ -2357,6 +2443,7 @@ describe("Set up huddles", () => {
     expect(screen.queryByRole("region", { name: "Audio and video chat" })).not.toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "Cameras" })).not.toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "Screen sharing" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Relay for strict networks" })).not.toBeInTheDocument();
   });
 });
 

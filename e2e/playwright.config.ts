@@ -67,8 +67,9 @@ export default defineConfig<MobileOptions>({
     // given an account in Set up Ember AI, and which serves the models file too, in place of the one on
     // Ember's main branch, the ID of the account Ember is deployed to, as `pnpm run deploy` gives it,
     // which Set up Ember AI fills in, and the address of the Realtime SFU the huddles spec fakes, which
-    // Ember asks to start a session with an app's keys before it keeps them in Set up huddles, and then
-    // to carry what's said in a huddle. Servers start in turn, so the app is built by then.
+    // Ember asks to start a session with an app's keys before it keeps them in Set up huddles, then to
+    // carry what's said in a huddle, and, as Cloudflare's TURN service, for a relay's servers. Servers
+    // start in turn, so the app is built by then.
     {
       command: [
         `node -e "require('node:fs').rmSync('e2e/.wrangler/settings-state', { recursive: true, force: true })"`,

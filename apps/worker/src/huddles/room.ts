@@ -15,6 +15,7 @@ import {
   SCREENS_OFF,
   type CameraSize,
   type HuddleClientFrame,
+  type HuddleIceServer,
   type HuddlePerson,
   type HuddleServerFrame,
   type HuddleTrack,
@@ -23,6 +24,7 @@ import {
 import type { Env } from "../env";
 import { CLOSE_REASONS, closedAtOnce, closeTooLarge, isTooLarge, MAX_ROOM_FRAME_SIZE } from "../sockets";
 import { workspace } from "../workspace";
+import { relayServers } from "./relay";
 import { acceptAnswer, closeTracks, publishTracks, pullTracks, resizeTracks, SfuError, startSession, TRACKS_PER_REQUEST, type HuddleApp, type Pulled, type SfuApp } from "./sfu";
 
 // A room's huddle, which the room's Durable Object keeps beside its own sockets (src/chat-room.ts): who's
@@ -43,6 +45,10 @@ import { acceptAnswer, closeTracks, publishTracks, pullTracks, resizeTracks, Sfu
 // only while it shows the huddle open, so what nobody looks at isn't sent. A camera whose browser
 // sends it in two sizes at once (simulcast) is sent to each tab in the one that tab says it shows
 // cameras in, so that small tiles cost a small picture.
+//
+// A network that blocks the way to the SFU is gone around by Cloudflare's TURN service, where an
+// administrator has given huddles a relay (./relay.ts): the room asks Cloudflare, as a tab joins, for
+// the servers its connections go by, and welcomes the tab with them.
 //
 // What a socket publishes and hears is in its attachment, which outlives hibernation, so a huddle costs
 // the room nothing between its frames but a check every `HUDDLE_CHECK_MS`. When someone leaves, or loses
@@ -352,9 +358,10 @@ export class Huddle {
    * Workspace's word for them. A huddle that's full, or huddles being off, closes the socket at once
    * with the code that says so. Someone already in the huddle moves to this tab: their other socket
    * closes, and the others hear that they changed rather than that they left and joined. The room,
-   * which lets people in one at a time, sets its alarm to check the huddle once someone's in it.
+   * which lets people in one at a time, sets its alarm to check the huddle once someone's in it. The
+   * tab is welcomed with `iceServers`, the servers its connections go by, if the room has any for it.
    */
-  async join(user: User, roomId: RoomId, tags: string[], muted: boolean): Promise<Response> {
+  async join(user: User, roomId: RoomId, tags: string[], muted: boolean, iceServers: HuddleIceServer[] | null): Promise<Response> {
     const app = await this.appNow();
     if (!app) return closedAtOnce(HuddleCloseCode.Off);
     let members = this.members();
@@ -374,10 +381,21 @@ export class Huddle {
     const attachment: HuddleAttachment = { huddle: true, user, roomId, joinedAt: earlier[0]?.attachment.joinedAt ?? now, openedAt: now, startedAt, muted, appId: app.appId };
     server.serializeAttachment(attachment);
     for (const { socket } of earlier) this.close(socket, HuddleCloseCode.Moved);
-    send(server, { type: "huddle.welcome", you: user, people: this.people(), startedAt });
+    send(server, { type: "huddle.welcome", you: user, people: this.people(), startedAt, ...(iceServers && { iceServers }) });
     this.broadcast({ type: earlier.length > 0 ? "huddle.changed" : "huddle.joined", person: personOf(attachment) }, server);
     if (earlier.length === 0) this.reportSoon();
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  /**
+   * The servers a tab that joins now makes its connections by, while huddles have a relay: what
+   * Cloudflare answers the room with for the tab, or null without a relay, or when the room can't say.
+   * The tab is let in either way. The Workspace is asked afresh, so a relay set up a moment ago is
+   * the next tab's to use.
+   */
+  async iceServers(): Promise<HuddleIceServer[] | null> {
+    const app = await this.appNow(true).catch(() => null);
+    return app?.relay ? relayServers(this.env, app.relay) : null;
   }
 
   /** Does what a frame from one of the huddle's sockets asks. */

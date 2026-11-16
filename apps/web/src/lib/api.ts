@@ -33,6 +33,7 @@ import {
   type EmailLinkSignUp,
   type EmailSettings,
   type Favorites,
+  type HuddleRelaySetup,
   type HuddlesForgotten,
   type HuddlesSaved,
   type HuddlesSettings,
@@ -587,6 +588,24 @@ export async function saveHuddles(setup: HuddlesSetup): Promise<HuddlesSettings>
 /** Turns huddles off, forgetting the SFU app's keys Ember was given. Fails with a 403 ApiError for anyone but an administrator. */
 export async function forgetHuddles(): Promise<null> {
   return (await request<HuddlesForgotten>("/api/account/huddles", { method: "DELETE" })).huddles;
+}
+
+/**
+ * Gives Ember a TURN key's ID and API token for huddles' relay to go by, answering huddles as they are
+ * then. Fails with a 422 ApiError on the field Ember or Cloudflare refuses, a 502 one when Ember couldn't
+ * ask Cloudflare, a 409 one while huddles are off, and a 403 one for anyone but an administrator.
+ */
+export async function saveHuddleRelay(setup: HuddleRelaySetup): Promise<HuddlesSettings> {
+  return (await request<HuddlesSaved>("/api/account/huddles/relay", { method: "PUT", body: JSON.stringify(setup) })).huddles;
+}
+
+/**
+ * Takes huddles' relay away, forgetting the TURN key Ember was given, answering huddles as they are
+ * then, which is null where they've been turned off since. Fails with a 403 ApiError for anyone but an
+ * administrator.
+ */
+export async function forgetHuddleRelay(): Promise<HuddlesSettings | null> {
+  return (await request<HuddlesSaved | HuddlesForgotten>("/api/account/huddles/relay", { method: "DELETE" })).huddles;
 }
 
 /**

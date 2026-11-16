@@ -396,10 +396,12 @@ export class ChatRoom extends DurableObject<Env> {
    * room's does, so whatever ends their access to the room takes them out of its huddle. Like one of the
    * room's, it's turned away when the Workspace's word for it is too old, or older than a revocation.
    */
-  private joinHuddle(user: User, roomId: RoomId, tags: string[], authorizedAt: number, muted: boolean): Promise<Response> {
+  private async joinHuddle(user: User, roomId: RoomId, tags: string[], authorizedAt: number, muted: boolean): Promise<Response> {
+    // Cloudflare is asked for the relay's servers before the join takes its turn, so that nothing else the room does waits on its answer.
+    const iceServers = await this.huddle.iceServers();
     return this.serially(async () => {
       if (await this.revocationsFor(roomId).refuse(tags, authorizedAt)) return closedAtOnce(CloseCode.Reconnect);
-      const response = await this.huddle.join(user, roomId, tags, muted);
+      const response = await this.huddle.join(user, roomId, tags, muted, iceServers);
       if (this.huddle.live) await this.checkHuddleBy(Date.now() + HUDDLE_CHECK_MS);
       return response;
     });

@@ -1,15 +1,17 @@
 import type { AccountSettings, Me, WorkspaceSettings } from "@ember/protocol";
-import { APP_ID_UNKNOWN, APP_SECRET_UNKNOWN, CAMERAS_OFF, SCREENS_FULL, SCREENS_OFF } from "@ember/protocol/huddles";
+import { APP_ID_UNKNOWN, APP_SECRET_UNKNOWN, CAMERAS_OFF, RELAY_API_TOKEN_UNKNOWN, RELAY_KEY_ID_UNKNOWN, RELAY_TTL_S, SCREENS_FULL, SCREENS_OFF } from "@ember/protocol/huddles";
 import type { APIRequestContext, Browser, BrowserContext, Locator, Page } from "@playwright/test";
 import { administratorSession, cookieHeader, expect, huddleTilesKeepClear, newAddress, SAME_ORIGIN, signInAsAdministrator, test, useOwnAddress, type TestRoom } from "../../fixtures";
-import { AI_GATEWAY_ACCOUNT, SFU_APP } from "../../projects/workspace-settings";
-import { startFakeSfu, type FakeSfu } from "./fake-sfu";
+import { AI_GATEWAY_ACCOUNT, SFU_APP, TURN_KEY } from "../../projects/workspace-settings";
+import { startFakeSfu, type FakeSfu, type IceServer } from "./fake-sfu";
 
-// The Huddles tab's cards and Set up huddles, and a huddle itself, on the second test server, which asks
-// the Realtime SFU this spec fakes: to start a session with the keys it's given, and to carry what the
-// people in a huddle say, what their cameras show and the screens they share, which the fake does
-// through a page of its own. Each test leaves the workspace as a new one is: huddles off, and cameras
-// and screen sharing allowed in them, and the SFU taking a camera in each size it's sent in.
+// The Huddles tab's cards, Set up huddles and Set up the relay, and a huddle itself, on the second test
+// server, which asks the Realtime SFU this spec fakes: to start a session with the keys it's given, and
+// to carry what the people in a huddle say, what their cameras show and the screens they share, which
+// the fake does through a page of its own. It asks the fake for the relay's servers too, as it asks
+// Cloudflare's TURN service. Each test leaves the workspace as a new one is: huddles off, with no
+// relay, and cameras and screen sharing allowed in them, and the SFU taking a camera in each size it's
+// sent in.
 
 let sfu: FakeSfu;
 let relay: Page;
@@ -47,6 +49,12 @@ const huddlesCard = (page: Page) => page.getByRole("region", { name: "Audio and 
 /** The card under it, which the tab has while huddles are on: its Cameras row, and its Screen sharing row. */
 const camerasCard = (page: Page) => page.getByRole("region", { name: "Cameras", exact: true });
 const screensRow = (page: Page) => page.getByRole("region", { name: "Screen sharing", exact: true });
+
+/** The card under those, which the tab has while huddles are on too: whether they have a relay. */
+const relayCard = (page: Page) => page.getByRole("region", { name: "Relay for strict networks", exact: true });
+
+/** Where Ember asks the TURN service for a tab's servers, as the TURN key the spec gives it, and what it asks with. */
+const TURN_SERVERS_ASKED = { method: "POST", path: `/v1/turn/keys/${TURN_KEY.keyId}/credentials/generate-ice-servers`, authorization: `Bearer ${TURN_KEY.apiToken}`, ttl: RELAY_TTL_S };
 
 /** Opens community settings' Huddles tab as the administrator, answering its card. */
 async function openHuddles(page: Page) {
@@ -170,6 +178,72 @@ test.describe("Set up huddles", () => {
     await expect(screensSwitch).toBeChecked();
     await expect.poll(() => workspaceNow(request)).toMatchObject({ huddleCameras: true, huddleScreens: true });
   });
+
+  test("the administrator gives Ember a TURN key for the relay, which Cloudflare makes its servers with, and Ember keeps it until they turn the relay off", async ({ page, request }) => {
+    const saved = await request.put("/api/account/huddles", { data: SFU_APP, headers: await asAdministrator(request) });
+    expect(saved.status(), await saved.text()).toBe(200);
+    const huddles = await openHuddles(page);
+    const relay = relayCard(page);
+    await expect(relay).toContainText("With a relay, people on them connect through Cloudflare's TURN service, with a TURN key in your Cloudflare account.");
+    const relaySwitch = relay.getByRole("switch", { name: "Relay for strict networks" });
+    await expect(relaySwitch).not.toBeChecked();
+    await relaySwitch.click();
+
+    const setup = page.getByRole("dialog");
+    await expect(setup).toHaveAccessibleName("Set up the relay");
+    // The dashboard opens at the account Ember is deployed to.
+    await expect(setup.getByRole("link", { name: "Open Cloudflare's dashboard" })).toHaveAttribute("href", `https://dash.cloudflare.com/${AI_GATEWAY_ACCOUNT.accountId}/calls`);
+    const [keyId, apiToken] = [setup.getByRole("textbox", { name: "TURN Token ID" }), setup.getByRole("textbox", { name: "API Token" })];
+    const save = setup.getByRole("button", { name: "Save" });
+    // The token shows as dots, in a field that's no password's, as the app's secret does.
+    await expect(apiToken).toHaveCSS("-webkit-text-security", "disc");
+    await expect(apiToken).toHaveJSProperty("type", "text");
+
+    // A key Cloudflare doesn't know comes back to its field, as does a token that isn't the key's.
+    const made = sfu.turnServers.length;
+    await keyId.fill("0".repeat(32));
+    await apiToken.fill(TURN_KEY.apiToken);
+    await save.click();
+    await expect(setup.getByRole("alert")).toHaveText(RELAY_KEY_ID_UNKNOWN);
+    await expect(keyId).toHaveAccessibleDescription(RELAY_KEY_ID_UNKNOWN);
+    await keyId.fill(TURN_KEY.keyId);
+    await apiToken.fill("not-the-keys-token");
+    await save.click();
+    await expect(setup.getByRole("alert")).toHaveText(RELAY_API_TOKEN_UNKNOWN);
+    await expect(apiToken).toHaveAccessibleDescription(RELAY_API_TOKEN_UNKNOWN);
+    expect(sfu.turnServers).toHaveLength(made);
+
+    // The right one is kept once Cloudflare has made servers with it, which it's asked for as it is for each tab's.
+    await apiToken.fill(TURN_KEY.apiToken);
+    await save.click();
+    await expect(setup).toHaveAccessibleName("The relay is on");
+    expect(sfu.asked.at(-1)).toEqual(TURN_SERVERS_ASKED);
+    expect(sfu.turnServers).toHaveLength(made + 1);
+    await setup.getByRole("button", { name: "Done" }).click();
+    await expect(setup).toBeHidden();
+    await expect(relay).toContainText(`by the TURN key ${TURN_KEY.keyId} in your Cloudflare account.`);
+    await expect(relaySwitch).toBeChecked();
+
+    // Ember keeps the key, and Change key starts from its ID, asking for its token again.
+    await page.reload();
+    await expect(relaySwitch).toBeChecked();
+    await relay.getByRole("button", { name: "Change key" }).click();
+    await expect(setup.getByRole("textbox", { name: "TURN Token ID" })).toHaveValue(TURN_KEY.keyId);
+    await expect(setup.getByRole("textbox", { name: "API Token" })).toHaveValue("");
+    await expect(setup).toContainText("Ember has a TURN key already.");
+    await setup.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(setup).toBeHidden();
+
+    // Turning the relay off, once they're sure, forgets the key, and leaves huddles on.
+    page.once("dialog", (dialog) => void dialog.accept());
+    await relaySwitch.click();
+    await expect(relaySwitch).not.toBeChecked();
+    await expect(relaySwitch).toBeEnabled();
+    await expect(relay.getByRole("button", { name: "Change key" })).toHaveCount(0);
+    await page.reload();
+    await expect(relaySwitch).not.toBeChecked();
+    await expect(huddles.getByRole("switch", { name: "Audio and video chat" })).toBeChecked();
+  });
 });
 
 /** The huddle `page` is in, opened over the page, which is how it starts. */
@@ -285,6 +359,30 @@ const musicIn = (page: Page) =>
     const audio = (window as unknown as KeepsSounds).huddleSoundsPlayed.filter(({ dataset }) => dataset.huddleSound === "music").at(-1);
     return { at: audio?.currentTime ?? 0, playing: audio !== undefined && audio.isConnected && !audio.paused };
   });
+
+/** Where `keepConnections` has a page keep what it made each of its connections by. */
+type KeepsConnections = Window & { huddleConnectionsMadeBy: Array<RTCConfiguration | undefined> };
+
+/** Has `page` keep what it makes each of its connections by. */
+const keepConnections = (page: Page) =>
+  page.addInitScript(() => {
+    const madeBy: Array<RTCConfiguration | undefined> = [];
+    Object.assign(window, {
+      huddleConnectionsMadeBy: madeBy,
+      RTCPeerConnection: class extends RTCPeerConnection {
+        constructor(configuration?: RTCConfiguration) {
+          super(configuration);
+          madeBy.push(configuration);
+        }
+      },
+    });
+  });
+
+/** The servers `page` has made each of its connections by, in the order it made them. */
+const serversOf = (page: Page) => page.evaluate(() => (window as unknown as KeepsConnections).huddleConnectionsMadeBy.map((configuration) => configuration?.iceServers));
+
+/** What a tab is given of the servers the TURN service made for it: all but the address at the port browsers won't connect to. */
+const givenOf = (servers: IceServer[]) => servers.map((server) => ({ ...server, urls: server.urls.filter((url) => !url.includes(":53?")) }));
 
 /** What the room's row in the sidebar ends with while a huddle is going on in it, which says who's in it under a pointer. */
 const sidebarMark = (page: Page, room: TestRoom) => page.getByRole("region", { name: "Rooms" }).getByRole("link", { name: room.name, exact: true }).locator("[title]");
@@ -819,6 +917,85 @@ test.describe("A huddle", () => {
     expect(sizesAsked(askedBefore)).toEqual(sizesChanged);
 
     // They leave, and the room has had the SFU close what each of them published, the camera's two sizes as one, and what each heard and saw.
+    for (const huddle of [gracesHuddle, adasHuddle]) await huddle.getByRole("button", { name: "Leave", exact: true }).click();
+    await expect(adasHuddle).toHaveCount(0);
+    await expect.poll(sessionsLeftOpen).toEqual([]);
+    await context.close();
+  });
+
+  test("with a relay, each tab makes its connections by the servers Cloudflare made for it as it joined, on which people hear each other, and by Ember's own once the relay is off", async ({ page, browser, baseURL, request }) => {
+    const administrator = await administratorSession(request);
+    const headers = await asAdministrator(request);
+    const room = await roomOfItsOwn(request);
+    for (const [path, data] of [
+      ["/api/account/huddles", SFU_APP],
+      ["/api/account/huddles/relay", TURN_KEY],
+    ] as const) {
+      const saved = await request.put(path, { data, headers });
+      expect(saved.status(), await saved.text()).toBe(200);
+    }
+    // Cloudflare made servers once as the key was checked, which nobody is given.
+    const made = sfu.turnServers.length;
+    const asked = sfu.asked.length;
+
+    // Ada starts the room's huddle. Her microphone goes out on a connection made by the servers Cloudflare made for her tab.
+    await keepConnections(page);
+    await useOwnAddress(page);
+    await page.goto(`/rooms/${room.id}`);
+    await signInAsAdministrator(page);
+    await page.getByRole("button", { name: "Start huddle", exact: true }).click();
+    await page.getByRole("dialog", { name: `Start a huddle in ${room.name}` }).getByRole("button", { name: "Start Huddle" }).click();
+    const adasHuddle = huddleOpened(page, room);
+    await expect(adasHuddle).toContainText("1 person");
+    await expect.poll(() => serversOf(page)).toHaveLength(1);
+    expect(sfu.turnServers).toHaveLength(made + 1);
+    const adas = givenOf(sfu.turnServers[made]!);
+    expect(await serversOf(page)).toEqual([adas]);
+    // They're the TURN service's less the address no browser reaches, and carry what her tab uses the relay with.
+    expect(adas.flatMap(({ urls }) => urls).filter((url) => url.includes(":53"))).toEqual([]);
+    expect(adas.at(-1)).toMatchObject({ username: `e2e-turn-${made + 1}`, credential: "e2e-only-not-a-credential" });
+
+    // Grace joins, by servers made for her own tab. Each hears the other, on connections their tabs made by their own.
+    const { user: her, context } = await newcomer(browser, baseURL, request, "Grace");
+    const grace = await context.newPage();
+    await keepConnections(grace);
+    const gracesHuddle = await joinByLink(grace, room);
+    await expect(gracesHuddle).toContainText("2 people");
+    await expect.poll(() => hears(grace, administrator.user.id), { timeout: 15_000 }).toBe(true);
+    await expect.poll(() => hears(page, her.id), { timeout: 15_000 }).toBe(true);
+    expect(sfu.turnServers).toHaveLength(made + 2);
+    const graces = givenOf(sfu.turnServers[made + 1]!);
+    expect(graces).not.toEqual(adas);
+    for (const [tab, theirs] of [
+      [page, adas],
+      [grace, graces],
+    ] as const) {
+      // The connection its microphone goes out on, and the one that brings the other's voice.
+      const madeBy = await serversOf(tab);
+      expect(madeBy.length).toBeGreaterThanOrEqual(2);
+      for (const servers of madeBy) expect(servers).toEqual(theirs);
+    }
+    // Cloudflare was asked for each tab's as the TURN key huddles were given, to last a day.
+    expect(sfu.asked.slice(asked).filter(({ path }) => path.includes("/turn/"))).toEqual([TURN_SERVERS_ASKED, TURN_SERVERS_ASKED]);
+
+    // The relay is turned off. Grace leaves and joins again, and her tab makes its connections as it did
+    // before huddles had one, which Cloudflare isn't asked for. Ada goes on hearing her.
+    const forgotten = await request.delete("/api/account/huddles/relay", { headers });
+    expect(forgotten.status(), await forgotten.text()).toBe(200);
+    await gracesHuddle.getByRole("button", { name: "Leave", exact: true }).click();
+    await expect(gracesHuddle).toHaveCount(0);
+    await expect(adasHuddle).toContainText("1 person");
+    const before = (await serversOf(grace)).length;
+    await grace.getByRole("button", { name: "Join huddle, 1 in it" }).click();
+    await grace.getByRole("dialog", { name: `Join the huddle in ${room.name}` }).getByRole("button", { name: "Join Huddle" }).click();
+    await expect(gracesHuddle).toContainText("2 people");
+    await expect.poll(() => hears(grace, administrator.user.id), { timeout: 15_000 }).toBe(true);
+    await expect.poll(() => hears(page, her.id), { timeout: 15_000 }).toBe(true);
+    const since = (await serversOf(grace)).slice(before);
+    expect(since.length).toBeGreaterThanOrEqual(2);
+    for (const servers of since) expect(servers).toEqual([{ urls: "stun:stun.cloudflare.com:3478" }]);
+    expect(sfu.turnServers).toHaveLength(made + 2);
+
     for (const huddle of [gracesHuddle, adasHuddle]) await huddle.getByRole("button", { name: "Leave", exact: true }).click();
     await expect(adasHuddle).toHaveCount(0);
     await expect.poll(sessionsLeftOpen).toEqual([]);

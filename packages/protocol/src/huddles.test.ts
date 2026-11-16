@@ -13,8 +13,13 @@ import {
   MAX_HUDDLE_SCREENS,
   MAX_SDP_LENGTH,
   parseHuddleClientFrame,
+  parseHuddleRelaySetup,
   parseHuddleSocketParams,
   parseHuddlesSetup,
+  RELAY_API_TOKEN_REFUSED,
+  RELAY_KEY_ID_REFUSED,
+  relayApiTokenOf,
+  relayKeyIdOf,
 } from "./huddles";
 import { CloseCode, MAX_ID_LENGTH } from "./index";
 
@@ -89,6 +94,35 @@ describe("Set up huddles", () => {
     for (const appSecret of ["", APP_SECRET.slice(1), `${APP_SECRET}0`, `${APP_SECRET.slice(0, 63)}.`, `${APP_SECRET.slice(0, 32)} ${APP_SECRET.slice(33)}`, APP_ID, 42, null, undefined]) {
       expect(parseHuddlesSetup({ appId: APP_ID, appSecret }), JSON.stringify(appSecret)).toEqual(refused);
     }
+  });
+});
+
+describe("Set up the relay", () => {
+  // A TURN key's ID and its API token are as long as an SFU app's ID and its secret.
+  const [KEY_ID, API_TOKEN] = [APP_ID, APP_SECRET];
+
+  it("takes a TURN key's ID and its API token, without the spaces around them", () => {
+    expect(parseHuddleRelaySetup({ keyId: ` ${KEY_ID}\n`, apiToken: `\t${API_TOKEN} ` })).toEqual({ keyId: KEY_ID, apiToken: API_TOKEN });
+    expect(relayKeyIdOf(KEY_ID.toUpperCase())).toBe(KEY_ID.toUpperCase());
+    // Cloudflare says which keys are its own, so one of another length than its keys have today is asked about.
+    expect(relayKeyIdOf("abc123")).toBe("abc123");
+    expect(relayApiTokenOf("Abc-123_x.y~z+/w==")).toBe("Abc-123_x.y~z+/w==");
+  });
+
+  it("refuses an ID that can't go into the address Cloudflare is asked at, on its field", () => {
+    const refused = { error: RELAY_KEY_ID_REFUSED, field: "keyId" };
+    for (const keyId of ["", "   ", `${KEY_ID}/credentials`, `${KEY_ID}?ttl=1`, "../apps", `${KEY_ID.slice(0, 31)}é`, `${KEY_ID} ${KEY_ID}`, "a".repeat(65), 42, null, undefined]) {
+      expect(parseHuddleRelaySetup({ keyId, apiToken: API_TOKEN }), JSON.stringify(keyId)).toEqual(refused);
+    }
+  });
+
+  it("refuses an API token no request could carry, on its field", () => {
+    const refused = { error: RELAY_API_TOKEN_REFUSED, field: "apiToken" };
+    for (const apiToken of ["", "   ", `${API_TOKEN.slice(0, 32)} ${API_TOKEN.slice(33)}`, `${API_TOKEN}\r\nX-Other: 1`, `${API_TOKEN}é`, "=", "a=b", "a".repeat(257), 42, null, undefined]) {
+      expect(parseHuddleRelaySetup({ keyId: KEY_ID, apiToken }), JSON.stringify(apiToken)).toEqual(refused);
+    }
+    // Nor anything but an object.
+    for (const given of [null, undefined, "keys", [KEY_ID, API_TOKEN]]) expect(parseHuddleRelaySetup(given)).toEqual({ error: RELAY_KEY_ID_REFUSED, field: "keyId" });
   });
 });
 

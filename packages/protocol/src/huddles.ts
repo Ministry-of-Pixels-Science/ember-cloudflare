@@ -1,13 +1,20 @@
 // Huddles, in which people in a room talk to each other through Cloudflare's Realtime SFU, by an SFU app
 // in the Cloudflare account of whoever runs Ember, whose keys administrators give it in Set up huddles,
 // behind the Huddles card of workspace settings, or as they set Ember up, through `/api/account/huddles`.
+// A network that blocks the way a browser reaches the SFU is gone around through Cloudflare's TURN
+// service, which relays what the browser sends and receives, by a TURN key in the same account, whose
+// ID and API token administrators give in Set up the relay, through `/api/account/huddles/relay`.
 
 import type { User, UserId } from "./index.ts";
 import { MAX_ID_LENGTH } from "./pages.ts";
 
-/** Huddles as the Huddles card shows them to administrators while they're on: the SFU app they run through, by its ID. */
+/**
+ * Huddles as the Huddles tab shows them to administrators while they're on: the SFU app they run
+ * through, by its ID, and the TURN key their relay goes by, by its ID, or null while they have none.
+ */
 export interface HuddlesSettings {
   appId: string;
+  relayKeyId: string | null;
 }
 
 /** What Set up huddles gives `PUT /api/account/huddles`: a Realtime SFU app's ID and its secret, as Cloudflare's dashboard shows them when the app is made. */
@@ -16,7 +23,11 @@ export interface HuddlesSetup {
   appSecret: string;
 }
 
-/** What `PUT /api/account/huddles` answers once Cloudflare has taken the app's keys: huddles as they are then. */
+/**
+ * What `PUT /api/account/huddles` answers once Cloudflare has taken the app's keys, and
+ * `PUT /api/account/huddles/relay` once it has taken the TURN key's: huddles as they are then. It's
+ * what `DELETE /api/account/huddles/relay` answers too, while huddles are on.
+ */
 export interface HuddlesSaved {
   huddles: HuddlesSettings;
 }
@@ -28,6 +39,15 @@ export interface HuddlesForgotten {
 
 /** A field of Set up huddles, which a refusal can be about. */
 export type HuddlesField = "appId" | "appSecret";
+
+/** What Set up the relay gives `PUT /api/account/huddles/relay`: a TURN key's ID and its API token, as Cloudflare's dashboard shows them when the key is made. */
+export interface HuddleRelaySetup {
+  keyId: string;
+  apiToken: string;
+}
+
+/** A field of Set up the relay, which a refusal can be about. */
+export type HuddleRelayField = "keyId" | "apiToken";
 
 /** How long an SFU app's ID is, and its secret, as Cloudflare's API gives them. */
 const APP_ID_LENGTH = 32;
@@ -65,6 +85,44 @@ export function parseHuddlesSetup(data: unknown): HuddlesSetup | { error: string
   const appSecret = typeof given.appSecret === "string" ? appSecretOf(given.appSecret) : null;
   if (appSecret === null) return { error: APP_SECRET_REFUSED, field: "appSecret" };
   return { appId, appSecret };
+}
+
+/** The most letters and digits a TURN key's ID is taken to have, and the most characters its API token: Cloudflare's own are shorter. */
+const MAX_RELAY_KEY_ID_LENGTH = 64;
+const MAX_RELAY_API_TOKEN_LENGTH = 256;
+
+/** Why Set up the relay's fields are refused before Cloudflare is asked about them. */
+export const RELAY_KEY_ID_REFUSED = "A TURN Token ID is letters and digits. Copy it from your TURN key under Realtime in the Cloudflare dashboard.";
+export const RELAY_API_TOKEN_REFUSED = "That can't be a TURN key's API Token. Copy it from your TURN key under Realtime in the Cloudflare dashboard.";
+
+/** Why they're refused once Cloudflare has been asked for the relay's servers with them, or couldn't be. */
+export const RELAY_KEY_ID_UNKNOWN = "Cloudflare doesn't know that TURN Token ID. Copy it again from your TURN key, or try again in a minute if you've just made it.";
+export const RELAY_API_TOKEN_UNKNOWN = "Cloudflare didn't take that API Token for this TURN key. Copy both from the same key.";
+export const RELAY_UNCHECKED = "Ember couldn't reach Cloudflare to check the TURN key. Try again.";
+
+/** Why a TURN key isn't kept while huddles are off: the relay is huddles', and is forgotten with the SFU app they run through. */
+export const RELAY_WITHOUT_HUDDLES = "Huddles are off. Turn them on before setting up their relay.";
+
+/** The TURN key ID `text` gives, without the spaces around it, or null when it can't be one: letters and digits, as it goes into the address Cloudflare is asked at. */
+export function relayKeyIdOf(text: string): string | null {
+  const keyId = text.trim();
+  return keyId.length <= MAX_RELAY_KEY_ID_LENGTH && /^[0-9a-z]+$/i.test(keyId) ? keyId : null;
+}
+
+/** The TURN key's API token `text` gives, without the spaces around it, or null when it can't be one: what a request can carry as its bearer token. */
+export function relayApiTokenOf(text: string): string | null {
+  const apiToken = text.trim();
+  return apiToken.length <= MAX_RELAY_API_TOKEN_LENGTH && /^[A-Za-z0-9._~+/-]+=*$/.test(apiToken) ? apiToken : null;
+}
+
+/** What `PUT /api/account/huddles/relay` gives Ember, as Set up the relay sends it, or why it can't be a TURN key's, on the field it's about. */
+export function parseHuddleRelaySetup(data: unknown): HuddleRelaySetup | { error: string; field: HuddleRelayField } {
+  const given = typeof data === "object" && data !== null && !Array.isArray(data) ? (data as Record<string, unknown>) : {};
+  const keyId = typeof given.keyId === "string" ? relayKeyIdOf(given.keyId) : null;
+  if (keyId === null) return { error: RELAY_KEY_ID_REFUSED, field: "keyId" };
+  const apiToken = typeof given.apiToken === "string" ? relayApiTokenOf(given.apiToken) : null;
+  if (apiToken === null) return { error: RELAY_API_TOKEN_REFUSED, field: "apiToken" };
+  return { keyId, apiToken };
 }
 
 // A huddle's socket. Each tab in a huddle keeps one to the room, at `/api/rooms/:id/huddle`, besides the
@@ -105,6 +163,24 @@ export type HuddleCloseCode = (typeof HuddleCloseCode)[keyof typeof HuddleCloseC
  */
 export const CAMERA_SIZES = { large: "a", small: "b" } as const;
 export type CameraSize = (typeof CAMERA_SIZES)[keyof typeof CAMERA_SIZES];
+
+/**
+ * How long Cloudflare's relay takes what a tab is given to use it with, in seconds, from when the room
+ * has Cloudflare make it, as the tab joins: a day. A tab whose connection fails after that joins again,
+ * for what the relay takes then.
+ */
+export const RELAY_TTL_S = 86_400;
+
+/**
+ * A server a tab's connections to the SFU go by, as a browser's `RTCIceServer` has it: a STUN server,
+ * by which the browser learns the address the SFU reaches it at, or the relay's, with the name and the
+ * credential Cloudflare made for the tab to use it with.
+ */
+export interface HuddleIceServer {
+  urls: string[];
+  username?: string;
+  credential?: string;
+}
 
 /** What a track in a huddle carries: someone's microphone, their camera, or the screen they share. */
 export type HuddleTrackKind = "audio" | "video" | "screen";
@@ -178,8 +254,13 @@ export type HuddleClientFrame =
 
 /** What a tab hears on its huddle's socket. */
 export type HuddleServerFrame =
-  /** The huddle as the tab joins it: everyone in it, the tab's person included, and when it started. */
-  | { type: "huddle.welcome"; you: User; people: HuddlePerson[]; startedAt: string }
+  /**
+   * The huddle as the tab joins it: everyone in it, the tab's person included, and when it started.
+   * While huddles have a relay, `iceServers` are the servers the tab's connections go by, the relay's
+   * among them, which take what the tab is given to use them with for `RELAY_TTL_S` from now. A tab
+   * that's given none goes by Cloudflare's STUN server alone.
+   */
+  | { type: "huddle.welcome"; you: User; people: HuddlePerson[]; startedAt: string; iceServers?: HuddleIceServer[] }
   | { type: "huddle.joined"; person: HuddlePerson }
   /**
    * Someone muted or unmuted, can be listened to or watched now, or can't be: they've turned their camera

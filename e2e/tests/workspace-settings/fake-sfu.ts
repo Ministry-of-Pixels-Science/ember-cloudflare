@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage } from "node:http";
 import type { JSHandle, Page } from "@playwright/test";
-import { SFU_APP, SFU_PORT } from "../../projects/workspace-settings";
+import { SFU_APP, SFU_PORT, TURN_KEY, TURN_PORT } from "../../projects/workspace-settings";
 
 // Cloudflare's Realtime SFU for the huddles spec, at the address the second test server's REALTIME_SFU_URL
 // names, as Ember asks it (apps/worker/src/huddles/sfu.ts): it knows one app, `SFU_APP`, starts a session
@@ -18,13 +18,29 @@ import { SFU_APP, SFU_PORT } from "../../projects/workspace-settings";
 // asks for, or changes to: Cloudflare's `simulcast.preferredRid`, as its documentation and its API's
 // description have it. Told to take one size, it answers as an SFU that takes no simulcast would, and
 // told to keep to the sizes it sends, it refuses to change one.
+//
+// It answers for Cloudflare's TURN service as well, which Ember asks beside the SFU
+// (apps/worker/src/huddles/relay.ts): asked as the one TURN key it knows, `TURN_KEY`, with the key's API
+// token, it makes the servers a browser's connections go by as Cloudflare answers them, the TURN
+// server's under another name each time. Their addresses are this machine's, at a port where nothing
+// listens, so a browser that goes by them finds no TURN server and reaches the SFU's page as it would
+// without. Cloudflare doesn't document how it refuses a key it doesn't know, or a token that isn't the
+// key's, so 404 and 401 here are guesses too, and Ember reads 400 and 403 as it does them.
 
-/** What Ember asked the SFU: how, where, with which secret, and in which size it asked for each track that comes in several. */
+/** What Ember asked the SFU: how, where, with which secret, in which size it asked for each track that comes in several, and how long it asked for a TURN key's servers to last. */
 export interface SfuAsked {
   method: string;
   path: string;
   authorization: string | undefined;
   sizes?: string[];
+  ttl?: number;
+}
+
+/** A server a connection goes by, as Cloudflare's TURN service answers it, and a browser takes it. */
+export interface IceServer {
+  urls: string[];
+  username?: string;
+  credential?: string;
 }
 
 export interface FakeSfu {
@@ -34,6 +50,8 @@ export interface FakeSfu {
   oneSize: boolean;
   /** Whether it refuses to send a session a track in another size than it sends it in, which is a test's to say too. */
   fixedSizes: boolean;
+  /** The servers it made each time it was asked for them as the TURN service, in order. */
+  turnServers: IceServer[][];
   close(): Promise<void>;
 }
 
@@ -50,10 +68,11 @@ interface Pulled {
   simulcast?: { preferredRid?: string };
 }
 
-/** What Ember sends with a request about a session's tracks. */
+/** What Ember sends with a request about a session's tracks, or for a TURN key's servers. */
 interface AskedOfTracks {
   sessionDescription?: { sdp: string };
   tracks?: Array<Partial<Published & Pulled>>;
+  ttl?: number;
 }
 
 /** The page's side of the SFU: its sessions' connections, by what Ember asks of them. */
@@ -68,13 +87,14 @@ type Relay = JSHandle<{
 /** Starts the SFU, which carries what's published through `page`'s connections when it's given one. */
 export async function startFakeSfu(page?: Page): Promise<FakeSfu> {
   const relay = page && (await relayOn(page));
-  const sfu: FakeSfu = { asked: [], oneSize: false, fixedSizes: false, close: () => new Promise((resolve) => server.close(() => resolve())) };
+  const sfu: FakeSfu = { asked: [], oneSize: false, fixedSizes: false, turnServers: [], close: () => new Promise((resolve) => server.close(() => resolve())) };
   const server = createServer((request, response) => {
     void bodyOf(request).then(async (asked) => {
       const { method = "", url = "" } = request;
       const sizes = (asked.tracks ?? []).flatMap(({ simulcast }) => simulcast?.preferredRid ?? []);
-      sfu.asked.push({ method, path: url, authorization: request.headers.authorization, ...(sizes.length > 0 && { sizes }) });
-      const [status, body] = await answer(request, asked, relay, sfu);
+      sfu.asked.push({ method, path: url, authorization: request.headers.authorization, ...(sizes.length > 0 && { sizes }), ...(asked.ttl !== undefined && { ttl: asked.ttl }) });
+      const [, keyId] = TURN_SERVERS.exec(url) ?? [];
+      const [status, body] = keyId === undefined ? await answer(request, asked, relay, sfu) : turnServersFor(request, keyId, sfu.turnServers);
       response.writeHead(status, { "Content-Type": "application/json" }).end(JSON.stringify(body));
     });
   });
@@ -116,6 +136,27 @@ async function answer(
   } catch (error) {
     return [400, { errorCode: "invalid_request", errorDescription: String(error) }];
   }
+}
+
+/** Where the TURN service is asked for the servers a connection goes by, as the TURN key the address names. */
+const TURN_SERVERS = /^\/v1\/turn\/keys\/([^/]+)\/credentials\/generate-ice-servers$/;
+
+/**
+ * What the TURN service answers a request for servers made as the TURN key `keyId`: the servers, which
+ * it adds to `made`, or why it makes none. Among the TURN server's addresses is one at the port
+ * browsers won't connect to, as among Cloudflare's, which Ember is to leave out.
+ */
+function turnServersFor(request: IncomingMessage, keyId: string, made: IceServer[][]): [status: number, body: unknown] {
+  if (request.method !== "POST") return [405, { errorCode: "method_not_allowed" }];
+  if (keyId !== TURN_KEY.keyId) return [404, { errorCode: "not_found", errorDescription: "The TURN key was not found." }];
+  if (request.headers.authorization !== `Bearer ${TURN_KEY.apiToken}`) return [401, { errorCode: "unauthorized", errorDescription: "The TURN key's API token was not accepted." }];
+  const at = `127.0.0.1:${TURN_PORT}`;
+  const iceServers: IceServer[] = [
+    { urls: [`stun:${at}`] },
+    { urls: [`turn:${at}?transport=udp`, `turn:${at}?transport=tcp`, "turn:127.0.0.1:53?transport=udp"], username: `e2e-turn-${made.length + 1}`, credential: "e2e-only-not-a-credential" },
+  ];
+  made.push(iceServers);
+  return [201, { iceServers }];
 }
 
 /** What a request carries, read as JSON, or nothing. */
