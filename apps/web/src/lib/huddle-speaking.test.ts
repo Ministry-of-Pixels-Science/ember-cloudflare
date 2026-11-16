@@ -133,7 +133,52 @@ describe("Who's speaking in a huddle", () => {
     expect(said).toEqual([]);
   });
 
-  it.each(["click", "keydown"])("has an engine the browser keeps from running run at the person's next %s, which is when it hears who's speaking", (touch) => {
+  it("is nobody for long once the browser stops its audio engine, whose analysers keep what they last heard", () => {
+    const engine = audioEngine();
+    const sam = voice();
+    measuring().hear("sam", sam);
+    engine.setLevel(sam, LOUD);
+    measures();
+    engine.engines[0]!.state = "suspended";
+
+    vi.advanceTimersByTime(QUIET_FOR_MS - MEASURED_EVERY_MS);
+    expect(said).toEqual([["sam"]]);
+    measures();
+    expect(said).toEqual([["sam"], []]);
+  });
+
+  it("isn't someone who went quiet while the engine was stopped, by what its analysers still hold of them as it runs again", () => {
+    const engine = audioEngine();
+    const sam = voice();
+    measuring().hear("sam", sam);
+    engine.setLevel(sam, LOUD);
+    measures();
+    engine.engines[0]!.state = "suspended";
+    vi.advanceTimersByTime(QUIET_FOR_MS);
+    engine.setLevel(sam, 0);
+    expect(said).toEqual([["sam"], []]);
+
+    engine.engines[0]!.state = "running";
+    measures(10);
+    expect(said).toEqual([["sam"], []]);
+  });
+
+  it("hears who's speaking again once the engine has run for twice as long as its analysers hold, which is 171 ms at the tests' engine's 48 kHz", () => {
+    const engine = audioEngine();
+    const sam = voice();
+    measuring().hear("sam", sam);
+    engine.engines[0]!.state = "suspended";
+    measures();
+    engine.setLevel(sam, LOUD);
+
+    engine.engines[0]!.state = "running";
+    measures(3);
+    expect(said).toEqual([]);
+    measures();
+    expect(said).toEqual([["sam"]]);
+  });
+
+  it.each(["click", "keydown"])("has an engine the browser keeps from running run at the person's next %s, from when it hears who's speaking", (touch) => {
     const engine = audioEngine("suspended");
     const sam = voice();
     measuring().hear("sam", sam);
@@ -143,7 +188,7 @@ describe("Who's speaking in a huddle", () => {
 
     document.body.dispatchEvent(new Event(touch, { bubbles: true }));
     expect(engine.engines.map(({ state }) => state)).toEqual(["running"]);
-    measures();
+    measures(4);
     expect(said).toEqual([["sam"]]);
   });
 

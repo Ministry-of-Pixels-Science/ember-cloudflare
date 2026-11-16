@@ -59,10 +59,29 @@ export function whoSpeaks(changed: (speaking: ReadonlySet<string>) => void): Hud
   let speaking: ReadonlySet<string> = new Set();
   /** Null once it's stopped, too. */
   let engine = startedEngine();
+  /** The engine's own time when it was last found not to be running. */
+  let stoodAt = -Infinity;
+
+  /**
+   * Whether the analysers hold only what's heard now. An engine the browser has stopped hears nothing
+   * new, and its analysers keep what they last heard: while it stands, and once it runs again until it
+   * has run for as long as they hold. It's given twice that long, since a few milliseconds of old
+   * speech left among the samples would still measure as speech.
+   */
+  const hearsNow = () => {
+    if (engine?.state !== "running") {
+      stoodAt = engine?.currentTime ?? stoodAt;
+      return false;
+    }
+    return engine.currentTime - stoodAt >= (2 * SAMPLES) / engine.sampleRate;
+  };
+  const listen = (now: number) => {
+    for (const voice of voices.values()) if (levelOf(voice.analyser, samples) >= SPEAKING_LEVEL) voice.loudAt = now;
+  };
 
   const measure = () => {
     const now = Date.now();
-    for (const voice of voices.values()) if (levelOf(voice.analyser, samples) >= SPEAKING_LEVEL) voice.loudAt = now;
+    if (hearsNow()) listen(now);
     const heard = [...voices].filter(([, { loudAt }]) => loudAt > 0 && now - loudAt < QUIET_FOR_MS).map(([whose]) => whose);
     if (heard.length === speaking.size && heard.every((whose) => speaking.has(whose))) return;
     speaking = new Set(heard);
