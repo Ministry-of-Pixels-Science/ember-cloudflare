@@ -7,6 +7,7 @@ import { MAX_ATTRIBUTES, ParseLimitError } from "./markup";
 import { mentionSgid, userIdsIn } from "./mentions";
 import { parseHtml } from "./parse";
 import { canonicalize, presentMessage } from "./render";
+import { htmlEscape } from "./ruby";
 import { cgiUnescapeHtml } from "./sanitize";
 import { testUserId, testUsers } from "./testing/users";
 import { descendants, getAttr, isElement } from "./tree";
@@ -23,6 +24,8 @@ const mention = (n: number) =>
   `<action-text-attachment content-type="application/vnd.campfire.mention" sgid="${mentionSgid(testUserId(n))}"></action-text-attachment>`;
 const galleryAttachment =
   '<action-text-attachment presentation="gallery" content-type="text/html" content="&lt;p&gt;x&lt;/p&gt;"></action-text-attachment>';
+const preview = (content: string) =>
+  `<action-text-attachment content-type="${OPENGRAPH_EMBED_CONTENT_TYPE}" content="${htmlEscape(content)}"></action-text-attachment>`;
 
 /**
  * A generous bound: each of these bodies of hundreds of KB takes a second at most, where the slow paths
@@ -186,6 +189,7 @@ describe("Rich text, safely", () => {
     "300 KB of misnested links": `<b>${"<a>x</a><p>y".repeat(25_000)}`,
     "a misnested <b> around 200,000 <br>s": `<b><div>${"<br>".repeat(200_000)}</b>`,
     "500 KB of escaped ampersands": `<p><a href="${"&amp;#38;".repeat(50_000)}">x</a></p>`,
+    "a preview of 10,000 images in a div of 25,000 classes": preview(`<div class="${"a ".repeat(25_000)}">${"<img>".repeat(10_000)}</div>`),
   };
   for (const [what, body] of Object.entries(hostileBodies)) {
     it(
