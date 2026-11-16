@@ -540,7 +540,11 @@ Objects, D1 or speed call for something else.
   the batch that resets the password, which deletes the person's as the recovery script's reset
   does, so two at once spend it once and a password that can't be saved leaves it working. Their
   subqueries find the person through the unique index on `users.email_address`, and saving one
-  deletes those that have expired, through the index on `expires_at`.
+  deletes those that have expired, through the index on `expires_at`. Asking for a code looks for
+  the account, and trying one counts the try, in a batch that first counts a time nobody was asked
+  for in `email_link_requests`, under a name no address is counted under, and deletes it: a Durable
+  Object keeps an answer back until what it wrote is stored for good, so writing only for an
+  address with an account, or a code, would answer later for it.
 - **A bot's cards are part of its message's row.** Cards, what a Slack-compatible webhook's legacy
   attachments show, are kept as JSON in `messages.cards` (room migration 0034), as a file is, rather
   than in the body as Action Text attachments, which the rich text pipeline would sanitize as

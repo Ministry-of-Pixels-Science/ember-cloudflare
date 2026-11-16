@@ -2985,15 +2985,16 @@ export class Workspace extends DurableObject<Env> {
    * `emailAddress`, as sign-in matches it, while they're active and have a password, from the workspace's
    * From address. Asks from `ip` count against the network's limit while they're `limited`, as they are
    * while Ember lacks Turnstile's keys. It answers "asked" before anything is emailed, and whether or not
-   * anyone has the address, so that neither the answer nor how soon it comes says who has an account: the
-   * code is emailed afterwards, one at a time with the others asked for (`emailResetCode`).
+   * anyone has the address, so that neither the answer nor how soon it comes says who has an account:
+   * looking for them changes what's stored either way (`passwordToReset`), and the code is emailed
+   * afterwards, one at a time with the others asked for (`emailResetCode`).
    */
   async askForPasswordReset(ip: string, emailAddress: string, code: NewResetCode, limited: boolean): Promise<PasswordResetAsk> {
     const account = await this.joinableAccount();
     const sending = account && (await this.emailSender(account));
     if (!account || !sending) return "unsendable";
     if (limited && !this.passwordResetAsks.attempt(ip)) return "limited";
-    const person = await this.store.passwordFor(emailAddress);
+    const person = await this.store.passwordToReset(emailAddress);
     if (person) {
       const emailing = this.lastResetCode
         .then(() => this.emailResetCode(person, emailAddress, code, account.name, sending))
