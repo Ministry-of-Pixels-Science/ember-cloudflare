@@ -1542,14 +1542,19 @@ describe("A camera's sizes in a huddle", () => {
     await watchSmall(linuses, [ada.user.id], true);
     const pictures = newest(sfu);
     vi.spyOn(console, "warn").mockImplementation(() => {});
-    sfu.answerInstead(/\/tracks\/new$/, () => Response.json({ requiresImmediateRenegotiation: false, tracks: [{ sessionId: fromGrace, trackName: "video", errorCode: "invalid_params", errorDescription: "No such size" }] }));
-    expect(await watchSmall(linuses, [ada.user.id, grace.user.id])).toBeNull();
-    expect((await remembered(room))[2]!.cameras!.receiving).toEqual({ sessionId: pictures, heard: [{ mid: "0", from: fromAda, kind: "video", size: "b" }], unsized: true });
-
+    sfu.refuseSizesOf(fromGrace);
     // While it shows them small, Ada's stays, and Grace's comes as the SFU would send it.
     let asked = sfu.asked.length;
     expect((await watchSmall(linuses, [ada.user.id, grace.user.id]))!.tracks).toEqual([{ mid: "1", kind: "video", userId: grace.user.id }]);
-    expect(sfu.asked.slice(asked).map(({ path }) => path)).toEqual([`/sessions/${pictures}/tracks/new`, `/sessions/${pictures}/renegotiate`]);
+    expect(sfu.asked.slice(asked).map(({ path }) => path)).toEqual([`/sessions/${pictures}/tracks/new`, `/sessions/${pictures}/tracks/new`, `/sessions/${pictures}/renegotiate`]);
+    expect((await remembered(room))[2]!.cameras!.receiving).toEqual({
+      sessionId: pictures,
+      heard: [
+        { mid: "0", from: fromAda, kind: "video", size: "b" },
+        { mid: "1", from: fromGrace, kind: "video" },
+      ],
+      unsized: true,
+    });
     // Shown large, Ada's is closed and asked for again, as the SFU would send it.
     asked = sfu.asked.length;
     expect((await watch(linuses, [ada.user.id, grace.user.id]))!.tracks).toEqual([{ mid: "2", kind: "video", userId: ada.user.id }]);
@@ -1581,17 +1586,16 @@ describe("A camera's sizes in a huddle", () => {
     const pictures = newest(sfu);
     const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    sfu.answerInstead(/\/tracks\/new$/, () => Response.json({ requiresImmediateRenegotiation: false, tracks: [{ sessionId: fromGrace, trackName: "video", errorCode: "invalid_params", errorDescription: "No such size" }] }));
-    expect(await watch(linuses, [ada.user.id, grace.user.id])).toBeNull();
-    expect(warned).toHaveBeenCalledExactlyOnceWith("The Realtime SFU didn't send a huddle's camera in the size asked for:", "invalid_params");
-    expect((await remembered(room))[2]!.cameras!.receiving).toEqual({ sessionId: pictures, heard: [{ mid: "0", from: fromAda, kind: "video", size: "a" }], unsized: true });
-    // Her camera is asked for as the SFU would send it, and Ada's stays in the size it's in, however the tab shows them.
+    // Her camera is asked for again in the same round, as the SFU would send it.
+    sfu.refuseSizesOf(fromGrace);
     let asked = sfu.asked.length;
-    expect((await watchSmall(linuses, [ada.user.id, grace.user.id]))!.tracks).toEqual([{ mid: "1", kind: "video", userId: grace.user.id }]);
+    expect((await watch(linuses, [ada.user.id, grace.user.id]))!.tracks).toEqual([{ mid: "1", kind: "video", userId: grace.user.id }]);
     expect(sfu.asked.slice(asked).map(({ path, body }) => ({ path, body }))).toEqual([
+      { path: `/sessions/${pictures}/tracks/new`, body: { tracks: [{ location: "remote", sessionId: fromGrace, trackName: "video", simulcast: sizeOf("a") }] } },
       { path: `/sessions/${pictures}/tracks/new`, body: { tracks: [{ location: "remote", sessionId: fromGrace, trackName: "video" }] } },
       { path: `/sessions/${pictures}/renegotiate`, body: expect.anything() as unknown },
     ]);
+    expect(warned).toHaveBeenCalledExactlyOnceWith("The Realtime SFU didn't send a huddle's camera in the size asked for:", "invalid_params");
     expect((await remembered(room))[2]!.cameras!.receiving).toEqual({
       sessionId: pictures,
       heard: [
@@ -1600,6 +1604,10 @@ describe("A camera's sizes in a huddle", () => {
       ],
       unsized: true,
     });
+    // Ada's stays in the size it's in, however the tab shows them from then on: the SFU is asked nothing.
+    asked = sfu.asked.length;
+    expect(await watchSmall(linuses, [ada.user.id, grace.user.id])).toBeNull();
+    expect(sfu.asked).toHaveLength(asked);
     // Which the connection keeps to as it stops watching a camera that went off.
     graces.send({ type: "huddle.unpublish", kind: "video" });
     await reached(graces);
@@ -1613,6 +1621,121 @@ describe("A camera's sizes in a huddle", () => {
     expect(sfu.asked.at(-1)!.body).toEqual({ tracks: [{ location: "remote", sessionId: fromAda, trackName: "video", simulcast: sizeOf("b") }] });
     expect((await remembered(room))[2]!.cameras!.receiving).toEqual({ sessionId: newest(sfu), heard: [] });
     expect(warned).toHaveBeenCalledOnce();
+  });
+
+  it("asks at once, without a size, for a camera the SFU won't send in the size asked for and offers a tab nothing with: a tab with no connection yet would ask by size again, and never be shown it", async () => {
+    const { ada, sfu } = await huddlesOn();
+    const room = await freshRoom("unsized-at-once");
+    const [grace, linus] = [await signIn("Grace"), await signIn("Linus")];
+    const adas = await welcomed(room, ada);
+    const graces = await welcomed(room, grace);
+    const linuses = await welcomed(room, linus);
+    const fromAda = await showing(sfu, adas, inSizes());
+    const fromGrace = await showing(sfu, graces, inSizes());
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    sfu.refuseSizesOf(fromAda);
+
+    // A tab makes its connection of an offer, and Linus's is offered her camera in the round that asked for it.
+    let asked = sfu.asked.length;
+    expect((await watch(linuses, [ada.user.id], true))!.tracks).toEqual([{ mid: "0", kind: "video", userId: ada.user.id }]);
+    const pictures = newest(sfu);
+    expect(sfu.asked.slice(asked).map(({ path, body }) => ({ path, body }))).toEqual([
+      { path: "/sessions/new", body: null },
+      { path: `/sessions/${pictures}/tracks/new`, body: { tracks: [{ location: "remote", sessionId: fromAda, trackName: "video", simulcast: sizeOf("a") }] } },
+      { path: `/sessions/${pictures}/tracks/new`, body: { tracks: [{ location: "remote", sessionId: fromAda, trackName: "video" }] } },
+      { path: `/sessions/${pictures}/renegotiate`, body: expect.anything() as unknown },
+    ]);
+    expect(warned).toHaveBeenCalledExactlyOnceWith("The Realtime SFU didn't send a huddle's camera in the size asked for:", "invalid_params");
+    expect((await remembered(room))[2]!.cameras!.receiving).toEqual({ sessionId: pictures, heard: [{ mid: "0", from: fromAda, kind: "video" }], unsized: true });
+
+    // The connection asks for no sizes from then on.
+    asked = sfu.asked.length;
+    expect((await watchSmall(linuses, [ada.user.id, grace.user.id]))!.tracks).toEqual([{ mid: "1", kind: "video", userId: grace.user.id }]);
+    expect(sfu.asked[asked]!.body).toEqual({ tracks: [{ location: "remote", sessionId: fromGrace, trackName: "video" }] });
+  });
+
+  it("leaves a camera the SFU won't send in the size asked for to the tab's next round when it offers the tab another with it, which the tab answers first", async () => {
+    const { ada, sfu } = await huddlesOn();
+    const room = await freshRoom("unsized-next-round");
+    const [grace, linus] = [await signIn("Grace"), await signIn("Linus")];
+    const adas = await welcomed(room, ada);
+    const graces = await welcomed(room, grace);
+    const linuses = await welcomed(room, linus);
+    const fromAda = await showing(sfu, adas, inSizes());
+    const fromGrace = await showing(sfu, graces, inSizes());
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    sfu.refuseSizesOf(fromGrace);
+
+    // The session takes nothing more until the tab has answered the offer of Ada's, which comes in the size asked for.
+    let asked = sfu.asked.length;
+    expect((await watchSmall(linuses, [ada.user.id, grace.user.id], true))!.tracks).toEqual([{ mid: "0", kind: "video", userId: ada.user.id }]);
+    const pictures = newest(sfu);
+    expect(sfu.asked.slice(asked).map(({ path }) => path)).toEqual(["/sessions/new", `/sessions/${pictures}/tracks/new`, `/sessions/${pictures}/renegotiate`]);
+    expect(warned).toHaveBeenCalledExactlyOnceWith("The Realtime SFU didn't send a huddle's camera in the size asked for:", "invalid_params");
+    expect((await remembered(room))[2]!.cameras!.receiving).toEqual({ sessionId: pictures, heard: [{ mid: "0", from: fromAda, kind: "video", size: "b" }], unsized: true });
+
+    // The tab has a connection by then, so its next round asks on it, where Grace's is asked for without a size.
+    asked = sfu.asked.length;
+    expect((await watchSmall(linuses, [ada.user.id, grace.user.id]))!.tracks).toEqual([{ mid: "1", kind: "video", userId: grace.user.id }]);
+    expect(sfu.asked.slice(asked).map(({ path, body }) => ({ path, body }))).toEqual([
+      { path: `/sessions/${pictures}/tracks/new`, body: { tracks: [{ location: "remote", sessionId: fromGrace, trackName: "video" }] } },
+      { path: `/sessions/${pictures}/renegotiate`, body: expect.anything() as unknown },
+    ]);
+    expect(warned).toHaveBeenCalledOnce();
+  });
+
+  it("asks for cameras again without sizes when the SFU refuses the whole request that asked for them in sizes, and lets go of the connection as ever when it refuses that too, or didn't answer", async () => {
+    const { ada, sfu } = await huddlesOn();
+    const room = await freshRoom("sizes-refused");
+    const [grace, linus] = [await signIn("Grace"), await signIn("Linus")];
+    const adas = await welcomed(room, ada);
+    const graces = await welcomed(room, grace);
+    const linuses = await welcomed(room, linus);
+    const fromAda = await showing(sfu, adas, inSizes());
+    // Grace's camera is sent in one size.
+    const fromGrace = await showing(sfu, graces);
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const sized = { tracks: [{ location: "remote", sessionId: fromAda, trackName: "video", simulcast: sizeOf("a") }] };
+    const unsized = { tracks: [{ location: "remote", sessionId: fromAda, trackName: "video" }] };
+    const pulling = /\/tracks\/new$/;
+    /** What the SFU was asked to pull, of the last `count` things it was asked. */
+    const pulledSince = (count: number) => sfu.asked.slice(count).flatMap(({ path, body }) => (pulling.test(path) ? [body] : []));
+    /** Has Linus's tab ask to watch `people` on a fresh connection, and answers the SFU's pulls for it once the room has told it that it failed. */
+    async function refusedWatching(people: Session[]) {
+      const asked = sfu.asked.length;
+      linuses.send({ type: "huddle.listen", kind: "video", watch: people.map(({ user }) => user.id), fresh: true });
+      expect(await linuses.next("error")).toEqual(failed("huddle.listen", "video"));
+      expect((await remembered(room))[2]!.cameras).toEqual({});
+      return pulledSince(asked);
+    }
+
+    // By whatever status it refuses with, since it doesn't say which it would for its sizes, or by an error code in place of its answer.
+    const refusals: Array<[() => void, string]> = [
+      [() => sfu.refuse(pulling, 406, "invalid_params"), "The Realtime SFU answered 406 (invalid_params)"],
+      [() => sfu.answerInstead(pulling, () => new Response("Service Unavailable", { status: 503 })), "The Realtime SFU answered 503"],
+      [() => sfu.answerInstead(pulling, () => Response.json({ errorCode: "invalid_params", errorDescription: "No such size" })), "The Realtime SFU answered 200 (invalid_params)"],
+    ];
+    for (const [refuse, logged] of refusals) {
+      refuse();
+      const asked = sfu.asked.length;
+      expect((await watch(linuses, [ada.user.id], true))!.tracks).toEqual([{ mid: "0", kind: "video", userId: ada.user.id }]);
+      expect(pulledSince(asked)).toEqual([sized, unsized]);
+      expect(warned).toHaveBeenLastCalledWith("The Realtime SFU didn't take a request for a huddle's cameras in sizes:", logged);
+      expect((await remembered(room))[2]!.cameras!.receiving).toEqual({ sessionId: newest(sfu), heard: [{ mid: "0", from: fromAda, kind: "video" }], unsized: true });
+    }
+
+    // Refused without sizes too, the tab hears that it failed, and starts over.
+    sfu.refuse(pulling, 406, "invalid_params");
+    sfu.refuse(pulling, 406, "invalid_params");
+    expect(await refusedWatching([ada])).toEqual([sized, unsized]);
+    // The room can't tell what a session carries once the SFU didn't answer, or answered what it can't read, so it asks nothing more of it.
+    sfu.answerInstead(pulling, () => Promise.reject(new TypeError("Network connection lost")));
+    expect(await refusedWatching([ada])).toEqual([sized]);
+    sfu.answerInstead(pulling, () => new Response("<html>"));
+    expect(await refusedWatching([ada])).toEqual([sized]);
+    // And a request that asked for no sizes has none to leave out.
+    sfu.refuse(pulling, 406, "invalid_params");
+    expect(await refusedWatching([grace])).toEqual([{ tracks: [{ location: "remote", sessionId: fromGrace, trackName: "video" }] }]);
   });
 });
 

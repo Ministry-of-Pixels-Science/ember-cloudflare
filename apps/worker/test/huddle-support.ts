@@ -75,6 +75,8 @@ export function standInSfu() {
   let offers = 0;
   /** Whether it takes a track in one size, whatever the offer sends. */
   let oneSize = false;
+  /** The sessions whose tracks it sends in no size asked for, only to whoever asks for none. */
+  const unsized = new Set<string>();
 
   function publish(sessionId: string, session: StandInSession, body: Record<string, unknown>, tracks: Array<Record<string, unknown>>): Response {
     const offer = isRecord(body.sessionDescription) && body.sessionDescription.type === "offer" ? body.sessionDescription.sdp : null;
@@ -95,9 +97,10 @@ export function standInSfu() {
       const { sessionId, trackName } = track;
       const published = [...(sessions.get(String(sessionId))?.published.values() ?? [])].includes(String(trackName));
       if (!published) return { sessionId, trackName, errorCode: "not_found_track_error", errorDescription: "Track not found" };
+      const rid = ridAsked(track);
+      if (rid !== undefined && unsized.has(String(sessionId))) return { sessionId, trackName, errorCode: "invalid_params", errorDescription: "No such size" };
       // A session numbers its own media sections, so two sessions carry different tracks in sections of one name.
       const mid = String(session.offered++);
-      const rid = ridAsked(track);
       session.pulled.set(mid, { sessionId: String(sessionId), trackName: String(trackName), ...(rid !== undefined && { rid }) });
       return { sessionId, trackName, mid };
     });
@@ -188,6 +191,8 @@ export function standInSfu() {
     publishers,
     /** Has the SFU take every track in one size from now, whatever sizes its offer sends, as an SFU that takes no more does. */
     takeOneSize: () => void (oneSize = true),
+    /** Has the SFU refuse to send what session `id` publishes in any size asked for, from now: it sends it to whoever asks for no size. */
+    refuseSizesOf: (id: string) => void unsized.add(id),
     /** Has the SFU answer the next request whose address ends as `path` does with `answer`, doing nothing of what's asked. */
     answerInstead: (path: RegExp, answer: () => Response | Promise<Response>) => void instead.push({ path, answer }),
     /** Has the SFU refuse the next such request, with a status and an error code. */

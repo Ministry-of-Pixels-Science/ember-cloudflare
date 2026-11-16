@@ -23,7 +23,7 @@ import {
 import type { Env } from "../env";
 import { CLOSE_REASONS, closedAtOnce, closeTooLarge, isTooLarge, MAX_ROOM_FRAME_SIZE } from "../sockets";
 import { workspace } from "../workspace";
-import { acceptAnswer, closeTracks, publishTracks, pullTracks, resizeTracks, SfuError, startSession, TRACKS_PER_REQUEST, type HuddleApp, type SfuApp } from "./sfu";
+import { acceptAnswer, closeTracks, publishTracks, pullTracks, resizeTracks, SfuError, startSession, TRACKS_PER_REQUEST, type HuddleApp, type Pulled, type SfuApp } from "./sfu";
 
 // A room's huddle, which the room's Durable Object keeps beside its own sockets (src/chat-room.ts): who's
 // in it, and what each of them publishes and receives at Cloudflare's Realtime SFU, which carries what
@@ -155,6 +155,9 @@ interface Heard {
   /** The size the SFU was last asked to send, of a camera it takes in both. */
   size?: CameraSize;
 }
+
+/** A track a tab doesn't hear yet, as the SFU is asked for it. */
+type Wanted = Omit<Heard, "mid">;
 
 /** What a tab hears, or watches, on one of its receiving connections. */
 interface Receiving {
@@ -303,6 +306,13 @@ function send(ws: WebSocket, frame: HuddleServerFrame): void {
 
 /** What's logged of a failure: the SFU's status and error code, or the kind of error, and never what was sent. */
 const logged = (error: unknown) => (error instanceof SfuError ? error.message : error instanceof Error ? error.name : "unknown error");
+
+/**
+ * Whether the SFU answered that it didn't do what it was asked, by its status or by an error code in
+ * place of its answer. Not when it didn't answer, or answered what the room can't read: the room can't
+ * tell what it did then.
+ */
+const isRefusal = (error: unknown): error is SfuError => error instanceof SfuError && error.status !== null && (error.status >= 400 || error.code !== null);
 
 export class Huddle {
   /** The SFU app huddles run through, and whether cameras may go on in them and screens be shared, as the Workspace last said, and when it did. */
@@ -614,6 +624,7 @@ export class Huddle {
    * the other size, which the SFU is asked to change first. A camera the SFU won't send in a size, or
    * won't make larger, is asked for without one, as is every other on that connection from then on,
    * so that it shows in whatever size the SFU chooses rather than not at all, or small in a large tile.
+   * Where the SFU would otherwise offer the tab nothing, it's asked for without one in the same round.
    */
   private async listen(ws: WebSocket, kind: HuddleTrackKind, fresh: boolean, only: UserId[] | null, small: boolean): Promise<void> {
     const app = await this.appOf(ws);
@@ -646,14 +657,8 @@ export class Huddle {
       );
       if (wanted.length === 0) return send(ws, { type: "huddle.listening", kind });
 
-      const asked = wanted.slice(0, TRACKS_PER_REQUEST);
       const sessionId = before?.sessionId ?? (await startSession(this.env, app));
-      const pulled = await pullTracks(
-        this.env,
-        app,
-        sessionId,
-        asked.map(({ from, kind, size }) => ({ sessionId: from, trackName: kind, ...(size && { rid: size }) })),
-      );
+      const { asked, pulled, sizeRefused } = await this.pulled(app, sessionId, wanted.slice(0, TRACKS_PER_REQUEST));
       const offered = pulled.tracks.flatMap(({ sessionId: from, trackName, mid }) => asked.filter((track) => track.from === from && track.kind === trackName).map((track) => ({ mid, ...track })));
       // They left while the SFU answered, so it sends them nothing of this.
       if (ws.readyState !== WebSocket.OPEN) return this.cut(app.appId, [{ sessionId, mids: midsOf(offered) }]);
@@ -661,7 +666,7 @@ export class Huddle {
         kind,
         pulled.missing.filter(({ code }) => code === NOT_PUBLISHED).map(({ sessionId }) => sessionId),
       );
-      if (this.wontSize(pulled.missing)) unsized = true;
+      if (sizeRefused) unsized = true;
       // The session waits for the tab's answer to whatever it offers, even an offer of nobody.
       changeConnections(ws, kind, (connections) => ({ ...connections, receiving: { sessionId, heard, ...(pulled.offer !== null && { offered }), ...(unsized && { unsized }) } }));
       if (pulled.offer === null) return send(ws, { type: "huddle.listening", kind });
@@ -739,6 +744,34 @@ export class Huddle {
       console.warn("Changing the size of a huddle's cameras failed:", logged(error));
       return { offer: null, refused: outgrown };
     }
+  }
+
+  /**
+   * Pulls the tracks `wanted` into a tab's session, each camera in the size wanted of it, and answers
+   * what the SFU made of them, the tracks as it was asked for them, and whether it refused a camera
+   * its size. A refusal that leaves the tab without an offer, because the SFU offered nobody else or
+   * refused the whole request, has them all asked for again at once, without sizes, and it's that
+   * request this answers for: a tab makes its connection of an offer, so with none it would ask again
+   * on a fresh one, by size, and never be shown the camera. Whatever the SFU refuses a whole request
+   * for counts, since it doesn't say how it would refuse one for its sizes.
+   */
+  private async pulled(app: HuddleApp, sessionId: string, wanted: Wanted[]): Promise<{ asked: Wanted[]; pulled: Pulled; sizeRefused: boolean }> {
+    const pull = (asked: Wanted[]) =>
+      pullTracks(
+        this.env,
+        app,
+        sessionId,
+        asked.map(({ from, kind, size }) => ({ sessionId: from, trackName: kind, ...(size && { rid: size }) })),
+      );
+    const pulled = await pull(wanted).catch((error: unknown) => {
+      if (!isRefusal(error) || !wanted.some(({ size }) => size)) throw error;
+      console.warn("The Realtime SFU didn't take a request for a huddle's cameras in sizes:", logged(error));
+      return null;
+    });
+    const sizeRefused = pulled === null || this.wontSize(pulled.missing);
+    if (pulled && (pulled.offer !== null || !sizeRefused)) return { asked: wanted, pulled, sizeRefused };
+    const unsized = wanted.map(({ from, kind }) => ({ from, kind }));
+    return { asked: unsized, pulled: await pull(unsized), sizeRefused: true };
   }
 
   /** Whether the SFU found a camera among those it was asked for and didn't offer, and wouldn't send it in the size asked for, which it says once. */
