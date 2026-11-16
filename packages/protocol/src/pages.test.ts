@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { huddlePath, isAppPage, MAX_ID_LENGTH, pageAfterWelcome, signInReturnPathIn, threadPath, TRANSFER_PATH, transferLink, welcomePath, workspacePageOf, workspacePathIn } from "./index";
 
+// This package is typed without a platform's library.
+declare const URL: object;
+
 describe("Error pages", () => {
   it("names the pages the app shows, for the Worker to serve the app at", () => {
     const pages = ["/", "/rooms", "/rooms/general", "/rooms/caf%C3%A9", "/rooms/opens/general", "/rooms/directs/ada-grace", "/rooms/opens/new", "/rooms/closeds/new"];
@@ -111,12 +114,23 @@ describe("Welcome", () => {
   });
 
   it("goes home rather than to another site, or a page that isn't the workspace's", () => {
-    for (const address of ["https://example.com/rooms/abc", "//example.com/rooms/abc", "/api/me", "/welcome", "/session/new", "javascript:alert(1)"]) {
+    for (const address of ["https://example.com/rooms/abc", "//example.com/rooms/abc", "/api/me", "/welcome", "/session/new", "javascript:alert(1)", "http://["]) {
       expect(workspacePathIn(address, origin), address).toBe("/");
       expect(pageAfterWelcome(`?return_to=${encodeURIComponent(address)}`, origin), address).toBe("/");
     }
     expect(workspacePathIn(`${origin}/rooms/abc`, origin)).toBe("/rooms/abc");
     expect(workspacePathIn(null, origin)).toBe("/");
+  });
+
+  it("goes on in browsers without `URL.parse`, as Safari's before 18 and Chrome's before 126 are", () => {
+    const parse = Object.getOwnPropertyDescriptor(URL, "parse");
+    Reflect.deleteProperty(URL, "parse");
+    try {
+      expect(pageAfterWelcome("?return_to=%2Frooms%2Fabc", origin)).toBe("/rooms/abc");
+      expect(pageAfterWelcome(`?return_to=${encodeURIComponent("http://[")}`, origin)).toBe("/");
+    } finally {
+      if (parse) Object.defineProperty(URL, "parse", parse);
+    }
   });
 
   it("is a page signing in comes back to, for someone whose session ended there, which checks where it goes on to itself", () => {

@@ -183,15 +183,24 @@ function huddlePageOf(roomSegment: string): WorkspacePage | null {
 }
 
 // This package is typed without a platform's library, and every platform it runs on has these.
-declare const URL: { parse(url: string, base: string): { readonly origin: string; readonly pathname: string; readonly search: string; readonly hash: string } | null };
+declare const URL: new (url: string, base: string) => { readonly origin: string; readonly pathname: string; readonly search: string; readonly hash: string };
 declare const URLSearchParams: new (init: string) => { get(name: string): string | null };
+
+/** `address` read against `origin`, or null for one that isn't an address, by `new URL`, as Safari before 18 and Chrome before 126 have no `URL.parse`. */
+function urlOf(address: string, origin: string) {
+  try {
+    return new URL(address, origin);
+  } catch {
+    return null;
+  }
+}
 
 /**
  * `address`'s path, query and fragment, if it names a page at `origin` that `isPage` takes, or else "/",
  * as `address` is someone's to make up: another site's, or a page that isn't one.
  */
 function pathIn(address: string | null, origin: string, isPage: (pathname: string) => boolean): string {
-  const url = address === null ? null : URL.parse(address, origin);
+  const url = address === null ? null : urlOf(address, origin);
   return url?.origin === origin && isPage(url.pathname) ? `${url.pathname}${url.search}${url.hash}` : "/";
 }
 
