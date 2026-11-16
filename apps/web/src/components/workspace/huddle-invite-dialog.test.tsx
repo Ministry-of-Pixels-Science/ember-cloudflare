@@ -264,6 +264,25 @@ describe("Invite people", () => {
     expect(list.scrollTop).toBe(0);
   });
 
+  it("keeps its search once it has one, however few are left to invite, so that it isn't taken from under whoever is typing in it", async () => {
+    const people = crowd(21);
+    serve(settingsWith([ada, ...people]));
+    const { user, show } = await openInvite(general, huddleWith(), directory(listed(ada), ...people.map((person) => listed(person))));
+    await waitFor(() => expect(boxes()).toHaveLength(20));
+    const search = within(dialog()).getByRole("textbox", { name: "Search people" });
+    await user.type(search, "person 2");
+    expect(names()).toEqual(["Person 20", "Person 21"]);
+
+    // One of them joins, which leaves 20 to invite, as many as the list shows at once.
+    show(huddleWith(people[20]!));
+    expect(names()).toEqual(["Person 20"]);
+    expect(search).toHaveValue("person 2");
+    expect(search).toHaveFocus();
+    await user.clear(search);
+    expect(boxes()).toHaveLength(20);
+    expect(search).toHaveFocus();
+  });
+
   it("keeps whoever is ticked while a search shows others, and invites them too", async () => {
     const people = crowd(25);
     serve(settingsWith([ada, ...people]));

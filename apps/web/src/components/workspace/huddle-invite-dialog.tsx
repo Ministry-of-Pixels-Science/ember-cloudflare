@@ -68,8 +68,8 @@ interface Props {
  * Invite people, as a huddle in Slack has it: the people in the huddle's room who aren't in the huddle
  * and could join it, by name, to tick one or more of, and Send Invite, which has the room ring them.
  * Someone who's the only one to invite is ticked already. Past 20 of them it lists 20 at a time, under
- * a search by name. One invitation names as many people as a huddle takes, so once that many are
- * ticked the rest can't be.
+ * a search by name, which it keeps once it has one. One invitation names as many people as a huddle
+ * takes, so once that many are ticked the rest can't be.
  */
 export function HuddleInviteDialog({ huddle, room, meId, opener, onClose, onFailed }: Props) {
   const nameOf = useNameOf();
@@ -82,6 +82,9 @@ export function HuddleInviteDialog({ huddle, room, meId, opener, onClose, onFail
   const { members, ask } = useMembers(room, onFailed);
   const [typed, setTyped] = useState("");
   const [pages, setPages] = useState(1);
+  // Whether the list has its search, which it keeps however few are left to invite, so that it isn't
+  // taken from under whoever is typing in it when one of them joins the huddle.
+  const [searchable, setSearchable] = useState(false);
   // Who's ticked, once anyone has been ticked or unticked.
   const [ticked, setTicked] = useState<ReadonlySet<UserId> | null>(null);
   const [unsent, setUnsent] = useState(false);
@@ -91,6 +94,7 @@ export function HuddleInviteDialog({ huddle, room, meId, opener, onClose, onFail
     const inIt = new Set(huddle.people.map(({ user }) => user.id));
     return byName(invitable(members, meId, inIt, joinsNone).map((person) => ({ ...person, name: nameOf(person) })));
   }, [members, huddle.people, meId, joinsNone, nameOf]);
+  if (!searchable && candidates.length > PEOPLE_PAGE) setSearchable(true);
   const sought = soughtName(typed).toLowerCase();
   const matches = sought ? candidates.filter(({ name }) => name.toLowerCase().includes(sought)) : candidates;
   const shown = matches.slice(0, pages * PEOPLE_PAGE);
@@ -170,7 +174,7 @@ export function HuddleInviteDialog({ huddle, room, meId, opener, onClose, onFail
           People in {place} who aren’t in the huddle. Ember rings whoever you invite, unless they’ve turned {direct ? "its" : "the room’s"} notifications off.
         </DialogDescription>
 
-        {candidates.length > PEOPLE_PAGE && (
+        {searchable && (
           // A label, so a tap anywhere on it reaches the field.
           <label className="mt-5 flex min-h-[46px] cursor-text items-center gap-2.5 rounded-[10px] border px-3 py-2.5 focus-within:border-muted-foreground focus-within:ring-1 focus-within:ring-muted-foreground">
             <Search className="size-[19px] flex-[0_0_19px] text-muted-foreground" />
