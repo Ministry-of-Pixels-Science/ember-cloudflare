@@ -22,7 +22,8 @@ export interface HuddleSpeaker {
   playOnce(audio: HTMLAudioElement): void;
   /**
    * Plays through the speaker `deviceId` from now, or the system's when that's empty, and answers
-   * whether the browser would: one it won't play through leaves the huddle on the one before.
+   * whether the browser would: one it won't play through leaves the huddle on the one before. One
+   * chosen while the browser takes up another waits for that one.
    */
   use(deviceId: string): Promise<boolean>;
   /** Stops all it plays until stopped, for good. What plays once plays out. */
@@ -44,10 +45,21 @@ export function huddleSpeaker(speakerId: string): HuddleSpeaker {
   let chosen = speakerId;
   /** The speaker they play through now: the one chosen, or the system's while that's unplugged. */
   let speaker = chosen;
+  /** The change of speaker under way, if its person has asked for one, which another they choose meanwhile waits for. */
+  let changing: Promise<boolean> | null = null;
   const playAllThrough = async (deviceId: string) => {
     speaker = deviceId;
     const played = await Promise.all([...playing].map((audio) => playThrough(audio, deviceId)));
     return played.every(Boolean);
+  };
+  /** Plays through the speaker `deviceId`, and answers whether the browser would: refused, it's back on the one before. */
+  const change = async (deviceId: string) => {
+    const before = { chosen, speaker };
+    chosen = deviceId;
+    if (await playAllThrough(deviceId)) return true;
+    chosen = before.chosen;
+    await playAllThrough(before.speaker);
+    return false;
   };
   const followSpeaker = async () => {
     const followed = chosen;
@@ -91,16 +103,15 @@ export function huddleSpeaker(speakerId: string): HuddleSpeaker {
       // Refused, it plays nothing: by the person's next touch, the moment has passed.
       void audio.play().catch(() => {});
     },
-    async use(deviceId) {
-      const [was, through] = [chosen, speaker];
-      chosen = deviceId;
-      const played = await playAllThrough(deviceId);
-      // Refused, it's back on the one before, unless another was chosen meanwhile, which is the one to play through.
-      if (!played && chosen === deviceId) {
-        chosen = was;
-        void playAllThrough(through);
-      }
-      return played;
+    // One change at a time, in the order they were chosen: the browser may finish the later of two
+    // first, and one it refuses goes back to where the one before it left the huddle.
+    use(deviceId) {
+      const changed = changing ? changing.then(() => change(deviceId)) : change(deviceId);
+      changing = changed;
+      void changed.then(() => {
+        if (changing === changed) changing = null;
+      });
+      return changed;
     },
     stopAll() {
       for (const audio of [...playing]) stop(audio);

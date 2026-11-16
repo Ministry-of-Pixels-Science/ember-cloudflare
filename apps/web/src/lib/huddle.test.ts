@@ -2083,6 +2083,31 @@ describe("Choosing another device in a huddle", () => {
     }
   });
 
+  it("shows the last of two speakers chosen one right after the other, however long the browser takes over the first", async () => {
+    let take = () => {};
+    const taken = new Promise<void>((resolve) => (take = resolve));
+    const setSinkId = vi.fn(async (deviceId: string) => {
+      if (deviceId === "headphones") await taken;
+    });
+    Object.defineProperty(HTMLMediaElement.prototype, "setSinkId", { configurable: true, value: setSinkId });
+    try {
+      await joined([person(grace)]);
+      await offeredRound(["0", grace]);
+
+      chooseHuddleDevice("speaker", "headphones");
+      chooseHuddleDevice("speaker", "monitor");
+      await settled();
+      expect(joinedHuddle()).toMatchObject({ speakerId: "" });
+      take();
+      await settled();
+      expect(setSinkId.mock.calls).toEqual([["headphones"], ["monitor"]]);
+      expect(joinedHuddle()).toMatchObject({ speakerId: "monitor" });
+      expect(localStorage.getItem("ember:huddle-speaker")).toBe("monitor");
+    } finally {
+      delete (HTMLMediaElement.prototype as { setSinkId?: unknown }).setSinkId;
+    }
+  });
+
   it("forgets a speaker chosen as the tab leaves, which its next huddle doesn't start with", async () => {
     const setSinkId = vi.fn(async () => {});
     Object.defineProperty(HTMLMediaElement.prototype, "setSinkId", { configurable: true, value: setSinkId });

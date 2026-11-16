@@ -6,14 +6,20 @@ const settled = () => new Promise((resolve) => setTimeout(resolve));
 const audio = () => document.createElement("audio");
 const box = () => document.querySelector<HTMLElement>("[data-huddle-voices]");
 
-/** A browser that can choose a speaker, as Safari can't: each `<audio>` says the one it was last told to play through, which is never `refused`. */
-function choosesSpeakers(refused?: string) {
+/**
+ * A browser that can choose a speaker, as Safari can't: each `<audio>` says the one it was last told to
+ * play through, which is never one of those `refused`. It takes its time over `slow`: until `take` is called.
+ */
+function choosesSpeakers({ refused = [], slow }: { refused?: string[]; slow?: string } = {}) {
+  let take = () => {};
+  const taken = new Promise<void>((resolve) => (take = resolve));
   const setSinkId = vi.fn(async function (this: HTMLMediaElement, deviceId: string) {
-    if (deviceId === refused) throw new DOMException("Refused", "NotAllowedError");
+    if (deviceId === slow) await taken;
+    if (refused.includes(deviceId)) throw new DOMException("Refused", "NotAllowedError");
     Object.defineProperty(this, "sinkId", { configurable: true, value: deviceId });
   });
   Object.defineProperty(HTMLMediaElement.prototype, "setSinkId", { configurable: true, value: setSinkId });
-  return setSinkId;
+  return Object.assign(setSinkId, { take });
 }
 
 /** The speakers the browser lists, which the function returned changes as plugging one in or unplugging it does. */
@@ -179,20 +185,22 @@ describe("What a huddle's speaker plays once", () => {
 });
 
 describe("Another speaker chosen for a huddle", () => {
-  it("plays what the huddle plays now, and what it plays after, until the system's is chosen again", () => {
+  it("plays what the huddle plays now, and what it plays after, until the system's is chosen again", async () => {
     const setSinkId = choosesSpeakers();
     const speaker = huddleSpeaker("");
     const [voice, later, sound] = [audio(), audio(), audio()];
     speaker.play(voice);
     expect(setSinkId).not.toHaveBeenCalled();
 
-    speaker.use("headphones");
+    const used = speaker.use("headphones");
     expect(setSinkId.mock.calls).toEqual([["headphones"]]);
     speaker.play(later);
     speaker.playOnce(sound);
     expect(setSinkId.mock.calls).toEqual([["headphones"], ["headphones"], ["headphones"]]);
     expect(setSinkId.mock.contexts).toEqual([voice, later, sound]);
 
+    // With nothing under way, the browser is asked as it's chosen.
+    await used;
     setSinkId.mockClear();
     speaker.use("");
     expect(setSinkId.mock.calls).toEqual([[""], [""]]);
@@ -218,7 +226,7 @@ describe("Another speaker chosen for a huddle", () => {
   });
 
   it("leaves the huddle on the one before when the browser won't play through it, and says so", async () => {
-    const setSinkId = choosesSpeakers("broken");
+    const setSinkId = choosesSpeakers({ refused: ["broken"] });
     const changeTo = lists("default", "headphones", "broken");
     const speaker = huddleSpeaker("");
     const [voice, later] = [audio(), audio()];
@@ -237,16 +245,55 @@ describe("Another speaker chosen for a huddle", () => {
     speaker.stopAll();
   });
 
-  it("is the one played through when it's chosen while the browser refuses the one before", async () => {
-    const setSinkId = choosesSpeakers("broken");
+  it("waits, chosen while the browser takes up another, for that one, so the last chosen is the one the huddle is left on", async () => {
+    const setSinkId = choosesSpeakers({ slow: "headphones" });
     const speaker = huddleSpeaker("");
+    const voice = audio();
+    speaker.play(voice);
+
+    const first = speaker.use("headphones");
+    const last = speaker.use("monitor");
+    await settled();
+    // Asked for both at once, the browser would take up the monitor first, and leave the huddle on the headphones.
+    expect(setSinkId.mock.calls).toEqual([["headphones"]]);
+    setSinkId.take();
+    await expect(first).resolves.toBe(true);
+    await expect(last).resolves.toBe(true);
+    expect(setSinkId.mock.calls).toEqual([["headphones"], ["monitor"]]);
+    expect(voice.sinkId).toBe("monitor");
+    speaker.stopAll();
+  });
+
+  it("waits as well, chosen while the browser refuses another, for the huddle to be back on the one before", async () => {
+    const setSinkId = choosesSpeakers({ refused: ["broken"], slow: "headphones" });
+    const speaker = huddleSpeaker("headphones");
     speaker.play(audio());
 
     const refused = speaker.use("broken");
-    const taken = speaker.use("headphones");
+    const taken = speaker.use("monitor");
+    await settled();
+    expect(setSinkId.mock.calls).toEqual([["headphones"], ["broken"], ["headphones"]]);
+    setSinkId.take();
     await expect(refused).resolves.toBe(false);
     await expect(taken).resolves.toBe(true);
-    expect(setSinkId.mock.calls).toEqual([["broken"], ["headphones"]]);
+    expect(setSinkId.mock.calls.slice(3)).toEqual([["monitor"]]);
+    speaker.stopAll();
+  });
+
+  it("goes back to the last the browser played through when it refuses two chosen one right after the other", async () => {
+    const setSinkId = choosesSpeakers({ refused: ["broken", "unplugged"] });
+    const speaker = huddleSpeaker("");
+    const [voice, later] = [audio(), audio()];
+    speaker.play(voice);
+    await speaker.use("headphones");
+    setSinkId.mockClear();
+
+    await expect(Promise.all([speaker.use("broken"), speaker.use("unplugged")])).resolves.toEqual([false, false]);
+    expect(setSinkId.mock.calls).toEqual([["broken"], ["headphones"], ["unplugged"], ["headphones"]]);
+    // What it plays after goes through the one it's on, and not through one of those refused.
+    speaker.play(later);
+    expect(setSinkId.mock.calls.slice(4)).toEqual([["headphones"]]);
+    expect(setSinkId.mock.contexts.at(-1)).toBe(later);
     speaker.stopAll();
   });
 
