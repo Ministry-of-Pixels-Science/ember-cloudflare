@@ -172,12 +172,31 @@ const PAGE = `SELECT id AS number, message, NULL AS marked FROM search_messages 
 /** The most words a hit says it matched. */
 const MOST_WORDS = 20;
 
+/** The marks `MARKED_PAGE` has each matching word between. */
+const OPENING_MARK = "\u0001";
+const CLOSING_MARK = "\u0002";
+
+/**
+ * What `marked` has between each opening mark and the first closing mark after it, where that's anything,
+ * in order. A message's own text can have the marks too, as many as it likes, so each is looked for from
+ * where the last was found, and an opening mark that nothing closes ends the walk: a regular expression
+ * would read on to the end of the text from every opening mark after it as well.
+ */
+function* betweenMarks(marked: string): Generator<string> {
+  let closing = -1;
+  for (let opening = marked.indexOf(OPENING_MARK); opening !== -1; opening = marked.indexOf(OPENING_MARK, closing + 1)) {
+    closing = marked.indexOf(CLOSING_MARK, opening + 1);
+    if (closing === -1) return;
+    if (closing > opening + 1) yield marked.slice(opening + 1, closing);
+  }
+}
+
 /** The words `marked` has between marks, as its text has them, once each however they're cased. */
 function wordsMarked(marked: string | null): string[] {
   const words = new Map<string, string>();
-  for (const [, word] of (marked ?? "").matchAll(/\u0001([^\u0002]+)\u0002/gu)) {
+  for (const word of betweenMarks(marked ?? "")) {
     if (words.size === MOST_WORDS) break;
-    if (!words.has(word!.toLowerCase())) words.set(word!.toLowerCase(), word!);
+    if (!words.has(word.toLowerCase())) words.set(word.toLowerCase(), word);
   }
   return [...words.values()];
 }

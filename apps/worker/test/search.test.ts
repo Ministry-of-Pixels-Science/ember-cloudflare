@@ -1,4 +1,5 @@
 import {
+  MAX_MESSAGE_LENGTH,
   MAX_SEARCH_LENGTH,
   SEARCH_LIMIT,
   SEARCH_TOO_LONG,
@@ -210,6 +211,21 @@ describe("Search messages", () => {
     const message = await post(ada, "Deploying the deploys, then DEPLOYED: deploy");
     await caughtUp(room);
     expect((await resultsFor(ada.session, "deploy")).matches).toEqual([{ message: expect.objectContaining({ id: message.id }), words: ["Deploying", "deploys", "DEPLOYED", "deploy"] }]);
+  });
+
+  it("answers the words each match matched when its text has the index's marks itself, however many", async () => {
+    const index = searchIndexStub();
+    const at = (second: number, text: string): IndexedMessage => indexed({ id: `message-${second}`, createdAt: new Date(Date.UTC(2026, 9, 16, 10, 0, second)).toISOString(), text, message: "{}" });
+    const wordsOf = async (terms: string) => (await index.search(indexSearch(terms, ["room-a"]))).hits.map(({ words }) => words);
+    // U+0001 and U+0002 are the marks the index has FTS5 put around each matching word.
+    await index.apply("room-a", 1, [at(0, "\u0002 Pear \u0002"), at(1, "\u0001\u0002 PEAR")], []);
+    expect(await wordsOf('"pear"')).toEqual([["PEAR"], ["Pear"]]);
+
+    // A page of the longest messages a room takes, each all opening marks that nothing closes after its
+    // word: read on to its end from every one of them, they'd keep the index long past the test's time.
+    const unclosed = "plum 日 ".padEnd(MAX_MESSAGE_LENGTH, "\u0001");
+    await index.apply("room-a", 2, Array.from({ length: SEARCH_LIMIT }, (_, second) => at(2 + second, unclosed)), []);
+    expect(await wordsOf('"plum"')).toEqual(Array.from({ length: SEARCH_LIMIT }, () => ["plum"]));
   });
 
   it("finds a message by its plain text, not its markup", async () => {
