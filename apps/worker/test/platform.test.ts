@@ -292,9 +292,9 @@ describe("Security headers and HTTPS", () => {
 
 describe("Version", () => {
   it("names the version on pages and the API's answers", async () => {
-    expect((await api("/api/bootstrap")).headers.get("X-Version")).toBe("0.5 beta 4");
-    expect((await page("/")).headers.get("X-Version")).toBe("0.5 beta 4");
-    expect((await api("/api/nope")).headers.get("X-Version")).toBe("0.5 beta 4");
+    expect((await api("/api/bootstrap")).headers.get("X-Version")).toBe("0.5 beta 5");
+    expect((await page("/")).headers.get("X-Version")).toBe("0.5 beta 5");
+    expect((await api("/api/nope")).headers.get("X-Version")).toBe("0.5 beta 5");
     const configured = await apiWith({ APP_VERSION: "1.2.3", GIT_REVISION: "abc123" }, "/api/me");
     expect([configured.headers.get("X-Version"), configured.headers.get("X-Rev")]).toEqual(["1.2.3", "abc123"]);
   });
@@ -302,7 +302,7 @@ describe("Version", () => {
   it("sends X-Rev only when GIT_REVISION is set, blank or not", async () => {
     expect((await api("/api/bootstrap")).headers.has("X-Rev")).toBe(false);
     const blank = await apiWith({ GIT_REVISION: "" }, "/api/bootstrap");
-    expect([blank.headers.get("X-Version"), blank.headers.get("X-Rev")]).toEqual(["0.5 beta 4", ""]);
+    expect([blank.headers.get("X-Version"), blank.headers.get("X-Rev")]).toEqual(["0.5 beta 5", ""]);
     expect((await apiWith({ GIT_REVISION: "abc123" }, "/api/bootstrap")).headers.get("X-Version")).toBe("abc123");
   });
 });
@@ -317,7 +317,7 @@ describe("Supported browsers", () => {
       expect(html, path).toContain("<title>Unsupported browser</title>");
       expect(html, path).toContain("<h1>Upgrade to a supported web browser</h1>");
       expectRailsDefaults(response);
-      expect(response.headers.get("X-Version")).toBe("0.5 beta 4");
+      expect(response.headers.get("X-Version")).toBe("0.5 beta 5");
     }
   });
 
