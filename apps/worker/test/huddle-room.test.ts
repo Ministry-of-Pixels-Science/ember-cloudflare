@@ -2069,6 +2069,21 @@ describe("Who a huddle is for", () => {
     expect(adas.pending("huddle.joined")).toHaveLength(1);
   });
 
+  it("ignores what a socket sent before it heard it was closed", async () => {
+    const { ada } = await huddlesOn();
+    const room = await freshRoom("late");
+    const grace = await signIn("Grace");
+    const adas = await welcomed(room, ada);
+    const graces = await welcomed(room, grace);
+
+    await roomStub(room).revoke(room, [{ tag: grace.user.id, code: CloseCode.Revoked }], Date.now());
+    graces.send({ type: "huddle.mute", muted: true });
+
+    expect(await adas.next("huddle.left")).toEqual({ type: "huddle.left", userId: grace.user.id });
+    await reached(adas);
+    expect(adas.pending("huddle.changed")).toEqual([]);
+  });
+
   it("takes someone who leaves the room out of its huddle too", async () => {
     const { ada } = await huddlesOn();
     const grace = await signIn("Grace");

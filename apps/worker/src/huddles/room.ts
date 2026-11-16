@@ -400,6 +400,9 @@ export class Huddle {
 
   /** Does what a frame from one of the huddle's sockets asks. */
   async message(ws: WebSocket, raw: string | ArrayBuffer): Promise<void> {
+    // A socket the room has closed, as when its person lost the room, can't change anything, even with
+    // frames it sent before it heard.
+    if (ws.readyState !== WebSocket.OPEN) return;
     // A session description is the largest thing a tab sends, and fits a room's largest frame twice over.
     // Whoever sends more leaves the huddle as the room closes their socket, rather than when their tab
     // answers the close, which it may never do.
