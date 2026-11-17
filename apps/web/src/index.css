@@ -605,10 +605,12 @@
       margin-inline-start: 40px;
     }
 
+    /* Lexxy's space around a divider, with no content margin, as the composer shows it. */
     hr {
       border: 0;
       border-block-end: 1px solid var(--message-rule);
       inline-size: 20%;
+      margin-block: 0.5em;
     }
 
     table {
