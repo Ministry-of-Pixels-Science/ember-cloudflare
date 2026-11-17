@@ -253,7 +253,8 @@ test.describe("Formatting row", () => {
     await tool(ada, "Paragraph").click();
     await expect(menu.getByRole("menuitemradio")).toHaveText(["Paragraph", "Big headingH1", "Medium headingH2", "Small headingH3"]);
     await expect(paragraphStyle(ada, "Paragraph")).toHaveAttribute("aria-checked", "true");
-    // Upward, as there's no room under the composer.
+    // Upward, as there's no room under the composer, once it's done sliding up into place.
+    await menu.evaluate((element) => Promise.all(element.getAnimations().map((animation) => animation.finished)));
     const menuBox = await box(menu);
     expect(menuBox.y + menuBox.height).toBeLessThanOrEqual(paragraphBox.y);
     await paragraphStyle(ada, "Big heading").click();
