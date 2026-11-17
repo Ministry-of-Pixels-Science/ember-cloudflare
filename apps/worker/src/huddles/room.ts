@@ -26,6 +26,7 @@ import {
 import type { Env } from "../env";
 import { CLOSE_REASONS, closedAtOnce, closeTooLarge, isTooLarge, MAX_ROOM_FRAME_SIZE } from "../sockets";
 import { workspace } from "../workspace";
+import type { InvitationPush } from "../workspace-store";
 import { relayServers } from "./relay";
 import { acceptAnswer, closeTracks, publishTracks, pullTracks, resizeTracks, SfuError, startSession, TRACKS_PER_REQUEST, type HuddleApp, type Pulled, type SfuApp } from "./sfu";
 
@@ -60,7 +61,8 @@ import { acceptAnswer, closeTracks, publishTracks, pullTracks, resizeTracks, Sfu
 // The room tells the Workspace who's in the huddle as they join and leave, and the Workspace tells
 // everyone in the room, in the huddle or not, so their sidebars and the room's header can show it.
 // Someone in the huddle invites others into it through the Workspace too (`huddle.invite`), which
-// knows who's in the room, and has every tab of theirs.
+// knows who's in the room, and has every tab of theirs. Whoever it finds with Ember in view nowhere is
+// pushed the invitation, which the room sends, as it sends its messages' pushes.
 
 /**
  * The tag on a huddle's sockets, besides the tags a room's own sockets carry. Nobody's id has a colon in
@@ -351,6 +353,8 @@ export class Huddle {
     private readonly env: Env,
     /** Sets the room's alarm to check the huddle by a time, unless it's set for sooner, once the room's events before it are done. */
     private readonly wakeBy: (time: number) => Promise<void>,
+    /** Sends an invitation's pushes, as the room sends its messages'. */
+    private readonly push: (pushes: InvitationPush[]) => Promise<void>,
   ) {}
 
   /** Whether `ws` is one of the huddle's sockets, rather than one of the room's own. */
@@ -553,9 +557,10 @@ export class Huddle {
 
   /**
    * Invites into the huddle the people `ws`'s person names, but for whoever is in it already: the
-   * Workspace tells those of them who are in the room, on every tab they have open. A tab that has
-   * invited people as often as one may in a minute hears that nobody more is, and so does one whose
-   * invitation the Workspace couldn't be given.
+   * Workspace tells those of them who are in the room, on every tab they have open, and the room pushes
+   * the invitation to whoever the Workspace finds with Ember in view nowhere, without the tab waiting
+   * on it. A tab that has invited people as often as one may in a minute hears that nobody more is, and
+   * so does one whose invitation the Workspace couldn't be given.
    */
   private async invite(ws: WebSocket, userIds: UserId[]): Promise<void> {
     const now = Date.now();
@@ -567,7 +572,9 @@ export class Huddle {
     const invited = userIds.filter((userId) => !inIt.has(userId));
     if (invited.length === 0) return;
     try {
-      await workspace(this.env).inviteToHuddle(roomId, user.id, invited);
+      const pushes = await workspace(this.env).inviteToHuddle(roomId, user.id, invited);
+      // A Workspace still on the code from before it answered pushes, as it may be for some minutes after an update, answers nothing.
+      if (pushes?.length > 0) this.ctx.waitUntil(this.push(pushes));
     } catch (error) {
       console.warn("Inviting people into a huddle failed:", logged(error));
       send(ws, { type: "error", message: NOBODY_INVITED, failed: "huddle.invite" });

@@ -5,6 +5,7 @@ import {
   roomSocketQuery,
   searchQuery,
   WORKSPACE_PRELOADS,
+  workspaceSocketQuery,
   type Account,
   type AccountChanges,
   type AssistantChanged,
@@ -90,6 +91,7 @@ import {
   type UserId,
   type WebSearchChanged,
   type WorkspaceSettings,
+  type WorkspaceSocketParams,
   type YourAssistantChanged,
   type YourAssistantChanges,
 } from "@ember/protocol";
@@ -1068,8 +1070,8 @@ export function socketUrl(path: string): string {
 /** The address of a room's socket, which tells the room what `params` says about the tab. */
 export const roomSocketUrl = (roomId: string, params: RoomSocketParams) => socketUrl(`/api/rooms/${encodeURIComponent(roomId)}/socket${roomSocketQuery(params)}`);
 
-/** The address of a tab's workspace socket, which carries what changes outside the room it shows. */
-export const workspaceSocketUrl = () => socketUrl("/api/socket");
+/** The address of a tab's workspace socket, which carries what changes outside the room it shows, and tells the Workspace what `params` says about the tab. */
+export const workspaceSocketUrl = (params: WorkspaceSocketParams) => socketUrl(`/api/socket${workspaceSocketQuery(params)}`);
 
 /** Forgets the session earlier versions of the app kept in localStorage, which nothing reads now. */
 export function forgetStoredSession(): void {

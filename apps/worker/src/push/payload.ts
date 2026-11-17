@@ -1,6 +1,6 @@
 import { threadPath, type RoomId, type RoomKind } from "@ember/protocol";
 
-// What a push of a new message says, for the service worker to show as it is.
+// What a push says, of a new message or of an invitation into a huddle, for the service worker to show as it is.
 
 /**
  * How long a push's title and text may be, counted as the bytes they take in its JSON: a push service
@@ -16,7 +16,7 @@ export interface PushPayload {
   path: string;
 }
 
-/** What a message's push says of the room it's in and who wrote it. */
+/** What a push says of the room its message is in, or its huddle. */
 export interface PushedRoom {
   kind: RoomKind;
   /** Null for a DM. */
@@ -43,6 +43,22 @@ export function messagePayload(roomId: RoomId, room: PushedRoom, senderName: str
   const body = direct ? plainText : `${senderName}: ${plainText}`;
   const path = reply === undefined ? `/rooms/${roomId}` : threadPath(roomId, reply.parentId, reply.replyId);
   return { title: truncated(title, MAX_TITLE_BYTES), body: truncated(body, MAX_BODY_BYTES), path };
+}
+
+/**
+ * How long a push service keeps an invitation's push for a browser that's away, in seconds: a minute,
+ * where it keeps a message's for weeks, since one that comes much later asks into a huddle that may be over.
+ */
+export const INVITATION_TTL_SECONDS = 60;
+
+/**
+ * The push of an invitation into a room's huddle, which reads as the invitation does where Ember is
+ * open: titled with whoever invites, "Invites you to a huddle", and in which room for any but a DM,
+ * whose huddle is with them. Opening it opens the room, where the huddle is to join.
+ */
+export function invitationPayload(roomId: RoomId, room: PushedRoom, inviterName: string): PushPayload {
+  const body = room.kind === "direct" ? "Invites you to a huddle" : `Invites you to a huddle in ${room.name ?? ""}`;
+  return { title: truncated(inviterName, MAX_TITLE_BYTES), body: truncated(body, MAX_BODY_BYTES), path: `/rooms/${roomId}` };
 }
 
 /**

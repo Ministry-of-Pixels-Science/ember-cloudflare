@@ -64,7 +64,7 @@ import type { AppId } from "@ember/protocol/apps";
 import type { LiveHuddle } from "@ember/protocol/huddles";
 import { statement, type Db, type Statement } from "./db";
 import type { StoredPicture } from "./files/pictures";
-import { messagePayload, type PushPayload } from "./push/payload";
+import { INVITATION_TTL_SECONDS, invitationPayload, messagePayload, type PushPayload } from "./push/payload";
 import { ADDRESS_TAG_PREFIX, EVERYONE, SESSION_TAG_PREFIX, type Revocation } from "./revocations";
 import type { RoomEvent } from "./room-log";
 
@@ -612,6 +612,14 @@ export interface MessagePush {
   deliveries: PushDelivery[];
 }
 
+/**
+ * The pushes of an invitation into a huddle, which are as a message's but for how long a push service
+ * keeps each for a browser that's away, in seconds.
+ */
+export interface InvitationPush extends MessagePush {
+  ttl: number;
+}
+
 /** One of someone's push subscriptions, with the user agent of the browser that saved it, if it sent one. */
 export interface StoredPushSubscription {
   id: number;
@@ -619,7 +627,7 @@ export interface StoredPushSubscription {
   userAgent: string | null;
 }
 
-/** A subscription a message is pushed to, and the count its push sets the app's badge to. */
+/** A subscription a message or an invitation is pushed to, and the count its push sets the app's badge to. */
 export interface PushDelivery {
   subscriptionId: number;
   endpoint: string;
@@ -1437,6 +1445,13 @@ function messagePushes(roomId: RoomId, { message }: RoomEvent, rows: PushRow[]):
   ];
 }
 
+/** An invitation's pushes, from the subscriptions `INVITATION_PUSHES` found for it: none when it found none. */
+function invitationPushes(roomId: RoomId, rows: InvitationPushRow[]): InvitationPush[] {
+  if (rows.length === 0) return [];
+  const [{ kind, name, inviter_name }] = rows as [InvitationPushRow];
+  return [{ payload: invitationPayload(roomId, { kind, name }, inviter_name), deliveries: rows.map(deliveryOf), ttl: INVITATION_TTL_SECONDS }];
+}
+
 /** Whether `ROOM_RANKED` found that the shared order ranks the room. */
 const isRanked = (rows: unknown[]) => (rows as Array<{ ranked: number }>)[0]?.ranked === 1;
 
@@ -1563,6 +1578,23 @@ const HUDDLE_REPORTED_AT = `SELECT huddle_reported_at FROM rooms WHERE id = ?`;
 export const HUDDLE_INVITEES = `SELECT memberships.user_id FROM memberships JOIN users ON users.id = memberships.user_id
   WHERE memberships.room_id = ?1 AND memberships.user_id IN (SELECT value FROM json_each(?2))
     AND memberships.involvement IN ('everything', 'mentions') AND users.status = ${ACTIVE}`;
+
+/**
+ * Where an invitation into room ?1's huddle by ?2 is pushed: to the subscriptions of those of the
+ * people a JSON list ?3 names whom it reaches, as `HUDDLE_INVITEES` has it, in the order they were
+ * saved. Guests are left out unless ?4 says they can stay signed in. Each comes with the room, the name
+ * of whoever invites and the count its push sets the badge to, as a message's does.
+ */
+export const INVITATION_PUSHES = `SELECT push_subscriptions.id, push_subscriptions.endpoint, push_subscriptions.p256dh_key, push_subscriptions.auth_key,
+    (SELECT count(*) FROM memberships AS marked WHERE marked.user_id = memberships.user_id AND marked.unread_at IS NOT NULL) AS badge,
+    rooms.kind, rooms.name, (SELECT name FROM users AS inviters WHERE inviters.id = ?2) AS inviter_name
+  FROM rooms
+    JOIN memberships ON memberships.room_id = rooms.id
+    JOIN users ON users.id = memberships.user_id
+    JOIN push_subscriptions ON push_subscriptions.user_id = memberships.user_id
+  WHERE rooms.id = ?1 AND memberships.user_id IN (SELECT value FROM json_each(?3))
+    AND memberships.involvement IN ('everything', 'mentions') AND users.status = ${ACTIVE} AND (users.guest = 0 OR ?4 = 1)
+  ORDER BY push_subscriptions.id`;
 
 /** A room's huddle, as its row keeps it. */
 const HUDDLE = `SELECT huddle_started_at, huddle_user_ids FROM rooms WHERE id = ?`;
@@ -1777,6 +1809,12 @@ interface PushRow extends DeliveryRow {
   kind: RoomKind;
   name: string | null;
   author_name: string;
+}
+
+interface InvitationPushRow extends DeliveryRow {
+  kind: RoomKind;
+  name: string | null;
+  inviter_name: string;
 }
 
 /**
@@ -3738,6 +3776,14 @@ export class WorkspaceStore {
   /** Who of `userIds` an invitation into room `roomId`'s huddle reaches: those in the room who hear its @mentions of them or more. */
   async huddleInvitees(roomId: RoomId, userIds: UserId[]): Promise<UserId[]> {
     return userIdsOf(await this.db.all<UserIdRow>(HUDDLE_INVITEES, roomId, JSON.stringify(userIds)));
+  }
+
+  /**
+   * The pushes of an invitation into room `roomId`'s huddle by `by`, to those of `userIds` it reaches
+   * who have saved a subscription, and to guests only if `guests` says they can stay signed in.
+   */
+  async invitationPushes(roomId: RoomId, by: UserId, userIds: UserId[], guests: boolean): Promise<InvitationPush[]> {
+    return invitationPushes(roomId, await this.db.all<InvitationPushRow>(INVITATION_PUSHES, roomId, by, JSON.stringify(userIds), guests ? 1 : 0));
   }
 
   /** The huddle going on in a room, or null when none is. */

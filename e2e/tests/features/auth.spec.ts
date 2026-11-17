@@ -314,7 +314,7 @@ test.describe("One live connection per tab outside the open room", () => {
       const settings = await laptop.context().newPage();
       // Its listener goes on as the socket opens, so it can't miss the welcome.
       const welcomed = new Promise<void>((resolve) =>
-        settings.on("websocket", (ws) => void (ws.url().endsWith("/api/socket") && ws.once("framereceived", () => resolve()))),
+        settings.on("websocket", (ws) => void (new URL(ws.url()).pathname === "/api/socket" && ws.once("framereceived", () => resolve()))),
       );
       await settings.goto("/account/edit");
       await welcomed;

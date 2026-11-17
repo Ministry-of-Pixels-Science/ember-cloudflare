@@ -77,7 +77,7 @@ class WorkspaceSocket extends QuietSocket {
 
   constructor(url: string) {
     super();
-    if (url.endsWith("/api/socket")) WorkspaceSocket.all.push(this);
+    if (new URL(url).pathname === "/api/socket") WorkspaceSocket.all.push(this);
   }
 
   receive(frame: object) {
