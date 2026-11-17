@@ -12,7 +12,8 @@ const WORKFLOW = ".github/workflows/update-ember.yml";
  * Stands in for the GitHub CLI: it notes each call in $GH_LOG/calls and what it read in
  * $GH_LOG/<command>-body. `pr create` opens pull request 7, unless $GH_PR_FAILS has it fail saying
  * that, and `issue create` opens issue 8; the listings answer $GH_PULLS and $GH_ISSUES, or else what
- * it opened.
+ * it opened, listed as gh lists a workflow's: a pull request from a branch of the copy's own
+ * repository, and an issue GitHub Actions opened.
  */
 const GH = `#!/usr/bin/env bash
 echo "$*" >> "$GH_LOG/calls"
@@ -22,17 +23,23 @@ case "$1 $2" in
   "pr create")
     cat > "$GH_LOG/pr-body"
     if [ -n "$GH_PR_FAILS" ]; then echo "$GH_PR_FAILS" >&2; exit 1; fi
-    printf '[{ "url": "https://github.com/me/chat/pull/7", "state": "OPEN", "headRefName": "%s" }]' "$(option --head "$@")" > "$GH_LOG/pulls"
+    printf '[{ "url": "https://github.com/me/chat/pull/7", "state": "OPEN", "headRefName": "%s", "isCrossRepository": false }]' "$(option --head "$@")" > "$GH_LOG/pulls"
     echo "https://github.com/me/chat/pull/7" ;;
   "issue create")
     cat > "$GH_LOG/issue-body"
-    printf '[{ "url": "https://github.com/me/chat/issues/8", "state": "OPEN", "title": "%s" }]' "$(option --title "$@")" > "$GH_LOG/issues"
+    printf '[{ "url": "https://github.com/me/chat/issues/8", "state": "OPEN", "title": "%s", "author": { "is_bot": true, "login": "app/github-actions" } }]' "$(option --title "$@")" > "$GH_LOG/issues"
     echo "https://github.com/me/chat/issues/8" ;;
   "pr list") echo "\${GH_PULLS:-$(cat "$GH_LOG/pulls" 2>/dev/null || echo "[]")}" ;;
   "issue list") echo "\${GH_ISSUES:-$(cat "$GH_LOG/issues" 2>/dev/null || echo "[]")}" ;;
 esac
 `;
 const PULL_REQUESTS_NOT_PERMITTED = "pull request create failed: GraphQL: GitHub Actions is not permitted to create or approve pull requests (createPullRequest)";
+/** What gh lists of a pull request from a branch of the copy's own repository, and of one from a fork's. */
+const FROM_COPY = { isCrossRepository: false };
+const FROM_FORK = { isCrossRepository: true };
+/** What gh lists of an issue the workflow opened, and of one somebody else did. */
+const BY_WORKFLOW = { author: { is_bot: true, login: "app/github-actions" } };
+const BY_SOMEONE = { author: { is_bot: false, login: "someone", id: "U_1", name: "" } };
 
 let dir: string;
 /** git's settings for these repositories alone, whatever the machine's say. */
@@ -563,6 +570,16 @@ describe("publishing an update, as the Update Ember workflow does", () => {
     expect(calls().filter((call) => call.startsWith("pr create"))).toHaveLength(1);
   });
 
+  it("makes each update once where it opens an issue, taking the one it opened for the update's offer", () => {
+    const { repo, copy, env, calls } = published();
+    const notPermitted = { ...env, GH_PR_FAILS: PULL_REQUESTS_NOT_PERMITTED };
+    update(copy, repo, ["--publish"], notPermitted);
+    const { status, output } = update(copy, repo, ["--publish"], notPermitted);
+    expect(status, output).toBe(0);
+    expect(output).toContain("https://github.com/me/chat/issues/8 offers this copy Ember v0.2.0 already.");
+    expect(calls().filter((call) => call.startsWith("issue create"))).toHaveLength(1);
+  });
+
   it("offers an update an earlier run pushed but couldn't offer, as its branch has it", () => {
     const { repo, copy, origin, env, calls } = published();
     expect(update(copy, repo, ["--publish"], { ...env, GH_PR_FAILS: "HTTP 502: Bad Gateway" }).status).toBe(1);
@@ -638,7 +655,7 @@ describe("publishing an update, as the Update Ember workflow does", () => {
 
   it("takes a closed pull request as turning its release down, until the next", () => {
     const { repo, copy, origin, env, calls } = published();
-    const pulls = JSON.stringify([{ url: "https://github.com/me/chat/pull/3", state: "CLOSED", headRefName: "update-ember/v0.2.0" }]);
+    const pulls = JSON.stringify([{ url: "https://github.com/me/chat/pull/3", state: "CLOSED", headRefName: "update-ember/v0.2.0", ...FROM_COPY }]);
     const declined = update(copy, repo, ["--publish"], { ...env, GH_PULLS: pulls });
     expect(declined.status, declined.output).toBe(0);
     expect(declined.output).toContain("https://github.com/me/chat/pull/3 offered this copy Ember v0.2.0 and is closed now, so this waits for Ember's next release.");
@@ -650,10 +667,39 @@ describe("publishing an update, as the Update Ember workflow does", () => {
     expect(output).toContain("Opened https://github.com/me/chat/pull/7, which brings this copy up to Ember v0.3.0.");
   });
 
+  it("takes neither a fork's closed pull request nor somebody else's closed issue as turning a release down", () => {
+    const { repo, copy, origin, env } = published();
+    const pulls = JSON.stringify([{ url: "https://github.com/me/chat/pull/3", state: "CLOSED", headRefName: "update-ember/v0.2.0", ...FROM_FORK }]);
+    const issues = JSON.stringify([{ url: "https://github.com/me/chat/issues/4", state: "CLOSED", title: "Update Ember to v0.2.0", ...BY_SOMEONE }]);
+    const { status, output } = update(copy, repo, ["--publish"], { ...env, GH_PULLS: pulls, GH_ISSUES: issues });
+    expect(status, output).toBe(0);
+    expect(output).toContain("Opened https://github.com/me/chat/pull/7, which brings this copy up to Ember v0.2.0.");
+    expect(show(origin, "update-ember/v0.2.0", "src/new.ts")).toBe("export {};");
+  });
+
+  it("takes neither a fork's open pull request nor somebody else's open issue for the update's own, and closes none of theirs", () => {
+    const { repo, copy, env, calls } = published();
+    const pulls = JSON.stringify([
+      { number: 3, url: "https://github.com/me/chat/pull/3", state: "OPEN", headRefName: "update-ember/v0.2.0", ...FROM_FORK },
+      { number: 4, headRefName: "update-ember/v0.1.5", ...FROM_COPY },
+      { number: 5, headRefName: "update-ember/v0.1.5", ...FROM_FORK },
+    ]);
+    const issues = JSON.stringify([
+      { number: 9, url: "https://github.com/me/chat/issues/9", state: "OPEN", title: "Update Ember to v0.2.0", ...BY_SOMEONE },
+      { number: 6, title: "Update Ember to v0.1.5", ...BY_WORKFLOW },
+      { number: 10, title: "Update Ember to v0.1.5", ...BY_SOMEONE },
+    ]);
+    const { status, output } = update(copy, repo, ["--publish"], { ...env, GH_PULLS: pulls, GH_ISSUES: issues });
+    expect(status, output).toBe(0);
+    expect(output).toContain("Opened https://github.com/me/chat/pull/7, which brings this copy up to Ember v0.2.0.");
+    const reason = "Ember v0.2.0 is out, so https://github.com/me/chat/pull/7 brings this copy up to it instead.";
+    expect(calls().filter((call) => call.includes("close"))).toEqual([`pr close 4 --delete-branch --comment ${reason}`, `issue close 6 --comment ${reason}`]);
+  });
+
   it("closes the pull requests and issues of the updates it replaces", () => {
     const { repo, copy, env, calls } = published();
-    const pulls = JSON.stringify([{ number: 4, headRefName: "update-ember/v0.1.5" }, { number: 5, headRefName: "fix-typo" }]);
-    const issues = JSON.stringify([{ number: 6, title: "Update Ember to v0.1.5" }, { number: 9, title: "Something else" }]);
+    const pulls = JSON.stringify([{ number: 4, headRefName: "update-ember/v0.1.5", ...FROM_COPY }, { number: 5, headRefName: "fix-typo", ...FROM_COPY }]);
+    const issues = JSON.stringify([{ number: 6, title: "Update Ember to v0.1.5", ...BY_WORKFLOW }, { number: 9, title: "Something else", ...BY_SOMEONE }]);
     expect(update(copy, repo, ["--publish"], { ...env, GH_PULLS: pulls, GH_ISSUES: issues }).status).toBe(0);
     const reason = "Ember v0.2.0 is out, so https://github.com/me/chat/pull/7 brings this copy up to it instead.";
     expect(calls()).toContain(`pr close 4 --delete-branch --comment ${reason}`);
@@ -693,8 +739,8 @@ describe("publishing an update, as the Update Ember workflow does", () => {
     update(copy, repo, ["--publish"], env);
     git(copy, ["pull", "--quiet", "--ff-only", "origin", "update-ember/v0.2.0"]);
     releaseBeta(repo);
-    const pulls = JSON.stringify([{ number: 9, url: "https://github.com/me/chat/pull/9", state: "OPEN", headRefName: "update-ember/v0.3.0-beta.1" }]);
-    const issues = JSON.stringify([{ number: 10, url: "https://github.com/me/chat/issues/10", state: "OPEN", title: "Update Ember to v0.3.0-beta.1" }]);
+    const pulls = JSON.stringify([{ number: 9, url: "https://github.com/me/chat/pull/9", state: "OPEN", headRefName: "update-ember/v0.3.0-beta.1", ...FROM_COPY }]);
+    const issues = JSON.stringify([{ number: 10, url: "https://github.com/me/chat/issues/10", state: "OPEN", title: "Update Ember to v0.3.0-beta.1", ...BY_WORKFLOW }]);
     const held = update(copy, repo, ["--publish"], { ...env, GH_PULLS: pulls, GH_ISSUES: issues });
     expect(held.output).toContain("This copy has everything in Ember's newest release, v0.2.0.");
     expect(calls().filter((call) => call.includes("close"))).toEqual([]);
@@ -708,7 +754,7 @@ describe("publishing an update, as the Update Ember workflow does", () => {
     const { repo, copy, env, calls } = published();
     update(copy, repo, ["--publish"], env);
     git(copy, ["pull", "--quiet", "--ff-only", "origin", "update-ember/v0.2.0"]);
-    const issues = JSON.stringify([{ number: 8, title: "Update Ember to v0.2.0" }]);
+    const issues = JSON.stringify([{ number: 8, title: "Update Ember to v0.2.0", ...BY_WORKFLOW }]);
     expect(update(copy, repo, ["--publish"], { ...env, GH_ISSUES: issues }).status).toBe(0);
     expect(calls()).toContain("issue close 8 --comment This copy has Ember's newest release now.");
   });

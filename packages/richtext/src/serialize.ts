@@ -1,7 +1,7 @@
 // Nokogiri's HTML5 serialization (`Nokogiri::HTML5::Node#write_to`, `html_standard_serialize`),
 // which is what Action Text's `to_html` and Loofah's produce.
 
-import { HTML_NAMESPACE, type Node, type Parent } from "./tree";
+import { HTML_NAMESPACE, type Attr, type Node, type Parent } from "./tree";
 
 const VOID_ELEMENTS = new Set([
   "area",
@@ -48,9 +48,7 @@ export function innerHtml(parent: Parent, options: SerializeOptions = {}): strin
 function serializeNode(node: Node, options: SerializeOptions): string {
   switch (node.kind) {
     case "element": {
-      let out = `<${node.name}`;
-      for (const attr of node.attrs) out += ` ${attr.name}="${escapeAttribute(attr.value, options)}"`;
-      out += ">";
+      const out = `<${node.name}${attributesHtml(node.attrs, options)}>`;
       if (node.namespace === HTML_NAMESPACE && VOID_ELEMENTS.has(node.name)) return out;
       return `${out}${innerHtml(node, options)}</${node.name}>`;
     }
@@ -62,6 +60,13 @@ function serializeNode(node: Node, options: SerializeOptions): string {
     case "comment":
       return `<!--${node.value}-->`;
   }
+}
+
+/** An element's attributes as its start tag holds them, each after a space. */
+export function attributesHtml(attrs: readonly Attr[], options: SerializeOptions = {}): string {
+  let out = "";
+  for (const attr of attrs) out += ` ${attr.name}="${escapeAttribute(attr.value, options)}"`;
+  return out;
 }
 
 function escapeAttribute(value: string, { escapeAttributeBrackets = false }: SerializeOptions): string {
