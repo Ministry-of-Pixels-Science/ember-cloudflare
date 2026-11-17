@@ -40,7 +40,7 @@ import {
   writtenBy,
   type Answer,
 } from "./assistant/answers";
-import { askWaiting, goOn, type Answered, type Asking, type GatewayRefusal } from "./assistant/gateway";
+import { askWaiting, goOn, type Answered, type Asking, type GatewayRefusal, type Question } from "./assistant/gateway";
 import { takesEmbersTools } from "./assistant/offered";
 import { roomSearch } from "./assistant/room-search";
 import { ToolError } from "./assistant/tool-calls";
@@ -269,6 +269,13 @@ const toldOf = (why: string) => {
 
 /** The names of the tools of the app `appId` among `picked`, an answerer's. */
 const toolsOf = (picked: readonly PickedTool[], appId: string) => new Set(picked.filter((tool) => tool.appId === appId).map(({ name }) => name));
+/** Whether `picked`, an answerer's tools in a room, have its calls of `tool`, as its model was given it, made without asking first there. */
+const isAlwaysAllowed = (picked: readonly PickedTool[], tool: GivenTool) =>
+  picked.some(({ appId, name, fingerprint, alwaysAllowed }) => alwaysAllowed && appId === tool.appId && name === tool.name && fingerprint === tool.fingerprint);
+/** Why a call made without asking first isn't shown, and so isn't made, once its answerer's calls of its tool ask first in the room, as they do in a DM or a private room. */
+const ASKS_FIRST_NOW = "each call of the tool asks first here now";
+/** `question`, asked in a room as the answerer `access` finds it: in a DM or a private room, without AI Gateway's logs keeping what's asked or answered. */
+const loggedIn = <Asked extends Omit<Question, "tools">>(question: Asked, { inPrivate }: AssistantAccess): Asked => (inPrivate ? { ...question, unlogged: true } : question);
 /** What an answerer says when its model isn't the one that made the call that waited. */
 const MODEL_CHANGED = "I can't go on from that call: my model was changed while it waited. Ask me again.";
 /** What an answerer says, by its tool's app, when what it has read is too much to keep while a call waits. */
@@ -1641,7 +1648,7 @@ export class ChatRoom extends DurableObject<Env> {
     const askedBy = { roomId, askerId: author.id };
     const appTools = given.map((tool) => appTool(this.env, bot.id, tool, askedBy, { described: tool, shown: this.showsCallsOf(roomId, access, message, tool), cards: this.showsCardsOf(roomId, bot, message, tool) }));
     const tools = takesTools ? [roomSearch(this.env, roomId, read), ...appTools] : [];
-    const asked = { ...questionFor({ ...bot, instructions, promptTemplate }, conversation, author, where, levels, new Date(), webTools, webSearchOn), tools };
+    const asked = loggedIn({ ...questionFor({ ...bot, instructions, promptTemplate }, conversation, author, where, levels, new Date(), webTools, webSearchOn), tools }, access);
     const [answered, people] = await Promise.all([askWaiting(this.env, gateway, asked, waitFor(asked)), this.peopleWhoWrote(conversation)]);
     return this.outcomeOf(access, message, answered, writtenBy(people, conversation, where.inThread), given.map(givenAs));
   }
@@ -1663,21 +1670,24 @@ export class ChatRoom extends DurableObject<Env> {
     const asked = { roomId, askerId: call.asker.id };
     const appTools = call.tools.map((tool) => appTool(this.env, bot.id, tool, asked, { shown: this.showsCallsOf(roomId, access, message, tool), cards: this.showsCardsOf(roomId, bot, message, tool) }));
     const tools = [roomSearch(this.env, roomId, read), ...appTools];
-    const [answered, people] = await Promise.all([goOn(this.env, gateway, tools, call.paused, allowed, waitFor(call.paused.question)), this.peopleWhoWrote(conversation)]);
+    const paused = { ...call.paused, question: loggedIn(call.paused.question, access) };
+    const [answered, people] = await Promise.all([goOn(this.env, gateway, tools, paused, allowed, waitFor(paused.question)), this.peopleWhoWrote(conversation)]);
     return this.outcomeOf(access, message, answered, writtenBy(people, conversation, inThread), call.tools);
   }
 
   /**
    * What shows room `roomId` the calls of `tool` that the bot `access` finds makes, answering `message`,
-   * without asking first, or undefined unless its calls of it are always allowed: a card for each, as
-   * its reply, which says what the tool was called with, and then that the call wasn't made, if it wasn't.
+   * without asking first, or undefined unless its calls of it are always allowed there: a card for each,
+   * as its reply, which says what the tool was called with, and then that the call wasn't made, if it
+   * wasn't. A call isn't shown, and so isn't made, once the bot's calls of it ask first in the room, as
+   * they do once it's private.
    */
   private showsCallsOf(roomId: RoomId, { bot, appTools }: AssistantAccess, message: Message, tool: GivenTool): ShowsCall | undefined {
-    const isIt = (picked: PickedTool) => picked.appId === tool.appId && picked.name === tool.name && picked.fingerprint === tool.fingerprint;
-    if (!appTools.some((picked) => isIt(picked) && picked.alwaysAllowed)) return undefined;
+    if (!isAlwaysAllowed(appTools, tool)) return undefined;
     return async (input) => {
       let cardId: string | undefined;
-      const unshown = await this.postCallCard(roomId, bot, message, () => slackMessage(usedCard(bot.name, tool, input), true), async (posted) => void (cardId = posted.id));
+      const card = ({ appTools }: AssistantAccess) => (isAlwaysAllowed(appTools, tool) ? slackMessage(usedCard(bot.name, tool, input), true) : ASKS_FIRST_NOW);
+      const unshown = await this.postCallCard(roomId, bot, message, card, async (posted) => void (cardId = posted.id));
       return unshown ?? { unmade: (why) => this.showUnmade(roomId, cardId!, tool, input, why) };
     };
   }
