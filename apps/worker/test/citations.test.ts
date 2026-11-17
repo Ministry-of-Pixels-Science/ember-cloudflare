@@ -68,6 +68,9 @@ describe("What an answer cites of the pages Ember's searches found", () => {
     uncited.blocks[0]!.text!.text = "Warriors 112, Lakers 108 <https://example.com/box?ids=[1]|Box score>";
     expect(citedIn(`The score [3].\n\n${card(payload)}`, PAGES)).toEqual({ text: `The score.\n\n${card(uncited)}`, cited: [NEWS] });
     expect(citedIn(card(payload, "Slack json"), PAGES)).toEqual({ text: card(uncited, "Slack json"), cited: [NEWS] });
+    // A card's mrkdwn doesn't link to the answer's own references.
+    const defined = "\n\n[3]: https://example.com/overview";
+    expect(citedIn(card(payload) + defined, PAGES)).toEqual({ text: card(uncited) + defined, cited: [NEWS] });
     const indented = (block: string) => `  ${block.replaceAll("\n", "\n  ")}`;
     expect(citedIn(`The score:\n\n${indented(card(payload))}\n\nFinal.`, PAGES)).toEqual({ text: `The score:\n\n${indented(card(uncited))}\n\nFinal.`, cited: [NEWS] });
   });

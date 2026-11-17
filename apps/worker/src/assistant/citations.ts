@@ -174,13 +174,15 @@ function withoutCitations(part: string, offset: number, { pages, labels }: Readi
 }
 
 /**
- * A ```slack block, `code`, from `offset` in the answer, with the citations `reading` finds in its
- * payload's text taken out of that text, and not out of its addresses, or as it's written when it cites
- * none or its payload doesn't parse, when it shows as code. Its citations count from where it starts.
+ * A ```slack block, `code`, from `offset` in the answer, with the citations of `pages` its payload's text
+ * writes taken out of that text, and not out of its addresses, or as it's written when it cites none or
+ * its payload doesn't parse, when it shows as code. Its citations count from where it starts. A card's
+ * text links to none of the answer's references, as its mrkdwn has no Markdown's.
  */
-function payloadWithoutCitations(code: Tokens.Code, offset: number, reading: Reading): Uncited {
+function payloadWithoutCitations(code: Tokens.Code, offset: number, { pages }: Reading): Uncited {
   const payload = payloadOf(code.text);
   if (payload === null) return { text: code.raw, citations: [] };
+  const reading: Reading = { pages, labels: new Set() };
   const citations: Citation[] = [];
   const uncited = (value: unknown, key: string): unknown => {
     if (typeof value === "string" && !ADDRESS_KEY.test(key)) {
