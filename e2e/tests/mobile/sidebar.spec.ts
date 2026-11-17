@@ -4,7 +4,8 @@ import { settle } from "./audits";
 import { expect, hasDrawerLayout, test } from "./fixtures";
 
 test.describe("Reorder starred rooms", () => {
-  test("a finger held on a starred room drags it to a new place", async ({ page, request, session }) => {
+  test("a finger held on a starred room drags it to a new place", async ({ page, request, session, browserName }) => {
+    test.skip(browserName !== "chromium", "The finger moves through Chromium's DevTools, which WebKit hasn't");
     const rooms = [await createRoom(request, session, "general"), await createRoom(request, session, "random")];
     for (const room of rooms) {
       const starred = await request.put(`/api/rooms/${room.id}/favorite`, { data: { favorite: true }, headers: { Cookie: cookieHeader(session) } });

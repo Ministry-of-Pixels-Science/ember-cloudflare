@@ -1,6 +1,6 @@
 import type { Room, Sidebar, WorkspaceServerFrame } from "@ember/protocol";
 import type { APIRequestContext, BrowserContext, Page, WebSocketRoute } from "@playwright/test";
-import { administratorSession, connectWorkspace, cookieHeader, createRoom, invitation, keepOtherRoomsOut, listing, makeAdministrator, rowsWithStars, signInAs, WORKSPACE_SOCKET } from "../../fixtures";
+import { administratorSession, allowClipboard, connectWorkspace, cookieHeader, createRoom, invitation, keepOtherRoomsOut, listing, makeAdministrator, rowsWithStars, signInAs, WORKSPACE_SOCKET } from "../../fixtures";
 import { expect, test, unique, type Member } from "./fixtures";
 
 /**
@@ -435,8 +435,8 @@ test.describe("Welcome card for administrators, until they dismiss it", () => {
 test.describe("Join link", () => {
   test("copies the join link", async ({ baseURL, members, request, session }) => {
     const { roomId, joinCode } = await invitation(request, session);
-    const context = { permissions: ["clipboard-read", "clipboard-write"] };
-    const ada = await members.signIn("Ada", { path: `/rooms/${roomId}`, serverRooms: true, administrator: true, context });
+    const ada = await members.signIn("Ada", { path: `/rooms/${roomId}`, serverRooms: true, administrator: true });
+    await allowClipboard(ada.page.context());
     const copy = ada.page.getByRole("button", { name: "Copy join link" });
     await copy.click();
     await expect(copy).toHaveClass(/animate-success/);

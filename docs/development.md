@@ -64,8 +64,8 @@ works, and [`docs/database.md`](database.md) compares the schema with Campfire's
 
 ## Browser tests
 
-`e2e/` drives the production build in Chromium, against `wrangler dev` on :8788 with its own
-state in `e2e/.wrangler`. Every suite shares `e2e/playwright.config.ts` and `e2e/fixtures.ts`
+`e2e/` drives the production build in Chromium, and in Safari's engine, WebKit, against
+`wrangler dev` on :8788 with its own state in `e2e/.wrangler`. Every suite shares `e2e/playwright.config.ts` and `e2e/fixtures.ts`
 (sign in, an isolated room, other participants over a real WebSocket); each adds its projects
 from `e2e/projects/` and its specs under `e2e/tests/<suite>/`.
 
@@ -75,7 +75,16 @@ pnpm test:e2e       # every suite
 pnpm test:features  # just the feature-by-feature suite, on a desktop browser
 pnpm test:mobile    # just the phones
 pnpm screenshots    # remakes the web app manifest's screenshots
+
+pnpm --filter @ember/e2e exec playwright install webkit   # once
+E2E_BROWSER=webkit pnpm test:e2e   # the first run, the features and two iPhones, in WebKit
 ```
+
+`E2E_BROWSER=webkit` swaps the projects for those in `e2e/projects/webkit.ts`, under the same
+names, so `E2E_BROWSER=webkit pnpm test:features` runs just the features. Every browser on an iPhone
+or iPad is WebKit, as Ember's apps will be, and CI runs these beside the Chromium ones. WebKit can't
+be told about a notch, so its iPhones report no safe-area insets, and the few tests that drive
+Chromium's DevTools run in Chromium alone.
 
 Before the other suites start, the `first-run` project sets up the test server through the Set up
 Ember page, as its first visitor would. The `workspace-settings` suites, which change the whole

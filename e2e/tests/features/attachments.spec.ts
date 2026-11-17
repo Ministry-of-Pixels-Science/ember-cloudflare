@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { uploadPartPath, uploadsPath, type Message, type Upload } from "@ember/protocol";
 import type { APIRequestContext, FileChooser, Locator, Page } from "@playwright/test";
-import { cookieHeader, drawnPicture } from "../../fixtures";
+import { allowClipboard, cookieHeader, drawnPicture } from "../../fixtures";
 import { expect, test, type Member } from "./fixtures";
 
 /**
@@ -250,7 +250,7 @@ test.describe("Text files' text", () => {
       expect(shown!.y + shown!.height).toBeLessThanOrEqual(card!.y);
     }
 
-    await grace.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await allowClipboard(grace.page.context());
     const block = grace.message("deploy.sh").locator(".code-block");
     await block.hover();
     await block.getByRole("button", { name: "Copy code" }).click();

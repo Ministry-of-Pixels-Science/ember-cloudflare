@@ -15,9 +15,13 @@ import { expect, hasDrawerLayout, openKeyboard, test } from "./fixtures";
 /** A huddle's socket, for `page.routeWebSocket`. */
 const HUDDLE_SOCKET = /\/api\/rooms\/[^/]+\/huddle/;
 
-// A microphone and a camera for the preview to open, which a page may use without asking anyone.
+// A microphone and a camera for the preview to open, which a page may use without asking anyone:
+// Chromium's made-up ones, or WebKit's, which it has without being told.
 test.use({
-  launchOptions: { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined, args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"] },
+  launchOptions:
+    process.env.E2E_BROWSER === "webkit"
+      ? {}
+      : { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined, args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"] },
 });
 
 test.beforeEach(async ({ page, session }) => {
@@ -168,8 +172,10 @@ function keepWhatKeepsAwake(): void {
  * its person. The headless Chromium these tests run in on CI refuses a page it hasn't been told to let.
  * Telling it so refuses the page whatever isn't named, so the microphone and the camera are named
  * too, and it holds for as long as the session that said it, which is left to end with the page.
+ * WebKit is told the same through Playwright's permissions.
  */
 async function letScreenBeKeptAwake(page: Page): Promise<void> {
+  if (page.context().browser()?.browserType().name() === "webkit") return page.context().grantPermissions(["screen-wake-lock", "camera", "microphone"]);
   const cdp = await page.context().newCDPSession(page);
   const { targetInfo } = await cdp.send("Target.getTargetInfo");
   await cdp.send("Browser.grantPermissions", { permissions: ["wakeLockScreen", "audioCapture", "videoCapture"], browserContextId: targetInfo.browserContextId });

@@ -165,6 +165,15 @@ export interface PushOptions {
  * and a stand-in for the browser's push service, which headless Chromium can't reach: a subscription
  * at `endpoint` that nothing is pushed to.
  */
+/**
+ * Lets every page in `context` read the clipboard, and write to it, which WebKit lets a page do
+ * without asking, so it has no permission to grant for that.
+ */
+export async function allowClipboard(context: BrowserContext): Promise<void> {
+  const writing = context.browser()?.browserType().name() === "webkit" ? [] : ["clipboard-write"];
+  await context.grantPermissions(["clipboard-read", ...writing]);
+}
+
 export async function allowNotifications(context: BrowserContext, { endpoint = uniqueEndpoint(), on = true }: PushOptions = {}): Promise<void> {
   await context.grantPermissions(["notifications"]);
   await context.route("**/api/bootstrap", async (route) => {

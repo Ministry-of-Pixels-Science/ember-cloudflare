@@ -1,6 +1,6 @@
 import type { ServerFrame } from "@ember/protocol";
 import type { Locator, Page } from "@playwright/test";
-import { administratorOn, editorField, ROOM_SOCKET } from "../../fixtures";
+import { administratorOn, allowClipboard, editorField, ROOM_SOCKET } from "../../fixtures";
 import { expect, test, type Member } from "./fixtures";
 
 const phone = { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true };
@@ -690,7 +690,7 @@ test.describe("More actions on a message", () => {
   test("copies a message's text, leaving the actions open", async ({ members, participant }) => {
     await (await participant("Grace")).say("Copy my words");
     const ada = await members.signIn("Ada");
-    await ada.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await allowClipboard(ada.page.context());
     const panel = await openMoreActions(ada, "Copy my words");
     await expect(panel.getByRole("button")).toHaveText(["Quote", "Copy text", "Copy link"]);
     await panel.getByRole("button", { name: "Copy text" }).click();
@@ -772,7 +772,7 @@ test("copies a code block from its corner, keeping its line breaks", async ({ me
   const code = 'const greeting = "Hello";\nconsole.log(greeting);';
   await (await participant("Grace")).post(`<p>Run this snippet</p><pre data-language="javascript">${code}</pre>`);
   const ada = await members.signIn("Ada");
-  await ada.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await allowClipboard(ada.page.context());
   const block = ada.message("Run this snippet").locator(".code-block");
   const copy = block.getByRole("button", { name: "Copy code" });
   await ada.page.getByRole("heading", { level: 1 }).hover();
@@ -801,7 +801,7 @@ test.describe("Copy a link to a message", () => {
   test("copies the message's address from More actions, keeping it open and turning Copy link green", async ({ members, participant, rooms, baseURL }) => {
     await (await participant("Grace")).say("Link to me");
     const ada = await members.signIn("Ada");
-    await ada.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await allowClipboard(ada.page.context());
     // With a mouse, it's in More actions rather than on the bar.
     await expect((await ada.actions("Link to me")).getByRole("button", { name: "Copy link" })).toHaveCount(0);
     const panel = await openMoreActions(ada, "Link to me");
@@ -819,7 +819,7 @@ test.describe("Link to a message", () => {
   test("opens a message's room at its permalink", async ({ members, participant, rooms }) => {
     await (await participant("Grace")).say("Find me later");
     const ada = await members.signIn("Ada");
-    await ada.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await allowClipboard(ada.page.context());
     await (await openMoreActions(ada, "Find me later")).getByRole("button", { name: "Copy link" }).click();
     const path = new URL(await ada.page.evaluate(() => navigator.clipboard.readText())).pathname;
 
@@ -832,7 +832,7 @@ test.describe("Link to a message", () => {
   test("goes from a message's own address to its permalink", async ({ members, participant, rooms }) => {
     await (await participant("Grace")).say("Find me again");
     const ada = await members.signIn("Ada");
-    await ada.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await allowClipboard(ada.page.context());
     await (await openMoreActions(ada, "Find me again")).getByRole("button", { name: "Copy link" }).click();
     const permalink = new URL(await ada.page.evaluate(() => navigator.clipboard.readText())).pathname;
 
