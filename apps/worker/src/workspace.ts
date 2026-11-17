@@ -141,7 +141,7 @@ import {
   type MemberfulSetup,
 } from "./memberful-api";
 import { webPush } from "./push/keys";
-import { FixedWindowLimit } from "./rate-limit";
+import { AddressLimit, FixedWindowLimit } from "./rate-limit";
 import { urlOf } from "./request-url";
 import { OPEN_ROOMS_ONLY, sessionTag } from "./revocations";
 import type { RoomEvent } from "./room-log";
@@ -209,7 +209,11 @@ export const SESSION_REFRESH_MS = 60 * 60 * 1000;
 export const SESSION_IDLE_MS = 400 * 24 * 60 * 60 * 1000;
 /** How many sessions the Workspace keeps in memory: a few devices each for a large team. */
 const CACHED_SESSIONS = 10_000;
-/** Campfire's sign-in limit: 10 attempts from an IP address in a fixed 3-minute window (sessions_controller.rb). */
+/**
+ * Campfire's sign-in limit: 10 attempts from an IP address in a fixed 3-minute window
+ * (sessions_controller.rb). Unlike Campfire's, it counts an IPv6 address as its /64, as every limit on
+ * attempts from an address here does (`AddressLimit`).
+ */
 const SIGN_IN_ATTEMPTS = 10;
 const SIGN_IN_WINDOW_MS = 3 * 60 * 1000;
 /**
@@ -1027,12 +1031,12 @@ export class Workspace extends DurableObject<Env> {
   private knownBannedAddresses: Set<string> | null = null;
   /** Counts the starts and ends of bans and lifted bans, so a read of the banned addresses that overlapped one isn't kept. */
   private banChanges = 0;
-  private readonly signInAttempts = new FixedWindowLimit(SIGN_IN_ATTEMPTS, SIGN_IN_WINDOW_MS);
-  private readonly signUps = new FixedWindowLimit(SIGN_UPS_PER_ADDRESS, SIGN_UP_WINDOW_MS);
-  private readonly emailLinkAsks = new FixedWindowLimit(EMAIL_LINKS_PER_NETWORK, EMAIL_ASK_WINDOW_MS);
-  private readonly passwordResetAsks = new FixedWindowLimit(PASSWORD_RESETS_PER_NETWORK, EMAIL_ASK_WINDOW_MS);
+  private readonly signInAttempts = new AddressLimit(SIGN_IN_ATTEMPTS, SIGN_IN_WINDOW_MS);
+  private readonly signUps = new AddressLimit(SIGN_UPS_PER_ADDRESS, SIGN_UP_WINDOW_MS);
+  private readonly emailLinkAsks = new AddressLimit(EMAIL_LINKS_PER_NETWORK, EMAIL_ASK_WINDOW_MS);
+  private readonly passwordResetAsks = new AddressLimit(PASSWORD_RESETS_PER_NETWORK, EMAIL_ASK_WINDOW_MS);
   private readonly unfurls = new FixedWindowLimit(UNFURLS, UNFURL_WINDOW_MS);
-  private readonly outsideRegistrations = new FixedWindowLimit(OUTSIDE_REGISTRATIONS_PER_ADDRESS, OUTSIDE_REGISTRATION_WINDOW_MS);
+  private readonly outsideRegistrations = new AddressLimit(OUTSIDE_REGISTRATIONS_PER_ADDRESS, OUTSIDE_REGISTRATION_WINDOW_MS);
   private readonly outsideSends = new FixedWindowLimit(OUTSIDE_SENDS_PER_MINUTE, 60_000);
   /** The probes custom domain checks send, each with its answer and when it's no longer waited for (see `expectProbe`). */
   private readonly probes = new Map<string, { answer: string; until: number }>();
