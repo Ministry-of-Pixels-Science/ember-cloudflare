@@ -83,7 +83,7 @@ test.describe("Security headers and HTTPS", () => {
     });
   });
 
-  test("only the app itself can show it in a frame", async ({ page, baseURL }) => {
+  test("only the app itself can show it in a frame", async ({ page, baseURL, browserName }) => {
     const showInFrame = (src: string) =>
       page.evaluate((src) => document.body.append(Object.assign(document.createElement("iframe"), { src })), src);
     await page.goto("/up");
@@ -98,11 +98,14 @@ test.describe("Security headers and HTTPS", () => {
     try {
       await page.goto(`http://localhost:${(site.address() as AddressInfo).port}/`);
       const framed = page.waitForResponse(`${baseURL}/session/new`);
+      const refused = page.waitForEvent("console", (message) => message.text().includes("frame-ancestors"));
       await showInFrame(`${baseURL}/session/new`);
       const headers = (await framed).headers();
       expect(headers["x-frame-options"]).toBe("SAMEORIGIN");
       expect(headers["content-security-policy"]).toContain("frame-ancestors 'self'");
-      await expect.poll(() => page.frames()[1]?.url()).toMatch(/^chrome-error:/);
+      // The browser says it refused, and Chrome shows its error page in the frame, where WebKit leaves the address.
+      await refused;
+      if (browserName === "chromium") await expect.poll(() => page.frames()[1]?.url()).toMatch(/^chrome-error:/);
     } finally {
       site.close();
     }

@@ -1,10 +1,10 @@
 import type { Locator, Page } from "@playwright/test";
-import type { BotAnswer, Bots, BotSettings } from "@ember/protocol";
+import type { BotAnswer, Bots, BotSettings, WorkspaceSettings } from "@ember/protocol";
 import type { AgentAnswer, Agents, AgentSettings, AgentTrialAnswer } from "@ember/protocol/agents";
 import type { AgentTools } from "@ember/protocol/apps";
 import { THINKING_LEVELS, TOP_LEVELS, type AssistantSettings } from "@ember/protocol/assistant";
 import { AGENT_TEMPLATE } from "@ember/protocol/prompts";
-import { changeTheWorkspace, fakeTurnstile, isolateRoom, listing, openRoom, signInAs, signInAsAdministrator, TURNSTILE_WIDGET, useOwnAddress, type Passes } from "../../fixtures";
+import { answerChanged, changeTheWorkspace, fakeTurnstile, isolateRoom, listing, openRoom, signInAs, signInAsAdministrator, TURNSTILE_WIDGET, useOwnAddress, type Passes } from "../../fixtures";
 import { auditScreen, settle } from "./audits";
 import { expect, hasDrawerLayout, SWITCHES, test } from "./fixtures";
 
@@ -100,11 +100,7 @@ test("an administrator's Huddles tab, naming the app huddles run through, its ca
   await useOwnAddress(page);
   // The settings as they are once an app's keys are given, and a TURN key's, without giving the test server any, which every other test shows.
   const relayKeyId = "7e1a".repeat(8);
-  await page.route("**/api/account", async (route) => {
-    const response = await route.fetch();
-    if (!response.ok()) return route.fulfill({ response });
-    await route.fulfill({ response, json: { ...(await response.json()), huddles: { appId: "ca11".repeat(8), relayKeyId } } });
-  });
+  await page.route("**/api/account", (route) => answerChanged<WorkspaceSettings>(route, (settings) => ({ ...settings, huddles: { appId: "ca11".repeat(8), relayKeyId } })));
   await page.goto("/account/edit#huddles-settings");
   await signInAsAdministrator(page);
   const card = page.getByRole("region", { name: "Audio and video chat", exact: true });
@@ -351,11 +347,7 @@ const TOOLS: AgentTools = {
 
 /** Shows `page` Ember AI on, with `AGENT` its only agent, without turning on the test server's, which would put @ember in every other test's rooms. */
 async function showTheAgents(page: Page): Promise<void> {
-  await page.route("**/api/account", async (route) => {
-    const response = await route.fetch();
-    if (!response.ok()) return route.fulfill({ response });
-    await route.fulfill({ response, json: { ...(await response.json()), assistant: ASSISTANT } });
-  });
+  await page.route("**/api/account", (route) => answerChanged<WorkspaceSettings>(route, (settings) => ({ ...settings, assistant: ASSISTANT })));
   await page.route("**/api/account/agents", (route) => route.fulfill({ json: { agents: [AGENT] } satisfies Agents }));
   await page.route(`**/api/account/agents/${AGENT.id}`, (route) => route.fulfill({ json: { agent: AGENT } satisfies AgentAnswer }));
   await page.route("**/api/account/agents/trials", (route) => route.fulfill({ json: TRIED }));

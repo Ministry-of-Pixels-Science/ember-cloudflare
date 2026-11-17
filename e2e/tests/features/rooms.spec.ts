@@ -1,6 +1,6 @@
 import type { Room, Sidebar, WorkspaceServerFrame } from "@ember/protocol";
 import type { APIRequestContext, BrowserContext, Page, WebSocketRoute } from "@playwright/test";
-import { administratorSession, allowClipboard, connectWorkspace, cookieHeader, createRoom, invitation, keepOtherRoomsOut, listing, makeAdministrator, rowsWithStars, signInAs, WORKSPACE_SOCKET } from "../../fixtures";
+import { administratorSession, allowClipboard, answerChanged, connectWorkspace, cookieHeader, createRoom, invitation, keepOtherRoomsOut, listing, makeAdministrator, rowsWithStars, signInAs, WORKSPACE_SOCKET } from "../../fixtures";
 import { expect, test, unique, type Member } from "./fixtures";
 
 /**
@@ -11,12 +11,7 @@ import { expect, test, unique, type Member } from "./fixtures";
  */
 async function showRoomsPicked(context: BrowserContext, shows: (room: Room) => boolean): Promise<void> {
   const picked = (room: Room) => room.kind === "direct" || shows(room);
-  await context.route("**/api/sidebar", async (route) => {
-    const response = await route.fetch();
-    if (!response.ok()) return route.fulfill({ response });
-    const list = (await response.json()) as Sidebar;
-    await route.fulfill({ response, json: { ...list, rooms: list.rooms.filter(picked) } });
-  });
+  await context.route("**/api/sidebar", (route) => answerChanged<Sidebar>(route, (list) => ({ ...list, rooms: list.rooms.filter(picked) })));
   await context.routeWebSocket(WORKSPACE_SOCKET, (ws) => void connectWorkspace(ws, (frame) => frame.type !== "room.saved" || picked(frame.room)));
 }
 
@@ -508,7 +503,8 @@ test.describe("QR codes for links", () => {
     // It saves the code and stays open.
     const download = ada.page.waitForEvent("download");
     await viewer.getByRole("link", { name: "Download file" }).click();
-    expect((await download).suggestedFilename()).toBe("QR code.svg");
+    // WebKit on Linux names the download with an underscore for its space.
+    expect((await download).suggestedFilename().replace("_", " ")).toBe("QR code.svg");
     await expect(viewer).toBeVisible();
     expect(new URL(ada.page.url()).pathname).toBe(`/rooms/${roomId}`);
 

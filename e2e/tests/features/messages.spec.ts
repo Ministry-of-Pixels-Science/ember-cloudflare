@@ -236,7 +236,9 @@ test.describe("Emoji-only messages", () => {
     await grace.say("Haha! 😄🤘");
     const ada = await members.signIn("Ada");
     const content = (text: RegExp) => ada.page.locator(".message-content").filter({ hasText: text });
-    await expect(content(/^😄🤘$/)).toHaveCSS("font-size", "33.6px");
+    // 2.24 times 15px, which WebKit gives as the nearest float, 33.599998px.
+    const fontSize = (text: RegExp) => content(text).evaluate((element) => parseFloat(getComputedStyle(element).fontSize));
+    await expect.poll(() => fontSize(/^😄🤘$/)).toBeCloseTo(33.6, 4);
     await expect(content(/^Haha! 😄🤘$/)).toHaveCSS("font-size", "15px");
   });
 });

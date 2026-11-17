@@ -1,4 +1,4 @@
-import { test as base, expect, type APIRequestContext, type APIResponse, type Browser, type BrowserContext, type Locator, type Page, type WebSocketRoute } from "@playwright/test";
+import { test as base, expect, type APIRequestContext, type APIResponse, type Browser, type BrowserContext, type Locator, type Page, type Route, type WebSocketRoute } from "@playwright/test";
 import { roomSocketQuery, type Account, type Bootstrap, type ClientFrame, type Invitation, type LiveHuddle, type Message, type ServerFrame, type Sidebar, type User, type WorkspaceServerFrame, type WorkspaceSettings } from "@ember/protocol";
 import { bodyFromPlainText } from "@ember/richtext";
 
@@ -161,11 +161,6 @@ export interface PushOptions {
 }
 
 /**
- * Lets every page in `context` show notifications, with Web Push on, which the test server's isn't,
- * and a stand-in for the browser's push service, which headless Chromium can't reach: a subscription
- * at `endpoint` that nothing is pushed to.
- */
-/**
  * Lets every page in `context` read the clipboard, and write to it, which WebKit lets a page do
  * without asking, so it has no permission to grant for that.
  */
@@ -174,18 +169,35 @@ export async function allowClipboard(context: BrowserContext): Promise<void> {
   await context.grantPermissions(["clipboard-read", ...writing]);
 }
 
+/**
+ * Answers `route` with the server's answer, its JSON changed by `change`. An answer with nothing to
+ * change goes as it came: a refusal, or a 304 for a copy the page has, which Playwright can't hand
+ * WebKit, so its request goes on to the server, which answers it the same.
+ */
+export async function answerChanged<T>(route: Route, change: (body: T) => unknown): Promise<void> {
+  const response = await route.fetch();
+  if (response.status() === 304) return route.continue();
+  if (!response.ok()) return route.fulfill({ response });
+  await route.fulfill({ response, json: change((await response.json()) as T) });
+}
+
+/**
+ * Lets every page in `context` show notifications, with Web Push on, which the test server's isn't,
+ * and a stand-in for the browser's push service, which headless Chromium can't reach: a subscription
+ * at `endpoint` that nothing is pushed to.
+ */
 export async function allowNotifications(context: BrowserContext, { endpoint = uniqueEndpoint(), on = true }: PushOptions = {}): Promise<void> {
   await context.grantPermissions(["notifications"]);
-  await context.route("**/api/bootstrap", async (route) => {
-    const response = await route.fetch();
-    await route.fulfill({ response, json: { ...((await response.json()) as Bootstrap), vapidPublicKey: VAPID_PUBLIC_KEY } });
-  });
+  await context.route("**/api/bootstrap", (route) => answerChanged<Bootstrap>(route, (bootstrap) => ({ ...bootstrap, vapidPublicKey: VAPID_PUBLIC_KEY })));
   await context.addInitScript(standInPushService, { endpoint, on, keys: PUSH_KEYS });
 }
 
 /** The push service `allowNotifications` stands in, for each page before the app loads. */
 function standInPushService({ endpoint, on, keys }: { endpoint: string; on: boolean; keys: typeof PUSH_KEYS }) {
-  if (!("PushManager" in window)) return;
+  // Safari on an iPhone has notifications and push only for Ember on the Home Screen, so WebKit's phones,
+  // which have neither, get them as Ember on the Home Screen has them.
+  if (!("Notification" in window)) Object.assign(window, { Notification: class {} });
+  if (!("PushManager" in window)) Object.assign(window, { PushManager: class {} });
   // The headless shell CI runs keeps notifications denied whatever the context grants.
   Object.defineProperty(Notification, "permission", { get: () => "granted" });
   Notification.requestPermission = async () => "granted";
@@ -268,13 +280,7 @@ export type Tells = (frame: WorkspaceServerFrame) => void;
 export async function changeTheWorkspace(page: Page, change: (account: Account) => Account, passes: Passes = () => true): Promise<Tells> {
   const changed = <T extends { account: Account }>(body: T): T => ({ ...body, account: change(body.account) });
   let socket: WebSocketRoute | undefined;
-  for (const path of ["**/api/bootstrap", "**/api/account"]) {
-    await page.route(path, async (route) => {
-      const response = await route.fetch();
-      if (!response.ok()) return route.fulfill({ response });
-      await route.fulfill({ response, json: changed(await response.json()) });
-    });
-  }
+  for (const path of ["**/api/bootstrap", "**/api/account"]) await page.route(path, (route) => answerChanged<{ account: Account }>(route, changed));
   await page.routeWebSocket(WORKSPACE_SOCKET, (ws) => {
     socket = ws;
     const server = ws.connectToServer();
@@ -509,8 +515,10 @@ export interface AppFixtures {
   policyKept: void;
 }
 
-/** What Chromium logs when a page's Content-Security-Policy blocks something, which is all a browser does about it. */
+/** What a browser logs when a page's Content-Security-Policy blocks something, which is all it does about it. */
 const CSP_VIOLATION = /Content Security Policy/;
+/** Whether a violation the browser logged is of `directive`, as Chromium names it (`directive: "frame-ancestors 'self'"`) or WebKit does (`the frame-ancestors directive`). */
+const isOf = (violation: string, directive: string) => violation.includes(`directive: "${directive}`) || violation.includes(`the ${directive} directive`);
 /** The annotation a test that means to see the policy refuse something carries, naming the directive. */
 const EXPECTED_VIOLATION = "policy-violation";
 /** What the policy blocked on the pages of every context this worker opened, since the test began. */
@@ -542,8 +550,8 @@ export const test = base.extend<AppFixtures>({
     async ({}, use, testInfo) => {
       blocked.length = 0;
       await use();
-      const expected = testInfo.annotations.filter((annotation) => annotation.type === EXPECTED_VIOLATION).map((annotation) => annotation.description);
-      const unexpected = blocked.filter((message) => !expected.some((directive) => message.includes(`directive: "${directive}`)));
+      const expected = testInfo.annotations.filter((annotation) => annotation.type === EXPECTED_VIOLATION).flatMap((annotation) => annotation.description ?? []);
+      const unexpected = blocked.filter((message) => !expected.some((directive) => isOf(message, directive)));
       expect(unexpected, "The Content-Security-Policy blocked something on a page").toEqual([]);
     },
     { auto: true },

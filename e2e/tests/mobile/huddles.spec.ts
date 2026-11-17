@@ -16,13 +16,12 @@ import { expect, hasDrawerLayout, openKeyboard, test } from "./fixtures";
 const HUDDLE_SOCKET = /\/api\/rooms\/[^/]+\/huddle/;
 
 // A microphone and a camera for the preview to open, which a page may use without asking anyone:
-// Chromium's made-up ones, or WebKit's, which it has without being told.
-test.use({
-  launchOptions:
-    process.env.E2E_BROWSER === "webkit"
-      ? {}
-      : { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined, args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"] },
-});
+// Chromium's made-up ones, or WebKit's, which a page gets once it's granted them.
+test.use(
+  process.env.E2E_BROWSER === "webkit"
+    ? { permissions: ["camera", "microphone"] }
+    : { launchOptions: { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined, args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"] } },
+);
 
 test.beforeEach(async ({ page, session }) => {
   // A phone's browser has no screen to share, which the desktop Chromium that stands in for it has.
@@ -175,7 +174,7 @@ function keepWhatKeepsAwake(): void {
  * WebKit is told the same through Playwright's permissions.
  */
 async function letScreenBeKeptAwake(page: Page): Promise<void> {
-  if (page.context().browser()?.browserType().name() === "webkit") return page.context().grantPermissions(["screen-wake-lock", "camera", "microphone"]);
+  if (page.context().browser()?.browserType().name() === "webkit") return page.context().grantPermissions(["screen-wake-lock"]);
   const cdp = await page.context().newCDPSession(page);
   const { targetInfo } = await cdp.send("Target.getTargetInfo");
   await cdp.send("Browser.grantPermissions", { permissions: ["wakeLockScreen", "audioCapture", "videoCapture"], browserContextId: targetInfo.browserContextId });
@@ -327,7 +326,7 @@ test("an invitation into a huddle fits the phone, under the header of the page i
   await expect(invitation).toHaveCount(0);
 });
 
-test("more invitations than the phone is tall enough for are a scroll away, under the header, whose buttons stay in reach", async ({ page, room, participant, safeArea }) => {
+test("more invitations than the phone is tall enough for are a scroll away, under the header, whose buttons stay in reach", async ({ page, room, participant, safeArea, browserName }) => {
   const grace = (await participant("Grace Hopper")).session.user;
   // Into rooms of this page's own, more of them than any phone shows at once, the last into the room it has open.
   const names = Array.from({ length: 8 }, (_, index) => `Launch ${index + 1}`);
@@ -350,9 +349,11 @@ test("more invitations than the phone is tall enough for are a scroll away, unde
   const startHuddle = header(page).getByRole("button", { name: "Start huddle", exact: true });
   await startHuddle.tap({ trial: true });
 
-  // A wheel over one scrolls them, as a finger on one does, and under the header, not over it.
+  // A wheel over one scrolls them, as a finger on one does, and under the header, not over it. Playwright
+  // turns no wheel on WebKit's phones, so there the page scrolls them itself.
   await first.hover();
-  await page.mouse.wheel(0, 4000);
+  if (browserName === "webkit") await page.getByRole("region", { name: "Huddle invitations" }).evaluate((region) => region.scrollBy(0, 4000));
+  else await page.mouse.wheel(0, 4000);
   await expect(last).toBeInViewport({ ratio: 1 });
   await expect(first).not.toBeInViewport();
   await startHuddle.tap({ trial: true });

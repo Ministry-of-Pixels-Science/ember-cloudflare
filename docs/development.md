@@ -82,9 +82,15 @@ E2E_BROWSER=webkit pnpm test:e2e   # the first run, the features and two iPhones
 
 `E2E_BROWSER=webkit` swaps the projects for those in `e2e/projects/webkit.ts`, under the same
 names, so `E2E_BROWSER=webkit pnpm test:features` runs just the features. Every browser on an iPhone
-or iPad is WebKit, as Ember's apps will be, and CI runs these beside the Chromium ones. WebKit can't
-be told about a notch, so its iPhones report no safe-area insets, and the few tests that drive
-Chromium's DevTools run in Chromium alone.
+or iPad is WebKit, as an iPhone app of Ember's would be, and CI runs these beside the Chromium ones.
+WebKit can't be told about a notch, so its iPhones report no safe-area insets, and the few tests
+that drive Chromium's DevTools run in Chromium alone. Playwright can't hand WebKit a 304, so a route
+that changes the server's answer goes through `answerChanged` in `e2e/fixtures.ts`. WebKit's phones
+have no mouse wheel, nor notifications and push, which Safari on an iPhone has only for Ember on the
+Home Screen, and a page has WebKit's camera and microphone only once it's granted them. On a Mac,
+WebKit's Tab skips links and buttons unless Option is held, and a click focuses neither, as in
+Safari, so the tests that press Tab, or expect a clicked link to have focus, fail there; CI runs
+WebKit on Linux, where they pass.
 
 Before the other suites start, the `first-run` project sets up the test server through the Set up
 Ember page, as its first visitor would. The `workspace-settings` suites, which change the whole
