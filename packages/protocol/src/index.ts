@@ -1438,7 +1438,7 @@ export const signInSaying = (problem: JoiningProblem) => `/session/new?${JOINING
 export const SIGN_UPS_PER_ADDRESS = 5;
 export const SIGN_UPS_PER_HOUR = 50;
 
-/** Why open sign-up refuses someone from an IP address that has signed up as many times as it may in an hour. */
+/** Why open sign-up refuses someone from a network that has signed up as many times as it may in an hour. */
 export const SIGN_UP_LIMITED = "Too many sign-ups from your network. Try again in an hour.";
 
 /** Why open sign-up refuses anyone once the workspace has let in as many new people as it does in an hour. */

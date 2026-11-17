@@ -2611,7 +2611,7 @@ export class Workspace extends DurableObject<Env> {
   /**
    * Counts a try at the deployment's setup password against its limit before it's checked: false past
    * the limit. A right guess would make whoever made it the administrator, so unlike sign-in's limit,
-   * which is per IP address and kept in memory, this one is the whole deployment's and stored: neither
+   * which is per network and kept in memory, this one is the whole deployment's and stored: neither
    * another address nor a Workspace that starts over starts the count over.
    */
   async trySetupPassword(): Promise<boolean> {
