@@ -7,7 +7,7 @@ import type { YourApp } from "./apps.ts";
 import type { AssistantSettings, YourAssistant } from "./assistant.ts";
 import { isActionId, isActionValue, type Card } from "./cards.ts";
 import type { StoredFile } from "./files.ts";
-import type { HuddlesSettings, LiveHuddle } from "./huddles.ts";
+import type { HuddlesSettings, LiveHuddle, MessageHuddle } from "./huddles.ts";
 import type { OutsideConnection } from "./outside.ts";
 import { MAX_ID_LENGTH } from "./pages.ts";
 import { MAX_PUSH_ENDPOINT_LENGTH } from "./push.ts";
@@ -80,7 +80,7 @@ export type {
   YourAssistantChanges,
 } from "./assistant.ts";
 // And the rest of huddles.ts, from "@ember/protocol/huddles", which only the Huddles card, its setup and the Worker's huddles use.
-export type { HuddleRelayField, HuddleRelaySetup, HuddlesField, HuddlesForgotten, HuddlesSaved, HuddlesSettings, HuddlesSetup, LiveHuddle } from "./huddles.ts";
+export type { HuddleRelayField, HuddleRelaySetup, HuddlesField, HuddlesForgotten, HuddlesSaved, HuddlesSettings, HuddlesSetup, LiveHuddle, MessageHuddle } from "./huddles.ts";
 export {
   FILE_NAME_NOT_KEPT,
   FILE_TOO_LARGE,
@@ -1539,6 +1539,12 @@ export interface Message {
   parentText?: string;
   /** The replies in the message's thread, once it has some, as the room shows them under it. */
   thread?: ThreadSummary;
+  /**
+   * The huddle a message is of. The room writes one as a huddle starts there, in the name of whoever
+   * started it, and marks it over once nobody is left in it, and its thread is the huddle's. It shows
+   * the huddle in place of its text, which says only that a huddle started, and can't be edited.
+   */
+  huddle?: MessageHuddle;
   /**
    * A message deleted while replies in its thread are left, which keeps its place for them: its text, file,
    * cards and boosts are gone, and it goes once its last reply does.

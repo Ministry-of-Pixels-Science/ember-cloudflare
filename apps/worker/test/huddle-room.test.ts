@@ -111,7 +111,7 @@ describe("A room's huddle", () => {
   it("lets the room's members in on a socket of their own, welcomes each with who's in it, and tells the others who joins and leaves", async () => {
     const { ada, sfu } = await huddlesOn();
     const room = await freshRoom("huddle");
-    const grace = await signIn("Grace");
+    const [grace, linus] = [await signIn("Grace"), await signIn("Linus")];
 
     const adas = await joinHuddle(room, ada);
     const welcome = await adas.next("huddle.welcome");
@@ -127,13 +127,13 @@ describe("A room's huddle", () => {
     // Being in a huddle, with nobody's microphone published, asks the SFU nothing.
     expect(sfu.asked).toEqual([]);
 
-    // Once everyone has left, whoever joins next starts another.
+    // Once everyone has left, someone who wasn't in it starts another by joining (huddle-message.test.ts has who goes on with it).
     adas.leave();
     await adas.closed;
     await sleep(5);
-    const next = await joinHuddle(room, grace);
+    const next = await joinHuddle(room, linus);
     const again = await next.next("huddle.welcome");
-    expect(again.people).toEqual([person(grace)]);
+    expect(again.people).toEqual([person(linus)]);
     expect(Date.parse(again.startedAt)).toBeGreaterThan(Date.parse(welcome.startedAt));
   });
 
@@ -193,7 +193,7 @@ describe("A room's huddle", () => {
     expect(await remembered(room)).toMatchObject([{ user: ada.user }, { user: grace.user }]);
   });
 
-  it("starts a huddle afresh for whoever joins once huddles run through another app", async () => {
+  it("has everyone connect again once huddles run through another app, to the huddle as it goes on with whoever joins then", async () => {
     const { ada } = await huddlesOn();
     const room = await freshRoom("another-app");
     const grace = await signIn("Grace");
@@ -203,13 +203,12 @@ describe("A room's huddle", () => {
     await giveKeys(ada, OTHER_APP);
     // The room goes by what the Workspace last said of the app for half a minute, unless it has restarted since.
     await evictDurableObject(roomStub(room));
-    await sleep(5);
     const graces = await joinHuddle(room, grace);
     const welcome = await graces.next("huddle.welcome");
-    // Ada's tab connects again, to a huddle that started when Grace joined it.
+    // Ada's tab connects again, to the huddle she was in, which goes on with Grace from when it started.
     expect(await adas.closed).toMatchObject({ code: CloseCode.Reconnect, reason: "Reconnect" });
     expect(welcome.people).toEqual([person(grace)]);
-    expect(Date.parse(welcome.startedAt)).toBeGreaterThan(Date.parse(startedAt));
+    expect(welcome.startedAt).toBe(startedAt);
     expect((await remembered(room)).map(({ appId, startedAt }) => ({ appId, startedAt }))).toEqual([{ appId: OTHER_APP.appId, startedAt: welcome.startedAt }]);
   });
 

@@ -85,3 +85,29 @@ export function inItsHuddle(others: string[], count: number, you: boolean): stri
   const [named, people] = you ? [[], count + 1] : [others, count];
   return `${peopleListed(named, people)} ${people === 1 ? "is" : "are"} in the huddle`;
 }
+
+/**
+ * Who was in a huddle that's over, for anyone in its room, by the names of the others who were in it and
+ * whether they were themselves: "Sam and Priya were in the huddle", "Sam and you were in the huddle",
+ * "Only you were in the huddle", and past three others, "Sam, Priya, Leo, and 2 others were in the huddle".
+ */
+export function wereInTheHuddle(others: string[], you: boolean): string {
+  if (others.length === 0) return you ? "Only you were in the huddle" : "Nobody was in the huddle";
+  if (others.length === 1 && !you) return `${firstName(others[0]!)} was in the huddle`;
+  const everyone = you && others.length <= MAX_NAMED ? toSentence([...others.map(firstName), "you"]) : peopleListed(others, others.length);
+  return `${everyone} were in the huddle`;
+}
+
+const counted = (count: number, one: string) => (count === 1 ? `1 ${one}` : `${count} ${one}s`);
+
+/**
+ * How long a huddle went on, from when it started to when it ended, in whole minutes, as its message
+ * says it of one that's over: "less than a minute", "24 minutes", "1 hour and 5 minutes".
+ */
+export function huddleLasted(startedAt: string, endedAt: string): string {
+  const minutes = Math.floor((Date.parse(endedAt) - Date.parse(startedAt)) / 60_000);
+  if (minutes < 1) return "less than a minute";
+  const [hours, left] = [Math.floor(minutes / 60), minutes % 60];
+  if (hours === 0) return counted(left, "minute");
+  return left === 0 ? counted(hours, "hour") : `${counted(hours, "hour")} and ${counted(left, "minute")}`;
+}

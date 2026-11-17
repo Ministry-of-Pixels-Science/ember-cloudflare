@@ -6,7 +6,7 @@ import type { ChatRoom } from "../src/chat-room";
 import type { Env } from "../src/env";
 import { workspace } from "../src/workspace";
 import { MEMBERS_TO_TELL_OF_HUDDLE } from "../src/workspace-store";
-import { alarmOf, huddlesOn, joinHuddle, kept, ring, welcomed } from "./huddle-support";
+import { alarmOf, giveKeys, huddlesOn, joinHuddle, kept, OTHER_APP, ring, welcomed } from "./huddle-support";
 import { api, createRoom, freshDeploy, freshRoom, openWorkspaceSocket, roomStub, sharedD1, signIn, workspaceSql, workspaceStub, type Session, type WorkspaceSocket } from "./support";
 
 // Who's in a room's huddle, as the room tells the Workspace, and the Workspace everyone in the room, in
@@ -171,6 +171,26 @@ describe("Who's in a room's huddle, for the rest of the room", () => {
     expect(await adas.closed).toMatchObject({ code: HuddleCloseCode.Off });
     expect(await nextHuddle(adasTab)).toEqual(told(room, null));
     expect((await sidebarOf(ada)).huddles).toEqual({});
+  });
+
+  it("says that a huddle goes on with whoever joins it once huddles run through another app, and never that it's over", async () => {
+    const { ada } = await huddlesOn();
+    const grace = await signIn("Grace");
+    const room = await freshRoom("another-app");
+    const gracesTab = await openWorkspaceSocket(grace);
+    const adas = await joinHuddle(room, ada);
+    const { startedAt } = await adas.next("huddle.welcome");
+    expect(await nextHuddle(gracesTab)).toEqual(told(room, { startedAt, userIds: [ada.user.id] }));
+
+    await giveKeys(ada, OTHER_APP);
+    // The room goes by what the Workspace last said of the app for half a minute, unless it has restarted since.
+    await evictDurableObject(roomStub(room));
+    await welcomed(room, grace);
+    expect(await nextHuddle(gracesTab)).toEqual(told(room, { startedAt, userIds: [grace.user.id] }));
+    // Ada's tab connects again, as her socket's closing has it do.
+    expect(await adas.closed).toMatchObject({ code: CloseCode.Reconnect });
+    await welcomed(room, ada);
+    expect(await nextHuddle(gracesTab)).toEqual(told(room, { startedAt, userIds: [grace.user.id, ada.user.id] }));
   });
 
   it("says who's in the huddle again at each check, which tells the room of whatever a report failed to", async () => {

@@ -1264,6 +1264,20 @@ copies the huddle's link, which opens the room at the preview, or the huddle onc
 huddle takes up to 50 people and ends when the last of them leaves. A tab is in one huddle at a time,
 and joining a room's huddle from another tab or device leaves it in the first.
 
+A huddle has a message in its room, as Slack's does, which Ember writes as the huddle starts, in the
+name of whoever started it. Where a message has its author's face and name, it has the headphones
+on green and "A huddle is happening", with LIVE beside it, and under that the faces and names of
+whoever is in the huddle, and Join, which opens the preview, in any tab that isn't in it. Once the
+last of them has left it reads "A huddle happened", and says who was in it and for how long: "Sam
+and Priya were in the huddle for 24 minutes". It's a message in what else it has: its time and its
+link, reactions, and a thread, where what a huddle settled can be written down, and search finds it
+by "A huddle started", which it has for its text. But it marks nothing unread, notifies nobody and
+is sent to no webhook, since the sidebar already shows a huddle and an invitation rings whoever is
+wanted in it, and nobody can edit it. Whoever started the huddle can delete it, as can an
+administrator, which leaves the huddle going with no message. Someone who was in a huddle and joins
+the room's again within half a minute of its end goes on with that huddle, under the same message,
+so the last person's lost connection doesn't leave the room two of them. Anyone else starts another.
+
 A direct message has a huddle too, with the headphones at its top and its mark on its row in the
 sidebar, when there's someone in it to huddle with, which a bot or an AI agent isn't, nor anyone who
 can no longer sign in. Starting one there invites the others in it. Wherever they have Ember open,
