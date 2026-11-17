@@ -7,8 +7,21 @@ import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } fr
 import { FlashProvider } from "@/components/flash";
 import { AccountContext, useAccount } from "@/hooks/use-account";
 import { PeopleContext } from "@/hooks/use-directory";
-import { showHuddle, showSpeaking, type JoinedHuddle } from "@/lib/huddle-store";
+import { NO_REACTIONS } from "@/lib/huddle-reactions";
+import { showHuddle, showReactions, showSpeaking, type JoinedHuddle } from "@/lib/huddle-store";
 import { HuddleView } from "./huddle-view";
+
+// The emoji picker, without Emojibase's data, which isn't served here: its search, and one emoji to pick.
+vi.mock("./emoji-panel", () => ({
+  default: ({ onPick, autoFocus = true }: { onPick: (emoji: string) => void; autoFocus?: boolean }) => (
+    <>
+      <input aria-label="Search all emoji" autoFocus={autoFocus} />
+      <button type="button" onClick={() => onPick("🎉")}>
+        🎉
+      </button>
+    </>
+  ),
+}));
 
 const ada: User = { id: "ada", name: "Ada Lovelace" };
 /** Ada as the app has her once she's signed in. */
@@ -25,6 +38,7 @@ const huddle = (changes: Partial<JoinedHuddle> = {}): JoinedHuddle => ({
   you: ada,
   people: [inHuddle(sam), inHuddle(ada)],
   muted: false,
+  sticker: null,
   microphone: true,
   microphoneId: "",
   speakerId: "",
@@ -46,7 +60,7 @@ const failed = vi.fn();
 
 /** The huddle this tab is in, opened, with what the huddle's controls were asked. */
 function renderView(joined: JoinedHuddle = huddle(), room: Room | null = general) {
-  const controls = { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setThread: vi.fn(), setDevice: vi.fn(), setSmall: vi.fn(), switchCamera: vi.fn(), invite: vi.fn(() => true) };
+  const controls = { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setThread: vi.fn(), setDevice: vi.fn(), setSmall: vi.fn(), switchCamera: vi.fn(), invite: vi.fn(() => true), setSticker: vi.fn(), react: vi.fn() };
   act(() => showHuddle(joined, controls));
   const user = userEvent.setup();
   const view = render(<HuddleView huddle={joined} room={room} me={me} onFailed={failed} />, { wrapper: FlashProvider });
@@ -108,6 +122,16 @@ const count = () => opened().querySelector("header [aria-live]");
 /** The buttons along its base, first to last: its own base's, and not those under what's written in its thread. */
 const tools = () => within(opened().querySelector(":scope > footer")!).getAllByRole("button");
 const inviteDialog = () => screen.findByRole("dialog", { name: "Invite people" });
+/** What each of the buttons along its base is called. */
+const toolNames = () => tools().map((tool) => tool.getAttribute("aria-label") ?? tool.textContent);
+/** The panel React opens, while it's open. */
+const reactions = () => screen.queryByRole("dialog", { name: "React" });
+/** What's over the people in the huddle: the reactions that rise there, and the pills of the emoji they are, while any does. */
+const overPeople = () => list().parentElement!.nextElementSibling as HTMLElement;
+const rising = () => [...overPeople().querySelectorAll<HTMLElement>(":scope > [aria-hidden]")];
+/** Which of the places along the people's base a reaction rises from, from 0 at the left. */
+const placeOf = (reaction: HTMLElement) => reaction.style.getPropertyValue("--place");
+const pills = () => screen.queryByRole("list", { name: "Reactions" });
 
 /** Stands in for the browser's WebSocket: the socket the huddle's thread has to its room, which the test plays the room on. */
 class FakeSocket {
@@ -186,6 +210,7 @@ beforeEach(() => {
 afterEach(() => {
   act(() => showHuddle(null));
   act(() => showSpeaking(new Set()));
+  act(() => showReactions(NO_REACTIONS));
   failed.mockClear();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -293,6 +318,157 @@ describe("The tiles of a huddle", () => {
       [true, true],
       [false, false],
     ]);
+  });
+
+  it("shows the sticker someone shows in the corner over their name, by its emoji and what it's called, said for whoever can't see it, until they take it off", () => {
+    const { rerender } = renderView(huddle({ people: [inHuddle(sam, { sticker: "hand" }), inHuddle(ada), inHuddle(priya, { sticker: "brb" })] }));
+    const [first, second, third] = tiles();
+    const raised = within(first!).getByTitle("Raise hand");
+    expect(raised).toHaveTextContent(/^✋Raise hand$/);
+    // Someone else's is nothing to press, and it's the line under it that says it.
+    expect(raised.tagName).toBe("SPAN");
+    expect(raised).toHaveAttribute("aria-hidden", "true");
+    // Over their name, where Slack has it, and no taller for the room around it.
+    expect(raised).toHaveClass("absolute", "top-0", "left-0", "items-start", "p-2.5", "max-md:p-1.5");
+    expect(raised.firstElementChild).toHaveClass("rounded-full", "bg-surface");
+    // A tile too narrow for what it's called has its emoji alone.
+    expect(within(raised).getByText("Raise hand")).toHaveClass("truncate", "@max-[11rem]:hidden");
+    const said = within(first!).getByText("Sam Rivera: Hand raised");
+    expect(said).toHaveAttribute("aria-live", "polite");
+    expect(said).toHaveClass("sr-only");
+    expect(within(third!).getByTitle("Be right back")).toHaveTextContent(/^☕Be right back$/);
+    // Whoever shows none has a tile that says no more than it did.
+    expect(second).toHaveTextContent(/^Ada Lovelace \(you\)$/);
+    expect(within(second!).queryByTitle(/./)).not.toBeInTheDocument();
+
+    rerender(<HuddleView huddle={huddle({ people: [inHuddle(sam, { sticker: "done" }), inHuddle(ada), inHuddle(priya, { sticker: "thumbs-up" })] })} room={general} me={me} onFailed={failed} />);
+    expect(within(first!).getByTitle("Done")).toHaveTextContent(/^✅Done$/);
+    expect(within(first!).queryByTitle("Raise hand")).not.toBeInTheDocument();
+    // What says it is what said the last, so that it's said as it changes.
+    expect(said).toHaveTextContent(/^Sam Rivera: Done$/);
+    expect(within(third!).getByTitle("Yes")).toHaveTextContent(/^👍Yes$/);
+    expect(within(third!).getByText("Priya Patel: Yes")).toBeInTheDocument();
+
+    rerender(<HuddleView huddle={huddle({ people: [inHuddle(sam), inHuddle(ada), inHuddle(priya)] })} room={general} me={me} onFailed={failed} />);
+    expect(first).toHaveTextContent(/^Sam Rivera$/);
+    expect(within(first!).queryByTitle(/./)).not.toBeInTheDocument();
+  });
+
+  it("has the sticker of the tab's person on their own tile be a button, large enough for a finger, which takes it off", async () => {
+    const { setSticker, user } = renderView(huddle({ sticker: "thumbs-down", people: [inHuddle(sam, { sticker: "done" }), inHuddle(ada, { sticker: "thumbs-down" })] }));
+    const [first, second] = tiles();
+    expect(within(first!).queryByRole("button")).not.toBeInTheDocument();
+    const mine = within(second!).getByRole("button", { name: "Remove sticker: No" });
+    expect(mine).toHaveAttribute("title", "Remove sticker");
+    expect(mine).toHaveTextContent(/^👎No$/);
+    expect(mine).toHaveClass("absolute", "top-0", "left-0", "cursor-pointer", "touch:min-h-11", "touch:min-w-11");
+    // With the focus it's ringed around the sticker, where the tile's edge would cut a ring around the button.
+    expect(mine).toHaveClass("focus-visible:outline-none");
+    expect(mine.firstElementChild).toHaveClass("group-hover:bg-hover", "group-focus-visible:outline-2", "group-focus-visible:outline-offset-2");
+    expect(within(first!).getByTitle("Done").firstElementChild).not.toHaveClass("group-hover:bg-hover");
+    // It's said as everyone's is.
+    expect(within(second!).getByText("Ada Lovelace: No")).toHaveClass("sr-only");
+    await user.click(mine);
+    expect(setSticker).toHaveBeenCalledExactlyOnceWith(null);
+  });
+
+  it("has someone's reaction rise over the people in the huddle, from the base of where they are, over their name, said for whoever can't see it, and the same emoji again anew", () => {
+    renderView(huddle({ people: [inHuddle(sam, { sticker: "hand" }), inHuddle(ada)] }));
+    // Over the people, and a click goes through it to them. What rises there goes by how wide they are.
+    expect(overPeople()).toHaveClass("pointer-events-none", "absolute", "inset-0", "@container", "overflow-hidden");
+    expect(overPeople().parentElement).toHaveClass("relative");
+    expect(overPeople().nextElementSibling).toBeNull();
+    expect(rising()).toEqual([]);
+
+    const first = { nth: 1, userId: "sam", emoji: "🎉" };
+    act(() => showReactions({ rising: [first], runs: [] }));
+    const [risen] = rising();
+    expect(risen).toHaveTextContent(/^🎉Sam Rivera$/);
+    // Without motion it holds still, at the base. The huddle's first is at the middle of the places there
+    // are, which are right of the people's middle, or across more of them where they have less room.
+    expect(risen).toHaveClass("absolute", "bottom-3", "-translate-x-1/2", "motion-safe:animate-reaction", "left-[calc(45%+var(--place)*6.25%)]", "@max-2xl:left-[calc(20%+var(--place)*12.5%)]", "@max-md:left-[calc(15%+var(--place)*11.25%)]");
+    expect(placeOf(risen!)).toBe("2");
+    // Its emoji grows as it rises, from the name under it, which doesn't.
+    expect(within(risen!).getByText("🎉")).toHaveClass("origin-bottom", "motion-safe:animate-reaction-emoji");
+    expect(within(risen!).getByText("Sam Rivera")).not.toHaveClass("motion-safe:animate-reaction-emoji");
+    const said = within(overPeople()).getByText("Sam Rivera reacted with 🎉");
+    expect(said.parentElement).toHaveAttribute("aria-live", "polite");
+    expect(said.parentElement).toHaveClass("sr-only");
+    // No tile has it, and their sticker stays where it was.
+    for (const tile of tiles()) expect(within(tile).queryByText("🎉")).not.toBeInTheDocument();
+    expect(within(tiles()[0]!).getByTitle("Raise hand")).toBeInTheDocument();
+
+    // The same again is another, apart from it, to rise from the start and be said again.
+    act(() => showReactions({ rising: [first, { nth: 2, userId: "sam", emoji: "🎉" }], runs: [] }));
+    expect(rising()).toHaveLength(2);
+    expect(rising()[0]).toBe(risen);
+    expect(placeOf(rising()[1]!)).toBe("0");
+    expect(within(overPeople()).getAllByText("Sam Rivera reacted with 🎉")).toEqual([said, expect.anything()]);
+
+    // Your own rises over your name, as everyone's does.
+    act(() => showReactions({ rising: [{ nth: 3, userId: "ada", emoji: "👍" }], runs: [] }));
+    expect(rising().map((each) => [each.textContent, placeOf(each)])).toEqual([["👍Ada Lovelace", "4"]]);
+    expect(within(overPeople()).getByText("Ada Lovelace reacted with 👍")).toBeInTheDocument();
+    expect(risen).not.toBeInTheDocument();
+    expect(said).not.toBeInTheDocument();
+
+    // Each is apart from the one before it, so that those that rise together aren't over each other, and
+    // the sixth is where the first was.
+    act(() => showReactions({ rising: [4, 5, 6, 7, 8, 9].map((nth) => ({ nth, userId: "ada", emoji: "👍" })), runs: [] }));
+    expect(rising().map(placeOf)).toEqual(["1", "3", "2", "0", "4", "1"]);
+
+    // One of someone who isn't in the huddle shows nothing.
+    act(() => showReactions({ rising: [{ nth: 10, userId: "priya", emoji: "👀" }], runs: [{ emoji: "👀", first: "priya", more: 0 }] }));
+    expect(overPeople()).toHaveTextContent(/^$/);
+    expect(screen.queryByRole("button", { name: /👀/ })).not.toBeInTheDocument();
+
+    act(() => showReactions(NO_REACTIONS));
+    expect(overPeople()).toHaveTextContent(/^$/);
+  });
+
+  it("has a pill in the corner for each emoji that rises, which says who sent the first and how many have come since, and sends it again", async () => {
+    const { react, user } = renderView(huddle({ people: [inHuddle(sam), inHuddle(ada)] }));
+    expect(pills()).not.toBeInTheDocument();
+
+    const rise = [
+      { nth: 1, userId: "ada", emoji: "🎉" },
+      { nth: 2, userId: "sam", emoji: "👍" },
+    ];
+    act(() =>
+      showReactions({
+        rising: rise,
+        runs: [
+          { emoji: "🎉", first: "ada", more: 0 },
+          { emoji: "👍", first: "sam", more: 2 },
+        ],
+      }),
+    );
+    // In the corner, where a click on them isn't one on the people under them.
+    expect(pills()).toHaveClass("pointer-events-auto", "absolute", "right-3", "bottom-3");
+    expect(overPeople()).toContainElement(pills());
+    const [mine, sams] = within(pills()!).getAllByRole("button");
+    expect(mine).toHaveTextContent(/^You🎉$/);
+    expect(mine).toHaveAccessibleName("You 🎉: react with 🎉 too");
+    expect(mine).toHaveAttribute("title", "React with 🎉 too");
+    // 44px for a finger.
+    expect(mine).toHaveClass("h-8", "touch:h-11", "touch:min-w-11");
+    // Someone else's has their avatar for their name.
+    expect(sams).toHaveTextContent(/^\+ 2👍$/);
+    expect(sams).toHaveAccessibleName("Sam Rivera + 2 👍: react with 👍 too");
+    expect(sams!.querySelector("img")).toHaveClass("size-5");
+
+    await user.click(sams!);
+    await user.click(mine!);
+    expect(react.mock.calls).toEqual([["👍"], ["🎉"]]);
+
+    // One that's counted again is the pill it was.
+    act(() => showReactions({ rising: rise, runs: [{ emoji: "🎉", first: "ada", more: 1 }] }));
+    expect(within(pills()!).getAllByRole("button")).toEqual([mine]);
+    expect(mine).toHaveTextContent(/^You\+ 1🎉$/);
+    expect(mine).toHaveAccessibleName("You + 1 🎉: react with 🎉 too");
+
+    act(() => showReactions(NO_REACTIONS));
+    expect(pills()).not.toBeInTheDocument();
   });
 
   it("shows someone's camera in place of their avatar, playing without sound", () => {
@@ -634,7 +810,7 @@ describe("The buttons along the base of a huddle", () => {
     expect(screen.getByRole("button", { name: "Camera" })).toHaveClass("max-md:hidden");
     // Right after the camera's own, and its arrow on a computer.
     const names = screen.getAllByRole("button").map((each) => each.getAttribute("aria-label") ?? each.textContent);
-    expect(names.slice(names.indexOf("Turn off camera"))).toEqual(["Turn off camera", "Camera", "Switch camera", "More", "Leave"]);
+    expect(names.slice(names.indexOf("Turn off camera"), names.indexOf("Raise hand"))).toEqual(["Turn off camera", "Camera", "Switch camera"]);
 
     await user.click(button);
     expect(switchCamera).toHaveBeenCalledExactlyOnceWith();
@@ -739,6 +915,95 @@ describe("The buttons along the base of a huddle", () => {
     expect(screen.getByRole("button", { name: "Share screen" })).toBeInTheDocument();
   });
 
+  it("raises the hand of the tab's person and lowers it, from a button after the screen's that's filled while it's raised, which a phone hasn't, and takes off another sticker they show, which it draws meanwhile", async () => {
+    browserSharesScreens();
+    const { setSticker, user, rerender } = renderView();
+    const raise = screen.getByRole("button", { name: "Raise hand" });
+    expect(toolNames().slice(toolNames().indexOf("Share screen"))).toEqual(["Share screen", "Raise hand", "Stickers", "React", "More", "Leave"]);
+    expect(raise).toHaveAttribute("title", "Raise hand");
+    expect(raise).toHaveTextContent(/^✋$/);
+    expect(raise).toHaveClass("bg-hover");
+    // A phone has its stickers in React's panel.
+    expect(raise.parentElement).toHaveClass("max-md:hidden");
+    await user.click(raise);
+
+    rerender(<HuddleView huddle={huddle({ sticker: "hand" })} room={general} me={me} onFailed={failed} />);
+    const lower = screen.getByRole("button", { name: "Lower hand" });
+    expect(lower).toBe(raise);
+    expect(lower).toHaveAttribute("title", "Lower hand");
+    expect(lower).toHaveClass("bg-foreground", "text-background");
+    await user.click(lower);
+    expect(setSticker.mock.calls).toEqual([["hand"], [null]]);
+
+    // Another sticker is on it in the hand's place, as on Slack's, and it takes that off.
+    rerender(<HuddleView huddle={huddle({ sticker: "brb" })} room={general} me={me} onFailed={failed} />);
+    const remove = screen.getByRole("button", { name: "Remove sticker" });
+    expect(remove).toBe(raise);
+    expect(remove).toHaveAttribute("title", "Remove sticker");
+    expect(remove).toHaveTextContent(/^☕$/);
+    expect(remove).toHaveClass("bg-foreground", "text-background");
+    await user.click(remove);
+    expect(setSticker.mock.calls).toEqual([["hand"], [null], [null]]);
+  });
+
+  it("has an arrow beside Raise hand, of a piece with it and lit as it is, which opens the stickers there are, the one that's shown ticked, to show another or take that one off", async () => {
+    const { setSticker, user, rerender } = renderView(huddle({ sticker: "brb" }));
+    const arrow = screen.getByRole("button", { name: "Stickers" });
+    expect(arrow).toHaveAttribute("title", "Stickers");
+    expect(arrow).toHaveClass("rounded-l-none", "bg-foreground", "text-background");
+    expect(screen.getByRole("button", { name: "Remove sticker" })).toHaveClass("md:rounded-r-none");
+
+    await user.click(arrow);
+    const menu = await screen.findByRole("menu");
+    expect(menu).toHaveAccessibleName("Stickers");
+    // Under how long one stays, as Slack's says over its own.
+    expect(menu.firstElementChild).toHaveTextContent(/^StickersOne stays on until you take it off\.$/);
+    const choices = within(menu).getAllByRole("menuitemcheckbox");
+    expect(choices.map((choice) => [choice.textContent, choice.getAttribute("aria-checked")])).toEqual([
+      ["✋Raise hand", "false"],
+      ["☕Be right back", "true"],
+      ["👍Yes", "false"],
+      ["👎No", "false"],
+      ["✅Done", "false"],
+    ]);
+    await user.click(choices[2]!);
+    await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+    expect(setSticker).toHaveBeenCalledExactlyOnceWith("thumbs-up");
+
+    await user.click(arrow);
+    await user.click(await screen.findByRole("menuitemcheckbox", { name: "Be right back" }));
+    expect(setSticker).toHaveBeenLastCalledWith(null);
+
+    rerender(<HuddleView huddle={huddle()} room={general} me={me} onFailed={failed} />);
+    expect(arrow).toHaveClass("bg-hover");
+    expect(arrow).not.toHaveClass("bg-foreground");
+  });
+
+  it("has React after Raise hand, which opens the huddle's reactions and stickers over its buttons, and closes them again, as an emoji picked does", async () => {
+    const { react, user } = renderView();
+    const button = screen.getByRole("button", { name: "React" });
+    expect(toolNames().slice(toolNames().indexOf("Stickers"))).toEqual(["Stickers", "React", "More", "Leave"]);
+    expect(button).toHaveAttribute("title", "React");
+    expect(button).toHaveAttribute("aria-haspopup", "dialog");
+    expect(button).toHaveAttribute("aria-expanded", "false");
+    // A phone too narrow for it has it in More's menu.
+    expect(button).toHaveClass("bg-hover", "max-[360px]:hidden");
+    expect(reactions()).not.toBeInTheDocument();
+
+    await user.click(button);
+    expect(reactions()).toBeInTheDocument();
+    expect(button).toHaveAttribute("aria-expanded", "true");
+    await user.click(await within(reactions()!).findByRole("button", { name: "🎉" }));
+    expect(react).toHaveBeenCalledExactlyOnceWith("🎉");
+    expect(reactions()).not.toBeInTheDocument();
+    await waitFor(() => expect(button).toHaveFocus());
+
+    await user.click(button);
+    expect(reactions()).toBeInTheDocument();
+    await user.click(button);
+    expect(reactions()).not.toBeInTheDocument();
+  });
+
   it("has Invite people first, on a computer, which opens the list of the room's people to invite, and has the focus back once that closes", async () => {
     const { invite, user } = renderView(huddle({ roomId: "direct-1" }), direct);
     const button = screen.getByRole("button", { name: "Invite people" });
@@ -766,14 +1031,15 @@ describe("The buttons along the base of a huddle", () => {
     expect(tools().at(-2)).toBe(more);
     expect(more).toHaveAttribute("title", "More");
     expect(more).toHaveClass("md:hidden", "bg-hover");
+    expect(more).not.toHaveClass("min-[360px]:hidden");
 
     await user.click(more);
     const choices = within(await screen.findByRole("menu")).getAllByRole("menuitem");
-    expect(choices.map((choice) => choice.textContent)).toEqual(["Invite people"]);
+    expect(choices.map((choice) => choice.textContent)).toEqual(["React", "Invite people"]);
     const focused: EventTarget[] = [];
     const note = (event: FocusEvent) => void focused.push(event.target!);
     document.addEventListener("focusin", note);
-    await user.click(choices[0]!);
+    await user.click(choices[1]!);
     const dialog = await inviteDialog();
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
     const title = within(dialog).getByRole("heading", { name: "Invite people" });
@@ -783,7 +1049,7 @@ describe("The buttons along the base of a huddle", () => {
     expect(dialog).not.toBeInTheDocument();
     await waitFor(() => expect(more).toHaveFocus());
     // The focus went from the menu straight to the list, which kept it until it closed.
-    expect(focused).toEqual([choices[0], title, more]);
+    expect(focused).toEqual([choices[1], title, more]);
     document.removeEventListener("focusin", note);
     expect(invite).not.toHaveBeenCalled();
     // Neither the menu nor the list is left holding the page.
@@ -831,11 +1097,49 @@ describe("The buttons along the base of a huddle", () => {
     await waitFor(() => expect(failed).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ status: 401 })));
   });
 
-  it("has neither Invite people nor More once its room isn't among this person's, which leaves nobody to list", () => {
-    renderView(huddle(), null);
+  it("has React in More's menu, on a phone too narrow to give it a button, which opens the reactions and stickers once the menu has shut, and has the focus back once they close", async () => {
+    const { setSticker, user } = renderView(huddle({ roomId: "direct-1" }), direct);
+    const more = screen.getByRole("button", { name: "More" });
+    const choose = async () => {
+      await user.click(more);
+      const choice = await screen.findByRole("menuitem", { name: "React" });
+      // Only where React has no button of its own.
+      expect(choice).toHaveClass("min-[360px]:hidden");
+      await user.click(choice);
+      await waitFor(() => expect(reactions()).toBeInTheDocument());
+      expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+      // The menu isn't left holding the page.
+      expect(document.body.style.pointerEvents).toBe("");
+    };
+
+    await choose();
+    await user.keyboard("{Escape}");
+    expect(reactions()).not.toBeInTheDocument();
+    await waitFor(() => expect(more).toHaveFocus());
+
+    // As a sticker's chosen, too.
+    await choose();
+    await user.click(within(reactions()!).getByRole("tab", { name: "Stickers" }));
+    await user.click(within(reactions()!).getByRole("button", { name: "Done" }));
+    expect(setSticker).toHaveBeenCalledExactlyOnceWith("done");
+    expect(reactions()).not.toBeInTheDocument();
+    await waitFor(() => expect(more).toHaveFocus());
+
+    // But a click outside them leaves the focus where it put it.
+    await choose();
+    await user.click(screen.getByRole("button", { name: "Mute microphone" }));
+    expect(reactions()).not.toBeInTheDocument();
+    expect(more).not.toHaveFocus();
+  });
+
+  it("has no Invite people once its room isn't among this person's, which leaves nobody to list, and More only for React, where React has no button", async () => {
+    const { user } = renderView(huddle(), null);
     expect(screen.queryByRole("button", { name: "Invite people" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "More" })).not.toBeInTheDocument();
-    expect(tools().map((tool) => tool.getAttribute("aria-label") ?? tool.textContent)).toEqual(["Mute microphone", "Microphone and speaker", "Turn on camera", "Camera", "Leave"]);
+    expect(toolNames()).toEqual(["Mute microphone", "Microphone and speaker", "Turn on camera", "Camera", "Raise hand", "Stickers", "React", "More", "Leave"]);
+    const more = screen.getByRole("button", { name: "More" });
+    expect(more).toHaveClass("md:hidden", "min-[360px]:hidden");
+    await user.click(more);
+    expect(within(await screen.findByRole("menu")).getAllByRole("menuitem").map((choice) => choice.textContent)).toEqual(["React"]);
   });
 
   it("leaves on Leave, the last of its buttons", async () => {
@@ -855,10 +1159,11 @@ describe("The thread of a huddle", () => {
 
   it("shows beside the people in the huddle, once the room has said which message is the huddle's, over a socket of its own to the huddle's room", () => {
     renderView(huddle({ roomId: "direct-1", messageId: "h1" }), direct);
-    // In a row with the tiles, between the huddle's header and its buttons.
-    expect(thread()!.parentElement).toBe(list().parentElement!.parentElement);
+    // In a row with the people and what rises over them, between the huddle's header and its buttons.
+    const people = overPeople().parentElement!;
+    expect(thread()!.parentElement).toBe(people.parentElement);
     expect(thread()!.parentElement).toHaveClass("flex");
-    expect(thread()!.previousElementSibling).toBe(list().parentElement);
+    expect(thread()!.previousElementSibling).toBe(people);
     expect(thread()!.parentElement!.previousElementSibling).toBe(opened().querySelector(":scope > header"));
     expect(thread()!.parentElement!.nextElementSibling).toBe(opened().querySelector(":scope > footer"));
 
@@ -867,16 +1172,19 @@ describe("The thread of a huddle", () => {
     expect(FakeSocket.all[0]!.sent).toEqual([{ type: "thread.open", parentId: "h1" }]);
   });
 
-  it("has Thread among its buttons, after the screen's and before More, lit while the thread shows", () => {
+  it("has Thread among its buttons, after React and before More, lit while the thread shows", () => {
     browserSharesScreens();
     renderView(huddle({ messageId: "h1" }));
-    expect(tools().map((tool) => tool.getAttribute("aria-label") ?? tool.textContent)).toEqual([
+    expect(toolNames()).toEqual([
       "Invite people",
       "Mute microphone",
       "Microphone and speaker",
       "Turn on camera",
       "Camera",
       "Share screen",
+      "Raise hand",
+      "Stickers",
+      "React",
       "Thread",
       "More",
       "Leave",

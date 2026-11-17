@@ -2464,6 +2464,8 @@ describe("Huddles", () => {
     setSmall: vi.fn(),
     switchCamera: vi.fn(),
     invite: vi.fn(() => true),
+    setSticker: vi.fn(),
+    react: vi.fn(),
   } satisfies HuddleControls;
   /** The tab's camera, on: one that doesn't say which way it faces, as a computer's doesn't. */
   const CAMERA = { getVideoTracks: () => [] } as unknown as MediaStream;
@@ -2484,7 +2486,7 @@ describe("Huddles", () => {
     // Joining lets the tab into the huddle at once, alone, and shows it opened.
     vi.mocked(joinHuddle).mockImplementation(({ roomId, muted }) =>
       showHuddle(
-        { roomId, connected: true, you: ada, people: [{ user: ada, muted, audio: false, video: false, screen: false }], muted, microphone: true, microphoneId: "", speakerId: "", camera: null, watched: new Map(), screen: null, screens: new Map(), open: true, thread: true },
+        { roomId, connected: true, you: ada, people: [{ user: ada, muted, audio: false, video: false, screen: false }], muted, sticker: null, microphone: true, microphoneId: "", speakerId: "", camera: null, watched: new Map(), screen: null, screens: new Map(), open: true, thread: true },
         controls,
       ),
     );

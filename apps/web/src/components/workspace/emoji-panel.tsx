@@ -2,7 +2,7 @@ import { EmojiPicker as EmojiPickerPrimitive, useSkinTone, type SkinTone } from 
 import { useEffect, useState } from "react";
 import { EmojiPicker, EmojiPickerContent, EmojiPickerFooter, EmojiPickerSearch } from "@/components/ui/emoji-picker";
 
-// The composer's emoji picker, a chunk of its own that loads as Emoji first opens it.
+// The emoji picker, the composer's and a huddle's reactions', a chunk of its own that loads as either first opens it.
 
 /**
  * Where Emojibase's emoji data is served from Ember itself (vite.config.ts), rather than from a CDN, which
@@ -38,19 +38,25 @@ function KeepSkinTone() {
   return null;
 }
 
+interface Props {
+  onPick: (emoji: string) => void;
+  /** Whether its search has the focus as it shows, to type in at once, as it does unless told otherwise. */
+  autoFocus?: boolean;
+}
+
 /**
  * Slack's emoji picker: a search of every emoji by name, the emoji by category, the one the pointer or the
  * arrow keys are on, named, and the skin tone, which this browser remembers. Enter picks the emoji the
  * arrow keys are on.
  */
-export default function EmojiPanel({ onPick }: { onPick: (emoji: string) => void }) {
+export default function EmojiPanel({ onPick, autoFocus = true }: Props) {
   const [skinTone] = useState(keptSkinTone);
   return (
     <EmojiPicker className="h-[min(380px,60dvh)]" columns={9} skinTone={skinTone} emojibaseUrl={EMOJIBASE_URL} onEmojiSelect={({ emoji }) => onPick(emoji)}>
-      <EmojiPickerSearch placeholder="Search all emoji" aria-label="Search all emoji" autoFocus />
+      <EmojiPickerSearch placeholder="Search all emoji" aria-label="Search all emoji" autoFocus={autoFocus} />
       <EmojiPickerContent />
       <EmojiPickerFooter>
-        <EmojiPickerPrimitive.SkinToneSelector className="ms-auto flex size-8 flex-none cursor-pointer items-center justify-center rounded-[7px] text-xl leading-none hover:bg-hover" />
+        <EmojiPickerPrimitive.SkinToneSelector className="ms-auto flex size-8 flex-none cursor-pointer items-center justify-center rounded-[7px] text-xl leading-none hover:bg-hover touch:size-11" />
       </EmojiPickerFooter>
       <KeepSkinTone />
     </EmojiPicker>

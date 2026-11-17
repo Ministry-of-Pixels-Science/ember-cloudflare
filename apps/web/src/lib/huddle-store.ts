@@ -1,6 +1,7 @@
 import type { RoomId, User, UserId } from "@ember/protocol";
-import type { HuddlePerson } from "@ember/protocol/huddles";
+import type { HuddlePerson, HuddleSticker } from "@ember/protocol/huddles";
 import type { HuddleDevice } from "./huddle-devices";
+import { NO_REACTIONS, type ShownReactions } from "./huddle-reactions";
 
 /**
  * The huddle this tab is in, as its room's header, the huddle's bar and the huddle itself, opened, show
@@ -15,6 +16,8 @@ export interface JoinedHuddle {
   /** Everyone in the huddle, in the order they joined, as the room last said. */
   people: HuddlePerson[];
   muted: boolean;
+  /** The sticker the tab's person shows on their tile, or null while they show none. */
+  sticker: HuddleSticker | null;
   /** Whether the tab has a microphone to unmute. Without one its person only listens. */
   microphone: boolean;
   /** That microphone, by its device's id: empty with none, and where the browser doesn't say which it is. */
@@ -54,6 +57,10 @@ export interface HuddleControls {
   switchCamera(): void;
   /** Asks the room to invite the people `userIds` names into the huddle, saying whether it could, which it can't while its connection to the room is down. */
   invite(userIds: UserId[]): boolean;
+  /** Shows `sticker` on the tile of the tab's person, in place of any they show, or with null, takes theirs off. */
+  setSticker(sticker: HuddleSticker | null): void;
+  /** Reacts with `emoji`, which rises from the base of the huddle for a moment, for everyone in it, once the room has told them of it. */
+  react(emoji: string): void;
 }
 
 /** The id the huddle opened has in the page, where Skip to main content goes while it covers the page. */
@@ -88,6 +95,25 @@ export const isSpeaking = (userId: UserId) => speaking.has(userId);
 export function showSpeaking(who: ReadonlySet<UserId>): void {
   speaking = who;
   for (const listener of speakingListeners) listener();
+}
+
+// A reaction shows for a moment, so the ones that show are kept apart from the huddle too.
+let reactions = NO_REACTIONS;
+const reactionListeners = new Set<() => void>();
+
+/** Hears whenever the reactions that show in the tab's huddle change, until the function returned is called. */
+export function watchReactions(listener: () => void): () => void {
+  reactionListeners.add(listener);
+  return () => void reactionListeners.delete(listener);
+}
+
+/** The reactions that show in the tab's huddle now: those that rise, and the emoji that have a pill. */
+export const shownReactions = () => reactions;
+
+/** Shows the reactions that show in the tab's huddle. The huddle's own code calls this. */
+export function showReactions(shown: ShownReactions): void {
+  reactions = shown;
+  for (const listener of reactionListeners) listener();
 }
 
 /** The huddle the tab is in, or null. */
@@ -139,6 +165,12 @@ export const switchHuddleCamera = () => controls?.switchCamera();
  * once the tab is in no huddle.
  */
 export const inviteToHuddle = (userIds: UserId[]) => controls?.invite(userIds) ?? false;
+
+/** Shows a sticker on the tile of the tab's person in its huddle, in place of any they show, or with null, takes theirs off, if it's in one. */
+export const showHuddleSticker = (sticker: HuddleSticker | null) => controls?.setSticker(sticker);
+
+/** Reacts with `emoji` in the tab's huddle, if it's in one: it rises from the huddle's base for a moment, for everyone in it. */
+export const reactInHuddle = (emoji: string) => controls?.react(emoji);
 
 /**
  * Has `say` told whatever the tab's huddle has to tell its person, until the function returned is

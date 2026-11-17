@@ -6,13 +6,16 @@ import { useNameOf } from "@/hooks/use-directory";
 import { useIsSpeaking } from "@/hooks/use-huddle";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { facesAway } from "@/lib/huddle-devices";
-import { OPEN_HUDDLE, openHuddle, showHuddleThread, takeCamerasSmall, type JoinedHuddle } from "@/lib/huddle-store";
+import { STICKERS } from "@/lib/huddle-stickers";
+import { OPEN_HUDDLE, openHuddle, showHuddleSticker, showHuddleThread, takeCamerasSmall, type JoinedHuddle } from "@/lib/huddle-store";
 import { SCREEN_SHAPE, showsCamerasSmall, stageLayout, TILE_GAP, tilesLayout } from "@/lib/huddle-tiles";
 import { cn } from "@/lib/utils";
 import { HuddleInviteDialog } from "./huddle-invite-dialog";
 import { HuddlePicture } from "./huddle-picture";
+import { HuddleReactions } from "./huddle-reactions";
+import { RisingReactions } from "./huddle-rising";
 import { HuddleThread } from "./huddle-thread";
-import { CameraTool, InviteTool, LeaveButton, MicrophoneTool, MoreTool, ScreenTool, SwitchCameraTool, ThreadTool, useHuddleName, waitingToJoin } from "./huddle-tools";
+import { CameraTool, InviteTool, LeaveButton, MicrophoneTool, MoreTool, RaiseHandTool, ReactTool, ScreenTool, SwitchCameraTool, ThreadTool, useHuddleName, waitingToJoin } from "./huddle-tools";
 import { UserAvatar } from "./user-avatar";
 
 interface Space {
@@ -52,6 +55,10 @@ function useSpace(): [RefObject<HTMLDivElement | null>, Space] {
 const TILE = "relative grid grid-rows-[minmax(6px,1fr)_auto_minmax(44px,1fr)] justify-items-center overflow-hidden rounded-2xl border bg-background [container-type:size]";
 /** What a tile says of its picture, over a corner of it. */
 const CAPTION = "absolute bottom-2.5 left-2.5 flex max-w-[calc(100%-20px)] items-center gap-1.5 rounded-md bg-surface px-2 py-1 text-[13px] leading-5 font-medium max-md:bottom-1.5 max-md:left-1.5";
+/** Where a tile has the sticker its person shows: the corner over that one, as Slack's tiles do. */
+const STICKER_CORNER = "group absolute top-0 left-0 flex max-w-full items-start p-2.5 max-md:p-1.5";
+/** The sticker there: its emoji and what it's called, or on a tile under 176px wide, which is too narrow for both, its emoji. */
+const STICKER = "flex min-w-0 items-center gap-1.5 rounded-full bg-surface px-2.5 py-1 text-[13px] leading-5 font-medium";
 
 interface TileProps {
   person: HuddlePerson;
@@ -67,10 +74,22 @@ interface TileProps {
 /**
  * Someone in the huddle: their camera's picture, or their avatar while it's off, over their name, and
  * ringed in green while they speak. The ring is in the tile's edge's place: drawn against each other,
- * the two show a seam between them at the corners.
+ * the two show a seam between them at the corners. The sticker they show is in a corner of it until
+ * they take it off, which on their own tile a click on it does, as on Slack's, and it's said as it
+ * comes, for whoever can't see it.
  */
 function Tile({ person, name, you, picture, className }: TileProps) {
   const speaking = useIsSpeaking(person);
+  const sticker = person.sticker && STICKERS[person.sticker];
+  const shown = sticker && (
+    // The button it's in on their own tile is ringed around the sticker when it has the focus, where the tile's edge would cut a ring around the button.
+    <span className={cn(STICKER, you && "group-hover:bg-hover group-focus-visible:outline-2 group-focus-visible:outline-offset-2 group-focus-visible:outline-foreground")}>
+      <span aria-hidden className="text-base leading-none">
+        {sticker.emoji}
+      </span>
+      <span className="truncate @max-[11rem]:hidden">{sticker.name}</span>
+    </span>
+  );
   return (
     <li className={cn(TILE, speaking && "border-transparent", className)}>
       {picture ? (
@@ -85,6 +104,20 @@ function Tile({ person, name, you, picture, className }: TileProps) {
           {name}
           {you && " (you)"}
         </span>
+      </span>
+      {sticker &&
+        (you ? (
+          // Taller and wider than the sticker in it, for a finger.
+          <button type="button" title="Remove sticker" aria-label={`Remove sticker: ${sticker.name}`} onClick={() => showHuddleSticker(null)} className={cn(STICKER_CORNER, "cursor-pointer focus-visible:outline-none touch:min-h-11 touch:min-w-11")}>
+            {shown}
+          </button>
+        ) : (
+          <span aria-hidden title={sticker.name} className={STICKER_CORNER}>
+            {shown}
+          </span>
+        ))}
+      <span aria-live="polite" className="sr-only">
+        {sticker && `${name}: ${sticker.shown}`}
       </span>
       {/* Last, so over the tile's picture. */}
       {speaking && <span role="img" aria-label="Speaking" className="pointer-events-none absolute inset-0 rounded-[15px] border-2 border-positive" />}
@@ -215,10 +248,13 @@ interface Props {
  * that of whoever joined first. Their own shows among the tiles, as they have the screen itself before
  * them. Minimizing it leaves the huddle's bar under the page. Invite people, at the start of its base,
  * opens the list of the room's people to invite, while the room is among this person's. A phone has it
- * in the menu of a More button, the last before Leave, as Slack's does. From 1180px wide the huddle's
- * thread shows beside the people in it, as in Slack's huddle window, once the room has said which
- * message is the huddle's, until its person closes it: Thread, after the screen's button, shows it
- * again.
+ * in the menu of a More button, the last before Leave, as Slack's does. After the screen's button are
+ * Raise hand, with an arrow that opens the stickers there are, and React, which opens the reactions
+ * and the stickers over the buttons: a phone has only React, and one under 360px wide has it in
+ * More's menu. A reaction rises over the people in the huddle, from the base of where they are, as
+ * Slack's do. From 1180px wide the huddle's thread shows beside the people in it, as in Slack's
+ * huddle window, once the room has said which message is the huddle's, until its person closes it:
+ * Thread, after React, shows it again.
  */
 export function HuddleView({ huddle, room, me, onFailed }: Props) {
   const nameOf = useNameOf();
@@ -244,6 +280,8 @@ export function HuddleView({ huddle, room, me, onFailed }: Props) {
   // It covers the page whatever had the focus there, so it takes it as it opens.
   const section = useRef<HTMLElement>(null);
   useEffect(() => section.current?.focus(), []);
+  // What's between the header and the buttons, which the reactions and stickers open within.
+  const [body, setBody] = useState<HTMLElement | null>(null);
   // The button Invite people was opened from, while it's open.
   const [inviteOpener, setInviteOpener] = useState<HTMLElement | null>(null);
   // The thread the huddle can show, by its message, where it has the room for it.
@@ -290,30 +328,34 @@ export function HuddleView({ huddle, room, me, onFailed }: Props) {
         </button>
       </header>
 
-      <div className="flex min-h-0 flex-1">
-        <div ref={tiles} className={cn("flex min-h-0 min-w-0 flex-1 p-6 max-md:p-3", stage ? cn("gap-3", !stage.beside && "flex-col") : "overflow-auto")}>
-          {stage && (
-            <Stage
-              label={screenOf(nameOf(stage.user))}
-              stream={stage.stream}
-              shape={shape}
-              width={stage.screen}
-              onShape={(shape) => setShaped((last) => (last?.userId === stage.user.id && last.shape === shape ? last : { userId: stage.user.id, shape }))}
-              className={stage.beside ? "my-auto ml-auto" : "mx-auto"}
-            />
-          )}
-          {/*
-            By themselves, the tiles' margins center them while they fit, and leave their start in reach
-            once they scroll. With a screen they scroll by themselves, in rows that stay as tall as their
-            tiles, and give way to their scrollbar: beside it, they're in the middle with it while they fit.
-          */}
-          <ul
-            aria-label="In the huddle"
-            className={cn("grid auto-rows-max", !stage ? "m-auto" : stage.beside ? "my-auto mr-auto max-h-full overflow-y-auto" : "min-h-0 flex-1 content-start justify-center overflow-y-auto")}
-            style={{ gap: TILE_GAP, gridTemplateColumns: `repeat(${columns}, ${stage ? `minmax(0, ${width}px)` : `${width}px`})` }}
-          >
-            <Tiles huddle={huddle} staged={stage?.user.id} onEnlarge={setChosen} shape={square ? "aspect-square" : "aspect-[4/3]"} />
-          </ul>
+      <div ref={setBody} className="flex min-h-0 flex-1">
+        <div className="relative flex min-h-0 min-w-0 flex-1">
+          <div ref={tiles} className={cn("flex min-h-0 min-w-0 flex-1 p-6 max-md:p-3", stage ? cn("gap-3", !stage.beside && "flex-col") : "overflow-auto")}>
+            {stage && (
+              <Stage
+                label={screenOf(nameOf(stage.user))}
+                stream={stage.stream}
+                shape={shape}
+                width={stage.screen}
+                onShape={(shape) => setShaped((last) => (last?.userId === stage.user.id && last.shape === shape ? last : { userId: stage.user.id, shape }))}
+                className={stage.beside ? "my-auto ml-auto" : "mx-auto"}
+              />
+            )}
+            {/*
+              By themselves, the tiles' margins center them while they fit, and leave their start in reach
+              once they scroll. With a screen they scroll by themselves, in rows that stay as tall as their
+              tiles, and give way to their scrollbar: beside it, they're in the middle with it while they fit.
+            */}
+            <ul
+              aria-label="In the huddle"
+              className={cn("grid auto-rows-max", !stage ? "m-auto" : stage.beside ? "my-auto mr-auto max-h-full overflow-y-auto" : "min-h-0 flex-1 content-start justify-center overflow-y-auto")}
+              style={{ gap: TILE_GAP, gridTemplateColumns: `repeat(${columns}, ${stage ? `minmax(0, ${width}px)` : `${width}px`})` }}
+            >
+              <Tiles huddle={huddle} staged={stage?.user.id} onEnlarge={setChosen} shape={square ? "aspect-square" : "aspect-[4/3]"} />
+            </ul>
+          </div>
+          {/* Last, so over the people and a screen they share. */}
+          <RisingReactions huddle={huddle} />
         </div>
         {/* A thread is its message's, so another huddle's is another thread. */}
         {room && threadId !== undefined && huddle.thread && <HuddleThread key={threadId} room={room} me={me} messageId={threadId} autoFocus={threadAsked} onClose={closeThread} />}
@@ -325,14 +367,20 @@ export function HuddleView({ huddle, room, me, onFailed }: Props) {
             <InviteTool onInvite={setInviteOpener} />
           </div>
         )}
-        <div className="col-start-2 flex gap-1.5">
-          <MicrophoneTool huddle={huddle} devices />
-          <CameraTool huddle={huddle} devices />
-          <SwitchCameraTool huddle={huddle} />
-          <ScreenTool huddle={huddle} />
-          {room && threadId !== undefined && <ThreadTool ref={threadTool} shown={huddle.thread} onShow={showThread} />}
-          {room && <MoreTool onInvite={setInviteOpener} />}
-        </div>
+        <HuddleReactions huddle={huddle} within={body}>
+          {(react) => (
+            <div className="col-start-2 flex gap-1.5">
+              <MicrophoneTool huddle={huddle} devices />
+              <CameraTool huddle={huddle} devices />
+              <SwitchCameraTool huddle={huddle} />
+              <ScreenTool huddle={huddle} />
+              <RaiseHandTool huddle={huddle} stickers />
+              <ReactTool />
+              {room && threadId !== undefined && <ThreadTool ref={threadTool} shown={huddle.thread} onShow={showThread} />}
+              <MoreTool onReact={react} onInvite={room ? setInviteOpener : undefined} />
+            </div>
+          )}
+        </HuddleReactions>
         <div className="flex justify-end">
           <LeaveButton />
         </div>

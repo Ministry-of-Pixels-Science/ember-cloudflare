@@ -44,7 +44,7 @@ function roomIcons(): Plugin {
 }
 
 /**
- * Serves Emojibase's English emoji data, which the composer's emoji picker reads (emoji-panel.tsx), at
+ * Serves Emojibase's English emoji data, which the emoji picker reads (emoji-panel.tsx), at
  * /emojibase/en/, from the emojibase-data package: from Ember itself, since the page's Content-Security-Policy
  * keeps it from asking a CDN, and a CDN would hear from everyone who opens the picker.
  */
