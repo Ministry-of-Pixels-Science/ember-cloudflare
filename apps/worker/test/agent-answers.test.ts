@@ -307,7 +307,7 @@ describe("An AI agent", () => {
     expect(await nextFrom(client, scout)).toMatchObject({ plainText: "Sunny." });
     const told = questions[0]!.body.messages[0]!.content;
     expect(told).toMatch(new RegExp(`^You are Scout of .+, asked in the room "general" by Ada Lovelace\\.\n\n${SCOUT.instructions.replace(/[.,]/g, "\\$&")}\n\nWrite at most 150 words\\. You can't search the web or open links\\.`));
-    expect(told).toMatch(/ Today is \w+, \w+ \d+, \d{4}\.$/);
+    expect(told).toMatch(/ Today is \w+, \w+ \d+, \d{4} at \d{2}:\d{2}\.$/);
     expect(told).not.toContain("{{");
     client.close();
   });
@@ -690,7 +690,7 @@ describe("Try it", () => {
     const trial = { ...TRIAL, name: "Grok", model: "xai/grok-4.7", thinking: "low", webSearch: true, question: "who won the latest Packers game?" };
     const questions = internet((asked) => {
       if (asked.url === WEB_SEARCH) return Response.json({ success: true, result: { items: [{ ...DOCS, description: "The Packers won." }] } });
-      if (asked.body.messages.at(-1)?.role === "tool") return chatAnswer("The Packers won.");
+      if (asked.body.messages.at(-1)?.role === "tool") return chatAnswer("The Packers won [1].");
       const call = { id: "call_0", type: "function", function: { name: "web_search", arguments: JSON.stringify({ query: "Packers" }) } };
       return Response.json({ choices: [{ message: { role: "assistant", content: null, tool_calls: [call] }, finish_reason: "tool_calls" }], usage: { completion_tokens: 20 } });
     });

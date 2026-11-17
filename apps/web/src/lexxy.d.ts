@@ -44,6 +44,9 @@ declare module "@37signals/lexxy" {
     select(anchorOffset?: number, focusOffset?: number): unknown;
     getTextContentSize(): number;
     setTextContent(text: string): this;
+    /** Its formats, as bits, as a selection's are. */
+    getFormat(): number;
+    getStyle(): string;
   }
 
   /** A place in the editor: in a text node, at an offset, or in an element, before its child at an offset. */
@@ -53,6 +56,8 @@ declare module "@37signals/lexxy" {
     offset: number;
     getNode(): LexicalNode;
     set(key: string, offset: number, type: "text" | "element"): void;
+    /** Whether it's the same place as `point`. */
+    is(point: Point): boolean;
   }
 
   /** The parts of Lexical's RangeSelection that the composer uses. */
@@ -97,6 +102,10 @@ declare module "@37signals/lexxy" {
     ElementNode: typeof ElementNode;
     $getSelection(): unknown;
     $isRangeSelection(selection: unknown): selection is RangeSelection;
+    /** The selection the page's `selection` is in the editor's text, if it's in it. */
+    $createRangeSelectionFromDom(selection: Selection | null, editor: LexicalEditor): RangeSelection | null;
+    /** The page's selection in `window`. */
+    getDOMSelection(window: Window | null): Selection | null;
     $copyNode<Node extends LexicalNode>(node: Node): Node;
     $createParagraphNode(): ParagraphNode;
     $createTextNode(text: string): TextNode;

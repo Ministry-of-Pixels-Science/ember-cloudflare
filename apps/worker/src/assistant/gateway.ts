@@ -13,6 +13,7 @@ import {
 } from "@ember/protocol/assistant";
 import type { Env } from "../env";
 import { isLoopback } from "../loopback";
+import { citedIn } from "./citations";
 import { isMessages, isObject, isResponses } from "./formats";
 import {
   decided,
@@ -101,7 +102,8 @@ const WEB_SEARCH_FUNCTION = {
   type: "function",
   function: {
     name: "web_search",
-    description: "Search the web for what's current, or what you don't know. It answers with the pages it finds, each with its title, address and what it says.",
+    description:
+      "Search the web for what's current, or what you don't know. It answers with the pages it finds, each numbered, with its title, address and what it says. Cite each page you use by its number in brackets, such as [1], after what you take from it: the chat names the pages you cite under your answer.",
     parameters: {
       type: "object",
       properties: { query: { type: "string", description: "What to search for, in a few words, as you'd type it into a search engine." } },
@@ -241,14 +243,16 @@ export interface Source {
 
 /**
  * A model's answer: its text, whether it was cut short, as it took every token it could, and the pages
- * it came from, when it used the web: those it cites, then those it read, or those Ember's searches found
- * for one of Workers AI's, which can't cite them. When none of those searches found any, as Cloudflare's
- * Web Search API refused them, why it did.
+ * it came from, when it used the web: those it cites, then those it read, as its provider says, or, for
+ * Grok or one of Workers AI's, those it cites of the pages Ember's searches found (`citedIn`). Whether
+ * those searches found any, which it may cite none of, or, when none did, as Cloudflare's Web Search API
+ * refused them, why.
  */
 export interface Answered {
   text: string;
   cut?: true;
   sources?: Source[];
+  searched?: true;
   searchRefused?: GatewayRefusal;
 }
 
@@ -445,9 +449,10 @@ async function answering(env: Env, gateway: Gateway, question: Question, signal:
 /**
  * Ember's own tool for searching the web, as one of the tools it runs, for a model in Chat Completions,
  * Grok, that may search the web for the question it's asked, `asked()` as it is by each search, what an
- * answer comes to with the pages its searches found (`withSearches`), as it can't cite them, and those
+ * answer comes to with the pages it cites of those its searches found (`withSearches`), and those
  * searches, which an answer that waits keeps; or null for one in any other format, or that may not. An
- * answer that waited goes on from its searches `before`.
+ * answer that waited goes on from its searches `before`, numbering the pages its searches find after
+ * theirs.
  */
 function searchingInChat(
   env: Env,
@@ -473,8 +478,9 @@ function searchingInChat(
         console.error(`${gateway.model}'s search of the web failed: ${result.refusal}`);
         throw new ToolError(SEARCH_FAILED);
       }
+      const first = found.flat().length + 1;
       found.push(result);
-      return whatWasFound(result);
+      return whatWasFound(result, first);
     },
   };
   return { tool, sourced: (answered) => withSearches(answered, found, searchRefused), searches: () => ({ found, ...(searchRefused && { refused: searchRefused }) }) };
@@ -483,9 +489,15 @@ function searchingInChat(
 /** What a model is told when Cloudflare's Web Search API refused its search. */
 const SEARCH_FAILED = "The search failed, so you can't search the web now. Answer without it, and say that you couldn't search.";
 
-/** What a model reads of the pages a search of the web found, `result`. */
-const whatWasFound = (result: (Source & { text: string })[]) =>
-  result.length > 0 ? result.map(({ url, title, text }, n) => `${n + 1}. ${title || url}\n${url}\n${text}`).join("\n\n") : "The search found nothing.";
+/**
+ * What a model reads of the pages a search of the web found, `result`: each with its number, counted on
+ * from `first`, after the pages the answer's searches found before, which it cites the page by.
+ */
+function whatWasFound(result: (Source & { text: string })[], first: number): string {
+  if (result.length === 0) return "The search found nothing.";
+  const pages = result.map(({ url, title, text }, n) => `[${first + n}] ${title || url}\n${url}\n${text}`);
+  return [...pages, `Cite a page you use by its number in brackets, such as [${first}], after what you take from it.`].join("\n\n");
+}
 
 /**
  * What the model `gateway` names answers `question` without Ember's tools, once it was `refused` going on
@@ -608,7 +620,7 @@ const listOf = (value: unknown): unknown[] => (Array.isArray(value) ? value : []
  * times as it likes, which Ember runs (`searchedFor`) and answers it with what was found, until it answers
  * in words, has taken every token the answer may, thinking among them, or has searched as much as an
  * answer may, when each search it asks for after that is answered with that it can't, and it's asked once
- * more. Its sources are the pages its searches found, as it can't cite them.
+ * more. Its sources are the pages it cites of those its searches found, by the numbers Ember gives them.
  */
 async function askWorkersAi(env: Env, gateway: Gateway, question: Question, signal: AbortSignal): Promise<Answered | GatewayRefusal> {
   const request = requestOf(gateway, question);
@@ -644,8 +656,9 @@ async function askWorkersAi(env: Env, gateway: Gateway, question: Question, sign
         console.error(`${gateway.model}'s search of the web failed: ${result.refusal}`);
         return SEARCH_FAILED;
       }
+      const first = found.flat().length + 1;
       found.push(result);
-      return whatWasFound(result);
+      return whatWasFound(result, first);
     });
     // Each turn of calls counts as a search at least, so that calls of no search still end.
     searched += searches.filter((query) => query !== null).length || 1;
@@ -690,18 +703,18 @@ function jsonIn(text: string): unknown {
 const completionTokensIn = (body: unknown) => (isObject(body) && isObject(body.usage) && typeof body.usage.completion_tokens === "number" ? body.usage.completion_tokens : 0);
 
 /**
- * `answered`, a Workers AI model's answer, or Grok's, with the pages its searches, `found`, found, the first of each
- * search's, then the second of each, and so on, each once, no more than an answer names, or else, when
- * none found any as Cloudflare's Web Search API refused them, why, `searchRefused`.
+ * `answered`, a Workers AI model's answer, or Grok's, without the citations it writes of the pages its
+ * searches found, `found`, numbered in the order it read them, and with the pages it cites, each once,
+ * no more than an answer names (`citedIn`), saying it searched; or else, when its searches found none as
+ * Cloudflare's Web Search API refused them, why, `searchRefused`.
  */
 function withSearches(answered: Answered | GatewayRefusal, found: Source[][], searchRefused: GatewayRefusal | undefined): Answered | GatewayRefusal {
   if ("refusal" in answered) return answered;
-  const named = new Set<string>();
-  const most = Math.max(0, ...found.map((results) => results.length));
-  const sources = Array.from({ length: most }, (_, rank) => found.flatMap((results) => results[rank] ?? [])).flat();
-  const unnamed = sources.filter(({ url }) => !named.has(url) && named.add(url)).slice(0, MAX_SOURCES).map(({ url, title }) => ({ url, title }));
-  if (unnamed.length > 0) return { ...answered, sources: unnamed };
-  return searchRefused ? { ...answered, searchRefused } : answered;
+  const pages = found.flat();
+  if (pages.length === 0) return searchRefused ? { ...answered, searchRefused } : answered;
+  const { text, cited } = citedIn(answered.text, pages);
+  const sources = cited.slice(0, MAX_SOURCES).map(({ url, title }) => ({ url, title }));
+  return { ...answered, text: text.trim() || answered.text, searched: true, ...(sources.length > 0 && { sources }) };
 }
 
 /**
