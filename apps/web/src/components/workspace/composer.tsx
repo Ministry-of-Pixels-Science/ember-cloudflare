@@ -446,7 +446,7 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
             </p>
           )}
         </div>
-        <div className="flex min-h-[108px] min-w-0 flex-col rounded-[12px] border bg-surface p-3 max-md:min-h-[100px] max-md:p-2.5">
+        <div className="@container flex min-h-[108px] min-w-0 flex-col rounded-[12px] border bg-surface p-3 max-md:min-h-[100px] max-md:p-2.5">
           {formattingShown && (
             <FormattingToolbar
               formatting={formatting}
@@ -481,7 +481,7 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
               )}
             </Suspense>
           </div>
-          <div className="flex flex-none items-center gap-0.5">
+          <div className="flex flex-none items-center gap-0.5 touch:@max-[28rem]:flex-wrap">
             {/* Upload from your computer's, and Cmd or Ctrl+O's, file picker. */}
             <input
               ref={fileField}
@@ -538,9 +538,11 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
                 <AtSign className="size-[18px] opacity-70" />
               </button>
             </ShortcutTooltip>
-            {/* For fingers, the box sits far enough into its label for a fingertip on it to land on the label. */}
+            {/* For fingers, the box sits far enough into its label for a fingertip on it to land on the label, and
+                where their bigger buttons would leave the label too little room, as on a phone held upright, it
+                takes a line of its own above them. */}
             {threadId !== undefined && (
-              <label className="mr-2 ml-2.5 flex min-w-0 cursor-pointer items-center gap-[7px] text-[13px] leading-[18px] text-message-muted touch:ml-0 touch:min-h-11 touch:pl-3.5 touch:text-sm">
+              <label className="mr-2 ml-2.5 flex min-w-0 cursor-pointer items-center gap-[7px] text-[13px] leading-[18px] text-message-muted touch:ml-0 touch:min-h-11 touch:pl-3.5 touch:text-sm touch:@max-[28rem]:order-first touch:@max-[28rem]:mr-0 touch:@max-[28rem]:basis-full">
                 <input
                   type="checkbox"
                   checked={alsoSend}
