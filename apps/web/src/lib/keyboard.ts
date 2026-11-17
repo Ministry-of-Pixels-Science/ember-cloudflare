@@ -1,3 +1,5 @@
+import { FORMATTING_NAMES, type FormattingKey } from "./formatting";
+
 /** Phones and tablets: their on-screen keyboards have no Shift+Enter. */
 export const hasTouchKeyboard = () => matchMedia("(pointer: coarse)").matches;
 
@@ -57,24 +59,28 @@ export const huddleShortcut = (apple = appleKeyboard()): Shortcut =>
 export const muteShortcut = (apple = appleKeyboard()): Shortcut =>
   apple ? { keys: ["⌘", "⇧", "Space"], aria: "Meta+Shift+Space" } : { keys: ["Ctrl", "Shift", "Space"], aria: "Control+Shift+Space" };
 
-/** Ctrl+K, or Cmd+K on a Mac, which opens the Link field of Lexxy's toolbar (its `data-hotkey="cmd+k ctrl+k"`). */
-export function opensLink(event: KeyboardEvent): boolean {
-  return event.key.toLowerCase() === "k" && event.ctrlKey !== event.metaKey && !event.altKey && !event.shiftKey;
-}
-
 /**
  * Whether a keypress in a message's editor should send it, as Campfire's composer_controller.js decides:
  * Enter sends and Shift+Enter starts a new line, except on touch screens, where Enter has to start the
- * new line and the Send button sends, and while the formatting toolbar is open, when Enter starts a new
- * paragraph. Cmd/Ctrl+Enter sends everywhere.
+ * new line and the Send button sends. Cmd/Ctrl+Enter sends everywhere. Enter sends with the formatting
+ * row showing too, as Slack's does, where Campfire's started a new paragraph while its toolbar was open.
  *
  * Campfire treats any touch-capable device that way, and doesn't send on Cmd/Ctrl+Enter there either;
  * this checks the primary pointer instead, so a laptop with a touchscreen still sends on Enter.
  */
-export function sendsMessage(event: KeyboardEvent, { toolbarOpen = false } = {}): boolean {
+export function sendsMessage(event: KeyboardEvent): boolean {
   if (event.key !== "Enter" || event.isComposing) return false;
   if (event.metaKey || event.ctrlKey) return true;
-  return !event.shiftKey && !toolbarOpen && !hasTouchKeyboard();
+  return !event.shiftKey && !hasTouchKeyboard();
+}
+
+/**
+ * Shift+Enter with nothing else held where Enter sends, as it does but on touch screens: the one way
+ * there to a new line, or a list's next item.
+ */
+export function breaksLine(event: KeyboardEvent): boolean {
+  if (event.key !== "Enter" || !event.shiftKey || event.isComposing || event.ctrlKey || event.metaKey || event.altKey) return false;
+  return !hasTouchKeyboard();
 }
 
 /**
@@ -103,6 +109,60 @@ const option = (apple: boolean) => (apple ? "⌥" : "Alt");
 /** Shift, as each keyboard names it. */
 const shift = (apple: boolean) => (apple ? "⇧" : "Shift");
 
+/** A formatting key: the letter or digit pressed with Cmd, or with Ctrl off Apple's keyboards, and with Shift or Option as given. */
+interface FormattingKeys {
+  key: string;
+  shift?: boolean;
+  option?: boolean;
+}
+
+/**
+ * Slack's formatting keys, the first of each being the one its button's tooltip shows. Cmd or Ctrl+K
+ * links too, as it did before the row was Slack's.
+ */
+const FORMATTING_KEYS: Partial<Record<FormattingKey, FormattingKeys[]>> = {
+  bold: [{ key: "B" }],
+  italic: [{ key: "I" }],
+  underline: [{ key: "U" }],
+  strikethrough: [{ key: "X", shift: true }],
+  link: [{ key: "U", shift: true }, { key: "K" }],
+  orderedList: [{ key: "7", shift: true }],
+  bulletedList: [{ key: "8", shift: true }],
+  quote: [{ key: "9", shift: true }],
+  code: [{ key: "C", shift: true }],
+  codeBlock: [{ key: "C", shift: true, option: true }],
+};
+
+/** Cmd or Ctrl+B, I and U, which the editor takes itself. */
+const EDITORS_OWN = new Set<FormattingKey>(["bold", "italic", "underline"]);
+
+/** Shift and Option change the character a key types, so a key counts by where it is on the keyboard too. */
+const codeOf = (key: string) => (/\d/.test(key) ? `Digit${key}` : `Key${key}`);
+
+function pressedKeys(event: KeyboardEvent, { key, shift = false, option = false }: FormattingKeys): boolean {
+  if (event.shiftKey !== shift || event.altKey !== option || event.isComposing || !commandHeld(event)) return false;
+  return event.key.toUpperCase() === key || event.code === codeOf(key);
+}
+
+/** The formatting a key pressed in a message's text asks for, if it's one of Slack's keys that the editor doesn't take itself. */
+export function formattingShortcut(event: KeyboardEvent): FormattingKey | null {
+  for (const [action, keys] of Object.entries(FORMATTING_KEYS) as [FormattingKey, FormattingKeys[]][]) {
+    if (!EDITORS_OWN.has(action) && keys.some((combination) => pressedKeys(event, combination))) return action;
+  }
+  return null;
+}
+
+const shortcutOf = ({ key, shift: shifted, option: optioned }: FormattingKeys, apple: boolean): Shortcut => ({
+  keys: [command(apple), ...(optioned ? [option(apple)] : []), ...(shifted ? [shift(apple)] : []), key],
+  aria: [apple ? "Meta" : "Control", ...(optioned ? ["Alt"] : []), ...(shifted ? ["Shift"] : []), key].join("+"),
+});
+
+/** The keys of a formatting button that has them, on this keyboard, as its tooltip shows them. */
+export function formattingKeys(action: FormattingKey, apple = appleKeyboard()): Shortcut | undefined {
+  const keys = FORMATTING_KEYS[action]?.[0];
+  return keys && shortcutOf(keys, apple);
+}
+
 /**
  * What the keyboard shortcuts dialog lists, a group at a time: each key the matchers here take, so a
  * shortcut added to them is listed beside them.
@@ -127,11 +187,18 @@ export const SHORTCUTS: { group: string; rows: ShortcutRow[] }[] = [
     group: "Write a message",
     rows: [
       { action: "Send", keys: () => ["Enter"] },
-      { action: "Send with the formatting toolbar open, or on a touch screen", keys: (apple) => [command(apple), "Enter"] },
-      { action: "Start a new line", keys: (apple) => [shift(apple), "Enter"] },
+      { action: "Send, on a touch screen too", keys: (apple) => [command(apple), "Enter"] },
+      { action: "Start a new line, or a list's next item", keys: (apple) => [shift(apple), "Enter"] },
       { action: "Add a link", keys: (apple) => [command(apple), "K"] },
       { action: "Edit your last message, with nothing written", keys: () => ["↑"] },
     ],
+  },
+  {
+    group: "Format text",
+    rows: (Object.entries(FORMATTING_KEYS) as [FormattingKey, FormattingKeys[]][]).map(([action, [keys]]) => ({
+      action: FORMATTING_NAMES[action],
+      keys: (apple) => shortcutOf(keys!, apple).keys,
+    })),
   },
   {
     group: "Edit a message",

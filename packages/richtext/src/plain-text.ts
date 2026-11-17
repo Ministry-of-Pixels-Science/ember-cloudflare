@@ -1,4 +1,5 @@
-// `ActionText::PlainTextConversion`.
+// `ActionText::PlainTextConversion`, with a heading of any size ending a block, as `h1` does there, since Ember's
+// formatting row writes `h2` and `h3` as well as Campfire's `h1`.
 
 import { chompNewlines, isBlank } from "./ruby";
 import { ancestors, nodeName, textContent, type Element, type Node, type Parent } from "./tree";
@@ -17,6 +18,11 @@ function plainTextFor(node: Node | Parent, index = 0): string {
     case "unsupported":
       return "";
     case "h1":
+    case "h2":
+    case "h3":
+    case "h4":
+    case "h5":
+    case "h6":
     case "p":
       return block(children());
     case "ul":

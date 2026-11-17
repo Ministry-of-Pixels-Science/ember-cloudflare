@@ -74,152 +74,26 @@ lexxy-editor lexxy-code-language-picker select {
   }
 }
 
-/* The toolbar only shows when rich text mode is toggled on (see composer.css) */
-lexxy-toolbar {
-  /* Wide, airy button spacing like the Trix toolbar */
-  --lexxy-toolbar-gap: 1.3em;
-
-  /* Match the compact size of the Trix toolbar buttons, with Iconoir's 24px grid at the scale Lexxy
-     draws its 18px one, 1.125em */
-  --lexxy-toolbar-button-size: 1.7em;
-  --lexxy-toolbar-icon-size: 1.5em;
-
-  display: none;
-  border-block-end: 0;
-  min-width: 0;
-  z-index: 3;
-
-  /* Tools Campfire doesn't offer, matching the Trix toolbar: underline,
-     color highlights, tables, dividers and undo/redo (history tools were
-     hidden under Trix as well) */
-  button[name="underline"],
-  button[name="table"],
-  button[name="divider"],
-  button[name="undo"],
-  button[name="redo"],
-  lexxy-highlight-dropdown {
-    display: none !important;
-  }
-
-  /* No group separator pipes, like the Trix toolbar */
-  .lexxy-editor__toolbar-button.lexxy-editor__toolbar-group-end::after {
-    display: none;
-  }
-
-  /* Dropdown panels: a solid surface with a uniform radius. Lexxy derives
-     the panel's radius and gap from --lexxy-toolbar-gap, which Campfire
-     repurposes for button spacing */
-  .lexxy-editor__toolbar-dropdown [data-dropdown-panel] {
-    --lexxy-color-canvas: var(--background);
-    --lexxy-color-ink-lightest: var(--surface);
-    --lexxy-color-selected: var(--hover);
-    --lexxy-color-selected-hover: var(--surface);
-
-    border: 1px solid var(--border);
-    border-radius: 0.5em;
-    gap: 0.25em;
-    padding: 0.25em;
-  }
-
-  .lexxy-editor__toolbar-dropdown > .lexxy-editor__toolbar-button[aria-expanded="true"] {
-    border-radius: var(--lexxy-radius);
-  }
-}
-
 /*
- * Iconoir's icons in place of Lexxy's, as the project's owner chose for every icon Ember draws. Lexxy
- * writes its own into each button, so each is painted over: in the button's text color, through the
- * Iconoir file in apps/web/src/components/icons/iconoir/ named for the button, with Lexxy's shapes
- * hidden. The paint is kept in forced colors, which would otherwise turn it the canvas's color.
+ * Iconoir's trash in place of Lexxy's, as the project's owner chose Iconoir for every icon Ember draws, on
+ * the remove button of a link preview or an attachment while it's selected. Lexxy writes its own icon into
+ * the button, so it's painted over: in the button's text color, through Iconoir's file in
+ * apps/web/src/components/icons/iconoir/, with Lexxy's shapes hidden. The paint is kept in forced colors,
+ * which would otherwise turn it the canvas's color.
  */
-:is(
-    lexxy-toolbar
-      :is(
-        button[name="bold"],
-        button[name="italic"],
-        button[name="strikethrough"],
-        button[name="format"],
-        button[data-heading],
-        button[name="paragraph"],
-        button[name="clear-formatting"],
-        button[name="link"],
-        button[name="quote"],
-        button[name="code"],
-        button[name="unordered-list"],
-        button[name="ordered-list"],
-        .lexxy-editor__toolbar-overflow > [data-dropdown-trigger]
-      ),
-    .lexxy-node-delete
-  )
-  > svg {
-  background-color: currentColor;
-  forced-color-adjust: none;
-  mask: var(--iconoir) center / contain no-repeat;
-
-  > * {
-    display: none;
-  }
-}
-
-lexxy-toolbar {
-  button[name="bold"] {
-    --iconoir: url("../icons/iconoir/bold.svg");
-  }
-
-  button[name="italic"] {
-    --iconoir: url("../icons/iconoir/italic.svg");
-  }
-
-  button[name="strikethrough"] {
-    --iconoir: url("../icons/iconoir/strikethrough.svg");
-  }
-
-  /* Text formatting, and its menu's heading. */
-  button:is([name="format"], [data-heading]) {
-    --iconoir: url("../icons/iconoir/h-square.svg");
-  }
-
-  button[name="paragraph"] {
-    --iconoir: url("../icons/iconoir/text.svg");
-  }
-
-  button[name="clear-formatting"] {
-    --iconoir: url("../icons/iconoir/erase.svg");
-  }
-
-  button[name="link"] {
-    --iconoir: url("../icons/iconoir/link.svg");
-  }
-
-  button[name="quote"] {
-    --iconoir: url("../icons/iconoir/quote.svg");
-  }
-
-  button[name="code"] {
-    --iconoir: url("../icons/iconoir/code.svg");
-  }
-
-  button[name="unordered-list"] {
-    --iconoir: url("../icons/iconoir/list.svg");
-  }
-
-  button[name="ordered-list"] {
-    --iconoir: url("../icons/iconoir/numbered-list-left.svg");
-  }
-
-  /* The … that holds the buttons a narrow toolbar has no room for. */
-  .lexxy-editor__toolbar-overflow > [data-dropdown-trigger] {
-    --iconoir: url("../icons/iconoir/more-horiz.svg");
-  }
-}
-
-/* The remove button on a link preview or an attachment while it's selected, at the toolbar's scale. */
 .lexxy-node-delete {
   --iconoir: url("../icons/iconoir/trash.svg");
 
   > svg {
+    background-color: currentColor;
     block-size: 1.5em;
+    forced-color-adjust: none;
     inline-size: 1.5em;
+    mask: var(--iconoir) center / contain no-repeat;
+
+    > * {
+      display: none;
+    }
   }
 }
 
@@ -390,8 +264,19 @@ action-text-attachment[content-type~="application/vnd.actiontext.opengraph-embed
     padding: 0 !important;
   }
 
+  /* Slack's Big, Medium and Small heading, as messages show them (index.css). */
   h1 {
     font-size: 1.4rem !important;
+    margin: 0;
+  }
+
+  h2 {
+    font-size: 1.2rem !important;
+    margin: 0;
+  }
+
+  h3 {
+    font-size: 1.05rem !important;
     margin: 0;
   }
 }
@@ -482,11 +367,11 @@ action-text-attachment[content-type~="application/vnd.actiontext.opengraph-embed
 /*
  * The composer: 14px text, between 40px and min(32dvh, 300px) tall, then scrolling. At 900px wide and
  * below it's at least 30px, and there and on touch screens its text is 16px, as `touch:` sizes fields,
- * so iOS doesn't zoom in. Formatting options shows the toolbar under the text, wrapping, with its menus
- * opening upward.
+ * so iOS doesn't zoom in.
  *
  * The text takes the card's padding around it and all the room above the buttons, so a tap anywhere
- * there lands in it, 44px tall on phones. The sizes above are the text's, inside that padding.
+ * there lands in it, 44px tall on phones. The sizes above are the text's, inside that padding. Under the
+ * formatting row, it takes the card's padding at its sides, and 6px over it.
  */
 .composer {
   lexxy-editor {
@@ -509,43 +394,25 @@ action-text-attachment[content-type~="application/vnd.actiontext.opengraph-embed
   }
 
   .lexxy-editor__content {
+    /* The padding over the text, which is the card's, except under the formatting row. */
+    --text-padding: var(--composer-padding);
+
     flex: 1;
-    margin: calc(-1 * var(--composer-padding)) calc(-1 * var(--composer-padding)) 0;
-    max-block-size: calc(min(32dvh, 300px) + var(--composer-padding) + 4px);
-    min-block-size: calc(40px + var(--composer-padding) + 4px);
+    margin: calc(-1 * var(--text-padding)) calc(-1 * var(--composer-padding)) 0;
+    max-block-size: calc(min(32dvh, 300px) + var(--text-padding) + 4px);
+    min-block-size: calc(40px + var(--text-padding) + 4px);
     overflow-y: auto;
-    padding: var(--composer-padding) var(--composer-padding) 4px;
+    padding: var(--text-padding) var(--composer-padding) 4px;
 
     &:focus {
       outline: none;
     }
   }
 
-  &[data-toolbar] {
-    lexxy-toolbar {
-      --lexxy-toolbar-gap: 4px;
+  &[data-formatting] .lexxy-editor__content {
+    --text-padding: 6px;
 
-      display: flex;
-      flex-wrap: wrap;
-      /* 8px from the text, less the 4px the text keeps under it, and 4px to the buttons */
-      margin-block: 4px;
-    }
-
-    .lexxy-editor__content {
-      order: -1;
-    }
-  }
-
-  /* Campfire's composer.css, which puts 0.4em between the text and the toolbar on wide screens with a mouse */
-  @media (min-width: 100ch) and (any-hover: hover) and (pointer: fine) {
-    &[data-toolbar] lexxy-toolbar {
-      margin-block-start: calc(0.4em - 4px);
-    }
-  }
-
-  lexxy-toolbar [data-dropdown-panel] {
-    inset-block-end: 100%;
-    inset-block-start: auto;
+    margin-block-start: 0;
   }
 
   @media (width < 56.3125rem) {
@@ -554,7 +421,7 @@ action-text-attachment[content-type~="application/vnd.actiontext.opengraph-embed
     }
 
     .lexxy-editor__content {
-      min-block-size: calc(30px + var(--composer-padding) + 4px);
+      min-block-size: calc(30px + var(--text-padding) + 4px);
     }
   }
 
@@ -566,26 +433,12 @@ action-text-attachment[content-type~="application/vnd.actiontext.opengraph-embed
 }
 
 /*
- * A message's editor (message-editor.tsx), after Campfire's composer.css: on wide screens with a mouse,
- * the formatting toolbar over the text, ruled off from it across the field.
+ * A message's editor (message-editor.tsx), after Campfire's composer.css, which has the formatting row over
+ * the text on wide screens with a mouse.
  */
 .message-edit {
-  @media (min-width: 100ch) and (any-hover: hover) and (pointer: fine) {
-    lexxy-toolbar {
-      display: flex;
-      border-block-end: 1px solid var(--border);
-      margin-inline: -0.8em;
-      padding-inline: 0.3em;
-      padding-block-end: 0.5em;
-    }
-
-    lexxy-editor {
-      margin-block-start: 8px;
-    }
-  }
-
   /*
-   * Where the toolbar doesn't show, the text takes the field's padding, as the composer's takes its
+   * Where the row doesn't show, the text takes the field's padding, as the composer's takes its
    * card's, so a tap anywhere in the field lands in it, and it's at least 44px tall.
    */
   @media not ((min-width: 100ch) and (any-hover: hover) and (pointer: fine)) {
