@@ -88,6 +88,17 @@ async function roomOf(env: Env, access: OutsideAccess, roomId: unknown): Promise
   return room;
 }
 
+/**
+ * What `reading` reads of room `room`, once the app still reaches the room, as it looks again then: the
+ * room may have been made private as it was read, or its person taken out of it, and what was read then
+ * written since.
+ */
+async function readIn<T>(env: Env, access: OutsideAccess, room: Room, reading: Promise<T>): Promise<T> {
+  const read = await reading;
+  await roomOf(env, access, room.id);
+  return read;
+}
+
 async function listRooms(env: Env, access: OutsideAccess): Promise<unknown> {
   return { rooms: (await workspace(env).outsideRooms(access)).map((room) => listedRoom(room, access.userId)) };
 }
@@ -96,7 +107,7 @@ async function listRooms(env: Env, access: OutsideAccess): Promise<unknown> {
 async function readRoom(env: Env, access: OutsideAccess, { room_id: roomId, before }: Record<string, unknown>): Promise<unknown> {
   const room = await roomOf(env, access, roomId);
   if (before !== undefined && typeof before !== "string") throw new Refused("Give `before` as a message's id.");
-  const page = await env.CHAT_ROOM.getByName(room.id).outsidePage(room.id, before === undefined ? {} : { before });
+  const page = await readIn(env, access, room, env.CHAT_ROOM.getByName(room.id).outsidePage(room.id, before === undefined ? {} : { before }));
   if (!page) throw new Refused("The room has no message with the id given as `before`.");
   return { room: shownRoom(room, access.userId), messages: page.messages.map(shownMessage), older: page.hasMore && page.messages.length > 0 ? page.messages[0]!.id : null };
 }
@@ -104,7 +115,7 @@ async function readRoom(env: Env, access: OutsideAccess, { room_id: roomId, befo
 /** A thread: the message it's under, then its newest replies, oldest first. */
 async function readThread(env: Env, access: OutsideAccess, { room_id: roomId, message_id: messageId }: Record<string, unknown>): Promise<unknown> {
   const room = await roomOf(env, access, roomId);
-  const thread = typeof messageId === "string" ? await env.CHAT_ROOM.getByName(room.id).botThread(room.id, messageId) : null;
+  const thread = typeof messageId === "string" ? await readIn(env, access, room, env.CHAT_ROOM.getByName(room.id).botThread(room.id, messageId)) : null;
   if (!thread) throw new Refused("The room has no message with that id that a thread could be under. A reply's thread is under the message its `reply_to` names.");
   const [message, ...replies] = thread;
   return { room: shownRoom(room, access.userId), message: shownMessage(message!), replies: replies.map(shownMessage) };
@@ -120,8 +131,14 @@ async function searchMessages(env: Env, access: OutsideAccess, { words, room_id:
   if (rooms.length === 0) throw new Refused(roomId === undefined ? "This connection reaches no room of theirs to search." : NO_ROOM);
   const { hits, next } = await searchIndex(env).search({ terms: searchTerms(sanitizeSearch(words)), roomIds: rooms.map(({ id }) => id), sort: "newest", after: after ?? null });
   const taken = hits.slice(0, MESSAGES_FOUND);
-  const byId = new Map(rooms.map((room) => [room.id, shownRoom(room, access.userId)]));
-  const matches = (await matchesOf(env, taken)).map(({ message }) => ({ room: byId.get(message.roomId)!, ...shownMessage(message) }));
+  const found = await matchesOf(env, taken);
+  // Of the rooms it found something in, it answers from those it still reaches, as `readIn` does.
+  const reached = new Set((await workspace(env).outsideReadable(access)).map(({ id }) => id));
+  const byId = new Map(rooms.filter(({ id }) => reached.has(id)).map((room) => [room.id, shownRoom(room, access.userId)]));
+  const matches = found.flatMap(({ message }) => {
+    const room = byId.get(message.roomId);
+    return room ? [{ room, ...shownMessage(message) }] : [];
+  });
   // The index numbers its matches, so the search after this one starts past the last it took.
   return { matches, next: taken.length < hits.length ? taken.at(-1)!.number : next };
 }

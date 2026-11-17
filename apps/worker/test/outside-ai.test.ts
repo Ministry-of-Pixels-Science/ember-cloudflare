@@ -13,8 +13,10 @@ import {
   type YourOutsideAi,
 } from "@ember/protocol/outside";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ChatRoom } from "../src/chat-room";
 import { toBase64url } from "../src/encoding";
 import { MAX_SHOWN_LENGTH, MESSAGES_FOUND, SENDING_TOO_FAST } from "../src/outside/tools";
+import { SearchIndex } from "../src/search-index";
 import { MAX_OUTSIDE_CLIENTS, OUTSIDE_SENDS_PER_MINUTE } from "../src/workspace";
 import { api, connect, cookieOf, createRoom, direct, freshDeploy, origin, post, roomSql, settle, shown, signIn, upload, workspaceSql, type Session, type Socket } from "./support";
 
@@ -170,6 +172,28 @@ async function refusal(token: string, name: string, given: Record<string, unknow
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Waits until `done` says so, looking every few milliseconds. */
+async function until(done: () => boolean): Promise<void> {
+  while (!done()) await sleep(5);
+}
+
+/**
+ * Holds each call of `method` of `prototype`'s objects as it begins, until the test lets them `go` on,
+ * with what waits until as many `calls` have `reached` it. The calls are made in a Durable Object's own
+ * context, and neither it nor the test goes on from the other's promises without taking its context, so
+ * each waits by looking.
+ */
+function holding<T extends object>(prototype: T, method: keyof T & string): { reached: (calls?: number) => Promise<void>; go: () => void } {
+  let [arrived, gone] = [0, false];
+  const held = prototype[method] as (...args: unknown[]) => unknown;
+  vi.spyOn(prototype as Record<string, (...args: unknown[]) => unknown>, method).mockImplementation(async function (this: T, ...args: unknown[]) {
+    arrived++;
+    await until(() => gone);
+    return held.apply(this, args);
+  });
+  return { reached: (calls = 1) => until(() => arrived >= calls), go: () => void (gone = true) };
+}
 
 /** What a tool tells an app of a room it doesn't reach, its person's or not. */
 const NO_ROOM = "No room this connection reaches has that id. list_rooms lists the rooms it reaches.";
@@ -931,6 +955,19 @@ describe("Where a connected AI app reaches", () => {
     return { administrator, member, general, dm, leads, secret, kumquats, tokens, token: tokens.access_token };
   }
 
+  /** Ada, `administrator`, makes room `room` private to her and Grace, `member`, once the rooms have heard every revocation that queues. */
+  async function madePrivate(room: RoomId, administrator: Session, member: Session): Promise<void> {
+    const changed = await api(`/api/rooms/${room}`, { method: "PATCH", headers: as(administrator), body: JSON.stringify({ kind: "closed", memberIds: [administrator.user.id, member.user.id] }) });
+    expect(changed.status, await changed.clone().text()).toBe(200);
+    await vi.waitFor(async () => expect(await workspaceSql("SELECT count(*) AS n FROM pending_revocations")).toEqual([{ n: 0 }]), { timeout: 5_000 });
+  }
+
+  /** Ada, `administrator`, opens room `room` to everyone again. */
+  async function opened(room: RoomId, administrator: Session): Promise<void> {
+    const changed = await api(`/api/rooms/${room}`, { method: "PATCH", headers: as(administrator), body: JSON.stringify({ kind: "open" }) });
+    expect(changed.status, await changed.clone().text()).toBe(200);
+  }
+
   /** What Ember tells the app that asks with `token` of itself, as it starts. */
   const instructionsFor = async (token: string) =>
     ((await asked(token, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "Claude", version: "1" } })).result as { instructions: string }).instructions;
@@ -991,12 +1028,65 @@ describe("Where a connected AI app reaches", () => {
     await caughtUp(launch);
     expect((await found<{ messages: Array<{ id: string }> }>(token, "read_room", { room_id: launch })).messages.map(({ id }) => id)).toEqual([plan.id]);
 
-    const changed = await api(`/api/rooms/${launch}`, { method: "PATCH", headers: as(administrator), body: JSON.stringify({ name: "Launch", kind: "closed", memberIds: [administrator.user.id, member.user.id] }) });
-    expect(changed.status, await changed.clone().text()).toBe(200);
+    await madePrivate(launch, administrator, member);
     expect((await roomsFor(token)).map(({ id }) => id)).not.toContain(launch);
     expect(await refusal(token, "read_room", { room_id: launch })).toBe(NO_ROOM);
     expect(await refusal(token, "send_message", { room_id: launch, text: "Is it still on?" })).toBe(NO_ROOM);
     expect((await found<Found>(token, "search_messages", { words: "launch plan" })).matches).toEqual([]);
+  });
+
+  it("is none of a room made private as it reads there, nor of what's said there since", async () => {
+    const { administrator, member, kumquats, token } = await reaching();
+    const launch = (await createRoom("Launch", { as: administrator })).id;
+    const plan = await said(launch, administrator, "The kumquat launch plan");
+    await caughtUp(launch);
+
+    // Each read is held as it begins, past the room's check, while the room is made private and something's said there.
+    const page = holding(ChatRoom.prototype, "outsidePage");
+    const reading = refusal(token, "read_room", { room_id: launch });
+    await page.reached();
+    await madePrivate(launch, administrator, member);
+    await said(launch, administrator, "The launch moves to Friday");
+    page.go();
+    expect(await reading).toBe(NO_ROOM);
+
+    await opened(launch, administrator);
+    const thread = holding(ChatRoom.prototype, "botThread");
+    const readingThread = refusal(token, "read_thread", { room_id: launch, message_id: plan.id });
+    await thread.reached();
+    await madePrivate(launch, administrator, member);
+    const socket = await connect(launch, administrator);
+    await reply(socket, plan, "At the old observatory");
+    socket.close();
+    thread.go();
+    expect(await readingThread).toBe(NO_ROOM);
+
+    await opened(launch, administrator);
+    const search = holding(SearchIndex.prototype, "search");
+    const searching = found<Found>(token, "search_messages", { words: "kumquat" });
+    await search.reached();
+    await madePrivate(launch, administrator, member);
+    await said(launch, administrator, "Bring a kumquat on Friday");
+    await caughtUp(launch);
+    search.go();
+    // What it found in the open room it still reaches is all it's told.
+    expect((await searching).matches.map(({ id }) => id)).toEqual([kumquats.general.id]);
+  });
+
+  it("sends nothing to a room made private as it sends there, unless its person let it into private rooms", async () => {
+    const { administrator, member, token } = await reaching();
+    const everywhere = (await connected(member, { scope: "read write private" }, [], ["private"])).tokens.access_token;
+    const launch = (await createRoom("Launch", { as: administrator })).id;
+
+    // Both sends are held as they begin, past the room's check, while the room is made private.
+    const sending = holding(ChatRoom.prototype, "createOutsideMessage");
+    const sends = [refusal(token, "send_message", { room_id: launch, text: "Is it still on?" }), found(everywhere, "send_message", { room_id: launch, text: "See you on Friday" })];
+    await sending.reached(2);
+    await madePrivate(launch, administrator, member);
+    sending.go();
+    const [refused] = await Promise.all(sends);
+    expect(refused).toBe(NO_ROOM);
+    expect(await textsIn(launch)).toEqual(["See you on Friday"]);
   });
 
   it("asks to read too when an app asks for its person's direct messages and private rooms alone, and gives reading alone unless they're ticked", async () => {

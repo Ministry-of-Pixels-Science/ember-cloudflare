@@ -143,7 +143,7 @@ import {
 import { webPush } from "./push/keys";
 import { FixedWindowLimit } from "./rate-limit";
 import { urlOf } from "./request-url";
-import { sessionTag } from "./revocations";
+import { OPEN_ROOMS_ONLY, sessionTag } from "./revocations";
 import type { RoomEvent } from "./room-log";
 import { appConnector } from "./apps/connector";
 import { ACCESS_TTL_SECONDS, CODE_TTL_MS, provesChallenge, REFRESH_TTL_MS } from "./outside/oauth";
@@ -254,6 +254,8 @@ export type OutsideReach = Pick<OutsideAccess, "userId" | "scopes">;
 /** The person an AI app sends a message as, in a room they're in, as the room keeps who wrote it. */
 export interface OutsideSender {
   user: User;
+  /** What the room turns it away for a revocation of since the Workspace checked, as a socket's tags (`outsideTagsOf`). */
+  tags: string[];
   /** When the Workspace checked, in milliseconds since the epoch, as a room's socket has it. */
   authorizedAt: number;
 }
@@ -462,6 +464,13 @@ const isPrivate = (kind: RoomKind | null) => kind !== "open";
 
 /** Whether an AI app connected with `scopes` reaches a room of `kind`: one open to everyone, and with "private", a DM or a private room too. */
 const reaches = (scopes: readonly OutsideScope[], kind: RoomKind | null) => !isPrivate(kind) || scopes.includes("private");
+
+/**
+ * The tags of what an AI app connected as `userId` with `scopes` sends to a room, a revocation of which
+ * there turns it away: its person's, and, unless it reaches private rooms, the room's being made private
+ * (`OPEN_ROOMS_ONLY`).
+ */
+const outsideTagsOf = (userId: UserId, scopes: readonly OutsideScope[]) => (scopes.includes("private") ? [userId] : [userId, OPEN_ROOMS_ONLY]);
 
 /** The levels someone who `picked` them has of @ember's dials, where each starts for one they haven't picked, no higher than `most`. */
 const levelsOf = (picked: AssistantPicks | null, most: AnswerLevels): AnswerLevels =>
@@ -1666,15 +1675,16 @@ export class Workspace extends DurableObject<Env> {
 
   /**
    * The person `userId` as an AI app connected as them with `scopes` sends a message to room `roomId`,
-   * with when this checked, as a room's socket has it: null unless they're in the room and it's one the
-   * app reaches (`reaches`), or "limited" once their apps have sent as many in a minute as they may.
+   * with what the room turns it away for and when this checked, as a room's socket has them: null unless
+   * they're in the room and it's one the app reaches (`reaches`), or "limited" once their apps have sent
+   * as many in a minute as they may.
    */
   async outsideSender({ userId, scopes }: OutsideReach, roomId: RoomId): Promise<OutsideSender | "limited" | null> {
     // Before anything is read, as `roomAccess` takes it.
     const authorizedAt = Date.now();
     const [[user], { member }, kind] = await Promise.all([this.store.peopleWithIds([userId]), this.store.roomAccess(roomId, userId, null), this.store.roomKind(roomId)]);
     if (!user || !member || !reaches(scopes, kind)) return null;
-    return this.outsideSends.attempt(userId) ? { user, authorizedAt } : "limited";
+    return this.outsideSends.attempt(userId) ? { user, tags: outsideTagsOf(userId, scopes), authorizedAt } : "limited";
   }
 
   /**
@@ -4699,7 +4709,7 @@ export class Workspace extends DurableObject<Env> {
       let saved: SavedRoomChange;
       try {
         saved = await this.store.changeRoom(roomId, changes, CloseCode.Reconnect, now, new Date(now).toISOString());
-        queued = saved.removedIds.length > 0;
+        queued = saved.removedIds.length > 0 || saved.madePrivate;
       } finally {
         if (queued) await this.revocationsQueued(now);
       }
