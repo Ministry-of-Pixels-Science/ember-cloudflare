@@ -11,7 +11,8 @@ import { AI_GATEWAY_ACCOUNT, AI_GATEWAY_PORT } from "../../projects/workspace-se
 // any of its three formats. It answers with `HELLO` in the format asked, or, given a tool for searching
 // the web in Messages or Responses, with `FOUND`, citing `SOURCE`, as the model would once it had
 // searched, or, given Ember's own in Chat Completions, as Workers AI's models are, with a call of it, and
-// once told what it found, with `FOUND`, or, asked `CARD_QUESTION` last, with `CARDED` and a card's Slack
+// once told what it found, with `FOUND`, citing `SOURCE` by the number Ember gave it, which Ember takes
+// out, or, asked `CARD_QUESTION` last, with `CARDED` and a card's Slack
 // payload, or, asked `RECALL_QUESTION` last in Messages with the room's search among its tools, with a
 // call of it, and then with `RECALLED` and what the search found, or, asked `FILE_QUESTION` last in
 // Messages with an app's `create_issue` among its tools, with a call of that, and then with `FILED` and
@@ -193,8 +194,8 @@ const SEARCH_CALL = {
   ],
 };
 
-/** What Grok or a Workers AI model says in Chat Completions once Ember has told it what its search found. */
-const FOUND_IN_CHAT = answersSaying(FOUND)["chat/completions"];
+/** What Grok or a Workers AI model says in Chat Completions once Ember has told it what its search found, citing the page it found by its number. */
+const FOUND_IN_CHAT = answersSaying(`${FOUND} [1]`)["chat/completions"];
 
 /** Whether `body` gives Grok or a Workers AI model Ember's own tool for searching the web, a function. */
 const takesSearchFunction = (body: Record<string, unknown>) =>

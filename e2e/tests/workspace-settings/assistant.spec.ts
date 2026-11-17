@@ -227,7 +227,7 @@ test.describe("Ember AI", () => {
     await webSearch.click();
     await expect(card.getByRole("status")).toHaveText(`It searched the web and said: ${FOUND}`);
     await expect(webSearch).toBeChecked();
-    // The model called Ember's tool, which searched through the default gateway, and was told what it found.
+    // The model called Ember's tool, which searched through the default gateway, and was told what it found, numbered, and the number it cites is taken out of what it said.
     const searched = gateway.asked.findLast(({ path }) => path === `/accounts/${AI_GATEWAY_ACCOUNT.accountId}/ai/websearch/`);
     expect(searched).toMatchObject({
       authorization: `Bearer ${AI_GATEWAY_ACCOUNT.apiToken}`,
@@ -236,7 +236,7 @@ test.describe("Ember AI", () => {
     const told = gateway.asked.findLast(({ path, body }) => path === CHAT_PATH && Array.isArray(body.tools))!;
     expect(told).toMatchObject({ body: { model: GEMMA.id, tools: [{ type: "function", function: { name: "web_search" } }] } });
     expect((told.body.messages as Array<{ role: string; content: string }>).at(-1)).toEqual(
-      expect.objectContaining({ role: "tool", content: expect.stringContaining(SOURCE.url) as unknown }),
+      expect.objectContaining({ role: "tool", content: expect.stringContaining(`[1] ${SOURCE.title}\n${SOURCE.url}\n${FOUND}`) as unknown }),
     );
 
     await page.getByRole("link", { name: "Go Back" }).click();

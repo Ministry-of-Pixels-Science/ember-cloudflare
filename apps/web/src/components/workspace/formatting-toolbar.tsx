@@ -59,6 +59,7 @@ export function useFormatting(editor: RefObject<RichTextEditorHandle | null>) {
     event.preventDefault();
     event.stopPropagation();
     if (disabled(action)) return true;
+    editor.current?.catchUp();
     if (action === "link") openLink();
     else editor.current?.apply(action);
     return true;

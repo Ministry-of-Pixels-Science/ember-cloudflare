@@ -95,6 +95,7 @@ export default function RichTextEditor({ label, placeholder, rows, initialValue,
       formatted({ ...format.current, link: false });
     },
     startNewBlock: () => false,
+    catchUp: () => {},
   }));
 
   const keyPressed = useEffectEvent((event: KeyboardEvent) => onKeyDown?.(event));
