@@ -16,12 +16,17 @@ import type { Source } from "./gateway";
  */
 const CITATIONS = /[^\S\n]*(?<!\])((?:\[\^?\d{1,3}(?:[^\S\n]*[,–-][^\S\n]*\d{1,3})*\])+)(?![(:[\]])/g;
 
-/**
- * Where brackets in a block's text are never a citation: code in a span, as backticks fence it, and a web
- * address, up to what ends one, as a closing bracket does, with the parentheses it opens, so that its own
- * brackets stay.
- */
-const KEPT = /(`+)[\s\S]*?[^`]\1(?!`)|[a-z][a-z\d+.-]*:\/\/(?:[^\s<>()\]"'`]|\([^\s<>()"'`]*\))*/gi;
+/** Code in a span, as backticks fence it. */
+const CODE_SPAN = /(`+)[\s\S]*?[^`]\1(?!`)/;
+
+/** A link written in place, its text and where it goes, with the brackets and parentheses they hold, as in [the docs [2]](…/(a)[1]). */
+const INLINE_LINK = /\[(?:[^[\]\n]|\[[^[\]\n]*\])*\]\((?:[^\s()]|\([^\s()]*\))*(?:[^\S\n]+(?:"[^"\n]*"|'[^'\n]*'))?\)/;
+
+/** A web address, up to what ends one, as a closing bracket does, with the parentheses it opens. */
+const ADDRESS = /[a-z][a-z\d+.-]*:\/\/(?:[^\s<>()\]"'`]|\([^\s<>()"'`]*\))*/;
+
+/** Where brackets in a block's text are never a citation, so that their own stay. */
+const KEPT = new RegExp([CODE_SPAN, INLINE_LINK, ADDRESS].map(({ source }) => source).join("|"), "gi");
 
 /**
  * What ends a web address written in text, as a page's must be to be the page's: what can't be in one,
@@ -62,9 +67,9 @@ interface Reading {
 /**
  * The answer `text` without the citations it writes of `pages`, the pages its searches found, numbered
  * from 1 in the order the model read them, and the pages it cites, each once, in the order it first
- * cites them: by number, outside code and web addresses, a card's payload's text included, or by writing
- * a page's address, as in a link to it. A run of numbers that aren't all pages', or that links to one of
- * the answer's own references, is left as it's written, as it may be no citation.
+ * cites them: by number, outside code, links and web addresses, a card's payload's text included, or by
+ * writing a page's address, as in a link to it. A run of numbers that aren't all pages', or that links to
+ * one of the answer's own references, is left as it's written, as it may be no citation.
  */
 export function citedIn(text: string, pages: readonly Source[]): { text: string; cited: Source[] } {
   // The lexer's blocks are the text as it's written, a block at a time, once its line breaks are "\n".
@@ -153,23 +158,19 @@ function codeIn(token: Token, line: number): { code: Tokens.Code; line: number }
 /** A line without the indentation and the quote marks before it. */
 const unmarked = (line: string) => line.replace(/^[\s>]*/, "");
 
-/** `part` of an answer, from `offset` in it, without the citations `reading` finds in it outside code and web addresses, and those citations. */
+/** `part` of an answer, from `offset` in it, without the citations `reading` finds in it outside code, links and web addresses, and those citations. */
 function withoutCitations(part: string, offset: number, { pages, labels }: Reading): Uncited {
+  // What's kept is read with the rest, so that what's around a run, as a link after it, still tells what it is.
+  const kept: Span[] = [...part.matchAll(KEPT)].map(({ 0: written, index }) => ({ from: index, to: index + written.length }));
   const citations: Citation[] = [];
-  const uncited = (between: string, from: number) =>
-    between.replace(CITATIONS, (written: string, run: string, at: number) => {
-      const numbers = linksToReference(run, labels) ? null : numbersIn(run, pages.length);
-      if (numbers === null) return written;
-      citations.push(...numbers.map((number) => ({ at: offset + from + at, page: pages[number - 1]! })));
-      return "";
-    });
-  let text = "";
-  let from = 0;
-  for (const { 0: kept, index } of part.matchAll(KEPT)) {
-    text += uncited(part.slice(from, index), from) + kept;
-    from = index + kept.length;
-  }
-  return { text: text + uncited(part.slice(from), from), citations };
+  const text = part.replace(CITATIONS, (written: string, run: string, at: number) => {
+    if (kept.some(({ from, to }) => at < to && from < at + written.length)) return written;
+    const numbers = linksToReference(run, labels) ? null : numbersIn(run, pages.length);
+    if (numbers === null) return written;
+    citations.push(...numbers.map((number) => ({ at: offset + at, page: pages[number - 1]! })));
+    return "";
+  });
+  return { text, citations };
 }
 
 /**
