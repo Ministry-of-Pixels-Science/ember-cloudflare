@@ -34,6 +34,21 @@ const write = (member: Member, markup: string) =>
     (content.closest("lexxy-editor") as HTMLElement & { value: string }).value = markup;
   }, markup);
 
+/**
+ * Moves the page's selection back by `letters`, as Shift+Left does with `alter` "extend" and Left with
+ * "move", then presses Cmd or Ctrl with `key` in the text, before the page has told the editor its
+ * selection moved.
+ */
+const pressAsSelectionMoves = (member: Member, alter: "extend" | "move", letters: number, key: { key: string; code: string; shiftKey?: boolean }) =>
+  member.composer().evaluate(
+    (text, { alter, letters, key }) => {
+      for (let n = 0; n < letters; n++) getSelection()!.modify(alter, "backward", "character");
+      const command = /Mac/.test(navigator.platform) ? { metaKey: true } : { ctrlKey: true };
+      text.dispatchEvent(new KeyboardEvent("keydown", { ...key, ...command, bubbles: true, cancelable: true }));
+    },
+    { alter, letters, key },
+  );
+
 /** Opens another of the test's rooms from the sidebar. */
 async function openRoom(member: Member, name: string) {
   await member.page.getByRole("region", { name: "Rooms" }).getByRole("link", { name: new RegExp(name) }).click();
@@ -444,6 +459,31 @@ test.describe("Formatting row", () => {
       await ada.composer().press("Enter");
       await expect(grace.message(`Pressed ${keys}`).locator(`.message-content ${element}`)).toHaveText(`Pressed ${keys}`);
     }
+  });
+
+  test("formats what's selected as a key's pressed, though the page has yet to tell the editor the selection grew", async ({ members }) => {
+    const ada = await members.signIn("Ada");
+    await ada.composer().pressSequentially("Launch week checklist");
+    for (let n = 0; n < "hecklist".length; n++) await ada.composer().press("Shift+ArrowLeft");
+    // A letter more, then Cmd or Ctrl+Shift+8.
+    await pressAsSelectionMoves(ada, "extend", 1, { key: "*", code: "Digit8", shiftKey: true });
+    await ada.composer().pressSequentially("plan");
+    await expect(ada.composer().locator("li")).toHaveText("Launch week plan");
+  });
+
+  test("puts what's typed after a key where the cursor's moved to, in its text's format, though the page has yet to tell the editor", async ({ members }) => {
+    const ada = await members.signIn("Ada");
+    const grace = await members.signIn("Grace");
+    await ada.composer().pressSequentially("Run ");
+    await ada.composer().press("ControlOrMeta+b");
+    await ada.composer().pressSequentially("now");
+    // Back to after "Run", out of the bold, then Cmd or Ctrl+Shift+C.
+    await pressAsSelectionMoves(ada, "move", 4, { key: "C", code: "KeyC", shiftKey: true });
+    await ada.composer().pressSequentially(" it");
+    await ada.composer().press("Enter");
+    const content = grace.message("Run it now").locator(".message-content");
+    await expect(content.locator("code")).toHaveText(" it");
+    await expect(content.locator("strong")).toHaveText("now");
   });
 
   test("is one stop in the tab order, whose arrow keys move along it, formatting from the keyboard, with Escape back to the text", async ({ members }) => {

@@ -146,13 +146,41 @@ function nothingSelected(lexxy: LexxyEditor): boolean {
   });
 }
 
+/** Whether focus is in the text, where the page's selection is the text's. */
+const hasFocus = (lexxy: LexxyEditor) => lexxy.editorContentElement?.contains(document.activeElement) ?? false;
+
+/**
+ * Has the editor take what's selected on the page, where that's moved since the page last told it. The
+ * page tells it a moment after the selection moves, as Shift and an arrow move it, and a key pressed in
+ * that moment would otherwise format what was selected before, and put that back on the page.
+ */
+function catchUpWithThePage(lexxy: LexxyEditor) {
+  if (!hasFocus(lexxy)) return;
+  lexxy.editor.update(
+    () => {
+      const selection = Lexical.$getSelection();
+      const onPage = Lexical.$createRangeSelectionFromDom(Lexical.getDOMSelection(window), lexxy.editor);
+      if (!Lexical.$isRangeSelection(selection) || !onPage || (onPage.anchor.is(selection.anchor) && onPage.focus.is(selection.focus))) return;
+      selection.anchor.set(onPage.anchor.key, onPage.anchor.offset, onPage.anchor.type);
+      selection.focus.set(onPage.focus.key, onPage.focus.offset, onPage.focus.type);
+      // What's typed next takes the format of the text the cursor's moved to, as it would once the page told the editor.
+      const text = selection.anchor.getNode();
+      if (selection.isCollapsed() && Lexical.$isTextNode(text)) {
+        selection.setFormat(text.getFormat());
+        selection.setStyle(text.getStyle());
+      }
+    },
+    { discrete: true },
+  );
+}
+
 /**
  * Makes a change to the text from outside it, as the formatting row and Link's dialog do. Where focus is
  * elsewhere, as on a button of the row, Lexical would put the page's selection back in the text, and so
  * focus, which is left where it is: putting focus back in the text puts the selection there too.
  */
 function changeText(lexxy: LexxyEditor, change: () => void, tag?: string) {
-  const focused = lexxy.editorContentElement?.contains(document.activeElement) ?? false;
+  const focused = hasFocus(lexxy);
   const tags = [...(tag ? [tag] : []), ...(focused ? [] : [Lexical.SKIP_DOM_SELECTION_TAG])];
   lexxy.editor.update(change, { tag: tags });
 }
@@ -190,6 +218,11 @@ export interface RichTextEditorHandle {
    * editor, whose Shift+Enter breaks the line.
    */
   startNewBlock(): boolean;
+  /**
+   * Has it take what's selected on the page, where that's moved since the page last told it, as a key
+   * pressed in the text can come first.
+   */
+  catchUp(): void;
 }
 
 interface Props {
@@ -293,6 +326,9 @@ export default function RichTextEditor({
       if (editor.current) changeText(editor.current, $unlink);
     },
     startNewBlock: () => (editor.current ? startNewBlock(editor.current) : false),
+    catchUp: () => {
+      if (editor.current) catchUpWithThePage(editor.current);
+    },
   }));
 
   const changed = useEffectEvent(() => onChange?.());
