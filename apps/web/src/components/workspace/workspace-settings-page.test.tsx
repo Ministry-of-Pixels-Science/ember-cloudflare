@@ -497,6 +497,8 @@ describe("Version", () => {
   const card = () => screen.findByRole("region", { name: /^Ember \d(?!.* is out to try$)/ });
   /** The box under it that offers a beta to try, apart from it. */
   const betaBox = () => screen.queryByRole("region", { name: / is out to try$/ });
+  /** What heads General, its title and what it's for, which the card comes right after. */
+  const headingOfGeneral = () => screen.getByRole("heading", { level: 1, name: "Basic community settings" }).parentElement!;
   /** What the Worker says of a copy on GitHub, as its deploy told it, while Ember 0.2 is out, if `copy` is given. */
   const newerFor = (copy: CopyOnGitHub | null = null): ReleaseCheck => ({
     release: "0.1",
@@ -523,15 +525,14 @@ describe("Version", () => {
   }
 
   it.each([null, { repository: "someone/my-ember", branch: "main", workflow: true, betaWorkflow: true }])(
-    "shows administrators which release this is once the Worker has said, at the end of General (copy: %j)",
+    "shows administrators which release this is once the Worker has said, at the top of General (copy: %j)",
     async (copy) => {
       release = { release: "0.1", beta: false, newest: { release: "0.1", version: "0.1.0", notes: NOTES, newer: false }, checkedAt: CHECKED_AT, newestBeta: null, copy };
       showPage();
       const shown = await card();
       expect(shown.textContent).toBe(`Ember 0.1This is the newest release.Check for updates${LAST_CHECKED}`);
       expect(within(shown).queryByRole("link")).not.toBeInTheDocument();
-      const general = screen.getByRole("region", { name: "Basic community settings" });
-      expect(general.lastElementChild).toBe(shown);
+      expect(headingOfGeneral().nextElementSibling).toBe(shown);
     },
   );
 
@@ -622,8 +623,8 @@ describe("Version", () => {
       expect(shown.textContent).toBe(`Ember 0.2This is the newest release.Check for updates${LAST_CHECKED}`);
       expect(within(shown).queryByRole("link")).not.toBeInTheDocument();
       const box = shownBetaBox();
+      expect(headingOfGeneral().nextElementSibling).toBe(shown);
       expect(shown.nextElementSibling).toBe(box);
-      expect(screen.getByRole("region", { name: "Basic community settings" }).lastElementChild).toBe(box);
       // A little red, as a beta is experimental.
       expect(box).toHaveClass("border-beta-border", "bg-beta-background");
       expect(within(box).getByRole("heading", { level: 2 })).toHaveTextContent(/^Ember 0\.3 beta 1 is out to try$/);
