@@ -1,15 +1,19 @@
 import { Suspense, useEffect, useEffectEvent, useImperativeHandle, useLayoutEffect, useRef, useState, type Ref } from "react";
 import { MAX_FILE_SIZE, type User } from "@ember/protocol";
 import { OPENGRAPH_EMBED_CONTENT_TYPE, previewContent } from "@ember/richtext/dom";
-import { ArrowUp, Attachment, Page, TextSquare, XmarkCircle } from "@/components/icons/iconoir";
+import { AtSign, Page, Send, TextSquare, XmarkCircle } from "@/components/icons/iconoir";
 import { useNameOf } from "@/hooks/use-directory";
 import { fetchLinkPreview, mentionPromptSrc } from "@/lib/api";
 import { dropTarget } from "@/lib/drop-target";
-import { breaksLine, hasTouchKeyboard, pressedAlone, sendsMessage } from "@/lib/keyboard";
+import { breaksLine, hasTouchKeyboard, pressedAlone, sendsMessage, uploadsFiles, writesSnippet } from "@/lib/keyboard";
 import { tooLargeToAttach } from "@/lib/uploads";
 import { cn } from "@/lib/utils";
+import { AttachMenu } from "./attach-menu";
 import { RichTextEditor, editorLoaded, type PastedLink, type RichTextEditorHandle } from "./editor";
+import { EmojiButton } from "./emoji-button";
 import { FormattingToolbar, LinkDialog, useFormatting } from "./formatting-toolbar";
+import { ShortcutTooltip } from "./shortcut-tooltip";
+import { SnippetDialog } from "./snippet-dialog";
 
 /**
  * The typing indicator (Campfire's typing_tracker.js and composer.css): the names of whoever is typing,
@@ -43,6 +47,9 @@ const FOOTER = "bg-background px-[22px] pt-2.5 pb-[max(12px,env(safe-area-inset-
  * disconnected room disables them, though only Send looks it.
  */
 const BUTTON = "flex size-8 shrink-0 cursor-pointer items-center justify-center touch:size-11";
+
+/** A button under the text but Send and Slack's +, square, and lit on hover. */
+const TOOL = cn(BUTTON, "rounded-[7px] hover:not-active:brightness-85 [@media(hover:hover)_and_(pointer:fine)]:hover:bg-hover aria-expanded:bg-hover");
 
 /**
  * Where what someone has written in a room, or in one of its threads, and not yet sent is kept in this
@@ -283,10 +290,12 @@ export interface ComposerHandle {
 }
 
 /**
- * The composer: a card with Slack's formatting row on top, then the editor, and below it Attach files,
- * Show formatting, which shows or hides the row, and a round Send button. @ offers the room's people to
- * mention. Files picked, pasted or dropped wait above the card to go with the next message. What's
- * written is kept as a draft until it's sent. A thread's has Also send to the room before Send.
+ * The composer: a card with Slack's formatting row on top, then the editor, and below it Slack's buttons:
+ * + (Text snippet, Upload from your computer), Show formatting, which shows or hides the row, Emoji,
+ * Mention someone, and a round Send button, grey until there's something to send. @ offers the room's
+ * people to mention. Files picked, pasted or dropped, and snippets, wait above the card to go with the
+ * next message. What's written is kept as a draft until it's sent. A thread's has Also send to the room
+ * before Send.
  */
 export function Composer({ roomId, roomName, direct = false, userId, typing, disabled, deferEditor = false, threadId, onSend, onSendFiles, onTyping, onEditLastMessage, autoFocus = true, ref }: Props) {
   const editor = useRef<RichTextEditorHandle>(null);
@@ -304,6 +313,13 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
   const editorShown = useEditorShown(deferEditor);
   const previewLink = useLinkPreviews();
   const picked = usePickedFiles();
+  // Whether nothing's written, which, with no files picked, leaves Send grey, as Slack's is.
+  const [blank, setBlank] = useState(!draft);
+  const [writingSnippet, setWritingSnippet] = useState(false);
+  // Whether the editor can be written in, which Emoji and Mention someone wait for, since what they wrote before
+  // would be lost.
+  const [editorReady, setEditorReady] = useState(false);
+  const fileField = useRef<HTMLInputElement>(null);
   // Whether the editor was blank when it last changed, so emptying it tells the room you've stopped once.
   const wasBlank = useRef(!draft);
   // Whether Quote wrote what the editor opens with, before it showed, so it takes focus as Quote has it do.
@@ -315,6 +331,7 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
     if (body !== null) onTyping(true);
     else if (!wasBlank.current) onTyping(false);
     wasBlank.current = body === null;
+    setBlank(body === null);
     keepDraft(key, body);
   };
 
@@ -376,6 +393,14 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
 
   const keyDown = (event: KeyboardEvent) => {
     if (formatting.keyDown(event)) return;
+    // Slack's keys for the + menu's two: Cmd or Ctrl+O picks files, and with Shift, Enter writes a snippet.
+    if (uploadsFiles(event) || writesSnippet(event)) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (uploadsFiles(event)) fileField.current?.click();
+      else setWritingSnippet(true);
+      return;
+    }
     // Enter picks from an open list, such as the people to mention.
     if (editor.current?.hasOpenPrompt()) return;
     if (breaksLine(event) && editor.current?.startNewBlock()) {
@@ -421,7 +446,7 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
             </p>
           )}
         </div>
-        <div className="flex min-h-[108px] min-w-0 flex-col rounded-[12px] border bg-surface p-3 max-md:min-h-[100px] max-md:p-2.5">
+        <div className="@container flex min-h-[108px] min-w-0 flex-col rounded-[12px] border bg-surface p-3 max-md:min-h-[100px] max-md:p-2.5">
           {formattingShown && (
             <FormattingToolbar
               formatting={formatting}
@@ -449,56 +474,75 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
                   onFormatChange={formatting.setFormat}
                   onKeyDown={keyDown}
                   onLinkPasted={previewLink}
+                  onReady={() => setEditorReady(true)}
                 />
               ) : (
                 <LoadingEditor placeholder={placeholder} belowFormatting={formattingShown} />
               )}
             </Suspense>
           </div>
-          <div className="flex flex-none items-center gap-0.5">
-            {/* Campfire's `.input--file` (inputs.css): the file field fills the button, unseen, so pressing it
-                anywhere opens the browser's file picker, and the button shows when the field has focus. */}
-            <label
-              title="Attach files"
-              className={cn(
-                BUTTON,
-                "relative rounded-[7px] hover:not-active:brightness-85 [@media(hover:hover)_and_(pointer:fine)]:hover:bg-hover",
-                "has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-3 has-[:focus-visible]:outline-foreground",
-              )}
-            >
-              <Attachment className="size-[18px] opacity-70" />
-              <input
-                type="file"
-                multiple
-                disabled={disabled}
-                onChange={(event) => {
-                  picked.add(event.target.files ?? []);
-                  // So picking the same file again is a change.
-                  event.target.value = "";
-                }}
-                className="absolute inset-0 cursor-pointer opacity-0"
-              />
-              <span className="sr-only">Attach a file</span>
-            </label>
-            <button
-              type="button"
+          <div className="flex flex-none items-center gap-0.5 touch:@max-[28rem]:flex-wrap">
+            {/* Upload from your computer's, and Cmd or Ctrl+O's, file picker. */}
+            <input
+              ref={fileField}
+              type="file"
+              multiple
+              hidden
               disabled={disabled}
-              title={formattingShown ? "Hide formatting" : "Show formatting"}
-              aria-pressed={formattingShown}
-              // Keep focus in the editor, so a phone's keyboard stays up, as Send does.
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => {
-                showFormatting(!formattingShown);
-                editor.current?.focus();
+              onChange={(event) => {
+                picked.add(event.target.files ?? []);
+                // So picking the same file again is a change.
+                event.target.value = "";
               }}
-              className={cn(BUTTON, "rounded-[7px] hover:not-active:brightness-85 [@media(hover:hover)_and_(pointer:fine)]:hover:bg-hover")}
-            >
-              <TextSquare className="size-[18px] opacity-70" />
-              <span className="sr-only">Show formatting</span>
-            </button>
-            {/* For fingers, the box sits far enough into its label for a fingertip on it to land on the label. */}
+            />
+            <AttachMenu
+              disabled={disabled}
+              onUpload={() => fileField.current?.click()}
+              onSnippet={() => setWritingSnippet(true)}
+              onClosed={() => editor.current?.focus()}
+              // Slack's + sits in a circle of its own.
+              className={cn(BUTTON, "rounded-full bg-hover hover:not-active:brightness-95 aria-expanded:brightness-95")}
+            />
+            <ShortcutTooltip label={formattingShown ? "Hide formatting" : "Show formatting"}>
+              <button
+                type="button"
+                disabled={disabled}
+                aria-label="Show formatting"
+                aria-pressed={formattingShown}
+                // Keep focus in the editor, so a phone's keyboard stays up, as Send does.
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => {
+                  showFormatting(!formattingShown);
+                  editor.current?.focus();
+                }}
+                className={TOOL}
+              >
+                <TextSquare className="size-[18px] opacity-70" />
+              </button>
+            </ShortcutTooltip>
+            <EmojiButton
+              disabled={disabled || !editorReady}
+              onPick={(emoji) => editor.current?.insertText(emoji)}
+              onClosed={() => editor.current?.focus()}
+              className={TOOL}
+            />
+            <ShortcutTooltip label="Mention someone">
+              <button
+                type="button"
+                disabled={disabled || !editorReady}
+                aria-label="Mention someone"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => editor.current?.startMention()}
+                className={TOOL}
+              >
+                <AtSign className="size-[18px] opacity-70" />
+              </button>
+            </ShortcutTooltip>
+            {/* For fingers, the box sits far enough into its label for a fingertip on it to land on the label, and
+                where their bigger buttons would leave the label too little room, as on a phone held upright, it
+                takes a line of its own above them. */}
             {threadId !== undefined && (
-              <label className="mr-2 ml-2.5 flex min-w-0 cursor-pointer items-center gap-[7px] text-[13px] leading-[18px] text-message-muted touch:ml-0 touch:min-h-11 touch:pl-3.5 touch:text-sm">
+              <label className="mr-2 ml-2.5 flex min-w-0 cursor-pointer items-center gap-[7px] text-[13px] leading-[18px] text-message-muted touch:ml-0 touch:min-h-11 touch:pl-3.5 touch:text-sm touch:@max-[28rem]:order-first touch:@max-[28rem]:mr-0 touch:@max-[28rem]:basis-full">
                 <input
                   type="checkbox"
                   checked={alsoSend}
@@ -517,26 +561,31 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
                 </span>
               </label>
             )}
-            <button
-              type="submit"
-              disabled={disabled}
-              title="Send message"
-              // Keep focus in the editor, so a phone's keyboard stays up between messages.
-              onMouseDown={(event) => event.preventDefault()}
-              className={cn(
-                BUTTON,
-                "ml-auto rounded-full bg-foreground text-background hover:not-active:brightness-70",
-                "disabled:pointer-events-none disabled:opacity-50 disabled:grayscale disabled:contrast-50",
-              )}
-            >
-              <ArrowUp className="size-[18px]" />
-              <span className="sr-only">Send Message</span>
-            </button>
+            <ShortcutTooltip label="Send message">
+              <button
+                type="submit"
+                disabled={disabled}
+                data-empty={(blank && picked.files.length === 0) || undefined}
+                // Keep focus in the editor, so a phone's keyboard stays up between messages.
+                onMouseDown={(event) => event.preventDefault()}
+                className={cn(
+                  BUTTON,
+                  "ml-auto rounded-full bg-foreground text-background hover:not-active:brightness-70",
+                  // Slack's paper plane is grey, with nothing behind it, until there's something to send.
+                  "data-empty:bg-transparent data-empty:text-muted-foreground data-empty:hover:not-active:brightness-100",
+                  "disabled:pointer-events-none disabled:opacity-50 disabled:grayscale disabled:contrast-50",
+                )}
+              >
+                <Send className="size-[18px]" />
+                <span className="sr-only">Send Message</span>
+              </button>
+            </ShortcutTooltip>
           </div>
         </div>
       </form>
-      {/* Outside the form, so what's typed in it is kept from the composer's own handlers. */}
+      {/* Outside the form, so what's typed in them is kept from the composer's own handlers. */}
       <LinkDialog formatting={formatting} />
+      <SnippetDialog open={writingSnippet} onOpenChange={setWritingSnippet} onCreate={(file) => picked.add([file])} onClosed={() => editor.current?.focus()} />
     </footer>
   );
 }
