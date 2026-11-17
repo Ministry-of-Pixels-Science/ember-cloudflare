@@ -67,12 +67,14 @@ interface Reading {
 /**
  * The answer `text` without the citations it writes of `pages`, the pages its searches found, numbered
  * from 1 in the order the model read them, and the pages it cites, each once, in the order it first
- * cites them: by number, outside code, links and web addresses, a card's payload's text included, or by
- * writing a page's address, as in a link to it. A run of numbers that aren't all pages', or that links to
- * one of the answer's own references, is left as it's written, as it may be no citation.
+ * cites them: by number, outside code, links, references' definitions and web addresses, a card's
+ * payload's text included, or by writing a page's address, as in a link to it. A run of numbers that
+ * aren't all pages', or that links to one of the answer's own references, is left as it's written, as it
+ * may be no citation.
  */
 export function citedIn(text: string, pages: readonly Source[]): { text: string; cited: Source[] } {
-  // The lexer's blocks are the text as it's written, a block at a time, once its line breaks are "\n".
+  // The lexer's blocks are the text as it's written, a block at a time, once its line breaks are "\n",
+  // but for what it leaves out, as a label's second definition, which stays as it's written.
   const answer = text.replace(/\r\n?/g, "\n");
   const blocks = markdown.lexer(answer);
   const reading: Reading = { pages, labels: new Set(Object.keys(blocks.links)) };
@@ -80,11 +82,14 @@ export function citedIn(text: string, pages: readonly Source[]): { text: string;
   let shown = "";
   let at = 0;
   for (const block of blocks) {
-    const uncited = blockWithoutCitations(block, at, reading);
+    const from = answer.indexOf(block.raw, at);
+    if (from < 0) break;
+    const uncited = blockWithoutCitations(block, from, reading);
     citations.push(...uncited.citations);
-    shown += uncited.text;
-    at += block.raw.length;
+    shown += answer.slice(at, from) + uncited.text;
+    at = from + block.raw.length;
   }
+  shown += answer.slice(at);
   for (const page of pages) {
     const written = addressAt(answer, page.url);
     if (written !== null) citations.push({ at: written, page });
@@ -96,16 +101,19 @@ export function citedIn(text: string, pages: readonly Source[]): { text: string;
 
 /**
  * One of an answer's blocks, `block`, from `offset` in it, without the citations `reading` finds in it:
- * none in code but a card's payload's text, and none in a list or a quote whose code can't be found in it.
+ * none in what's kept as it's written but a card's payload's text, and none in a list or a quote where
+ * what's kept can't be found.
  */
 function blockWithoutCitations(block: Token, offset: number, reading: Reading): Uncited {
-  if (block.type === "code") return isCards(block as Tokens.Code) ? payloadWithoutCitations(block as Tokens.Code, offset, reading) : { text: block.raw, citations: [] };
-  const code = codeLinesIn(block);
-  if (code === null) return { text: block.raw, citations: [] };
-  // The text before each code block, and after the last, without its citations, and the code as it's written.
+  if (block.type === "code" && isCards(block as Tokens.Code)) return payloadWithoutCitations(block as Tokens.Code, offset, reading);
+  if (isKept(block)) return { text: block.raw, citations: [] };
+  const kept = keptLinesIn(block);
+  if (kept === null) return { text: block.raw, citations: [] };
+  // The text before each kept block, and after the last, without its citations, and the kept blocks as
+  // they're written.
   const uncited: Uncited = { text: "", citations: [] };
   let from = 0;
-  for (const span of [...code, { from: block.raw.length, to: block.raw.length }]) {
+  for (const span of [...kept, { from: block.raw.length, to: block.raw.length }]) {
     const around = withoutCitations(block.raw.slice(from, span.from), offset + from, reading);
     uncited.text += around.text + block.raw.slice(span.from, span.to);
     uncited.citations.push(...around.citations);
@@ -117,13 +125,16 @@ function blockWithoutCitations(block: Token, offset: number, reading: Reading): 
 /** Whether `code` is a ```slack block, whose payload shows as cards, as answers.ts reads its language. */
 const isCards = (code: Tokens.Code) => (code.lang ?? "").trim().split(/\s/)[0]?.toLowerCase() === "slack";
 
+/** Whether `token` is kept as it's written, as code and a reference's definition, title and all, are. */
+const isKept = (token: Token) => token.type === "code" || token.type === "def";
+
 /**
- * Where in `block` the lines of the code blocks it holds are, as a list or a quote holds them, each from
- * the start of its first line to the end of its last, or null when one isn't on the lines the lexer read
- * it from. It reads what a list or a quote holds a line for each of its lines, without the indentation and
- * the quote marks before them.
+ * Where in `block` the lines of what it holds that's kept as it's written are, as a list or a quote
+ * holds code, each from the start of its first line to the end of its last, or null when one isn't on
+ * the lines the lexer read it from. It reads what a list or a quote holds a line for each of its lines,
+ * without the indentation and the quote marks before them.
  */
-function codeLinesIn(block: Token): Span[] | null {
+function keptLinesIn(block: Token): Span[] | null {
   const lines = block.raw.split("\n");
   let start = 0;
   const starts = lines.map((line) => {
@@ -132,8 +143,8 @@ function codeLinesIn(block: Token): Span[] | null {
     return at;
   });
   const spans: Span[] = [];
-  for (const { code, line: first } of codeIn(block, 0)) {
-    const held = code.raw.replace(/\n+$/, "").split("\n");
+  for (const { kept, line: first } of keptIn(block, 0)) {
+    const held = kept.raw.replace(/\n+$/, "").split("\n");
     const last = first + held.length - 1;
     if (last >= lines.length || held.some((line, n) => unmarked(line) !== unmarked(lines[first + n]!))) return null;
     spans.push({ from: starts[first]!, to: starts[last]! + lines[last]!.length });
@@ -142,14 +153,14 @@ function codeLinesIn(block: Token): Span[] | null {
 }
 
 /**
- * The code blocks `token` holds, as a list's items or a quote do, in the order it holds them, each with
- * the line of `token` it starts on, counted on from `line`, as `token`'s first is.
+ * What `token` holds that's kept as it's written, as a list's items or a quote hold code, in the order it
+ * holds them, each with the line of `token` it starts on, counted on from `line`, as `token`'s first is.
  */
-function codeIn(token: Token, line: number): { code: Tokens.Code; line: number }[] {
+function keptIn(token: Token, line: number): { kept: Token; line: number }[] {
   const inside: Token[] = [...("tokens" in token && token.tokens ? token.tokens : []), ...(token.type === "list" ? (token as Tokens.List).items : [])];
   let at = line;
   return inside.flatMap((nested) => {
-    const held = nested.type === "code" ? [{ code: nested as Tokens.Code, line: at }] : codeIn(nested, at);
+    const held = isKept(nested) ? [{ kept: nested, line: at }] : keptIn(nested, at);
     at += nested.raw.split("\n").length - 1;
     return held;
   });

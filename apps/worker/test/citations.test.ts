@@ -34,6 +34,11 @@ describe("What an answer cites of the pages Ember's searches found", () => {
     for (const text of ["[the docs][1] say so.", "Read [1][manual] first.\n\n[manual]: https://example.com/manual", "It grew [1].\n\n[1]: https://example.com/one", "It grew [3][2].\n\n[2]: https://example.com/two", "It grew [1][the report](https://example.com/report)."]) {
       expect(citedIn(text, PAGES)).toEqual({ text, cited: [] });
     }
+    // A definition keeps its title, in a list too, and a label's second one, which the lexer leaves out, is kept whole.
+    const definition = '[docs]: https://example.com/docs "Edition [1]"';
+    expect(citedIn(`It grew [2].\n\n${definition}`, PAGES)).toEqual({ text: `It grew.\n\n${definition}`, cited: [BLOG] });
+    expect(citedIn(`- It grew [2].\n\n  ${definition}\n- It's out [3].`, PAGES)).toEqual({ text: `- It grew.\n\n  ${definition}\n- It's out.`, cited: [BLOG, NEWS] });
+    expect(citedIn(`[docs]: https://example.com/a\n\n${definition}\n\nIt grew [2].`, PAGES)).toEqual({ text: `[docs]: https://example.com/a\n\n${definition}\n\nIt grew.`, cited: [BLOG] });
   });
 
   it("leaves code as it's written, however it's fenced or indented, and a web address's own brackets", () => {
