@@ -13,6 +13,24 @@ const COMMAND = /^curl -d 'Hello!' https:\/\/127\.0\.0\.1:\d+\/rooms\/[^/]+\/[^/
 /** A bot's entry on the bots page. */
 const botNamed = (page: Page, name: string) => page.getByRole("listitem").filter({ has: page.getByText(name, { exact: true }) });
 
+/**
+ * The commands that post to room `room` as the bot named `name`, once the bots page has opened the bot to
+ * its rooms, and the room to its commands, as each starts folded away.
+ */
+async function botRoom(page: Page, name: string, room: string): Promise<Locator> {
+  const bot = botNamed(page, name);
+  await opened(bot.getByRole("button", { name, exact: true }));
+  await opened(bot.getByRole("button", { name: room, exact: true }));
+  return bot.getByRole("group", { name: room, exact: true });
+}
+
+/** Opens a row that opens, unless it's open already, as a bot's only room starts. */
+async function opened(row: Locator) {
+  await expect(row).toBeVisible();
+  if ((await row.getAttribute("aria-expanded")) !== "true") await row.click();
+  await expect(row).toHaveAttribute("aria-expanded", "true");
+}
+
 /** Where `locator` is drawn. */
 async function box(locator: Locator) {
   const rect = await locator.boundingBox();
@@ -44,7 +62,7 @@ async function addBot(page: Page, name: string, webhookUrl = "") {
 async function openGeneralFor(page: Page, name: string, webhookUrl?: string): Promise<string> {
   await openBots(page);
   await addBot(page, name, webhookUrl);
-  const command = botNamed(page, name).getByRole("group", { name: "general", exact: true }).getByRole("textbox", { name: "curl command for posting messages" });
+  const command = (await botRoom(page, name, "general")).getByRole("textbox", { name: "curl command for posting messages" });
   const url = (await command.inputValue()).split(" ").at(-1)!;
   // The room the command posts to, open in the administrator's browser.
   await page.goto(new URL(url).pathname.replace(/\/[^/]+\/messages$/, ""));
@@ -107,8 +125,13 @@ test.describe("Add and edit a bot", () => {
     const name = `Build Bot ${crypto.randomUUID().slice(0, 8)}`;
     await addBot(page, name, "https://ci.example.com/hook");
 
-    // A new bot joins every open room, as someone new does, first run's general among them.
-    const general = botNamed(page, name).getByRole("group", { name: "general", exact: true });
+    // A new bot joins every open room, as someone new does, first run's general among them. Its row names
+    // the first few, as other tests' rooms may come first, and folds their commands away until it's opened.
+    const row = botNamed(page, name).getByRole("button", { name, exact: true });
+    await expect(row).toHaveAttribute("aria-expanded", "false");
+    await expect(row).toHaveAccessibleDescription(/\S/);
+    await expect(botNamed(page, name).getByRole("textbox")).toHaveCount(0);
+    const general = await botRoom(page, name, "general");
     await expect(general.getByRole("textbox", { name: "curl command for posting messages" })).toHaveValue(COMMAND);
     await expect(general.getByRole("textbox", { name: "curl command for posting attachments" })).toHaveValue(/^curl -F "attachment=@\/path\/to\/file" https:/);
     const command = await general.getByRole("textbox", { name: "curl command for posting messages" }).inputValue();
@@ -164,7 +187,7 @@ test.describe("Generate a new bot key", () => {
     await openBots(page);
     const name = `Build Bot ${crypto.randomUUID().slice(0, 8)}`;
     await addBot(page, name);
-    const command = botNamed(page, name).getByRole("group", { name: "general", exact: true }).getByRole("textbox", { name: "curl command for posting messages" });
+    const command = (await botRoom(page, name, "general")).getByRole("textbox", { name: "curl command for posting messages" });
     const before = await command.inputValue();
 
     await botNamed(page, name).getByRole("link", { name: `Edit ${name}` }).click();
@@ -174,6 +197,7 @@ test.describe("Generate a new bot key", () => {
     });
     await page.getByRole("button", { name: "Generate a new key" }).click();
     await expect(page).toHaveURL(/\/account\/bots$/);
+    await botRoom(page, name, "general");
     await expect(command).toHaveValue(COMMAND);
     expect(await command.inputValue()).not.toBe(before);
   });
@@ -237,7 +261,7 @@ test.describe("Slack-compatible webhooks", () => {
     await openBots(page);
     const name = `Build Bot ${crypto.randomUUID().slice(0, 8)}`;
     await addBot(page, name);
-    const webhook = botNamed(page, name).getByRole("group", { name: "general", exact: true }).getByRole("textbox", { name: "Slack-compatible webhook URL" });
+    const webhook = (await botRoom(page, name, "general")).getByRole("textbox", { name: "Slack-compatible webhook URL" });
     await expect(webhook).toHaveValue(/^https:\/\/127\.0\.0\.1:\d+\/rooms\/[^/]+\/[^/]+-[A-Za-z0-9]{12}\/slack$/);
     const url = await webhook.inputValue();
     await page.goto(new URL(url).pathname.replace(/\/[^/]+\/slack$/, ""));
@@ -265,7 +289,7 @@ test.describe("Bot cards", () => {
     expect(created.status(), await created.text()).toBe(201);
     const name = `Alert Bot ${crypto.randomUUID().slice(0, 8)}`;
     await addBot(page, name);
-    const webhook = botNamed(page, name).getByRole("group", { name: roomName, exact: true }).getByRole("textbox", { name: "Slack-compatible webhook URL" });
+    const webhook = (await botRoom(page, name, roomName)).getByRole("textbox", { name: "Slack-compatible webhook URL" });
     const url = await webhook.inputValue();
     const room = new URL(url).pathname.replace(/\/[^/]+\/slack$/, "");
     await page.goto(room);
@@ -341,7 +365,7 @@ test.describe("Bot cards", () => {
     expect(created.status(), await created.text()).toBe(201);
     const name = `Deploy Bot ${crypto.randomUUID().slice(0, 8)}`;
     await addBot(page, name);
-    const webhook = botNamed(page, name).getByRole("group", { name: roomName, exact: true }).getByRole("textbox", { name: "Slack-compatible webhook URL" });
+    const webhook = (await botRoom(page, name, roomName)).getByRole("textbox", { name: "Slack-compatible webhook URL" });
     const url = await webhook.inputValue();
     const room = new URL(url).pathname.replace(/\/[^/]+\/slack$/, "");
     await page.goto(room);
@@ -668,14 +692,14 @@ test.describe("Chat bots page", () => {
   test("spaces its heading, explainer and Add a chat bot apart, with the bots lined up under them, on a computer and a phone", async ({ page, browser, baseURL }) => {
     await openBots(page);
     await addBot(page, `Spacing Bot ${crypto.randomUUID().slice(0, 8)}`);
-    /** The page's heading, explainer, Add a chat bot and first bot, where they're drawn. */
+    /** The page's heading, explainer, Add a chat bot and the card listing the bots, where they're drawn. */
     const header = async (on: Page) => {
       const main = on.getByRole("main");
       const [heading, explainer, add, bot] = [
         main.getByRole("heading", { level: 1, name: "Chat bots" }),
         main.getByText(/^Chat bots let other apps and services post in your rooms/),
         main.getByRole("link", { name: "Add a chat bot" }),
-        main.getByRole("listitem").first(),
+        main.getByRole("list", { name: "Chat bots" }),
       ];
       await expect(bot).toBeVisible();
       return { heading: await box(heading), explainer: await box(explainer), add: await box(add), bot: await box(bot) };

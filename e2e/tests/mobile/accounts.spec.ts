@@ -269,6 +269,11 @@ test("the Chat bots page, with a bot's commands, fits the phone", async ({ page,
   await showTheBot(page);
   await page.goto("/account/bots");
   await signInAsAdministrator(page);
+  // The bot's row, folded away, then open, with its only room open too.
+  const bot = page.getByRole("button", { name: BOT.name, exact: true });
+  await expect(bot).toBeVisible();
+  await screenIsFine();
+  await bot.click();
   await expect(page.getByRole("textbox", { name: "curl command for posting messages" })).toHaveValue(/^curl -d 'Hello!' /);
   await screenIsFine();
 });
