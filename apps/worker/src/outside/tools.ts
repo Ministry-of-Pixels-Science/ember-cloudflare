@@ -9,9 +9,10 @@ import { workspace, type OutsideAccess } from "../workspace";
 
 // What an AI app connected to Ember can ask of it, as the person who connected it: the rooms they're
 // in, a room's messages, a thread's, and a search of them all, and, where they let it, sending a
-// message as them. Each reads only the rooms that person is in, the ones they've hidden and their
-// direct messages too, as their own search does, and what a tool answers is JSON for the app's model
-// to read.
+// message as them. Each reaches only the rooms that person is in, the ones they've hidden too, as their
+// own search does, and of those, the ones open to everyone, unless they let the app into their direct
+// messages and private rooms too (the "private" scope), and what a tool answers is JSON for the app's
+// model to read.
 
 /** The most characters of a message a tool answers with, past which it's cut: about a page. */
 export const MAX_SHOWN_LENGTH = 4_000;
@@ -22,7 +23,7 @@ export const MESSAGES_FOUND = 20;
 /** Why a tool can't do what it's asked, in words for the app's model. */
 class Refused extends Error {}
 
-const NO_ROOM = "No room of theirs has that id. list_rooms lists the rooms they're in.";
+const NO_ROOM = "No room this connection reaches has that id. list_rooms lists the rooms it reaches.";
 
 /** What a send past the most a person's apps may make in a minute is told. */
 export const SENDING_TOO_FAST = "That's more messages than an app may send as them in a minute. Wait a minute before sending another.";
@@ -80,22 +81,33 @@ function shownMessage({ id, createdAt, creator, body, plainText, cards, attachme
   };
 }
 
-/** The room `roomId` names among those the person an app acts as is in, which is all it may read. */
-async function roomOf(env: Env, { userId }: OutsideAccess, roomId: unknown): Promise<Room> {
-  const room = typeof roomId === "string" ? (await workspace(env).outsideReadable(userId)).find(({ id }) => id === roomId) : undefined;
+/** The room `roomId` names among those of its person's that an app reaches, which is all it may read. */
+async function roomOf(env: Env, access: OutsideAccess, roomId: unknown): Promise<Room> {
+  const room = typeof roomId === "string" ? (await workspace(env).outsideReadable(access)).find(({ id }) => id === roomId) : undefined;
   if (!room) throw new Refused(NO_ROOM);
   return room;
 }
 
-async function listRooms(env: Env, { userId }: OutsideAccess): Promise<unknown> {
-  return { rooms: (await workspace(env).outsideRooms(userId)).map((room) => listedRoom(room, userId)) };
+/**
+ * What `reading` reads of room `room`, once the app still reaches the room, as it looks again then: the
+ * room may have been made private as it was read, or its person taken out of it, and what was read then
+ * written since.
+ */
+async function readIn<T>(env: Env, access: OutsideAccess, room: Room, reading: Promise<T>): Promise<T> {
+  const read = await reading;
+  await roomOf(env, access, room.id);
+  return read;
+}
+
+async function listRooms(env: Env, access: OutsideAccess): Promise<unknown> {
+  return { rooms: (await workspace(env).outsideRooms(access)).map((room) => listedRoom(room, access.userId)) };
 }
 
 /** A page of a room's messages, oldest first: its newest, or those before the message `before` names, with the id to read further back from, if there's more. */
 async function readRoom(env: Env, access: OutsideAccess, { room_id: roomId, before }: Record<string, unknown>): Promise<unknown> {
   const room = await roomOf(env, access, roomId);
   if (before !== undefined && typeof before !== "string") throw new Refused("Give `before` as a message's id.");
-  const page = await env.CHAT_ROOM.getByName(room.id).outsidePage(room.id, before === undefined ? {} : { before });
+  const page = await readIn(env, access, room, env.CHAT_ROOM.getByName(room.id).outsidePage(room.id, before === undefined ? {} : { before }));
   if (!page) throw new Refused("The room has no message with the id given as `before`.");
   return { room: shownRoom(room, access.userId), messages: page.messages.map(shownMessage), older: page.hasMore && page.messages.length > 0 ? page.messages[0]!.id : null };
 }
@@ -103,24 +115,30 @@ async function readRoom(env: Env, access: OutsideAccess, { room_id: roomId, befo
 /** A thread: the message it's under, then its newest replies, oldest first. */
 async function readThread(env: Env, access: OutsideAccess, { room_id: roomId, message_id: messageId }: Record<string, unknown>): Promise<unknown> {
   const room = await roomOf(env, access, roomId);
-  const thread = typeof messageId === "string" ? await env.CHAT_ROOM.getByName(room.id).botThread(room.id, messageId) : null;
+  const thread = typeof messageId === "string" ? await readIn(env, access, room, env.CHAT_ROOM.getByName(room.id).botThread(room.id, messageId)) : null;
   if (!thread) throw new Refused("The room has no message with that id that a thread could be under. A reply's thread is under the message its `reply_to` names.");
   const [message, ...replies] = thread;
   return { room: shownRoom(room, access.userId), message: shownMessage(message!), replies: replies.map(shownMessage) };
 }
 
-/** The newest messages with every word of `words`, in the rooms the person is in, or the one `room_id` names, from the match `after` on. */
+/** The newest messages with every word of `words`, in the rooms of the person's that the app reaches, or the one `room_id` names, from the match `after` on. */
 async function searchMessages(env: Env, access: OutsideAccess, { words, room_id: roomId, after }: Record<string, unknown>): Promise<unknown> {
   if (typeof words !== "string" || !hasWords(words)) throw new Refused("Give the words to find, as `words`.");
   if (words.length > MAX_SEARCH_LENGTH) throw new Refused("That's too much to search for. Give one or two words.");
   if (after !== undefined && (typeof after !== "number" || !Number.isSafeInteger(after))) throw new Refused("Give `after` as the `next` an earlier search answered.");
-  const readable = await workspace(env).outsideReadable(access.userId);
+  const readable = await workspace(env).outsideReadable(access);
   const rooms = roomId === undefined ? readable : readable.filter(({ id }) => id === roomId);
-  if (rooms.length === 0) throw new Refused(roomId === undefined ? "They're in no room to search." : NO_ROOM);
+  if (rooms.length === 0) throw new Refused(roomId === undefined ? "This connection reaches no room of theirs to search." : NO_ROOM);
   const { hits, next } = await searchIndex(env).search({ terms: searchTerms(sanitizeSearch(words)), roomIds: rooms.map(({ id }) => id), sort: "newest", after: after ?? null });
   const taken = hits.slice(0, MESSAGES_FOUND);
-  const byId = new Map(rooms.map((room) => [room.id, shownRoom(room, access.userId)]));
-  const matches = (await matchesOf(env, taken)).map(({ message }) => ({ room: byId.get(message.roomId)!, ...shownMessage(message) }));
+  const found = await matchesOf(env, taken);
+  // Of the rooms it found something in, it answers from those it still reaches, as `readIn` does.
+  const reached = new Set((await workspace(env).outsideReadable(access)).map(({ id }) => id));
+  const byId = new Map(rooms.filter(({ id }) => reached.has(id)).map((room) => [room.id, shownRoom(room, access.userId)]));
+  const matches = found.flatMap(({ message }) => {
+    const room = byId.get(message.roomId);
+    return room ? [{ room, ...shownMessage(message) }] : [];
+  });
   // The index numbers its matches, so the search after this one starts past the last it took.
   return { matches, next: taken.length < hits.length ? taken.at(-1)!.number : next };
 }
@@ -136,7 +154,7 @@ async function sendMessage(env: Env, access: OutsideAccess, { room_id: roomId, t
   if (text.length > MAX_MARKDOWN_LENGTH) throw new Refused(MESSAGE_TOO_LONG);
   if (threadId !== undefined && typeof threadId !== "string") throw new Refused("Give `thread_id` as the id of the message the thread is under.");
   const room = await roomOf(env, access, roomId);
-  const sender = await workspace(env).outsideSender(access.userId, room.id);
+  const sender = await workspace(env).outsideSender(access, room.id);
   if (sender === "limited") throw new Refused(SENDING_TOO_FAST);
   const sent = sender && (await env.CHAT_ROOM.getByName(room.id).createOutsideMessage(room.id, sender, markdownHtml(text), threadId));
   if (!sent) throw new Refused(NO_ROOM);
@@ -162,7 +180,7 @@ const READING: Tool[] = [
     name: "list_rooms",
     title: "List rooms",
     description:
-      "Lists the rooms the connected person is in: each one's id, its name, its kind (open to everyone, closed, which is private, or direct, a direct message named after the others in it), and whether it has messages they haven't read.",
+      "Lists the rooms the connected person is in that this connection reaches: each one's id, its name, its kind (open to everyone, closed, which is private, or direct, a direct message named after the others in it), and whether it has messages they haven't read.",
     takes: {},
     required: [],
     run: listRooms,
@@ -186,7 +204,7 @@ const READING: Tool[] = [
   {
     name: "search_messages",
     title: "Search messages",
-    description: `Searches the messages of the rooms the connected person is in, threads and direct messages too, and answers the newest ${MESSAGES_FOUND} that have every word given, each with its room. It finds whole words as they were written, not meanings, so give one or two words the message would have. \`next\` is the number to give as \`after\` for older matches, or null when there are none.`,
+    description: `Searches the messages of the rooms this connection reaches, threads too, and answers the newest ${MESSAGES_FOUND} that have every word given, each with its room. It finds whole words as they were written, not meanings, so give one or two words the message would have. \`next\` is the number to give as \`after\` for older matches, or null when there are none.`,
     takes: {
       words: { type: "string", description: "The words to find: a message matches when it has them all, in any order." },
       room_id: { type: "string", description: "A room's id, as list_rooms gives it, to search that room alone." },
@@ -214,8 +232,12 @@ const SENDING: Tool[] = [
   },
 ];
 
-/** The tools each scope gives a connection, with what an app is told of them: one that asks its person before changing anything goes by whether a tool only reads. */
-const TOOLS: Record<OutsideScope, { tools: Tool[]; annotations: { readOnlyHint: boolean; destructiveHint?: boolean; openWorldHint: boolean } }> = {
+/**
+ * The tools each scope gives a connection, with what an app is told of them: one that asks its person
+ * before changing anything goes by whether a tool only reads. "private" gives none, only more rooms for
+ * the others to reach.
+ */
+const TOOLS: Partial<Record<OutsideScope, { tools: Tool[]; annotations: { readOnlyHint: boolean; destructiveHint?: boolean; openWorldHint: boolean } }>> = {
   read: { tools: READING, annotations: { readOnlyHint: true, openWorldHint: false } },
   write: { tools: SENDING, annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false } },
 };
@@ -232,8 +254,7 @@ async function answered(found: Promise<unknown>) {
 
 /** Gives `server` the tools `access` allows its app, each doing what it does as the connection's person. */
 export function registerTools(server: McpServer, env: Env, access: OutsideAccess): void {
-  for (const scope of access.scopes) {
-    const { tools, annotations } = TOOLS[scope];
+  for (const { tools, annotations } of access.scopes.flatMap((scope) => TOOLS[scope] ?? [])) {
     for (const { name, title, description, takes, required, run } of tools) {
       const inputSchema = fromJsonSchema({ type: "object" as const, properties: takes, required, additionalProperties: false });
       server.registerTool(name, { title, description, inputSchema, annotations }, (given) => answered(run(env, access, given as Record<string, unknown>)));

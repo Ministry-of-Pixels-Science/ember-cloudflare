@@ -65,7 +65,7 @@ import type { LiveHuddle } from "@ember/protocol/huddles";
 import { statement, type Db, type Statement } from "./db";
 import type { StoredPicture } from "./files/pictures";
 import { INVITATION_TTL_SECONDS, invitationPayload, messagePayload, type PushPayload } from "./push/payload";
-import { ADDRESS_TAG_PREFIX, EVERYONE, SESSION_TAG_PREFIX, type Revocation } from "./revocations";
+import { ADDRESS_TAG_PREFIX, EVERYONE, OPEN_ROOMS_ONLY, SESSION_TAG_PREFIX, type Revocation } from "./revocations";
 import type { RoomEvent } from "./room-log";
 
 // The account, its people, their sessions and their rooms, kept by the Workspace in its own SQLite
@@ -582,6 +582,8 @@ export interface SavedRoomChange {
   addedIds: UserId[];
   /** Who it took out, whose sockets there it queued closing. */
   removedIds: UserId[];
+  /** Whether it made a room open to everyone private, which queued turning away what AI apps that reach only open rooms were let send there. */
+  madePrivate: boolean;
   /** Whether the shared order ranks the room, which the sidebars of the people it put in have left out. */
   ranked: boolean;
 }
@@ -1650,6 +1652,14 @@ const KEPT_SUSPENDED_MEMBERSHIP = `EXISTS (SELECT 1 FROM users JOIN rooms ON roo
  */
 export const QUEUE_MEMBER_REVOCATIONS = `INSERT INTO pending_revocations (room_id, tag, code, due_at)
   SELECT room_id, user_id, ?, ? FROM memberships WHERE room_id = ? AND user_id NOT IN (SELECT value FROM json_each(?)) AND NOT ${KEPT_SUSPENDED_MEMBERSHIP}
+  RETURNING id`;
+
+/**
+ * Queues turning away, in a room that's open to everyone as it's made private, what the AI apps that
+ * reach only open rooms were let send there (`OPEN_ROOMS_ONLY`), answering a row if it was open.
+ */
+const QUEUE_OPEN_ROOMS_ONLY_REVOCATION = `INSERT INTO pending_revocations (room_id, tag, code, due_at)
+  SELECT id, ?, ?, ? FROM rooms WHERE id = ? AND kind = 'open'
   RETURNING id`;
 
 /**
@@ -4702,16 +4712,17 @@ export class WorkspaceStore {
     if (changes.kind === "open") {
       const grant = statement(GRANT_ROOM_TO_ACTIVE_USERS, roomId, now, now);
       const [updated, added, after, rank] = (await this.db.batch([update, grant, members, ranked])) as UserIdRow[][];
-      return { roomChanged: updated!.length > 0, memberIds: userIdsOf(after!), addedIds: userIdsOf(added!), removedIds: [], ranked: isRanked(rank!) };
+      return { roomChanged: updated!.length > 0, memberIds: userIdsOf(after!), addedIds: userIdsOf(added!), removedIds: [], madePrivate: false, ranked: isRanked(rank!) };
     }
     if (changes.kind !== "closed") {
       const [updated, after] = (await this.db.batch([update, members])) as UserIdRow[][];
       // Nobody new is in it, so nobody's sidebar has left it out.
-      return { roomChanged: updated!.length > 0, memberIds: userIdsOf(after!), addedIds: [], removedIds: [], ranked: false };
+      return { roomChanged: updated!.length > 0, memberIds: userIdsOf(after!), addedIds: [], removedIds: [], madePrivate: false, ranked: false };
     }
     const memberIds = JSON.stringify(changes.memberIds);
-    // Whom it takes out is read before the room's kind changes, which says whether anyone suspended stays.
-    const [, removed, updated, added, after, rank] = (await this.db.batch([
+    // Whether it was open, and whom it takes out, are read before the room's kind changes, which says whether anyone suspended stays.
+    const [madePrivate, , removed, updated, added, after, rank] = (await this.db.batch([
+      statement(QUEUE_OPEN_ROOMS_ONLY_REVOCATION, OPEN_ROOMS_ONLY, code, dueAt, roomId),
       statement(QUEUE_MEMBER_REVOCATIONS, code, dueAt, roomId, memberIds),
       statement(REVOKE_ROOM_FROM_OTHERS, roomId, memberIds),
       update,
@@ -4724,6 +4735,7 @@ export class WorkspaceStore {
       memberIds: userIdsOf(after!),
       addedIds: userIdsOf(added!),
       removedIds: userIdsOf(removed!),
+      madePrivate: madePrivate!.length > 0,
       ranked: isRanked(rank!),
     };
   }
