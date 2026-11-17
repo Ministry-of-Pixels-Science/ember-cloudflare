@@ -49,8 +49,8 @@ const huddleMessage = (huddle: MessageHuddle = { startedAt: STARTED }, changes: 
 const going = (...userIds: string[]): Record<string, LiveHuddle> => ({ general: { startedAt: STARTED, userIds } });
 
 /** The huddle this tab is in, in room `roomId`. */
-const joined = (roomId: string): JoinedHuddle => ({ roomId, connected: true, you: grace!, people: [], muted: false, microphone: true, microphoneId: "", speakerId: "", camera: null, watched: new Map(), screen: null, screens: new Map(), open: false, thread: true });
-const controls = () => ({ leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setThread: vi.fn(), setDevice: vi.fn(), setSmall: vi.fn(), switchCamera: vi.fn(), invite: vi.fn() });
+const joined = (roomId: string): JoinedHuddle => ({ roomId, connected: true, you: grace!, people: [], muted: false, sticker: null, microphone: true, microphoneId: "", speakerId: "", camera: null, watched: new Map(), screen: null, screens: new Map(), open: false, thread: true });
+const controls = () => ({ leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setThread: vi.fn(), setDevice: vi.fn(), setSmall: vi.fn(), switchCamera: vi.fn(), invite: vi.fn(), setSticker: vi.fn(), react: vi.fn() });
 
 interface Seen {
   /** Whose tab shows the message: Linus's, who's in no huddle, unless given. */

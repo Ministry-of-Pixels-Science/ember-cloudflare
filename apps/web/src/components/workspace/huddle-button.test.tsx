@@ -9,9 +9,9 @@ import { HuddleButton, HuddlesContext, joinsNoHuddle, useJoinsNoHuddle } from ".
 
 const huddleOf = (...userIds: string[]): LiveHuddle => ({ startedAt: "2026-11-10T09:00:00.000Z", userIds });
 /** The huddle this tab is in, in room `roomId`. */
-const joined = (roomId: string): JoinedHuddle => ({ roomId, connected: true, you: { id: "ada", name: "Ada" }, people: [], muted: false, microphone: true, microphoneId: "", speakerId: "", camera: null, watched: new Map(), screen: null, screens: new Map(), open: false, thread: true });
+const joined = (roomId: string): JoinedHuddle => ({ roomId, connected: true, you: { id: "ada", name: "Ada" }, people: [], muted: false, sticker: null, microphone: true, microphoneId: "", speakerId: "", camera: null, watched: new Map(), screen: null, screens: new Map(), open: false, thread: true });
 /** What the tab's huddle is asked to do, `leave` among it. */
-const controlsWith = (leave = vi.fn()) => ({ leave, setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setThread: vi.fn(), setDevice: vi.fn(), setSmall: vi.fn(), switchCamera: vi.fn(), invite: vi.fn() });
+const controlsWith = (leave = vi.fn()) => ({ leave, setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setThread: vi.fn(), setDevice: vi.fn(), setSmall: vi.fn(), switchCamera: vi.fn(), invite: vi.fn(), setSticker: vi.fn(), react: vi.fn() });
 
 /** The keyboard of a device whose `navigator.platform` is `platform`. */
 const on = (platform: string) => vi.stubGlobal("navigator", { ...navigator, platform, clipboard: navigator.clipboard });

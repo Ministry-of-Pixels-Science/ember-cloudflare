@@ -4,7 +4,7 @@ import { evictDurableObject, runDurableObjectAlarm, runInDurableObject } from "c
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HUDDLE_HEADER, type ChatRoom } from "../src/chat-room";
 import type { Env } from "../src/env";
-import { HUDDLE_CHECK_MS, HUDDLE_SILENT_MS, HUDDLE_TAG, NO_OFFER, PUBLICATION_SETTLES_MS, TOO_FAST, type Huddle, type HuddleAttachment } from "../src/huddles/room";
+import { HUDDLE_CHECK_MS, HUDDLE_SILENT_MS, HUDDLE_TAG, NO_OFFER, PUBLICATION_SETTLES_MS, REACTIONS_IN_TEN_SECONDS, TOO_FAST, type Huddle, type HuddleAttachment } from "../src/huddles/room";
 import { REVOCATIONS_KEPT_MS, sessionTag } from "../src/revocations";
 import { MAX_ROOM_FRAME_SIZE } from "../src/sockets";
 import { viewersOf } from "../src/viewing";
@@ -179,10 +179,12 @@ describe("A room's huddle", () => {
     const grace = await signIn("Grace");
     const phone = await welcomed(room, ada);
     const onPhone = await publishing(sfu, phone);
+    phone.send({ type: "huddle.sticker", sticker: "hand" });
+    await reached(phone);
     const graces = await welcomed(room, grace);
 
     const laptop = await joinHuddle(room, ada, { muted: true });
-    // In her place still, ahead of Grace, with nothing published from this tab yet.
+    // In her place still, ahead of Grace, with nothing published from this tab yet, nor the sticker the other showed.
     expect((await laptop.next("huddle.welcome")).people).toEqual([person(ada, { muted: true }), person(grace)]);
     expect(await phone.closed).toMatchObject({ code: HuddleCloseCode.Moved, reason: "Moved" });
     expect(await graces.next("huddle.changed")).toEqual({ type: "huddle.changed", person: person(ada, { muted: true }) });
@@ -275,6 +277,78 @@ describe("A room's huddle", () => {
     expect((await linuses.next("huddle.welcome")).people).toMatchObject([{ muted: false }, { muted: true }, { muted: false }]);
   });
 
+  it("tells the others when someone shows a sticker, shows another in its place, or takes theirs off, and welcomes whoever joins with the ones shown", async () => {
+    const { ada } = await huddlesOn();
+    const room = await freshRoom("stickers");
+    const [grace, linus] = [await signIn("Grace"), await signIn("Linus")];
+    const adas = await welcomed(room, ada);
+    const graces = await welcomed(room, grace, true);
+
+    adas.send({ type: "huddle.sticker", sticker: "hand" });
+    expect(await graces.next("huddle.changed")).toEqual({ type: "huddle.changed", person: person(ada, { sticker: "hand" }) });
+    // Shown again, it's nothing new, and neither is taking off a sticker that isn't shown.
+    adas.send({ type: "huddle.sticker", sticker: "hand" });
+    graces.send({ type: "huddle.sticker", sticker: null });
+    await reached(adas, graces);
+    expect([adas.pending("huddle.changed"), graces.pending("huddle.changed")]).toEqual([[], []]);
+
+    adas.send({ type: "huddle.sticker", sticker: "brb" });
+    expect(await graces.next("huddle.changed")).toEqual({ type: "huddle.changed", person: person(ada, { sticker: "brb" }) });
+    // Whatever else of someone changes, their sticker stays.
+    graces.send({ type: "huddle.sticker", sticker: "done" });
+    expect(await adas.next("huddle.changed")).toEqual({ type: "huddle.changed", person: person(grace, { muted: true, sticker: "done" }) });
+    graces.send({ type: "huddle.mute", muted: false });
+    expect(await adas.next("huddle.changed")).toEqual({ type: "huddle.changed", person: person(grace, { sticker: "done" }) });
+
+    // The room keeps them while it hibernates, and welcomes whoever joins with them.
+    await evictDurableObject(roomStub(room));
+    const linuses = await joinHuddle(room, linus);
+    expect((await linuses.next("huddle.welcome")).people).toEqual([person(ada, { sticker: "brb" }), person(grace, { sticker: "done" }), person(linus)]);
+
+    adas.send({ type: "huddle.sticker", sticker: null });
+    expect([await graces.next("huddle.changed"), await linuses.next("huddle.changed")]).toEqual([
+      { type: "huddle.changed", person: person(ada) },
+      { type: "huddle.changed", person: person(ada) },
+    ]);
+    await reached(adas);
+    // Their own tab hears of none of it: it shows what it sent.
+    expect(adas.log.map(({ type }) => type)).toEqual(["huddle.welcome", "huddle.joined", "pong", "huddle.changed", "huddle.changed", "huddle.joined", "pong"]);
+    expect((await remembered(room)).map(({ sticker }) => sticker)).toEqual([undefined, "done", undefined]);
+  });
+
+  it("tells everyone in a huddle when someone reacts with an emoji, their own tab too, and of only so many of one tab's in ten seconds", async () => {
+    const { ada } = await huddlesOn();
+    const room = await freshRoom("reactions");
+    const grace = await signIn("Grace");
+    const adas = await welcomed(room, ada);
+    const graces = await welcomed(room, grace);
+    const reacted = ({ user }: Session, emoji: string) => ({ type: "huddle.reacted", userId: user.id, emoji });
+    /** What both of them next hear that someone reacted with. */
+    const bothHear = async () => [await adas.next("huddle.reacted"), await graces.next("huddle.reacted")];
+    const start = Date.now();
+    vi.useFakeTimers({ toFake: ["Date"], now: start });
+
+    adas.send({ type: "huddle.react", emoji: "\u{1F389}" });
+    expect(await bothHear()).toEqual([reacted(ada, "\u{1F389}"), reacted(ada, "\u{1F389}")]);
+    for (let nth = 1; nth < REACTIONS_IN_TEN_SECONDS; nth++) adas.send({ type: "huddle.react", emoji: "\u{1F44D}\u{1F3FD}" });
+    for (let nth = 1; nth < REACTIONS_IN_TEN_SECONDS; nth++) expect(await bothHear()).toEqual([reacted(ada, "\u{1F44D}\u{1F3FD}"), reacted(ada, "\u{1F44D}\u{1F3FD}")]);
+
+    // The next goes unheard, by her own tab too, which is told nothing of it, while Grace's are heard as ever.
+    adas.send({ type: "huddle.react", emoji: "\u{1F389}" });
+    vi.setSystemTime(start + 9_999);
+    adas.send({ type: "huddle.react", emoji: "\u{1F389}" });
+    await reached(adas);
+    graces.send({ type: "huddle.react", emoji: "\u2764\uFE0F" });
+    expect(await bothHear()).toEqual([reacted(grace, "\u2764\uFE0F"), reacted(grace, "\u2764\uFE0F")]);
+    expect([adas.pending("huddle.reacted"), adas.pending("error"), graces.pending("huddle.reacted")]).toEqual([[], [], []]);
+
+    // Once its ten seconds are over, the tab has as many again. A reaction changes nothing of anyone.
+    vi.setSystemTime(start + 10_000);
+    adas.send({ type: "huddle.react", emoji: "\u{1F389}" });
+    expect(await bothHear()).toEqual([reacted(ada, "\u{1F389}"), reacted(ada, "\u{1F389}")]);
+    expect([adas.pending("huddle.changed"), graces.pending("huddle.changed")]).toEqual([[], []]);
+  });
+
   it("refuses a frame it can't read, and closes a socket that sends one larger than a room takes", async () => {
     const { ada, sfu } = await huddlesOn();
     const room = await freshRoom("frames");
@@ -293,6 +367,11 @@ describe("A room's huddle", () => {
       { type: "huddle.listen", kind: "screen", watch: ["u1", "u2", "u3"] },
       { type: "huddle.unpublish", kind: "slides" },
       { type: "huddle.answer" },
+      { type: "huddle.sticker" },
+      { type: "huddle.sticker", sticker: "wave" },
+      { type: "huddle.react" },
+      { type: "huddle.react", emoji: "hello" },
+      { type: "huddle.react", emoji: "\u{1F389}\u{1F389}" },
       { type: "message.create", clientMessageId: "c1", body: "Hello" },
     ];
     for (const frame of unreadable) {
