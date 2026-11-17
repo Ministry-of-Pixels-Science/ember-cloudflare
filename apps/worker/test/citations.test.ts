@@ -24,11 +24,11 @@ describe("What an answer cites of the pages Ember's searches found", () => {
     expect(citedIn("A footnote[^2].", PAGES)).toEqual({ text: "A footnote.", cited: [BLOG] });
   });
 
-  it("leaves brackets that aren't all pages' numbers, a link's text and a reference's label and definition as they're written", () => {
-    for (const text of ["In [2024] it grew.", "See [4].", "See [0].", "See [3-1].", "See [1, 9].", "A list [a].", "[1](https://example.com/one)", "[1]: https://example.com/one"]) {
+  it("leaves brackets that aren't all pages' numbers, a link's text, and a reference's label, its definition and the links to it as they're written", () => {
+    for (const text of ["In [2024] it grew.", "See [4].", "See [0].", "See [3-1].", "See [1, 9].", "A list [a].", "[1](https://example.com/one)", "[[1]](https://example.com/one)", "[See [2]](https://example.com/two)", "[1]: https://example.com/one"]) {
       expect(citedIn(text, PAGES)).toEqual({ text, cited: [] });
     }
-    for (const text of ["[the docs][1] say so.", "Read [1][manual] first.\n\n[manual]: https://example.com/manual"]) {
+    for (const text of ["[the docs][1] say so.", "Read [1][manual] first.\n\n[manual]: https://example.com/manual", "It grew [1].\n\n[1]: https://example.com/one", "It grew [3][2].\n\n[2]: https://example.com/two"]) {
       expect(citedIn(text, PAGES)).toEqual({ text, cited: [] });
     }
   });
@@ -39,6 +39,7 @@ describe("What an answer cites of the pages Ember's searches found", () => {
     }
     expect(citedIn("Write `list[1]` [2].", PAGES)).toEqual({ text: "Write `list[1]`.", cited: [BLOG] });
     expect(citedIn("See [the report](https://example.com/report?ids=[1]) [2].", PAGES)).toEqual({ text: "See [the report](https://example.com/report?ids=[1]).", cited: [BLOG] });
+    expect(citedIn("See [the report](https://example.com/(item[1])) [2].", PAGES)).toEqual({ text: "See [the report](https://example.com/(item[1])).", cited: [BLOG] });
   });
 
   it("takes citations out of a list's or a quote's text around the code it holds, but not out of the code", () => {
@@ -49,6 +50,7 @@ describe("What an answer cites of the pages Ember's searches found", () => {
     expect(citedIn("- Run:\n\n  ```js\n  pages[1]\n  ```\n- It's out [3].", PAGES)).toEqual({ text: "- Run:\n\n  ```js\n  pages[1]\n  ```\n- It's out.", cited: [NEWS] });
     expect(citedIn("> ~~~js\n> const first = pages[1];\n> ~~~\n>\n> It's out [2].", PAGES)).toEqual({ text: "> ~~~js\n> const first = pages[1];\n> ~~~\n>\n> It's out.", cited: [BLOG] });
     expect(citedIn("- A quote:\n\n  >     const first = pages[1];\n  >\n  > It's out [2].", PAGES)).toEqual({ text: "- A quote:\n\n  >     const first = pages[1];\n  >\n  > It's out.", cited: [BLOG] });
+    expect(citedIn("> It's out [2].\n>\n>     It's out [2].", PAGES)).toEqual({ text: "> It's out.\n>\n>     It's out [2].", cited: [BLOG] });
     // Code begun on an item's number can't be told from the item's text, so the list stays as it's written.
     const numbered = "1.     const first = pages[1];\n\n   It's out [2].";
     expect(citedIn(numbered, PAGES)).toEqual({ text: numbered, cited: [] });
@@ -79,8 +81,9 @@ describe("What an answer cites of the pages Ember's searches found", () => {
 
   it("counts a page whose address the answer writes as cited, though it gives no number, and only its whole address", () => {
     expect(citedIn(`Read [the docs](${DOCS.url}) first [2].`, PAGES).cited).toEqual([DOCS, BLOG]);
-    expect(citedIn(`At ${NEWS.url}.`, PAGES).cited).toEqual([NEWS]);
-    expect(citedIn(`At ${NEWS.url}/sports.`, PAGES).cited).toEqual([]);
+    expect(citedIn(`It grew [1].\n\n[1]: ${NEWS.url}`, PAGES)).toEqual({ text: `It grew [1].\n\n[1]: ${NEWS.url}`, cited: [NEWS] });
+    for (const text of [`At ${NEWS.url}.`, `At ${NEWS.url}, then.`, `At _${NEWS.url}_.`, `At (${NEWS.url}).`]) expect(citedIn(text, PAGES).cited).toEqual([NEWS]);
+    for (const text of [`At ${NEWS.url}/sports.`, `At ${NEWS.url},2026.`, `At ${NEWS.url};edition=2.`, `At ${NEWS.url}_archive.`]) expect(citedIn(text, PAGES).cited).toEqual([]);
   });
 
   it("counts no pages when no searches found any", () => {
