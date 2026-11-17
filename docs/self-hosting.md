@@ -571,6 +571,11 @@ push is an outgoing request, of which the Workers Free plan allows 50 per invoca
 pushes past that, for a message with more subscribers or a run of messages sent together, fail and
 are logged; the Paid plan allows 10,000.
 
+An invitation into a huddle is pushed too, from the huddle's room, to the subscriptions of the
+people it reaches who have Ember in view nowhere, as [Huddles](#huddles) describes. Its pushes
+count toward the same 50, so on the Free plan those past that, for an invitation to many people at
+once, fail and are logged.
+
 ### Files
 
 The files people upload go to an R2 bucket, bound as `FILES` in `wrangler.jsonc` and
@@ -1237,8 +1242,8 @@ in a huddle before they've said how they join it, and answering an invitation, e
 down in their other tabs and on their other devices. Whoever started the huddle isn't told of a
 Decline. It stops ringing by itself once the huddle is over, or once they're in it. An invitation
 reaches the people in the direct message who hear its @mentions or more, so nobody who has turned
-its notifications off, and only where Ember is open: a device with Ember closed doesn't ring yet.
-Nothing is kept of an invitation, so one that comes while someone's connection is down is lost.
+its notifications off. Nothing is kept of an invitation, so a tab whose connection is down when one
+comes never shows it.
 
 Anyone in a huddle can invite more of its room's people into it. Invite people, the first button
 along the huddle's base, or in the menu of More, the last before Leave, on a phone, lists the people
@@ -1247,6 +1252,20 @@ there are more. Tick one or more, up to 50, and Send Invite has the room invite 
 a direct message's huddle, and an invitation into a shared room says which: "Priya Patel invites you
 to a huddle in Launch". Here too, it rings only those who hear the room's @mentions or more, and
 whoever sent it is told who they invited, not who it reached, nor of a Decline.
+
+Whoever an invitation reaches who has Ember in view nowhere is sent it as a push notification too,
+on each browser and phone where they turned notifications on: someone with no tab of Ember open,
+with every one in the background, or with none heard from in the last minute, as on a laptop gone
+to sleep. A tab says whether it's shown as it connects, and each time it's hidden or shown again.
+The notification is titled with who invites them and reads "Invites you to a huddle", and in which
+room for a shared room's, and opening it opens the room, where the huddle is to join. A push
+service keeps it for a minute for a device it can't reach, where it keeps a message's for four
+weeks, so a phone that was off isn't told of a huddle long over. Once shown, it stays until it's
+opened or dismissed: answering the invitation somewhere else, or the huddle ending, doesn't take it
+down. A tab in the background still shows the invitation, and rings if its browser lets it, so
+someone with Ember behind another tab may get both. So may someone looking at a tab left open
+since before Ember was updated to do this: such a tab doesn't say whether it's shown, so it
+doesn't count until it's reloaded.
 
 An administrator turns huddles on under Huddles in community settings, with the switch on its card.
 Huddles run through Cloudflare's [Realtime SFU](https://developers.cloudflare.com/realtime/sfu/),

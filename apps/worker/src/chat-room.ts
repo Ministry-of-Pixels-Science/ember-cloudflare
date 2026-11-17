@@ -86,7 +86,7 @@ import { MessageStore, type Deletion, type InThread, type PageCursor, type Poste
 import { unfurler } from "./unfurl";
 import { viewersOf, type Viewing } from "./viewing";
 import { workspace, type AssistantAccess, type BotAccess, type OutsideSender, type WebhookAccess } from "./workspace";
-import type { AssistantAsk, MessagePush, MessageWebhook } from "./workspace-store";
+import type { AssistantAsk, InvitationPush, MessagePush, MessageWebhook } from "./workspace-store";
 
 /** What each socket remembers across hibernation. */
 interface Attachment extends Viewing {
@@ -343,7 +343,7 @@ export class ChatRoom extends DurableObject<Env> {
     super(ctx, env);
     // Heartbeats are answered by the runtime without waking the object.
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('{"type":"ping"}', '{"type":"pong"}'));
-    this.huddle = new Huddle(ctx, env, (time) => this.serially(() => this.checkHuddleBy(time)));
+    this.huddle = new Huddle(ctx, env, (time) => this.serially(() => this.checkHuddleBy(time)), (pushes) => this.push(pushes));
   }
 
   override async fetch(request: Request): Promise<Response> {
@@ -1950,10 +1950,10 @@ export class ChatRoom extends DurableObject<Env> {
   }
 
   /**
-   * Sends new messages' pushes, as the Workspace still allows each when its turn comes, and has it forget
-   * the subscriptions they found gone.
+   * Sends new messages' pushes, or those of an invitation into the huddle, as the Workspace still allows
+   * each when its turn comes, and has it forget the subscriptions they found gone.
    */
-  private async push(pushes: MessagePush[]): Promise<void> {
+  private async push(pushes: Array<MessagePush | InvitationPush>): Promise<void> {
     const gone = await sendPushes(this.env, pushes, (id) => workspace(this.env).pushable(id));
     if (gone.length === 0) return;
     await workspace(this.env)

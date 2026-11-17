@@ -17,6 +17,7 @@ import {
   NAVIGATION_SLOTS,
   othersAfterMove,
   parseWorkspaceClientFrame,
+  parseWorkspaceSocketParams,
   PASSWORD_RESET_CODE_MINUTES,
   PASSWORD_RESETS_PER_NETWORK,
   sameName,
@@ -139,6 +140,7 @@ import {
 } from "./memberful-api";
 import { webPush } from "./push/keys";
 import { FixedWindowLimit } from "./rate-limit";
+import { urlOf } from "./request-url";
 import { sessionTag } from "./revocations";
 import type { RoomEvent } from "./room-log";
 import { appConnector } from "./apps/connector";
@@ -154,6 +156,7 @@ import { SessionCache } from "./session-cache";
 import { CLOSE_REASONS, closeTooLarge, isTooLarge, MAX_WORKSPACE_FRAME_SIZE, RESERVED_CLOSE_CODES } from "./sockets";
 import type { Transfer } from "./transfers";
 import type { TurnstileKeys } from "./turnstile";
+import { isViewing, type Viewing } from "./viewing";
 import {
   NEW_ACCOUNT_LOOKS,
   WorkspaceStore,
@@ -166,6 +169,7 @@ import {
   type AssistantPicks,
   type DirectoryEntry,
   type Disconnection,
+  type InvitationPush,
   type JoinableAccount,
   type LinkedAccount,
   type LinkedPerson,
@@ -772,6 +776,21 @@ function isCode(code: string, joinCode: string): boolean {
   return given.length === expected.length && crypto.subtle.timingSafeEqual(given, expected);
 }
 
+/**
+ * What a workspace socket's attachment says of its tab: whether it's shown, as its address said and its
+ * `presence.visible` frames since, and when the Workspace last heard so, as a room's sockets say of theirs.
+ */
+type Shown = Pick<Viewing, "visible" | "heardAt">;
+
+/**
+ * What a socket with no attachment counts as saying, like one whose address didn't say: that its tab
+ * isn't shown. The Workspace let it in before it kept this, and a socket stays connected when the
+ * Workspace takes new code after hibernating.
+ */
+const UNSAID: Shown = { visible: false, heardAt: 0 };
+
+const shownOf = (tab: WebSocket) => (tab.deserializeAttachment() as Shown | null) ?? UNSAID;
+
 /** Sends `frame` on a workspace socket, unless it has closed since. */
 function send(ws: WebSocket, frame: WorkspaceServerFrame): void {
   try {
@@ -1040,7 +1059,7 @@ export class Workspace extends DurableObject<Env> {
   /**
    * Lets in a tab's workspace socket, which the Worker sends on with the credentials of the request
    * for it, if they sign someone in. Like a room's, it's tagged with its person and its session, so
-   * signing out can find it.
+   * signing out can find it, and keeps whether its tab is shown, as its address says.
    */
   override async fetch(request: Request): Promise<Response> {
     if (request.headers.get("Upgrade") !== "websocket") return new Response("Expected a WebSocket upgrade", { status: 426 });
@@ -1049,8 +1068,10 @@ export class Workspace extends DurableObject<Env> {
     const session = await this.session(credentials);
     if (!session) return Response.json({ error: "Sign in first" }, { status: 401 });
 
+    const { visible } = parseWorkspaceSocketParams(urlOf(request).searchParams);
     const { 0: client, 1: server } = new WebSocketPair();
     this.ctx.acceptWebSocket(server, [session.user.id, sessionTag(session.id)]);
+    server.serializeAttachment({ visible, heardAt: Date.now() } satisfies Shown);
     // On D1, signing out can end the session while the check above reads it, and close the session's
     // sockets before this one is among them. Now that it is, checking again settles it: the session
     // cache forgets a session as it starts ending, and doesn't keep a lookup an ending overlapped.
@@ -1063,10 +1084,14 @@ export class Workspace extends DurableObject<Env> {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  /** Answers a ping that the runtime doesn't, because it carries more than its type. A workspace socket sends nothing else. */
+  /**
+   * Keeps whether a tab says it's shown, and answers a ping that the runtime doesn't, because it carries
+   * more than its type. A workspace socket sends nothing else.
+   */
   override async webSocketMessage(ws: WebSocket, raw: string | ArrayBuffer): Promise<void> {
     if (isTooLarge(raw, MAX_WORKSPACE_FRAME_SIZE)) return closeTooLarge(ws);
     const frame = typeof raw === "string" ? parseWorkspaceClientFrame(raw) : null;
+    if (frame?.type === "presence.visible") return ws.serializeAttachment({ visible: frame.visible, heardAt: Date.now() } satisfies Shown);
     send(ws, frame ? { type: "pong" } : { type: "error", message: "Unrecognized frame" });
   }
 
@@ -1815,10 +1840,24 @@ export class Workspace extends DurableObject<Env> {
    * Invites into room `roomId`'s huddle the people `userIds` names, as the room says `by`, who's in it,
    * does: each of them who's in the room, and hears its @mentions of them or more, is told on every tab
    * they have open, where it rings. Nobody else is told, so nobody hears of a room they aren't in, and
-   * nothing is kept of an invitation: one that reaches no tab is lost.
+   * nothing is kept of an invitation. Whoever of them has Ember in view nowhere, with no tab open or
+   * none of them shown, is pushed it too, while Web Push is on: this answers their pushes, for the room
+   * to send, none of them to a guest while `EMBER_GUEST_SIGN_IN` doesn't let guests stay signed in.
    */
-  async inviteToHuddle(roomId: RoomId, by: UserId, userIds: UserId[]): Promise<void> {
-    this.tell(await this.store.huddleInvitees(roomId, userIds), { type: "huddle.invited", roomId, by });
+  async inviteToHuddle(roomId: RoomId, by: UserId, userIds: UserId[]): Promise<InvitationPush[]> {
+    const invited = await this.store.huddleInvitees(roomId, userIds);
+    this.tell(invited, { type: "huddle.invited", roomId, by });
+    const away = invited.filter((userId) => !this.hasInView(userId));
+    if (away.length === 0 || !(await webPush(this.env)).on) return [];
+    return this.store.invitationPushes(roomId, by, away, guestSignIn(this.env));
+  }
+
+  /**
+   * Whether `userId` has Ember in view: a tab of theirs has said it's shown, and the Workspace has heard
+   * from it lately, as a room asks of whoever's viewing it (`isViewing`).
+   */
+  private hasInView(userId: UserId, now = Date.now()): boolean {
+    return this.ctx.getWebSockets(userId).some((tab) => tab.readyState === WebSocket.OPEN && isViewing(shownOf(tab), this.ctx.getWebSocketAutoResponseTimestamp(tab), now));
   }
 
   /**
