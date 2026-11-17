@@ -92,12 +92,23 @@ export const COPY_CODE = "[data-copy-code]";
  * not when an address in it is linked. What a search's results mark in it stays marked.
  */
 export function CodeBlock({ block, children, ...props }: ComponentProps<"pre"> & { block: DisplayElement }) {
+  return (
+    <Code code={codeOf(block)} language={block.attrs["data-language"]} {...props}>
+      {children}
+    </Code>
+  );
+}
+
+/**
+ * Code shown as a code block, with Copy code: `code`, its text, highlighted once highlight.js has loaded, in
+ * `language` or the one it reads as, unless it's `plain`, and `children` where it holds more than text, as
+ * `code` null says it does.
+ */
+export function Code({ code, language, plain = false, children, ...props }: ComponentProps<"pre"> & { code: string | null; language?: string; plain?: boolean }) {
   const pre = useRef<HTMLPreElement>(null);
-  const code = codeOf(block);
-  const language = block.attrs["data-language"];
-  const highlighter = useHighlighter(code !== null);
+  const highlighter = useHighlighter(code !== null && !plain);
   const marks = useContext(SearchMarks);
-  const tokens = useMemo(() => (highlighter && code !== null ? highlighter.highlight(code, language) : null), [highlighter, code, language]);
+  const tokens = useMemo(() => (highlighter && code !== null && !plain ? highlighter.highlight(code, language) : null), [highlighter, code, language, plain]);
   return createElement(
     "div",
     { className: "code-block group/code relative" },
