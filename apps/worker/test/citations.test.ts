@@ -24,10 +24,13 @@ describe("What an answer cites of the pages Ember's searches found", () => {
     expect(citedIn("A footnote[^2].", PAGES)).toEqual({ text: "A footnote.", cited: [BLOG] });
   });
 
-  it("leaves brackets that aren't all pages' numbers, a link's text, and a reference's label, its definition and the links to it as they're written", () => {
+  it("leaves brackets that aren't all pages' numbers, escaped ones, a link's text, and a reference's label, its definition and the links to it as they're written", () => {
     for (const text of ["In [2024] it grew.", "See [4].", "See [0].", "See [3-1].", "See [1, 9].", "A list [a].", "[1](https://example.com/one)", "[[1]](https://example.com/one)", "[See [2]](https://example.com/two)", "[see [1] here](https://example.com/one)", "[x](/wiki/A_(b)[1])", "[1]: https://example.com/one"]) {
       expect(citedIn(text, PAGES)).toEqual({ text, cited: [] });
     }
+    for (const text of ["Literal \\[1].", "A footnote \\[^2].", "Three \\\\\\[2]."]) expect(citedIn(text, PAGES)).toEqual({ text, cited: [] });
+    // A backslash written as itself doesn't escape the bracket after it.
+    expect(citedIn("A backslash \\\\[2].", PAGES)).toEqual({ text: "A backslash \\\\.", cited: [BLOG] });
     for (const text of ["[the docs][1] say so.", "Read [1][manual] first.\n\n[manual]: https://example.com/manual", "It grew [1].\n\n[1]: https://example.com/one", "It grew [3][2].\n\n[2]: https://example.com/two", "It grew [1][the report](https://example.com/report)."]) {
       expect(citedIn(text, PAGES)).toEqual({ text, cited: [] });
     }

@@ -12,9 +12,9 @@ import type { Source } from "./gateway";
 /**
  * A run of citations as a model writes them, with the space before it: [2], [2, 5], [2-4], [^2] or
  * [2][5], but no link's text, as in [2](…) and [[2]](…), nor a reference's label or its definition, as in
- * [2][docs] and [2]: ….
+ * [2][docs] and [2]: …, nor a bracket escaped by an odd number of backslashes before it, as in \[2].
  */
-const CITATIONS = /[^\S\n]*(?<!\])((?:\[\^?\d{1,3}(?:[^\S\n]*[,–-][^\S\n]*\d{1,3})*\])+)(?![(:[\]])/g;
+const CITATIONS = /[^\S\n]*(?<!\])(?<!(?<!\\)(?:\\\\)*\\)((?:\[\^?\d{1,3}(?:[^\S\n]*[,–-][^\S\n]*\d{1,3})*\])+)(?![(:[\]])/g;
 
 /** Code in a span, as backticks fence it. */
 const CODE_SPAN = /(`+)[\s\S]*?[^`]\1(?!`)/;
