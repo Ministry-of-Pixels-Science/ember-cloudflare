@@ -80,26 +80,30 @@ const LINE_STYLES = new Set<FormattingCommand>(["paragraph", ...HEADING_TAGS, "o
 /** Formats what's selected, or what's typed next, as a button of the formatting row does. */
 export function $applyFormatting(lexxy: FormattedEditor, command: FormattingCommand) {
   if (lexxy.selection.isInsideCodeBlock && NOT_IN_CODE_BLOCKS.has(command)) return;
-  if (LINE_STYLES.has(command)) $keepingCursor(() => $format(lexxy, command));
+  if (LINE_STYLES.has(command)) $keepingSelection(() => $format(lexxy, command));
   else $format(lexxy, command);
 }
 
 /**
- * Runs `styleLine`, then, if nothing was selected, puts the cursor back where it was in its text, as Slack
- * keeps it, or else at the end of what's styled, so what's typed next doesn't take the line's place.
+ * Runs `styleLine`, then puts the cursor, or what was selected, back where it was in its text, as Slack
+ * keeps it, rather than leave the whole lines Lexxy styled selected, which what's typed next would take
+ * the place of. Where that text is gone, the cursor goes at the end of what's styled.
  */
-function $keepingCursor(styleLine: () => void) {
+function $keepingSelection(styleLine: () => void) {
   const before = $getSelection();
-  const cursor = $isRangeSelection(before) && before.isCollapsed() ? { key: before.anchor.key, offset: before.anchor.offset, type: before.anchor.type } : null;
+  const kept = $isRangeSelection(before) ? [before.anchor, before.focus].map(({ key, offset, type }) => ({ key, offset, type })) : [];
   styleLine();
   const after = $getSelection();
-  if (!cursor || !$isRangeSelection(after)) return;
+  if (kept.length === 0 || !$isRangeSelection(after)) return;
   // Text keeps to its line as Lexxy splits lines into blocks of their own, where an element can be split.
-  const text = cursor.type === "text" ? $getNodeByKey(cursor.key) : null;
-  if ($isTextNode(text) && text.isAttached()) {
-    const offset = Math.min(cursor.offset, text.getTextContentSize());
-    after.anchor.set(cursor.key, offset, "text");
-    after.focus.set(cursor.key, offset, "text");
+  const points = kept.map(({ key, offset, type }) => {
+    const text = type === "text" ? $getNodeByKey(key) : null;
+    return $isTextNode(text) && text.isAttached() ? { key, offset: Math.min(offset, text.getTextContentSize()) } : null;
+  });
+  const [anchor, focus] = points;
+  if (anchor && focus) {
+    after.anchor.set(anchor.key, anchor.offset, "text");
+    after.focus.set(focus.key, focus.offset, "text");
   } else {
     after.anchor.set(after.focus.key, after.focus.offset, after.focus.type);
   }

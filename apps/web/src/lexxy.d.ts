@@ -82,7 +82,7 @@ declare module "@37signals/lexxy" {
     /** Calls `listener` after each change to the editor's state, the selection's included. */
     registerUpdateListener(listener: (update: { editorState: EditorState }) => void): () => void;
     getEditorState(): EditorState;
-    update(change: () => void, options?: { discrete?: boolean; tag?: string }): void;
+    update(change: () => void, options?: { discrete?: boolean; tag?: string | string[] }): void;
     /** Lexxy's commands go by name, as its toolbar's buttons send them. */
     dispatchCommand(command: string, payload?: unknown): boolean;
     dispatchCommand<Payload>(command: LexicalCommand<Payload>, payload: Payload): boolean;
@@ -108,6 +108,8 @@ declare module "@37signals/lexxy" {
     KEY_SPACE_COMMAND: LexicalCommand<KeyboardEvent>;
     /** Tags a change after which the page's selection is left where it is, rather than put where the editor's is. */
     SKIP_DOM_SELECTION_TAG: string;
+    /** Tags a change that undo takes back with the one before it. */
+    HISTORY_MERGE_TAG: string;
   };
 
   /** What an editor allows and holds beyond Lexxy's own. */

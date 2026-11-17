@@ -221,6 +221,28 @@ test.describe("Formatting row", () => {
     await expect(grace.message("Quiet").locator(".message-content :is(strong, code)")).toHaveCount(0);
   });
 
+  test("turns Code on and off for what's typed next, straight after a list's new item too", async ({ members }) => {
+    const ada = await members.signIn("Ada");
+    const grace = await members.signIn("Grace");
+    await ada.composer().press("ControlOrMeta+Shift+8");
+    await ada.composer().pressSequentially("Steps");
+    // Shift+Enter, then Code before the page has told the editor its selection moved to the new item.
+    await ada.composer().evaluate(async (text) => {
+      const press = (key: string, code: string, keys: KeyboardEventInit) =>
+        text.dispatchEvent(new KeyboardEvent("keydown", { key, code, shiftKey: true, bubbles: true, cancelable: true, ...keys }));
+      press("Enter", "Enter", {});
+      await Promise.resolve();
+      press("C", "KeyC", /Mac/.test(navigator.platform) ? { metaKey: true } : { ctrlKey: true });
+    });
+    await ada.composer().pressSequentially("pnpm run deploy");
+    await ada.composer().press("ControlOrMeta+Shift+C");
+    await ada.composer().pressSequentially(" to ship");
+    await ada.composer().press("Enter");
+    const step = grace.message("Steps").locator(".message-content li").nth(1);
+    await expect(step).toHaveText("pnpm run deploy to ship");
+    await expect(step.locator("code")).toHaveText("pnpm run deploy");
+  });
+
   test("styles the line from the Paragraph menu as Slack's three headings, each smaller, keeping the cursor where it was", async ({ members }) => {
     const ada = await members.signIn("Ada");
     const grace = await members.signIn("Grace");
@@ -282,6 +304,27 @@ test.describe("Formatting row", () => {
     await expect(ada.composer().locator("li")).toHaveText("Hello big wide world");
   });
 
+  test("keeps what's selected as it styles the line, so what's typed next takes only its place", async ({ members }) => {
+    const ada = await members.signIn("Ada");
+    const select = async (word: string, before: string) => {
+      await ada.composer().press("End");
+      for (let n = 0; n < before.length; n++) await ada.composer().press("ArrowLeft");
+      for (let n = 0; n < word.length; n++) await ada.composer().press("Shift+ArrowLeft");
+    };
+    await ada.composer().pressSequentially("Launch day checklist");
+    await select("day", " checklist");
+    await tool(ada, "Paragraph").click();
+    await paragraphStyle(ada, "Medium heading").click();
+    await expect(ada.composer()).toBeFocused();
+    await ada.composer().pressSequentially("week");
+    await expect(ada.composer().locator("h2")).toHaveText("Launch week checklist");
+
+    await select("checklist", "");
+    await ada.composer().press("ControlOrMeta+Shift+8");
+    await ada.composer().pressSequentially("plan");
+    await expect(ada.composer().locator("li")).toHaveText("Launch week plan");
+  });
+
   test("starts a list's next item on Shift+Enter, where Enter sends, ending the list on an empty one, and a paragraph after a heading", async ({ members }) => {
     const ada = await members.signIn("Ada");
     const grace = await members.signIn("Grace");
@@ -335,8 +378,15 @@ test.describe("Formatting row", () => {
     await editing.getByLabel("Text").fill("Ember's site");
     await editing.getByRole("button", { name: "Save" }).click();
     await expect(ada.composer().getByRole("link")).toHaveText("Ember's site");
+    // Back in the text after the link once the dialog's gone, and into it two characters back, since
+    // Lexical takes the very end of a link's text as after it.
+    await expect(editing).toBeHidden();
+    await expect(ada.composer()).toBeFocused();
+    await expect(tool(ada, "Link")).toHaveAttribute("aria-pressed", "false");
 
     await ada.composer().press("ArrowLeft");
+    await ada.composer().press("ArrowLeft");
+    await expect(tool(ada, "Link")).toHaveAttribute("aria-pressed", "true");
     await tool(ada, "Link").click();
     await editing.getByRole("button", { name: "Remove link" }).click();
     await expect(ada.composer().getByRole("link")).toHaveCount(0);
@@ -346,6 +396,7 @@ test.describe("Formatting row", () => {
     await tool(ada, "Link").click();
     await adding.getByLabel("Link").fill("https://example.com/");
     await adding.getByRole("button", { name: "Save" }).click();
+    // Sent linked, though the dialog's still fading.
     await ada.composer().press("Enter");
     await expect(grace.message("Ember's site").getByRole("link", { name: "Ember's site" })).toHaveAttribute("href", "https://example.com/");
   });

@@ -153,7 +153,8 @@ function nothingSelected(lexxy: LexxyEditor): boolean {
  */
 function changeText(lexxy: LexxyEditor, change: () => void, tag?: string) {
   const focused = lexxy.editorContentElement?.contains(document.activeElement) ?? false;
-  lexxy.editor.update(change, { tag: tag ?? (focused ? undefined : Lexical.SKIP_DOM_SELECTION_TAG) });
+  const tags = [...(tag ? [tag] : []), ...(focused ? [] : [Lexical.SKIP_DOM_SELECTION_TAG])];
+  lexxy.editor.update(change, { tag: tags });
 }
 
 /** A link pasted in the editor, as Lexxy tells of it with `lexxy:insert-link`. */
@@ -272,14 +273,21 @@ export default function RichTextEditor({
     apply: (command) => {
       const lexxy = editor.current;
       if (!lexxy) return;
-      // Code with nothing selected is for what's typed next, which Lexxy takes off again after any change
-      // that isn't tagged as this one is, as it takes off code left over from code that's deleted.
-      const startsCode = command === "code" && nothingSelected(lexxy);
-      changeText(lexxy, () => $applyFormatting(lexxy, command), startsCode ? Lexical.SKIP_DOM_SELECTION_TAG : undefined);
+      // Code with nothing selected is for what's typed next, which Lexxy takes off again after a change it
+      // doesn't take as history, as this one is tagged, as it takes off code left over from code that's
+      // deleted. Lexical then puts the page's selection back, so it keeps the code, or no code, through the
+      // selection change that can still be on its way from the change before, as from a new list item.
+      const togglesCode = command === "code" && nothingSelected(lexxy);
+      changeText(lexxy, () => $applyFormatting(lexxy, command), togglesCode ? Lexical.HISTORY_MERGE_TAG : undefined);
     },
     linkDraft: () => editor.current?.editor.getEditorState().read($linkDraft) ?? { text: "", url: "" },
     link: (draft) => {
-      if (editor.current) linkText(editor.current, draft);
+      const lexxy = editor.current;
+      if (!lexxy) return;
+      linkText(lexxy, draft);
+      // Lexxy links text in changes of its own, outside any other, so it's this empty change after them,
+      // which Lexical draws with them as one, that leaves focus in Link's dialog until it's closed.
+      changeText(lexxy, () => {});
     },
     unlink: () => {
       if (editor.current) changeText(editor.current, $unlink);

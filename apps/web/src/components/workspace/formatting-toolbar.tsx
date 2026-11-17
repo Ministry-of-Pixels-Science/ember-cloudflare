@@ -255,10 +255,11 @@ export function LinkDialog({ formatting }: { formatting: Formatting }) {
   // What it shows, kept as it closes, so it doesn't empty as it fades.
   const [shown, setShown] = useState(linking);
   if (linking && linking !== shown) setShown(linking);
-  // What Save or Remove link does to the text, once focus is back in it, where the change puts the cursor.
-  const change = useRef<(() => void) | null>(null);
+  // Save and Remove link change the text at once, so that it's changed even before focus is back in it,
+  // where the change put the cursor, as the dialog fades, and only once, though Enter's pressed again.
   const finish = (changeText: () => void) => {
-    change.current = changeText;
+    if (linking === null) return;
+    changeText();
     closeLink();
   };
 
@@ -270,8 +271,6 @@ export function LinkDialog({ formatting }: { formatting: Formatting }) {
         onCloseAutoFocus={(event) => {
           event.preventDefault();
           editor.current?.focus();
-          change.current?.();
-          change.current = null;
         }}
         className={DIALOG}
       >
