@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import {
   ASSISTANT_ID,
   CloseCode,
+  DELETED_PERSON_NAME,
   HISTORY_PAGE_SIZE,
   isMessageTooLong,
   MAX_BOOST_LENGTH,
@@ -597,6 +598,34 @@ export class ChatRoom extends DurableObject<Env> {
       couriers.index.deliver();
       couriers.files.deliver();
       return ids.length > limit;
+    });
+  }
+
+  /**
+   * Deletes up to `limit` of the messages here of `userId`, who deleted their account, whenever they
+   * wrote them, as `removeMessagesBy` does, then once none are left, up to `limit` of the boosts they
+   * gave others' messages, telling everyone in the room of each, and answers whether any of theirs are
+   * left. Once none are, what's kept of their messages for their threads' replies takes the name a
+   * deleted account goes by.
+   */
+  async removeEverythingBy(roomId: RoomId, userId: UserId, limit: number): Promise<boolean> {
+    return this.serially(async () => {
+      const store = this.storeFor(roomId);
+      const ids = await store.messageIdsBy(userId, limit + 1, null);
+      if (ids.length > 0) {
+        await this.deleteEach(store, ids.slice(0, limit));
+        const couriers = this.couriersFor(roomId);
+        couriers.index.deliver();
+        couriers.files.deliver();
+        if (ids.length > limit) return true;
+      }
+      const boosts = await store.boostsBy(userId, limit + 1);
+      if (boosts.length > 0) {
+        await this.removeBoosts(store, boosts.slice(0, limit));
+        if (boosts.length > limit) return true;
+      }
+      await store.renameAuthor(userId, DELETED_PERSON_NAME);
+      return false;
     });
   }
 
@@ -1198,6 +1227,13 @@ export class ChatRoom extends DurableObject<Env> {
   private async removeBoost(store: MessageStore, boost: Boost): Promise<void> {
     const seq = await store.removeBoost(boost);
     this.broadcast({ type: "boost.deleted", boostId: boost.id, messageId: boost.messageId, seq });
+    this.couriersFor(store.roomId).index.deliver();
+  }
+
+  /** Deletes each of `boosts`, as `MessageStore.removeBoosts` does, telling everyone in the room. */
+  private async removeBoosts(store: MessageStore, boosts: Boost[]): Promise<void> {
+    const seq = await store.removeBoosts(boosts);
+    boosts.forEach((boost, index) => this.broadcast({ type: "boost.deleted", boostId: boost.id, messageId: boost.messageId, seq: seq + index }));
     this.couriersFor(store.roomId).index.deliver();
   }
 
