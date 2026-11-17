@@ -152,6 +152,36 @@ test.describe("Add and edit a bot", () => {
     await expect(botNamed(page, name)).toHaveCount(0);
   });
 
+  test("the administrator keeps a bot to the rooms chosen on its form, which its row then names alone, and puts it in every room again", async ({ page }) => {
+    await openBots(page);
+    const name = `Uptime Bot ${crypto.randomUUID().slice(0, 8)}`;
+    await page.getByRole("link", { name: "Add a chat bot" }).click();
+    await page.getByRole("textbox", { name: "Bot name" }).fill(name);
+    const rooms = page.getByRole("region", { name: "Rooms" });
+    await expect(rooms.getByRole("radio", { name: "Every room" })).toBeChecked();
+    await rooms.getByRole("radio", { name: "Only the rooms I choose" }).check();
+    await rooms.getByRole("checkbox", { name: "random", exact: true }).check();
+    await page.getByRole("button", { name: "Save changes" }).click();
+    await expect(page).toHaveURL(/\/account\/bots$/);
+
+    const row = botNamed(page, name).getByRole("button", { name, exact: true });
+    await expect(row).toHaveAccessibleDescription("random");
+    const random = await botRoom(page, name, "random");
+    await expect(random.getByRole("textbox", { name: "curl command for posting messages" })).toHaveValue(COMMAND);
+    await expect(botNamed(page, name).getByRole("button", { name: "general", exact: true })).toHaveCount(0);
+
+    await botNamed(page, name).getByRole("link", { name: `Edit ${name}` }).click();
+    await expect(page).toHaveURL(/\/account\/bots\/[^/]+\/edit$/);
+    await expect(rooms.getByRole("radio", { name: "Only the rooms I choose" })).toBeChecked();
+    await expect(rooms.getByRole("checkbox", { name: "random", exact: true })).toBeChecked();
+    await expect(rooms.getByRole("checkbox", { name: "general", exact: true })).not.toBeChecked();
+    await rooms.getByRole("radio", { name: "Every room" }).check();
+    await page.getByRole("button", { name: "Save changes" }).click();
+    await expect(page).toHaveURL(/\/account\/bots$/);
+    await opened(row);
+    await expect(botNamed(page, name).getByRole("button", { name: "general", exact: true })).toBeVisible();
+  });
+
   test("the administrator gives a bot an avatar from its form, shown on the bots page as the variant the browser made, and a new one", async ({ page }) => {
     await openBots(page);
     const name = `Build Bot ${crypto.randomUUID().slice(0, 8)}`;

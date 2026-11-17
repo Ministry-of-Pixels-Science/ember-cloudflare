@@ -429,18 +429,26 @@ export interface StoredBot extends DirectoryEntry {
   rooms: BotRoom[];
 }
 
-/** The same, with where its webhook delivers, or null for nowhere, as its edit page shows it. */
+/**
+ * The same, with where its webhook delivers, or null for nowhere, and the open rooms it's kept to, or
+ * null while it's in every open room, as its edit page shows it.
+ */
 export interface StoredBotSettings extends StoredBot {
   webhookUrl: string | null;
+  pickedRooms: BotRoom[] | null;
 }
 
-/** A bot to add: its id, name and token, where its webhook delivers, or null for nowhere, and its avatar, or null for none. */
+/**
+ * A bot to add: its id, name and token, where its webhook delivers, or null for nowhere, its avatar, or
+ * null for none, and the open rooms it's kept to, or null for every open room.
+ */
 export interface NewStoredBot {
   id: UserId;
   name: string;
   token: string;
   webhookUrl: string | null;
   avatar: StoredPicture | null;
+  rooms: RoomId[] | null;
 }
 
 /**
@@ -1035,6 +1043,19 @@ const roomsChange = (agentId: UserId, rooms: RoomId[] | null, now: string): Stat
         statement(`UPDATE agents SET every_open_room = 0 WHERE user_id = ?`, agentId),
         statement(LEAVE_UNPICKED_ROOMS, agentId, JSON.stringify(rooms)),
         statement(GRANT_PICKED_ROOMS, agentId, JSON.stringify(rooms), now),
+      ];
+
+/**
+ * What puts chat bot `botId` in every open room, with null, or in just the open rooms `rooms` names,
+ * taking it out of the others, and records which, as `roomsChange` does an agent.
+ */
+const botRoomsChange = (botId: UserId, rooms: RoomId[] | null, now: string): Statement[] =>
+  rooms === null
+    ? [statement(`UPDATE users SET rooms_picked = NULL WHERE id = ?`, botId), statement(GRANT_OPEN_ROOMS_TO_USER, botId, now, now)]
+    : [
+        statement(`UPDATE users SET rooms_picked = 1 WHERE id = ?`, botId),
+        statement(LEAVE_UNPICKED_ROOMS, botId, JSON.stringify(rooms)),
+        statement(GRANT_PICKED_ROOMS, botId, JSON.stringify(rooms), now),
       ];
 
 /**
@@ -2205,9 +2226,10 @@ const ACTIVE_BOTS_ROOMS = `SELECT memberships.user_id, rooms.id, rooms.name
   ORDER BY lower(rooms.name), rooms.id`;
 
 /**
- * An active bot, with its token and where its webhook delivers. @ember and the agents aren't, as above.
+ * An active bot, with its token, where its webhook delivers, and whether it's kept to the open rooms
+ * picked. @ember and the agents aren't, as above.
  */
-const ACTIVE_BOT = `SELECT ${DIRECTORY_COLUMNS}, users.bot_token, webhooks.url AS webhook_url
+const ACTIVE_BOT = `SELECT ${DIRECTORY_COLUMNS}, users.bot_token, webhooks.url AS webhook_url, users.rooms_picked
   FROM users LEFT JOIN webhooks ON webhooks.user_id = users.id
   WHERE users.id = ? AND users.status = ${ACTIVE} AND users.role = ${BOT} AND users.id <> '${ASSISTANT_ID}' AND ${NOT_AN_AGENT}`;
 
@@ -2220,8 +2242,8 @@ const ACTIVE_BOT_KEY = `SELECT users.id, users.name, users.bot_token, webhooks.u
   FROM users LEFT JOIN webhooks ON webhooks.user_id = users.id
   WHERE users.id = ?2 AND users.status = ${ACTIVE} AND users.role = ${BOT}`;
 
-/** The rooms a bot is in but its DMs, by name. */
-const BOT_ROOMS = `SELECT rooms.id, rooms.name FROM memberships JOIN rooms ON rooms.id = memberships.room_id
+/** The rooms a bot is in but its DMs, by name, with whether each is open. */
+const BOT_ROOMS = `SELECT rooms.id, rooms.name, rooms.kind FROM memberships JOIN rooms ON rooms.id = memberships.room_id
   WHERE memberships.user_id = ? AND rooms.kind <> 'direct' ORDER BY lower(rooms.name), rooms.id`;
 
 /** What the AI assistant tab lists of an agent, of its user and its row. */
@@ -2572,13 +2594,17 @@ const GRANT_OPEN_ROOMS_TO_USER = `INSERT INTO memberships (room_id, user_id, cre
 
 /**
  * Puts every active person in an open room, keeping the memberships they already have, and answers whom
- * it put in. Agents kept to the open rooms an administrator picked stay out, as do those only
- * administrators' direct messages reach.
+ * it put in. Agents and chat bots kept to the open rooms an administrator picked stay out, as do the
+ * agents only administrators' direct messages reach.
  */
 const GRANT_ROOM_TO_ACTIVE_USERS = `INSERT INTO memberships (room_id, user_id, created_at, updated_at)
-  SELECT ?, id, ?, ? FROM users WHERE status = ${ACTIVE} AND agent_access IS NOT 'admin-dms'
+  SELECT ?, id, ?, ? FROM users WHERE status = ${ACTIVE} AND agent_access IS NOT 'admin-dms' AND rooms_picked IS NULL
     AND NOT EXISTS (SELECT 1 FROM agents WHERE agents.user_id = users.id AND agents.every_open_room = 0)
   ON CONFLICT DO NOTHING RETURNING user_id`;
+
+/** Puts someone whose ban is lifted in every open room, as joining does, unless they're a chat bot kept to the open rooms picked. */
+const GRANT_OPEN_ROOMS_TO_UNBANNED = `INSERT INTO memberships (room_id, user_id, created_at, updated_at)
+  SELECT rooms.id, users.id, ?2, ?2 FROM rooms, users WHERE rooms.kind = 'open' AND users.id = ?1 AND users.rooms_picked IS NULL ON CONFLICT DO NOTHING`;
 
 /**
  * Adds one of first run's open rooms, made by ?3, unless the workspace has an open room of its name
@@ -3487,7 +3513,8 @@ export class WorkspaceStore {
   /**
    * Lifts someone's ban: unblocks their IP addresses and makes them active, recording when, unless they
    * were already, whatever their status was, and puts them in every open room, as joining does, those
-   * made or opened while they were banned among them. The rooms yet to delete their messages delete
+   * made or opened while they were banned among them, unless they're a chat bot kept to the open rooms
+   * picked, whose rooms kept it while it was banned. The rooms yet to delete their messages delete
    * only those written by then, at once. It queues having every room tell the sockets from those
    * addresses to reconnect, due at `dueAt`, so they come back able to change things again, unless
    * another ban blocks them too. Answers whether it queued anything.
@@ -3498,7 +3525,7 @@ export class WorkspaceStore {
       statement(QUEUE_UNBANNED_ADDRESS_REVOCATIONS, ADDRESS_TAG_PREFIX, reconnect, dueAt, userId),
       statement(`DELETE FROM bans WHERE user_id = ?`, userId),
       statement(`UPDATE users SET status = ${ACTIVE}, updated_at = ? WHERE id = ? AND status <> ${ACTIVE}`, now, userId),
-      statement(GRANT_OPEN_ROOMS_TO_USER, userId, now, now),
+      statement(GRANT_OPEN_ROOMS_TO_UNBANNED, userId, now),
       // The outbox holds a row only until its room answers, so this reads it all rather than keep an index.
       statement(`UPDATE pending_purges SET lifted_at = ? WHERE user_id = ? AND lifted_at IS NULL`, now, userId),
     ])) as unknown[][];
@@ -4110,38 +4137,44 @@ export class WorkspaceStore {
     return row ? { member: { id: userId, name: row.name }, administrator: row.administrator === 1 } : null;
   }
 
-  /** The active bot `botId`, with its token, its rooms but DMs and where its webhook delivers, or null unless it's one. */
+  /**
+   * The active bot `botId`, with its token, its rooms but DMs, where its webhook delivers and the open
+   * rooms it's kept to, if it's kept to the ones picked, or null unless it's one.
+   */
   async activeBot(botId: UserId): Promise<StoredBotSettings | null> {
     const [[row], rooms] = (await this.db.batch([statement(ACTIVE_BOT, botId), statement(BOT_ROOMS, botId)])) as [
-      Array<BotRow & { webhook_url: string | null }>,
-      BotRoom[],
+      Array<BotRow & { webhook_url: string | null; rooms_picked: number | null }>,
+      Array<BotRoom & { kind: string }>,
     ];
-    return row ? { ...storedBot(row, rooms), webhookUrl: row.webhook_url } : null;
+    if (!row) return null;
+    const open = rooms.flatMap(({ id, name, kind }) => (kind === "open" ? [{ id, name }] : []));
+    return { ...storedBot(row, rooms.map(({ id, name }) => ({ id, name }))), webhookUrl: row.webhook_url, pickedRooms: row.rooms_picked === 1 ? open : null };
   }
 
   /**
    * Adds a bot, with its webhook if it has somewhere to deliver and its avatar if it has one, in every
-   * open room, in one batch.
+   * open room or the ones it's kept to, in one batch.
    */
-  async createBot({ id, name, token, webhookUrl, avatar }: NewStoredBot, now: string): Promise<void> {
+  async createBot({ id, name, token, webhookUrl, avatar, rooms }: NewStoredBot, now: string): Promise<void> {
     await this.db.batch([
       statement(INSERT_BOT, id, name, token, avatar?.key ?? null, avatar?.variant ?? null, now, now),
       ...keeping(avatar),
       ...(webhookUrl === null ? [] : [statement(SAVE_WEBHOOK, id, webhookUrl, now)]),
-      statement(GRANT_OPEN_ROOMS_TO_USER, id, now, now),
+      ...botRoomsChange(id, rooms, now),
     ]);
   }
 
   /**
    * Changes a bot, in one batch: its webhook first, which delivers to `webhookUrl`, or goes when that's
-   * "", then its name, then its avatar, as `changeAvatar` gives someone theirs. What's left out stays as
-   * it is.
+   * "", then its name, then its avatar, as `changeAvatar` gives someone theirs, then the open rooms it's
+   * in (`botRoomsChange`). What's left out stays as it is.
    */
-  async changeBot(botId: UserId, { name, webhookUrl }: BotChanges, now: string, avatar: AvatarChange | null): Promise<void> {
+  async changeBot(botId: UserId, { name, webhookUrl, rooms }: BotChanges, now: string, avatar: AvatarChange | null): Promise<void> {
     await this.db.batch([
       ...(webhookUrl === undefined ? [] : [webhookUrl ? statement(SAVE_WEBHOOK, botId, webhookUrl, now) : statement(`DELETE FROM webhooks WHERE user_id = ?`, botId)]),
       ...(name === undefined ? [] : [statement(RENAME_BOT, name, now, botId)]),
       ...(avatar ? avatarChange(botId, avatar.avatar, avatar.previous, now, avatar.dueAt) : []),
+      ...(rooms === undefined ? [] : botRoomsChange(botId, rooms, now)),
     ]);
   }
 

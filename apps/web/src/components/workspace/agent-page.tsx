@@ -120,9 +120,9 @@ const CARD = "flex min-w-0 flex-col gap-4 rounded-[10px] border bg-surface px-[2
 
 /**
  * A radio button or a checkbox in a list of them, on a row 44px tall, whose box sits far enough into its
- * label, for fingers, for a fingertip on it to land on the label.
+ * label, for fingers, for a fingertip on it to land on the label, as the bot form's Rooms has them too.
  */
-const CHOICE = "flex min-h-11 cursor-pointer items-center gap-2.5 has-disabled:cursor-default touch:-ms-3.5 touch:ps-3.5";
+export const CHOICE = "flex min-h-11 cursor-pointer items-center gap-2.5 has-disabled:cursor-default touch:-ms-3.5 touch:ps-3.5";
 
 /** Where leaving an agent's page goes, which is always away from what's typed there. */
 const leaves = () => false;
@@ -209,10 +209,11 @@ const sameRooms = (a: readonly RoomId[] | null, b: readonly AgentRoom[] | null) 
   a === null || b === null ? a === b : a.length === b.length && b.every(({ id }) => a.includes(id));
 
 /**
- * The open rooms an agent can be kept to, by name: those in the sidebar's `rooms`, once it has them, and those
- * it's kept to already, `kept`, which the administrator may not be in, such as one made while they were banned.
+ * The open rooms an agent or a chat bot can be kept to, by name: those in the sidebar's `rooms`, once it has
+ * them, and those it's kept to already, `kept`, which the administrator may not be in, such as one made while
+ * they were banned.
  */
-function roomsToPick(rooms: readonly SidebarRoom[] | null, kept: readonly AgentRoom[]): AgentRoom[] {
+export function roomsToPick(rooms: readonly SidebarRoom[] | null, kept: readonly AgentRoom[]): AgentRoom[] {
   const open = rooms?.flatMap((room) => (room.kind === "open" ? [{ id: room.id, name: room.name }] : [])) ?? [];
   // The sidebar's last, as its names follow renames.
   const byId = new Map([...kept, ...open].map((room) => [room.id, room]));

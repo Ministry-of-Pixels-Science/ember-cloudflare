@@ -621,6 +621,12 @@ Objects, D1 or speed call for something else.
   statements that list people, such as the directory's and the mention prompt's, and the one that
   finds who answers a question, check it against the asker's role in SQL, so nobody is sent a person
   they aren't told of.
+- **Whether a chat bot is kept to the open rooms picked is a column of its person.**
+  `users.rooms_picked` (workspace migration 0073) is 1 for a bot an administrator keeps to the open
+  rooms they pick, as `agents.every_open_room` 0 keeps an agent, and null for one in every open room,
+  and for everyone who isn't a chat bot. The statement that puts everyone active in a room made, or
+  opened to everyone, leaves those bots out, as it does those agents, and so does the one that lifts a
+  ban, since a ban keeps memberships. The rooms a bot's kept to are its memberships, as an agent's are.
 
 ## Writing SQL here
 

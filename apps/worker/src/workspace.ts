@@ -3519,18 +3519,19 @@ export class Workspace extends DurableObject<Env> {
   /**
    * Adds a bot as the person `credentials` signs in: with a new token, a webhook if `bot` gives it
    * somewhere to deliver, `avatar`, which R2 has stored under a key `reservePicture` reserved, if it's
-   * given one, and in every open room, as someone who joins is, and everyone's workspace sockets hear of
-   * it. Answers it as its edit page shows it, "forbidden" unless that's an administrator, "agent's name"
-   * for a name that's an agent's (`takesAgentsName`), or null without a valid session.
+   * given one, and in every open room, as someone who joins is, or the open rooms `bot` keeps it to, and
+   * everyone's workspace sockets hear of it. Answers it as its edit page shows it, "forbidden" unless
+   * that's an administrator, "agent's name" for a name that's an agent's (`takesAgentsName`), or null
+   * without a valid session.
    */
-  async createBot(credentials: Credentials, { name, webhookUrl }: NewBot, avatar: StoredPicture | null): Promise<BotSettings | "forbidden" | "agent's name" | null> {
+  async createBot(credentials: Credentials, { name, webhookUrl, rooms }: NewBot, avatar: StoredPicture | null): Promise<BotSettings | "forbidden" | "agent's name" | null> {
     const user = await this.authenticate(credentials);
     if (!user) return null;
     return this.oneAtATime(async () => {
       if (!(await this.store.isAdministrator(user.id))) return "forbidden";
       if (await this.takesAgentsName(null, name)) return "agent's name";
       const id = sortableId();
-      await this.store.createBot({ id, name, token: newBotToken(), webhookUrl: webhookUrl || null, avatar }, new Date().toISOString());
+      await this.store.createBot({ id, name, token: newBotToken(), webhookUrl: webhookUrl || null, avatar, rooms: rooms ?? null }, new Date().toISOString());
       await this.publishPerson(id);
       return (await this.botSettings(id))!;
     });
@@ -3539,10 +3540,13 @@ export class Workspace extends DurableObject<Env> {
   /**
    * Changes the active bot `botId` as the person `credentials` signs in, giving it `avatar`, which R2
    * has stored under a key `reservePicture` reserved, in place of the one it had, if it's given one, as
-   * `changeAvatar` gives someone theirs. Answers it as its edit page then shows it: "forbidden" unless
-   * that's an administrator, "not found" unless `botId` is an active bot, "name reserved" for a new name
-   * that's @ember's, and "agent's name" for one that's an agent's, unless it was the bot's before, or null
-   * without a valid session. Everyone's workspace sockets hear of a new name or avatar.
+   * `changeAvatar` gives someone theirs, and putting it in every open room, or keeping it to the open
+   * rooms `changes` picks, which takes its key and its webhook out of the others at once, as nothing
+   * finds it in them then (`activeBotKey`, `MESSAGE_BOTS`). Answers it as its edit page then shows it:
+   * "forbidden" unless that's an administrator, "not found" unless `botId` is an active bot, "name
+   * reserved" for a new name that's @ember's, and "agent's name" for one that's an agent's, unless it was
+   * the bot's before, or null without a valid session. Everyone's workspace sockets hear of a new name or
+   * avatar.
    */
   async changeBot(
     credentials: Credentials,
@@ -3620,7 +3624,7 @@ export class Workspace extends DurableObject<Env> {
   /** A bot as its edit page shows it to administrators. */
   private async shownBotSettings(bot: StoredBotSettings): Promise<BotSettings> {
     const [shown] = await this.shownBots([bot]);
-    return { ...shown!, webhookUrl: bot.webhookUrl };
+    return { ...shown!, webhookUrl: bot.webhookUrl, pickedRooms: bot.pickedRooms };
   }
 
   /**
