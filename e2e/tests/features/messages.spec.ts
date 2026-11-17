@@ -394,6 +394,8 @@ test.describe("Message action bar", () => {
     const options = message.getByRole("button", { name: "Message options" });
 
     await ada.composer().focus();
+    // Back past the formatting row, which is one stop.
+    await ada.page.keyboard.press("Shift+Tab");
     await ada.page.keyboard.press("Shift+Tab");
     await expect(options).toBeFocused();
     // Focus shows Message options, not the bar.
@@ -890,13 +892,28 @@ test.describe("Edit a message", () => {
     await expect(ada.page.getByRole("article")).not.toContainText("(edited)");
   });
 
-  test("shows the formatting toolbar above the text on a wide screen with a mouse", async ({ members }) => {
+  test("shows the formatting row above the text on a wide screen with a mouse, which formats the edit as its keys do", async ({ members }) => {
     const ada = await members.signIn("Ada");
     await ada.send("Format me");
     await (await ada.actions("Format me")).getByRole("button", { name: "Edit" }).click();
-    const bold = ada.message("Format me").getByRole("toolbar").getByRole("button", { name: "Bold" });
+    const bold = ada.message("Format me").getByRole("toolbar", { name: "Formatting" }).getByRole("button", { name: "Bold" });
     await expect(bold).toBeVisible();
     expect((await box(bold)).y).toBeLessThan((await box(ada.editor())).y);
+
+    await ada.editor().press("ControlOrMeta+a");
+    await bold.click();
+    await expect(ada.editor()).toBeFocused();
+    await ada.editor().press("ControlOrMeta+Shift+X");
+    // Escape closes Link's dialog, leaving the edit open.
+    await ada.editor().press("ControlOrMeta+k");
+    await expect(ada.page.getByRole("dialog", { name: "Edit link" }).or(ada.page.getByRole("dialog", { name: "Add link" }))).toBeVisible();
+    await ada.page.keyboard.press("Escape");
+    await expect(ada.page.getByRole("dialog")).toBeHidden();
+    await expect(ada.editor()).toBeFocused();
+
+    await ada.editor().press("ControlOrMeta+Enter");
+    await expect(ada.message("Format me").locator(".message-content strong")).toHaveText("Format me");
+    await expect(ada.message("Format me").locator(".message-content s")).toHaveText("Format me");
   });
 
   test("scrolls the editor to the middle of the timeline as it opens, from the newest messages too", async ({ members, participant }) => {
@@ -927,14 +944,22 @@ test.describe("Edit a message", () => {
     await expect.poll(() => ada.outOfView(ada.message("My newest").locator(".message-edit"))).toBe(0);
   });
 
-  test("saves from Save changes with the Link field open, as Lexxy checks that itself", async ({ members }) => {
+  test("links what's selected from Link's dialog, whose Enter saves the link and leaves the edit open", async ({ members }) => {
     const ada = await members.signIn("Ada");
     await ada.send("Draft");
     await (await ada.actions("Draft")).getByRole("button", { name: "Edit" }).click();
     await ada.editor().fill("Final");
+    await ada.editor().press("ControlOrMeta+a");
     await ada.editor().press("ControlOrMeta+k");
+    const dialog = ada.page.getByRole("dialog", { name: "Add link" });
+    await dialog.getByLabel("Link").fill("example.com");
+    await dialog.getByLabel("Link").press("Enter");
+    await expect(dialog).toBeHidden();
+    await expect(ada.editor()).toBeFocused();
+    await expect(ada.editor().getByRole("link", { name: "Final" })).toHaveAttribute("href", "https://example.com");
     await ada.page.getByRole("button", { name: "Save changes" }).click();
     await expect(ada.message("Final")).toContainText("(edited)");
+    await expect(ada.message("Final").getByRole("link", { name: "Final" })).toHaveAttribute("href", "https://example.com");
   });
 
   test("discards an edit with Escape or Close editor and discard changes", async ({ members }) => {

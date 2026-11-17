@@ -1,15 +1,15 @@
 import { Suspense, useEffect, useEffectEvent, useImperativeHandle, useLayoutEffect, useRef, useState, type Ref } from "react";
-import { flushSync } from "react-dom";
 import { MAX_FILE_SIZE, type User } from "@ember/protocol";
 import { OPENGRAPH_EMBED_CONTENT_TYPE, previewContent } from "@ember/richtext/dom";
 import { ArrowUp, Attachment, Page, TextSquare, XmarkCircle } from "@/components/icons/iconoir";
 import { useNameOf } from "@/hooks/use-directory";
 import { fetchLinkPreview, mentionPromptSrc } from "@/lib/api";
 import { dropTarget } from "@/lib/drop-target";
-import { hasTouchKeyboard, opensLink, pressedAlone, sendsMessage } from "@/lib/keyboard";
+import { breaksLine, hasTouchKeyboard, pressedAlone, sendsMessage } from "@/lib/keyboard";
 import { tooLargeToAttach } from "@/lib/uploads";
 import { cn } from "@/lib/utils";
 import { RichTextEditor, editorLoaded, type PastedLink, type RichTextEditorHandle } from "./editor";
+import { FormattingToolbar, LinkDialog, useFormatting } from "./formatting-toolbar";
 
 /**
  * The typing indicator (Campfire's typing_tracker.js and composer.css): the names of whoever is typing,
@@ -69,16 +69,48 @@ function keepDraft(key: string, body: string | null) {
 }
 
 /**
- * What the composer shows while the editor loads: its placeholder, as Lexxy draws it, as tall as the
- * editor will be (rich-text-editor.css: 40px, or 30px below 900px wide, and the 4px under the text), so
- * the composer doesn't move as the editor loads.
+ * How tall the editor will be (rich-text-editor.css: 40px, or 30px below 900px wide, and the 4px under the
+ * text, and under the formatting row, the 6px over it), which the composer keeps for it while it loads and
+ * until it's drawn its text, so the composer doesn't move meanwhile.
  */
-function LoadingEditor({ placeholder }: { placeholder: string }) {
+const editorHeight = (belowFormatting: boolean) => (belowFormatting ? "min-h-[50px] max-md:min-h-10" : "min-h-11 max-md:min-h-[34px]");
+
+/** What the composer shows while the editor loads: its placeholder, where Lexxy draws it. */
+function LoadingEditor({ placeholder, belowFormatting }: { placeholder: string; belowFormatting: boolean }) {
   return (
-    <p aria-hidden="true" className="min-h-11 text-[14px] opacity-66 max-md:min-h-[34px] touch:text-[16px]">
+    <p aria-hidden="true" className={cn("text-[14px] opacity-66 touch:text-[16px]", belowFormatting && "pt-1.5")}>
       {placeholder}
     </p>
   );
+}
+
+/** Where whether the formatting row shows over the composer's text is kept in this browser. */
+const FORMATTING_SHOWN = "composer-formatting";
+
+/**
+ * Whether the formatting row shows over the composer's text, as Slack's Show formatting has it: as it was
+ * last left in this browser, and to begin with, everywhere but touch screens, whose keyboard leaves the
+ * composer little room.
+ */
+function useFormattingShown(): [boolean, (shown: boolean) => void] {
+  const [shown, setShown] = useState(() => {
+    try {
+      const kept = localStorage.getItem(FORMATTING_SHOWN);
+      if (kept !== null) return kept === "shown";
+    } catch {
+      // Storage can be unavailable, as in some private windows, which only means it isn't kept.
+    }
+    return !hasTouchKeyboard();
+  });
+  const show = (shown: boolean) => {
+    setShown(shown);
+    try {
+      localStorage.setItem(FORMATTING_SHOWN, shown ? "shown" : "hidden");
+    } catch {
+      // Not kept, then.
+    }
+  };
+  return [shown, show];
 }
 
 /**
@@ -251,17 +283,16 @@ export interface ComposerHandle {
 }
 
 /**
- * The composer: a card with the editor on top, and below it Attach files, Formatting options, which
- * shows Lexxy's toolbar under the text, and a round Send button. @ offers the room's people to mention.
- * Files picked, pasted or dropped wait above the card to go with the next message. What's written is
- * kept as a draft until it's sent. A thread's has Also send to the room before Send.
+ * The composer: a card with Slack's formatting row on top, then the editor, and below it Attach files,
+ * Show formatting, which shows or hides the row, and a round Send button. @ offers the room's people to
+ * mention. Files picked, pasted or dropped wait above the card to go with the next message. What's
+ * written is kept as a draft until it's sent. A thread's has Also send to the room before Send.
  */
 export function Composer({ roomId, roomName, direct = false, userId, typing, disabled, deferEditor = false, threadId, onSend, onSendFiles, onTyping, onEditLastMessage, autoFocus = true, ref }: Props) {
   const editor = useRef<RichTextEditorHandle>(null);
   const form = useRef<HTMLFormElement>(null);
-  const [toolbarOpen, setToolbarOpen] = useState(false);
-  // Whether the toolbar shows only for its Link field, which Ctrl or Cmd+K opened while it was shut.
-  const [toolbarForLink, setToolbarForLink] = useState(false);
+  const formatting = useFormatting(editor);
+  const [formattingShown, showFormatting] = useFormattingShown();
   const [alsoSend, setAlsoSend] = useState(false);
   const key = draftKey(userId, roomId, threadId);
   const [draft, setDraft] = useState(() => readDraft(key));
@@ -319,9 +350,9 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
   const changed = () => wrote(editor.current!.isBlank() ? null : editor.current!.value());
 
   // This sends nothing while the room is disconnected, and otherwise sends the files picked, then what's
-  // written unless it's blank, closes the toolbar and focuses the editor, on touch screens too. Before
-  // the editor shows, as its code loads, only the files go. Also send to the room is unticked once
-  // anything's gone, as Slack unticks it.
+  // written unless it's blank, and focuses the editor, on touch screens too. Before the editor shows, as
+  // its code loads, only the files go. Also send to the room is unticked once anything's gone, as Slack
+  // unticks it.
   const submit = () => {
     if (disabled) return;
     if (picked.files.length > 0) {
@@ -340,54 +371,32 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
       keepDraft(key, null);
       setAlsoSend(false);
     }
-    setToolbarOpen(false);
-    setToolbarForLink(false);
     written.focus();
   };
 
   const keyDown = (event: KeyboardEvent) => {
-    if (opensLink(event) && !toolbarOpen) {
-      // Lexxy opens its Link field on this even while its toolbar is hidden, so nothing would seem to
-      // happen, and the address you typed next would replace what you'd selected. Here the toolbar shows
-      // first, so the field can take focus, and shuts again when the field closes.
-      flushSync(() => {
-        setToolbarOpen(true);
-        setToolbarForLink(true);
-      });
+    if (formatting.keyDown(event)) return;
+    // Enter picks from an open list, such as the people to mention.
+    if (editor.current?.hasOpenPrompt()) return;
+    if (breaksLine(event) && editor.current?.startNewBlock()) {
+      // Where Enter sends, Shift+Enter starts a list's next item, or ends the list, and ends a heading.
+      event.preventDefault();
+      event.stopPropagation();
       return;
     }
-    // Enter picks from an open list, such as the people to mention.
-    if (editor.current?.hasOpenPrompt() || !sendsMessage(event, { toolbarOpen })) return;
+    if (!sendsMessage(event)) return;
     event.preventDefault();
     event.stopPropagation();
     submit();
   };
 
-  // Shuts the toolbar Ctrl or Cmd+K showed once its Link field closes, returning focus to the text if it
-  // was in the toolbar.
-  useEffect(() => {
-    const link = form.current?.querySelector("lexxy-link-dropdown [data-dropdown-trigger]");
-    if (!toolbarForLink || !link) return;
-    const observer = new MutationObserver(() => {
-      if (link.getAttribute("aria-expanded") === "true") return;
-      if (link.closest("lexxy-toolbar")?.contains(document.activeElement)) editor.current?.focus();
-      setToolbarForLink(false);
-      setToolbarOpen(false);
-    });
-    observer.observe(link, { attributeFilter: ["aria-expanded"] });
-    return () => observer.disconnect();
-  }, [toolbarForLink]);
-
   return (
     // A thread's panel is narrower than its room, and its composer keeps closer to its sides.
     <footer className={cn(FOOTER, threadId !== undefined && "px-4")}>
-      {/* Not validated, since Lexxy checks its Link field itself. An address left unfinished there, or the field
-          left open and empty, would otherwise stop Send without a word. */}
       <form
         ref={form}
-        noValidate
         className="composer relative min-w-0 [contain:inline-size]"
-        data-toolbar={toolbarOpen || undefined}
+        data-formatting={formattingShown || undefined}
         onSubmit={(event) => {
           event.preventDefault();
           submit();
@@ -413,9 +422,18 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
           )}
         </div>
         <div className="flex min-h-[108px] min-w-0 flex-col rounded-[12px] border bg-surface p-3 max-md:min-h-[100px] max-md:p-2.5">
-          {/* The editor takes the card's padding and fills this, all the card above the buttons (rich-text-editor.css). */}
-          <div className="flex min-w-0 flex-1 flex-col">
-            <Suspense fallback={<LoadingEditor placeholder={placeholder} />}>
+          {formattingShown && (
+            <FormattingToolbar
+              formatting={formatting}
+              // Close to the card's corner, as Slack's, and faint while the composer hasn't focus. On touch
+              // screens, it scrolls rather than wrapping its fingertip-sized buttons.
+              className="-mx-1.5 -mt-1.5 transition-opacity duration-150 motion-reduce:transition-none [.composer:not(:focus-within)_&]:opacity-55 touch:flex-nowrap touch:overflow-x-auto touch:[scrollbar-width:none]"
+            />
+          )}
+          {/* The editor takes the card's padding and fills this, all the card above the buttons, and below the
+              formatting row (rich-text-editor.css). */}
+          <div className={cn("flex min-w-0 flex-1 flex-col", editorHeight(formattingShown))}>
+            <Suspense fallback={<LoadingEditor placeholder={placeholder} belowFormatting={formattingShown} />}>
               {editorShown ? (
                 <RichTextEditor
                   ref={editor}
@@ -428,11 +446,12 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
                   mentionsAbove={hasTouchKeyboard()}
                   autoFocus={() => replied.current || (autoFocus && focusOnOpen && focusStayedOn(focusAtOpen))}
                   onChange={changed}
+                  onFormatChange={formatting.setFormat}
                   onKeyDown={keyDown}
                   onLinkPasted={previewLink}
                 />
               ) : (
-                <LoadingEditor placeholder={placeholder} />
+                <LoadingEditor placeholder={placeholder} belowFormatting={formattingShown} />
               )}
             </Suspense>
           </div>
@@ -464,19 +483,18 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
             <button
               type="button"
               disabled={disabled}
-              title="Formatting options"
-              aria-pressed={toolbarOpen}
+              title={formattingShown ? "Hide formatting" : "Show formatting"}
+              aria-pressed={formattingShown}
               // Keep focus in the editor, so a phone's keyboard stays up, as Send does.
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => {
-                setToolbarOpen((open) => !open);
-                setToolbarForLink(false);
+                showFormatting(!formattingShown);
                 editor.current?.focus();
               }}
               className={cn(BUTTON, "rounded-[7px] hover:not-active:brightness-85 [@media(hover:hover)_and_(pointer:fine)]:hover:bg-hover")}
             >
               <TextSquare className="size-[18px] opacity-70" />
-              <span className="sr-only">Rich text</span>
+              <span className="sr-only">Show formatting</span>
             </button>
             {/* For fingers, the box sits far enough into its label for a fingertip on it to land on the label. */}
             {threadId !== undefined && (
@@ -517,6 +535,8 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
           </div>
         </div>
       </form>
+      {/* Outside the form, so what's typed in it is kept from the composer's own handlers. */}
+      <LinkDialog formatting={formatting} />
     </footer>
   );
 }

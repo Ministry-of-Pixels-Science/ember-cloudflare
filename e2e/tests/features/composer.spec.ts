@@ -13,14 +13,20 @@ const box = async (locator: Locator) => {
 /** The composer's card, around the text and its buttons. */
 const card = (member: Member) => member.page.locator("form.composer > div:has([role=textbox])");
 
-/** Formatting options, which screen readers call "Rich text". */
-const formattingOptions = (member: Member) => member.page.getByRole("button", { name: "Rich text" });
+/** Show formatting, under the text, which shows or hides the formatting row. */
+const showFormatting = (member: Member) => member.page.getByRole("button", { name: "Show formatting" });
 
-/** Lexxy's formatting toolbar in the composer. */
-const toolbar = (member: Member) => member.page.locator("form.composer lexxy-toolbar");
+/** The formatting row over the composer's text. */
+const formattingRow = (member: Member) => member.page.locator("form.composer").getByRole("toolbar", { name: "Formatting" });
 
-/** A button of the formatting toolbar, by its title. */
-const tool = (member: Member, name: string) => toolbar(member).getByRole("button", { name, exact: true });
+/** A button of the formatting row, by its name. */
+const tool = (member: Member, name: string) => formattingRow(member).getByRole("button", { name, exact: true });
+
+/** Link's dialog, as it adds a link, or as it edits one. */
+const linkDialog = (member: Member, title = "Add link") => member.page.getByRole("dialog", { name: title });
+
+/** A style in the formatting row's Paragraph menu, by the start of its name, which ends in H1 to H3 for a heading's. */
+const paragraphStyle = (member: Member, name: string) => member.page.getByRole("menu").getByRole("menuitemradio", { name: new RegExp(`^${name}`) });
 
 /** Replaces what's in the composer with `markup`, as Lexxy holds what's typed. */
 const write = (member: Member, markup: string) =>
@@ -36,24 +42,26 @@ async function openRoom(member: Member, name: string) {
 }
 
 test.describe("Composer", () => {
-  test("is a card at least 108px tall, with the text on top and Attach files, Formatting options and a round Send button below", async ({ members }) => {
+  test("is a card at least 108px tall, with the formatting row and the text on top and Attach files, Show formatting and a round Send button below", async ({ members }) => {
     const ada = await members.signIn("Ada", { context: { viewport: { width: 1280, height: 800 } } });
     const field = ada.composer();
     const send = ada.page.getByRole("button", { name: "Send Message" });
     const attachFiles = ada.page.locator("label").filter({ has: ada.page.getByLabel("Attach a file") });
     await expect(field).toHaveAttribute("placeholder", "Message #general");
     await expect(attachFiles).toHaveAttribute("title", "Attach files");
-    await expect(formattingOptions(ada)).toHaveAttribute("title", "Formatting options");
+    await expect(showFormatting(ada)).toHaveAttribute("title", "Hide formatting");
     await expect(send).toHaveAttribute("title", "Send message");
 
     expect((await box(card(ada))).height).toBeGreaterThanOrEqual(108);
     await expect(card(ada)).toHaveCSS("border-top-left-radius", "12px");
+    const rowBox = await box(formattingRow(ada));
     const fieldBox = await box(field);
     const sendBox = await box(send);
+    expect(rowBox.y + rowBox.height).toBeLessThanOrEqual(fieldBox.y);
     expect(sendBox.y).toBeGreaterThanOrEqual(fieldBox.y + fieldBox.height);
-    expect((await box(formattingOptions(ada))).y).toBe(sendBox.y);
+    expect((await box(showFormatting(ada))).y).toBe(sendBox.y);
     expect((await box(attachFiles)).y).toBe(sendBox.y);
-    expect((await box(attachFiles)).x).toBeLessThan((await box(formattingOptions(ada))).x);
+    expect((await box(attachFiles)).x).toBeLessThan((await box(showFormatting(ada))).x);
     expect(sendBox.width).toBe(sendBox.height);
     expect(parseFloat(await send.evaluate((el) => getComputedStyle(el).borderTopLeftRadius))).toBeGreaterThanOrEqual(sendBox.width / 2);
   });
@@ -121,171 +129,329 @@ test.describe("Composer", () => {
   });
 });
 
-test.describe("Formatting toolbar", () => {
-  test("Formatting options shows Lexxy's toolbar under the text, without the tools Campfire leaves out", async ({ members }) => {
+test.describe("Formatting row", () => {
+  test("shows Slack's buttons over the text, which Show formatting hides, as the browser remembers", async ({ members }) => {
     const ada = await members.signIn("Ada");
-    await expect(toolbar(ada)).toBeHidden();
-    await formattingOptions(ada).click();
-    await expect(formattingOptions(ada)).toHaveAttribute("aria-pressed", "true");
-    await expect(toolbar(ada)).toBeVisible();
-    await expect(ada.composer()).toBeFocused();
-    expect((await box(toolbar(ada))).y).toBeGreaterThanOrEqual((await box(ada.composer())).y + (await box(ada.composer())).height);
-    await expect(toolbar(ada).getByRole("button", { name: "Bold" })).toBeVisible();
-    for (const name of ["Underline", "Color highlight", "Insert a table", "Insert a divider", "Undo", "Redo"]) {
-      await expect(toolbar(ada).getByRole("button", { name, exact: true })).toBeHidden();
-    }
+    await expect(formattingRow(ada)).toBeVisible();
+    await expect(showFormatting(ada)).toHaveAttribute("aria-pressed", "true");
+    expect(await formattingRow(ada).getByRole("button").evaluateAll((buttons) => buttons.map((button) => button.getAttribute("aria-label")))).toEqual([
+      "Bold",
+      "Italic",
+      "Underline",
+      "Strikethrough",
+      "Paragraph",
+      "Link",
+      "Ordered list",
+      "Bulleted list",
+      "Blockquote",
+      "Code",
+      "Code block",
+      "Divider",
+    ]);
 
-    await formattingOptions(ada).click();
-    await expect(toolbar(ada)).toBeHidden();
+    await showFormatting(ada).click();
+    await expect(formattingRow(ada)).toBeHidden();
+    await expect(showFormatting(ada)).toHaveAttribute("aria-pressed", "false");
+    await expect(showFormatting(ada)).toHaveAttribute("title", "Show formatting");
+    await expect(ada.composer()).toBeFocused();
+
+    await ada.page.reload();
+    await expect(ada.composer()).toBeVisible();
+    await expect(formattingRow(ada)).toBeHidden();
+    await showFormatting(ada).click();
+    await expect(formattingRow(ada)).toBeVisible();
   });
 
-  test("formats what's selected with each of its tools, and sends the formatting", async ({ members }) => {
+  test("names each button in a tooltip with its keys", async ({ members }) => {
+    const ada = await members.signIn("Ada");
+    await tool(ada, "Strikethrough").hover();
+    await expect(ada.page.getByRole("tooltip")).toHaveText(/^Strikethrough\s*(Ctrl|⌘)\s*(Shift|⇧)\s*X$/);
+    await expect(tool(ada, "Strikethrough")).toHaveAttribute("aria-keyshortcuts", /^(Control|Meta)\+Shift\+X$/);
+    await tool(ada, "Divider").hover();
+    await expect(ada.page.getByRole("tooltip", { name: "Divider" })).toHaveText("Divider");
+  });
+
+  test("formats what's selected with each button, lighting it, and sends the formatting", async ({ members }) => {
     const ada = await members.signIn("Ada");
     const grace = await members.signIn("Grace");
     const tools = [
       ["Bold", "strong"],
       ["Italic", "em"],
+      ["Underline", "u"],
       ["Strikethrough", "s"],
-      ["Quote", "blockquote"],
+      ["Blockquote", "blockquote"],
       ["Code", "code"],
-      ["Bullet list", "ul > li"],
-      ["Numbered list", "ol > li"],
+      ["Ordered list", "ol > li"],
+      ["Bulleted list", "ul > li"],
+      ["Code block", "pre"],
     ] as const;
     for (const [name, element] of tools) {
-      await formattingOptions(ada).click();
       await ada.composer().fill(`${name} text`);
       await ada.composer().press("ControlOrMeta+a");
       await tool(ada, name).click();
       await expect(tool(ada, name)).toHaveAttribute("aria-pressed", "true");
-      await ada.composer().press("ControlOrMeta+Enter");
+      await expect(ada.composer()).toBeFocused();
+      await ada.composer().press("Enter");
       await expect(grace.message(`${name} text`).locator(`.message-content ${element}`)).toHaveText(`${name} text`);
     }
+  });
 
-    // Code marks words selected on one line as code, and otherwise makes a code block of the line.
-    await formattingOptions(ada).click();
-    await ada.composer().fill("Block of code");
+  test("formats what's typed next with nothing selected, and leaves no formatting on for the next message", async ({ members }) => {
+    const ada = await members.signIn("Ada");
+    const grace = await members.signIn("Grace");
+    await ada.composer().pressSequentially("Plain, ");
+    await tool(ada, "Bold").click();
+    await expect(tool(ada, "Bold")).toHaveAttribute("aria-pressed", "true");
+    await ada.composer().pressSequentially("loud");
+    await tool(ada, "Bold").click();
+    await ada.composer().pressSequentially(" and ");
     await tool(ada, "Code").click();
-    await ada.composer().press("ControlOrMeta+Enter");
-    await expect(grace.message("Block of code").locator(".message-content pre")).toHaveText("Block of code");
-  });
-
-  test("leaves no formatting on for the next message", async ({ members }) => {
-    const ada = await members.signIn("Ada");
-    const grace = await members.signIn("Grace");
-    await formattingOptions(ada).click();
-    await ada.composer().fill("Loud");
-    await ada.composer().press("ControlOrMeta+a");
-    await tool(ada, "Bold").click();
-    await ada.composer().press("ControlOrMeta+Enter");
-    await expect(grace.message("Loud").locator(".message-content strong")).toHaveText("Loud");
-
-    await formattingOptions(ada).click();
-    await expect(tool(ada, "Bold")).toHaveAttribute("aria-pressed", "false");
-    await ada.composer().pressSequentially("Quiet");
-    await ada.composer().press("ControlOrMeta+Enter");
-    await expect(grace.message("Quiet").locator(".message-content")).toHaveText("Quiet");
-    await expect(grace.message("Quiet").locator(".message-content strong")).toHaveCount(0);
-  });
-
-  test("offers Normal, Large Heading and Clear formatting under Text formatting, in a menu that opens upward", async ({ members }) => {
-    const ada = await members.signIn("Ada");
-    const grace = await members.signIn("Grace");
-    await formattingOptions(ada).click();
-    await ada.composer().fill("Big news");
-    await tool(ada, "Text formatting").click();
-    const menu = toolbar(ada).getByRole("menu");
-    await expect(menu.getByRole("menuitem")).toHaveText(["Normal", "Large Heading", "Clear formatting"]);
-    const menuBox = await box(menu);
-    expect(menuBox.y + menuBox.height).toBeLessThanOrEqual((await box(tool(ada, "Text formatting"))).y);
-    await menu.getByRole("menuitem", { name: "Large Heading" }).click();
-    await expect(ada.composer().locator("h1")).toHaveText("Big news");
-
-    await tool(ada, "Text formatting").click();
-    await menu.getByRole("menuitem", { name: "Normal" }).click();
-    await expect(ada.composer().locator("p")).toHaveText("Big news");
-
-    await ada.composer().press("ControlOrMeta+a");
-    await tool(ada, "Bold").click();
-    await tool(ada, "Italic").click();
-    await expect(ada.composer().locator("strong")).toHaveText("Big news");
-    await tool(ada, "Text formatting").click();
-    await menu.getByRole("menuitem", { name: "Clear formatting" }).click();
-    await expect(ada.composer().locator("strong, em")).toHaveCount(0);
-
-    await tool(ada, "Text formatting").click();
-    await menu.getByRole("menuitem", { name: "Large Heading" }).click();
-    await ada.composer().press("ControlOrMeta+Enter");
-    await expect(grace.message("Big news").locator(".message-content h1")).toHaveText("Big news");
-  });
-
-  test("links what's selected to the address given in Link, and Unlink takes the link off", async ({ members }) => {
-    const ada = await members.signIn("Ada");
-    const grace = await members.signIn("Grace");
-    await formattingOptions(ada).click();
-    await ada.composer().fill("Ember");
-    await ada.composer().press("ControlOrMeta+a");
-    await tool(ada, "Link").click();
-    const field = toolbar(ada).getByRole("dialog", { name: "Link" });
-    const address = field.getByPlaceholder("Enter a URL…");
-    await expect(address).toBeFocused();
-    await address.fill("https://example.com/");
-    await field.getByRole("button", { name: "Link", exact: true }).click();
-    await expect(ada.composer().getByRole("link", { name: "Ember" })).toHaveAttribute("href", "https://example.com/");
-
-    await tool(ada, "Link").click();
-    await expect(address).toHaveValue("https://example.com/");
-    await field.getByRole("button", { name: "Unlink" }).click();
-    await expect(ada.composer().getByRole("link")).toHaveCount(0);
-
-    // An address has to be a URL.
-    await ada.composer().press("ControlOrMeta+a");
-    await tool(ada, "Link").click();
-    await address.fill("example.com");
-    await address.press("Enter");
-    await expect(address).toBeFocused();
-    await address.fill("https://example.com/");
-    await address.press("Enter");
-    await ada.composer().press("ControlOrMeta+Enter");
-    await expect(grace.message("Ember").getByRole("link", { name: "Ember" })).toHaveAttribute("href", "https://example.com/");
-  });
-
-  test("shows the toolbar with its Link field on Ctrl or Cmd+K, and shuts it again as the field closes", async ({ members }) => {
-    const ada = await members.signIn("Ada");
-    const grace = await members.signIn("Grace");
-    await ada.composer().fill("Ember");
-    await ada.composer().press("ControlOrMeta+a");
-    await ada.composer().press("ControlOrMeta+k");
-    const address = toolbar(ada).getByPlaceholder("Enter a URL…");
-    await expect(address).toBeVisible();
-    await expect(address).toBeFocused();
-    await address.press("Escape");
-    await expect(toolbar(ada)).toBeHidden();
-    await expect(ada.composer()).toBeFocused();
-
-    await ada.composer().press("ControlOrMeta+a");
-    await ada.composer().press("ControlOrMeta+k");
-    await address.fill("https://example.com/");
-    await address.press("Enter");
-    await expect(toolbar(ada)).toBeHidden();
-    await expect(ada.composer()).toBeFocused();
-    // Enter sends again, as it does while the toolbar is shut.
+    await expect(tool(ada, "Code")).toHaveAttribute("aria-pressed", "true");
+    await ada.composer().pressSequentially("code");
     await ada.composer().press("Enter");
-    await expect(grace.message("Ember").getByRole("link", { name: "Ember" })).toHaveAttribute("href", "https://example.com/");
+    const sent = grace.message("Plain, loud").locator(".message-content");
+    await expect(sent).toHaveText("Plain, loud and code");
+    await expect(sent.locator("strong")).toHaveText("loud");
+    await expect(sent.locator("code")).toHaveText("code");
 
-    // Opened by Formatting options, the toolbar stays.
-    await formattingOptions(ada).click();
-    await ada.composer().press("ControlOrMeta+k");
-    await expect(address).toBeFocused();
-    await address.press("Escape");
-    await expect(toolbar(ada)).toBeVisible();
+    await expect(tool(ada, "Code")).toHaveAttribute("aria-pressed", "false");
+    await ada.composer().pressSequentially("Quiet");
+    await ada.composer().press("Enter");
+    await expect(grace.message("Quiet").locator(".message-content")).toHaveText("Quiet");
+    await expect(grace.message("Quiet").locator(".message-content :is(strong, code)")).toHaveCount(0);
   });
 
-  test("formats Markdown as it's typed, and Ctrl or Cmd+B, I and U", async ({ members }) => {
+  test("styles the line from the Paragraph menu as Slack's three headings, each smaller, keeping the cursor where it was", async ({ members }) => {
+    const ada = await members.signIn("Ada");
+    const grace = await members.signIn("Grace");
+    const menu = ada.page.getByRole("menu");
+    await ada.composer().pressSequentially("Big news");
+    // Measured while the menu's shut, as the menu hides the rest of the page from screen readers.
+    const paragraphBox = await box(tool(ada, "Paragraph"));
+    await tool(ada, "Paragraph").click();
+    await expect(menu.getByRole("menuitemradio")).toHaveText(["Paragraph", "Big headingH1", "Medium headingH2", "Small headingH3"]);
+    await expect(paragraphStyle(ada, "Paragraph")).toHaveAttribute("aria-checked", "true");
+    // Upward, as there's no room under the composer.
+    const menuBox = await box(menu);
+    expect(menuBox.y + menuBox.height).toBeLessThanOrEqual(paragraphBox.y);
+    await paragraphStyle(ada, "Big heading").click();
+    await expect(menu).toBeHidden();
+    await expect(ada.composer()).toBeFocused();
+    await ada.composer().pressSequentially(" today");
+    await expect(ada.composer().locator("h1")).toHaveText("Big news today");
+    await ada.composer().press("Enter");
+
+    for (const [name, element] of [
+      ["Medium heading", "h2"],
+      ["Small heading", "h3"],
+    ] as const) {
+      await ada.composer().pressSequentially(`A ${name.toLowerCase()}`);
+      await tool(ada, "Paragraph").click();
+      await paragraphStyle(ada, name).click();
+      await ada.composer().press("Enter");
+      await expect(grace.message(`A ${name.toLowerCase()}`).locator(`.message-content ${element}`)).toHaveText(`A ${name.toLowerCase()}`);
+    }
+    const size = (text: string) => grace.message(text).locator(".message-content :is(h1, h2, h3)").evaluate((heading) => parseFloat(getComputedStyle(heading).fontSize));
+    const sizes = [await size("Big news today"), await size("A medium heading"), await size("A small heading"), 15];
+    expect(sizes).toEqual([...sizes].sort((a, b) => b - a));
+    expect(new Set(sizes).size).toBe(4);
+
+    await ada.composer().pressSequentially("Back to a paragraph");
+    await tool(ada, "Paragraph").click();
+    await paragraphStyle(ada, "Small heading").click();
+    await tool(ada, "Paragraph").click();
+    await expect(paragraphStyle(ada, "Small heading")).toHaveAttribute("aria-checked", "true");
+    await paragraphStyle(ada, "Paragraph").click();
+    await expect(ada.composer().locator("p")).toHaveText("Back to a paragraph");
+    await expect(ada.composer().locator("h3")).toHaveCount(0);
+  });
+
+  test("styles only the line the cursor's on, keeping the cursor there", async ({ members }) => {
+    const ada = await members.signIn("Ada");
+    await ada.composer().pressSequentially("Shopping");
+    await ada.composer().press("Shift+Enter");
+    await ada.composer().pressSequentially("Hello world");
+    for (let n = 0; n < "world".length; n++) await ada.composer().press("ArrowLeft");
+    await tool(ada, "Blockquote").click();
+    await ada.composer().pressSequentially("big ");
+    await expect(ada.composer().locator("blockquote")).toHaveText("Hello big world");
+    await expect(ada.composer().locator(":scope > p")).toHaveText("Shopping");
+
+    await tool(ada, "Bulleted list").click();
+    await ada.composer().pressSequentially("wide ");
+    await expect(ada.composer().locator("li")).toHaveText("Hello big wide world");
+  });
+
+  test("starts a list's next item on Shift+Enter, where Enter sends, ending the list on an empty one, and a paragraph after a heading", async ({ members }) => {
+    const ada = await members.signIn("Ada");
+    const grace = await members.signIn("Grace");
+    await expect(ada.composer()).toBeFocused();
+    await tool(ada, "Bulleted list").click();
+    await ada.composer().pressSequentially("Milk");
+    await ada.composer().press("Shift+Enter");
+    await ada.composer().pressSequentially("Eggs");
+    await ada.composer().press("Shift+Enter");
+    await ada.composer().press("Shift+Enter");
+    await ada.composer().pressSequentially("That's all");
+    await ada.composer().press("Enter");
+    const list = grace.message("Milk").locator(".message-content");
+    await expect(list.locator("ul > li")).toHaveText(["Milk", "Eggs"]);
+    await expect(list.locator(":scope > p")).toHaveText("That's all");
+
+    await tool(ada, "Paragraph").click();
+    await paragraphStyle(ada, "Small heading").click();
+    await ada.composer().pressSequentially("Agenda");
+    await ada.composer().press("Shift+Enter");
+    await ada.composer().pressSequentially("First, the budget");
+    await ada.composer().press("Enter");
+    const agenda = grace.message("Agenda").locator(".message-content");
+    await expect(agenda.locator("h3")).toHaveText("Agenda");
+    await expect(agenda.locator(":scope > p")).toHaveText("First, the budget");
+  });
+
+  test("links what's selected in Link's dialog, taking an address without a scheme as a web address, and edits or removes the link the cursor's in", async ({ members }) => {
+    const ada = await members.signIn("Ada");
+    const grace = await members.signIn("Grace");
+    await ada.composer().pressSequentially("Ember");
+    await ada.composer().press("ControlOrMeta+a");
+    await tool(ada, "Link").click();
+    const adding = linkDialog(ada);
+    await expect(adding.getByLabel("Text")).toHaveValue("Ember");
+    await expect(adding.getByLabel("Link")).toBeFocused();
+    await expect(adding.getByRole("button", { name: "Save" })).toBeDisabled();
+    await expect(adding.getByRole("button", { name: "Remove link" })).toHaveCount(0);
+    await adding.getByLabel("Link").fill("example.com/ember");
+    await adding.getByLabel("Link").press("Enter");
+    await expect(adding).toBeHidden();
+    await expect(ada.composer()).toBeFocused();
+    await expect(ada.composer().getByRole("link", { name: "Ember" })).toHaveAttribute("href", "https://example.com/ember");
+    await expect(tool(ada, "Link")).toHaveAttribute("aria-pressed", "true");
+
+    await ada.composer().press("ArrowLeft");
+    await tool(ada, "Link").click();
+    const editing = linkDialog(ada, "Edit link");
+    await expect(editing.getByLabel("Text")).toHaveValue("Ember");
+    await expect(editing.getByLabel("Link")).toHaveValue("https://example.com/ember");
+    await editing.getByLabel("Text").fill("Ember's site");
+    await editing.getByRole("button", { name: "Save" }).click();
+    await expect(ada.composer().getByRole("link")).toHaveText("Ember's site");
+
+    await ada.composer().press("ArrowLeft");
+    await tool(ada, "Link").click();
+    await editing.getByRole("button", { name: "Remove link" }).click();
+    await expect(ada.composer().getByRole("link")).toHaveCount(0);
+    await expect(ada.composer()).toHaveText("Ember's site");
+
+    await ada.composer().press("ControlOrMeta+a");
+    await tool(ada, "Link").click();
+    await adding.getByLabel("Link").fill("https://example.com/");
+    await adding.getByRole("button", { name: "Save" }).click();
+    await ada.composer().press("Enter");
+    await expect(grace.message("Ember's site").getByRole("link", { name: "Ember's site" })).toHaveAttribute("href", "https://example.com/");
+  });
+
+  test("opens Link's dialog on Cmd or Ctrl+Shift+U and Cmd or Ctrl+K with the row hidden too, writing the address as the text when there's none", async ({ members }) => {
+    const ada = await members.signIn("Ada");
+    const grace = await members.signIn("Grace");
+    await showFormatting(ada).click();
+    await ada.composer().pressSequentially("See ");
+    await ada.composer().press("ControlOrMeta+Shift+U");
+    await expect(linkDialog(ada).getByLabel("Text")).toBeFocused();
+    await ada.page.keyboard.press("Escape");
+    await expect(linkDialog(ada)).toBeHidden();
+    await expect(ada.composer()).toBeFocused();
+
+    await ada.composer().press("ControlOrMeta+k");
+    await linkDialog(ada).getByLabel("Link").fill("example.com");
+    await linkDialog(ada).getByLabel("Link").press("Enter");
+    await expect(ada.composer()).toBeFocused();
+    await ada.composer().pressSequentially(" for more");
+    await ada.composer().press("Enter");
+    const sent = grace.message("See").locator(".message-content");
+    await expect(sent).toHaveText("See https://example.com for more");
+    await expect(sent.getByRole("link")).toHaveAttribute("href", "https://example.com");
+  });
+
+  test("formats with Slack's keys", async ({ members }) => {
+    const ada = await members.signIn("Ada");
+    const grace = await members.signIn("Grace");
+    for (const [keys, element] of [
+      ["ControlOrMeta+b", "strong"],
+      ["ControlOrMeta+i", "em"],
+      ["ControlOrMeta+u", "u"],
+      ["ControlOrMeta+Shift+X", "s"],
+      ["ControlOrMeta+Shift+7", "ol > li"],
+      ["ControlOrMeta+Shift+8", "ul > li"],
+      ["ControlOrMeta+Shift+9", "blockquote"],
+      ["ControlOrMeta+Shift+C", "code"],
+      ["ControlOrMeta+Alt+Shift+C", "pre"],
+    ] as const) {
+      await ada.composer().fill(`Pressed ${keys}`);
+      await ada.composer().press("ControlOrMeta+a");
+      await ada.composer().press(keys);
+      await ada.composer().press("Enter");
+      await expect(grace.message(`Pressed ${keys}`).locator(`.message-content ${element}`)).toHaveText(`Pressed ${keys}`);
+    }
+  });
+
+  test("is one stop in the tab order, whose arrow keys move along it, formatting from the keyboard, with Escape back to the text", async ({ members }) => {
+    const ada = await members.signIn("Ada");
+    const grace = await members.signIn("Grace");
+    await ada.composer().pressSequentially("Keyboard only");
+    await ada.composer().press("ControlOrMeta+a");
+    await ada.page.keyboard.press("Shift+Tab");
+    await expect(tool(ada, "Bold")).toBeFocused();
+    await ada.page.keyboard.press("Enter");
+    await expect(tool(ada, "Bold")).toHaveAttribute("aria-pressed", "true");
+    await expect(tool(ada, "Bold")).toBeFocused();
+    await ada.page.keyboard.press("ArrowRight");
+    await ada.page.keyboard.press("Space");
+    await expect(tool(ada, "Italic")).toHaveAttribute("aria-pressed", "true");
+    await ada.page.keyboard.press("End");
+    await expect(tool(ada, "Divider")).toBeFocused();
+    await ada.page.keyboard.press("Escape");
+    await expect(ada.composer()).toBeFocused();
+    await ada.composer().press("Enter");
+    await expect(grace.message("Keyboard only").locator(".message-content strong")).toHaveText("Keyboard only");
+    // Lexical writes italic over bold as i.
+    await expect(grace.message("Keyboard only").locator(".message-content :is(em, i)")).toHaveText("Keyboard only");
+  });
+
+  test("greys out what a code block has no use for, and turns back into a paragraph", async ({ members }) => {
+    const ada = await members.signIn("Ada");
+    // The row shows as the composer does, and does nothing until the editor's there.
+    await expect(ada.composer()).toBeFocused();
+    await tool(ada, "Code block").click();
+    await expect(tool(ada, "Code block")).toHaveAttribute("aria-pressed", "true");
+    for (const name of ["Bold", "Italic", "Underline", "Strikethrough", "Link", "Code", "Divider"]) await expect(tool(ada, name)).toBeDisabled();
+    for (const name of ["Paragraph", "Ordered list", "Bulleted list", "Blockquote", "Code block"]) await expect(tool(ada, name)).toBeEnabled();
+    await ada.composer().pressSequentially("let x = 1");
+    await ada.composer().press("ControlOrMeta+Shift+X");
+    await expect(ada.composer().locator("s")).toHaveCount(0);
+
+    await tool(ada, "Code block").click();
+    await expect(tool(ada, "Bold")).toBeEnabled();
+    await expect(ada.composer().locator("p")).toHaveText("let x = 1");
+  });
+
+  test("adds a divider under the line, going on after it", async ({ members }) => {
+    const ada = await members.signIn("Ada");
+    const grace = await members.signIn("Grace");
+    await ada.composer().pressSequentially("Above");
+    await tool(ada, "Divider").click();
+    await ada.composer().pressSequentially("Below");
+    await ada.composer().press("Enter");
+    await expect(grace.message("Above").locator(".message-content > *")).toHaveText(["Above", "", "Below"]);
+    await expect(grace.message("Above").locator(".message-content hr")).toHaveCount(1);
+  });
+
+  test("formats Markdown as it's typed", async ({ members }) => {
     const ada = await members.signIn("Ada");
     const grace = await members.signIn("Grace");
     const blocks = [
       ["# Heading", "h1", "Heading"],
       ["## Subheading", "h2", "Subheading"],
+      ["### Small print", "h3", "Small print"],
       ["> Quoted", "blockquote", "Quoted"],
       ["- Bulleted", "ul > li", "Bulleted"],
       ["1. Numbered", "ol > li", "Numbered"],
@@ -304,39 +470,29 @@ test.describe("Formatting toolbar", () => {
     await expect(inline.locator("s")).toHaveText("struck");
     await expect(inline.getByRole("link", { name: "linked" })).toHaveAttribute("href", "https://example.com/");
 
-    for (const [key, element] of [
-      ["b", "strong"],
-      ["i", "em"],
-      ["u", "u"],
-    ] as const) {
-      await ada.composer().fill(`Pressed ${key}`);
-      await ada.composer().press("ControlOrMeta+a");
-      await ada.composer().press(`ControlOrMeta+${key}`);
-      await ada.composer().press("Enter");
-      await expect(grace.message(`Pressed ${key}`).locator(`.message-content ${element}`)).toHaveText(`Pressed ${key}`);
-    }
-
-    // A divider starts a paragraph, where Enter, which sends while the toolbar's shut, can't take you.
-    await formattingOptions(ada).click();
-    await ada.composer().pressSequentially("Above");
+    await ada.composer().pressSequentially("--- Below the line");
     await ada.composer().press("Enter");
-    await ada.composer().pressSequentially("--- Below");
-    await ada.composer().press("ControlOrMeta+Enter");
-    await expect(grace.message("Above").locator(".message-content > *")).toHaveText(["Above", "", "Below"]);
-    await expect(grace.message("Above").locator(".message-content hr")).toHaveCount(1);
+    await expect(grace.message("Below the line").locator(".message-content hr")).toHaveCount(1);
   });
 
-  test("fits on one row on the narrowest screen, and wraps rather than hiding any under Show more where it can't", async ({ members }) => {
+  test("scrolls rather than wraps on a phone, where it's hidden to begin with, its buttons fingertip-sized", async ({ members }) => {
     const ada = await members.signIn("Ada", { context: { ...phone, viewport: { width: 320, height: 568 } } });
-    await formattingOptions(ada).tap();
-    const showMore = toolbar(ada).getByRole("button", { name: "Show more toolbar buttons" });
-    expect((await box(tool(ada, "Numbered list"))).y).toBe((await box(tool(ada, "Bold"))).y);
-    await expect(showMore).toBeHidden();
+    await expect(formattingRow(ada)).toBeHidden();
+    await showFormatting(ada).tap();
+    await expect(formattingRow(ada)).toBeVisible();
+    const bold = await box(tool(ada, "Bold"));
+    expect(Math.min(bold.width, bold.height)).toBeGreaterThanOrEqual(44);
+    expect(await formattingRow(ada).evaluate((row) => row.scrollWidth > row.clientWidth)).toBe(true);
+    await tool(ada, "Divider").scrollIntoViewIfNeeded();
+    await expect(tool(ada, "Divider")).toBeInViewport();
+    expect((await box(tool(ada, "Divider"))).y).toBe(bold.y);
+  });
 
-    // Narrower than a page lets it be, since nothing is under 320px wide.
-    await ada.page.locator("form.composer").evaluate((form) => (form.style.inlineSize = "200px"));
-    await expect.poll(async () => (await box(tool(ada, "Numbered list"))).y).toBeGreaterThan((await box(tool(ada, "Bold"))).y);
-    await expect(showMore).toBeHidden();
+  test("wraps in a narrow composer with a mouse", async ({ members }) => {
+    const ada = await members.signIn("Ada", { context: { viewport: { width: 1280, height: 800 } } });
+    await ada.page.locator("form.composer").evaluate((form) => (form.style.inlineSize = "240px"));
+    await expect.poll(async () => (await box(tool(ada, "Divider"))).y - (await box(tool(ada, "Bold"))).y).toBeGreaterThan(0);
+    await expect(tool(ada, "Divider")).toBeInViewport();
   });
 });
 
@@ -477,39 +633,15 @@ test.describe("Send from the keyboard", () => {
     await expect(middle.locator(":scope > p").first()).toHaveText("Before");
   });
 
-  test("starts a new paragraph on Enter while the toolbar shows, and sends on Ctrl or Cmd+Enter, closing it", async ({ members }) => {
+  test("sends on Enter with the formatting row showing, as Slack's does, keeping the row", async ({ members }) => {
     const ada = await members.signIn("Ada");
-    await formattingOptions(ada).click();
+    await expect(formattingRow(ada)).toBeVisible();
     await ada.composer().pressSequentially("One");
     await ada.composer().press("Enter");
-    await ada.composer().pressSequentially("Two");
-    await expect(ada.composer().locator("p")).toHaveText(["One", "Two"]);
-    await expect(ada.page.getByRole("article")).toHaveCount(0);
-
-    await ada.composer().press("ControlOrMeta+Enter");
-    await expect(ada.message("One").locator(".message-content p")).toHaveText(["One", "Two"]);
-    await expect(toolbar(ada)).toBeHidden();
-  });
-
-  test("sends from the Send button with an address left unfinished in Link, or Link left open and empty", async ({ members }) => {
-    const ada = await members.signIn("Ada");
-    const send = ada.page.getByRole("button", { name: "Send Message" });
-    await formattingOptions(ada).click();
-    await toolbar(ada).getByRole("button", { name: "Link" }).click();
-    const address = toolbar(ada).getByPlaceholder("Enter a URL…");
-    await address.fill("example.com");
-    await address.press("Escape");
-    // Lexxy keeps what was in the field, which isn't an address.
-    expect(await address.evaluate((input: HTMLInputElement) => input.validity.valid)).toBe(false);
-    await ada.composer().fill("Never mind the link");
-    await send.click();
-    await expect(ada.message("Never mind the link")).toBeVisible();
-
-    // Ctrl or Cmd+K opens Link, which wants an address.
-    await ada.composer().fill("Linked nowhere");
-    await ada.composer().press("ControlOrMeta+k");
-    await send.click();
-    await expect(ada.message("Linked nowhere")).toBeVisible();
+    await expect(ada.message("One")).toBeVisible();
+    await expect(ada.composer()).toHaveText("");
+    await expect(ada.composer()).toBeFocused();
+    await expect(formattingRow(ada)).toBeVisible();
   });
 
   test("says a message over 10,000 characters is too long instead of sending it, keeping it to be cut down", async ({ members }) => {
