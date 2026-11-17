@@ -457,6 +457,30 @@ describe("Delete my account", () => {
     await user.click(await screen.findByRole("button", { name: "Delete my account" }));
     expect(await screen.findByLabelText("Type your name, Ada King, to delete your account")).toBeInTheDocument();
   });
+
+  it("keeps asking for the name saved last when a photo's answer comes after it, with the name from before", async () => {
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:moon");
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    const without = { ...profile, password: false };
+    let answerUpload = (_: Response) => {};
+    serve({
+      loaded: () => Response.json({ profile: without, transferId: LOADED_LINK } satisfies ProfileAnswer),
+      saved: () => Response.json({ profile: { ...without, name: "Ada King" }, transferId: SAVED_LINK } satisfies ProfileAnswer),
+      uploaded: () => new Promise((resolve) => (answerUpload = resolve)),
+    });
+    const { user } = showPage();
+    await loaded();
+    await user.upload(screen.getByLabelText("Upload avatar", { exact: false }), new File(["moon"], "moon.jpg", { type: "image/jpeg" }));
+    await user.clear(screen.getByLabelText("Name"));
+    await user.type(screen.getByLabelText("Name"), "Ada King");
+    await user.click(saveButton());
+    await waitFor(() => expect(screen.getByLabelText("Name")).toHaveValue("Ada King"));
+    await waitFor(() => expect(saveButton()).toBeEnabled());
+
+    await act(async () => answerUpload(Response.json({ profile: { ...without, avatarUrl: UPLOADED, avatar: true }, transferId: SAVED_LINK } satisfies ProfileAnswer)));
+    await user.click(screen.getByRole("button", { name: "Delete my account" }));
+    expect(await screen.findByLabelText("Type your name, Ada King, to delete your account")).toBeInTheDocument();
+  });
 });
 
 describe("Levels on your profile", () => {

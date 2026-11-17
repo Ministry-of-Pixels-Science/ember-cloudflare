@@ -131,7 +131,7 @@ export function ProfilePage({ me, rooms, askForRoom, onSignOut, onDeleteAccount,
   /**
    * Your name as the profile last loaded or saved it, which Delete my account asks someone without a
    * password to type, as the server has it: a name saved while the workspace socket is down reaches
-   * `me` only once it's back.
+   * `me` only once it's back. A photo's answer, which can arrive after a save, has the name from before.
    */
   const [savedName, setSavedName] = useState(me.name);
   /**
@@ -168,6 +168,7 @@ export function ProfilePage({ me, rooms, askForRoom, onSignOut, onDeleteAccount,
         if (stopped) return;
         saved.current = fieldsOf(answer.profile);
         setFields(saved.current);
+        setSavedName(answer.profile.name);
         setHasEmailAddress(answer.profile.emailAddress !== null);
         showAnswer(answer);
         // Only from here and the Ember AI section's own saves, as a save of the profile or a photo can
@@ -198,7 +199,6 @@ export function ProfilePage({ me, rooms, askForRoom, onSignOut, onDeleteAccount,
     setPicture((shown) => (shown && avatarVersionOf(shown.avatarUrl) > avatarVersionOf(answered.avatarUrl) ? shown : answered));
     // Nothing takes a password away, so an answer arriving late doesn't hide the field.
     setHasPassword((had) => had || profile.password);
-    setSavedName(profile.name);
     // Nothing connects a Memberful account without a reload, so once it's disconnected here, an answer
     // arriving late doesn't show it connected again, and shows what the Worker does for one disconnected.
     const { memberful } = profile;
@@ -257,6 +257,7 @@ export function ProfilePage({ me, rooms, askForRoom, onSignOut, onDeleteAccount,
         setSaving(false);
         const now = fieldsOf(answer.profile);
         saved.current = now;
+        setSavedName(answer.profile.name);
         setFields((fields) => fields && settled(fields, sent, now));
         setHasEmailAddress(answer.profile.emailAddress !== null);
         // The passwords leave their fields, unless others were typed meanwhile.
