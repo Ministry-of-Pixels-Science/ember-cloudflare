@@ -1,7 +1,7 @@
 import type { AccountSettings, Me, WorkspaceSettings } from "@ember/protocol";
 import { APP_ID_UNKNOWN, APP_SECRET_UNKNOWN, CAMERAS_OFF, RELAY_API_TOKEN_UNKNOWN, RELAY_KEY_ID_UNKNOWN, RELAY_TTL_S, SCREENS_FULL, SCREENS_OFF } from "@ember/protocol/huddles";
 import type { APIRequestContext, Browser, BrowserContext, Locator, Page } from "@playwright/test";
-import { administratorSession, cookieHeader, expect, huddleTilesKeepClear, newAddress, SAME_ORIGIN, signInAsAdministrator, test, useOwnAddress, type TestRoom } from "../../fixtures";
+import { administratorSession, cookieHeader, editorField, expect, huddleTilesKeepClear, newAddress, SAME_ORIGIN, signInAsAdministrator, test, useOwnAddress, type TestRoom } from "../../fixtures";
 import { AI_GATEWAY_ACCOUNT, SFU_APP, TURN_KEY } from "../../projects/workspace-settings";
 import { startFakeSfu, type FakeSfu, type IceServer } from "./fake-sfu";
 
@@ -387,9 +387,47 @@ const givenOf = (servers: IceServer[]) => servers.map((server) => ({ ...server, 
 /** What the room's row in the sidebar ends with while a huddle is going on in it, which says who's in it under a pointer. */
 const sidebarMark = (page: Page, room: TestRoom) => page.getByRole("region", { name: "Rooms" }).getByRole("link", { name: room.name, exact: true }).locator("[title]");
 
+/** The huddle of a direct message `page` is in, opened over the page: `name` is who it's with, as the page's person reads them. */
+const directHuddle = (page: Page, name: string) => page.getByRole("region", { name: `Huddle with ${name}` }).and(page.locator("#huddle"));
+
+/** What the row of the direct message with `name` ends with in `page`'s sidebar while a huddle is going on in it. */
+const directMark = (page: Page, name: string) => page.getByRole("region", { name: "DMs" }).getByRole("link", { name: `Direct message with ${name}`, exact: true }).locator("[title]");
+
+/** The invitation `page` shows into the huddle of a direct message, from `name`. */
+const invitationFrom = (page: Page, name: string) => page.getByRole("group", { name: `${name} invites you to a huddle`, exact: true });
+
+/** The invitation `page` shows into the huddle of `room`, which people share, from `name`. */
+const roomInvitationFrom = (page: Page, name: string, room: TestRoom) => page.getByRole("group", { name: `${name} invites you to a huddle in ${room.name}`, exact: true });
+
+/** Whether `page` rings for an invitation into a huddle: its sound plays there, over and over, and has for more than `seconds`. */
+const rings = (page: Page, seconds = 0) =>
+  page.evaluate(
+    (seconds) => (window as unknown as KeepsSounds).huddleSoundsPlayed.some((audio) => audio.dataset.huddleSound === "invited" && audio.loop && !audio.paused && audio.currentTime > seconds),
+    seconds,
+  );
+
+/** Those of `pages` that ring for an invitation into a huddle. */
+async function ringing(pages: Page[]): Promise<Page[]> {
+  const rung = await Promise.all(pages.map((page) => rings(page)));
+  return pages.filter((_, index) => rung[index]);
+}
+
+/** The huddle's own sounds `page` has started to play, in order, whether or not its browser let it. */
+const soundsStarted = (page: Page) => page.evaluate(() => (window as unknown as KeepsSounds).huddleSoundsPlayed.map((audio) => audio.dataset.huddleSound));
+
 /** A room of the test's own, which everyone is in. */
 async function roomOfItsOwn(request: APIRequestContext): Promise<TestRoom> {
   const created = await request.post("/api/rooms", { data: { kind: "open", name: `Standup ${crypto.randomUUID().slice(0, 8)}` }, headers: await asAdministrator(request) });
+  expect(created.status(), await created.text()).toBe(201);
+  return ((await created.json()) as { room: TestRoom }).room;
+}
+
+/** A room of the test's own, which only `members` are in. */
+async function roomOfJust(request: APIRequestContext, members: { id: string }[]): Promise<TestRoom> {
+  const created = await request.post("/api/rooms", {
+    data: { kind: "closed", name: `Launch ${crypto.randomUUID().slice(0, 8)}`, memberIds: members.map(({ id }) => id) },
+    headers: await asAdministrator(request),
+  });
   expect(created.status(), await created.text()).toBe(201);
   return ((await created.json()) as { room: TestRoom }).room;
 }
@@ -591,6 +629,79 @@ test.describe("A huddle", () => {
     expect(forgotten.status(), await forgotten.text()).toBe(200);
     await expect(grace.getByRole("button", { name: "Start huddle", exact: true })).toHaveCount(0);
     await expect(start).toHaveCount(0);
+    await context.close();
+  });
+
+  test("a huddle has a message in its room, which says it's happening and who's in it, offers Join, has a thread, and says who was in it and for how long once everyone has left", async ({ page, browser, baseURL, request }) => {
+    const administrator = await administratorSession(request);
+    const saved = await request.put("/api/account/huddles", { data: SFU_APP, headers: { Cookie: cookieHeader(administrator), ...SAME_ORIGIN } });
+    expect(saved.status(), await saved.text()).toBe(200);
+    const room = await roomOfItsOwn(request);
+    /** The huddle's message among the room's, as `of` shows it. */
+    const message = (of: Page) => of.getByRole("log").getByRole("article").filter({ has: of.getByRole("heading", { name: /^A huddle / }) });
+    const joinFrom = (of: Page) => message(of).getByRole("button", { name: "Join", exact: true });
+
+    // Grace, who joins Ember with the join link, has the room open before anyone huddles in it.
+    const { context } = await newcomer(browser, baseURL, request, "Grace");
+    const grace = await context.newPage();
+    await useOwnAddress(grace);
+    await grace.goto(`/rooms/${room.id}`);
+    await expect(grace.getByRole("heading", { level: 1 })).toHaveText(room.name);
+    await expect(message(grace)).toHaveCount(0);
+
+    // Ada starts a huddle there, which the room writes a message of: Grace sees it happening, with Ada in it.
+    await useOwnAddress(page);
+    await page.goto(`/rooms/${room.id}`);
+    await signInAsAdministrator(page);
+    await page.getByRole("button", { name: "Start huddle", exact: true }).click();
+    await page.getByRole("dialog", { name: `Start a huddle in ${room.name}` }).getByRole("button", { name: "Start Huddle" }).click();
+    const adasHuddle = huddleOpened(page, room);
+    await expect(adasHuddle).toContainText("1 person");
+    await expect(message(grace).getByRole("heading")).toContainText("A huddle is happeningLIVE");
+    await expect(message(grace)).toContainText("Ada is in the huddle");
+    await expect(message(grace)).not.toContainText("A huddle started");
+
+    // She joins from the message, by the preview. Behind her huddle, the message names them both, with nothing to join.
+    await joinFrom(grace).click();
+    await grace.getByRole("dialog", { name: `Join the huddle in ${room.name}` }).getByRole("button", { name: "Join Huddle" }).click();
+    const gracesHuddle = huddleOpened(grace, room);
+    await expect(gracesHuddle).toContainText("2 people");
+    await gracesHuddle.getByRole("button", { name: "Minimize huddle" }).filter({ visible: true }).click();
+    await expect(message(grace)).toContainText("Ada and you are in the huddle");
+    await expect(joinFrom(grace)).toHaveCount(0);
+    await adasHuddle.getByRole("button", { name: "Minimize huddle" }).filter({ visible: true }).click();
+    await expect(message(page)).toContainText("Grace and you are in the huddle");
+    await expect(joinFrom(page)).toHaveCount(0);
+
+    // Its thread is the huddle's: Grace replies in it, which the message sums up for them both.
+    await grace.getByRole("heading", { level: 1 }).hover();
+    await message(grace).hover();
+    await message(grace).getByRole("group", { name: "Message actions" }).getByRole("link", { name: "Reply in thread" }).click();
+    const thread = grace.getByRole("complementary", { name: "Thread" });
+    await expect(thread.getByRole("article").first()).toContainText("A huddle is happeningLIVE");
+    await editorField(thread, "Write a reply").fill("Notes from the huddle");
+    await editorField(thread, "Write a reply").press("Enter");
+    await expect(thread.getByRole("article").filter({ hasText: "Notes from the huddle" })).toBeVisible();
+    for (const of of [page, grace]) await expect(message(of).getByRole("link", { name: /^1 reply\b/ })).toBeVisible();
+    await thread.getByRole("link", { name: "Close thread" }).click();
+
+    // Grace leaves, and can join again from the message. Then Ada does, which ends the huddle: the message
+    // says that it happened, who was in it, and for how long, to each of them and to whoever opens the room later.
+    await grace.getByRole("button", { name: "Leave huddle", exact: true }).click();
+    await expect(message(grace)).toContainText("Ada is in the huddle");
+    await expect(joinFrom(grace)).toBeVisible();
+    await expect(message(page)).toContainText("Just you in the huddle");
+    await page.getByRole("button", { name: "Leave huddle", exact: true }).click();
+    for (const [of, who] of [[page, "Grace and you"], [grace, "Ada and you"]] as const) {
+      await expect(message(of).getByRole("heading")).toContainText("A huddle happened");
+      await expect(message(of)).not.toContainText("LIVE");
+      await expect(message(of)).toContainText(new RegExp(`${who} were in the huddle for (less than a minute|1 minute)`));
+      await expect(joinFrom(of)).toHaveCount(0);
+      await expect(message(of).getByRole("link", { name: /^1 reply\b/ })).toBeVisible();
+    }
+    await grace.reload();
+    await expect(message(grace)).toContainText(/Ada and you were in the huddle for (less than a minute|1 minute)/);
+    await expect(message(grace)).toHaveCount(1);
     await context.close();
   });
 
@@ -1000,5 +1111,195 @@ test.describe("A huddle", () => {
     await expect(adasHuddle).toHaveCount(0);
     await expect.poll(sessionsLeftOpen).toEqual([]);
     await context.close();
+  });
+
+  test("someone starts a huddle in a direct message, which invites the other person in it on every tab they have open, one of which rings, until they decline it in one of them, or join by it", async ({ page, browser, baseURL, request }) => {
+    const administrator = await administratorSession(request);
+    const headers = { Cookie: cookieHeader(administrator), ...SAME_ORIGIN };
+    const room = await roomOfItsOwn(request);
+    const saved = await request.put("/api/account/huddles", { data: SFU_APP, headers });
+    expect(saved.status(), await saved.text()).toBe(200);
+
+    // Grace, who joins Ember with the join link, has a room open in two tabs, and has clicked in each, so
+    // her browser lets either of them play a sound.
+    const { user: her, context } = await newcomer(browser, baseURL, request, "Grace");
+    const tabs = [await context.newPage(), await context.newPage()];
+    for (const tab of tabs) {
+      await keepSounds(tab);
+      await useOwnAddress(tab);
+      await tab.goto(`/rooms/${room.id}`);
+      await tab.getByRole("heading", { level: 1, name: room.name }).click();
+    }
+
+    // Ada starts a direct message with her, whose header has the huddle button. Its preview says who the
+    // huddle is with, and that starting it invites her.
+    const started = await request.post("/api/directs", { data: { userIds: [her.id] }, headers });
+    expect(started.status(), await started.text()).toBe(201);
+    const direct = ((await started.json()) as { room: { id: string } }).room;
+    await useOwnAddress(page);
+    await page.goto(`/rooms/${direct.id}`);
+    await signInAsAdministrator(page);
+    const start = page.getByRole("button", { name: "Start huddle", exact: true });
+    await start.click();
+    const starting = page.getByRole("dialog", { name: `Start a huddle with ${her.name}` });
+    await expect(starting).toContainText("Grace is invited once it starts.");
+    await starting.getByRole("button", { name: "Start Huddle" }).click();
+    const adasHuddle = directHuddle(page, her.name);
+    await expect(adasHuddle).toContainText("1 person");
+
+    // Each of Grace's tabs shows Ada's invitation, over the room it has open, and one of them rings for
+    // it. A second into its ring, the other has played nothing.
+    const invitations = tabs.map((tab) => invitationFrom(tab, administrator.user.name));
+    for (const invitation of invitations) await expect(invitation).toBeVisible();
+    await expect.poll(async () => (await ringing(tabs)).length).toBe(1);
+    const [rung] = await ringing(tabs);
+    const silent = tabs.find((tab) => tab !== rung)!;
+    await expect.poll(() => rings(rung!, 1)).toBe(true);
+    expect(await soundsStarted(silent)).toEqual([]);
+
+    // She declines in the tab that's silent, which takes the invitation from both and stops the other's
+    // ring. Ada isn't told, and stays in the huddle.
+    await invitationFrom(silent, administrator.user.name).getByRole("button", { name: "Decline", exact: true }).click();
+    for (const invitation of invitations) await expect(invitation).toHaveCount(0);
+    await expect.poll(() => ringing(tabs)).toEqual([]);
+    await expect(adasHuddle).toContainText("1 person");
+
+    // Ada leaves, which ends the huddle, and starts another, which invites Grace again. Grace closes the
+    // tab that rings, and the other rings in its place.
+    await adasHuddle.getByRole("button", { name: "Leave", exact: true }).click();
+    await expect(adasHuddle).toHaveCount(0);
+    await start.click();
+    await starting.getByRole("button", { name: "Start Huddle" }).click();
+    await expect(adasHuddle).toContainText("1 person");
+    for (const invitation of invitations) await expect(invitation).toBeVisible();
+    await expect.poll(async () => (await ringing(tabs)).length).toBe(1);
+    const [closed] = await ringing(tabs);
+    const grace = tabs.find((tab) => tab !== closed)!;
+    await closed!.close();
+    await expect.poll(() => rings(grace)).toBe(true);
+
+    // She joins by the invitation, which stops the ring and opens the huddle's preview over the room she
+    // has open. Joining from it puts her in the huddle with Ada, where each hears the other.
+    const invitation = invitationFrom(grace, administrator.user.name);
+    await invitation.getByRole("button", { name: "Join", exact: true }).click();
+    const joining = grace.getByRole("dialog", { name: `Join the huddle with ${administrator.user.name}` });
+    await expect(joining).toContainText("Ada is in it now.");
+    await expect(invitation).toHaveCount(0);
+    await expect.poll(() => rings(grace)).toBe(false);
+    await expect(grace).toHaveURL(`${baseURL}/rooms/${room.id}`);
+    await joining.getByRole("button", { name: "Join Huddle" }).click();
+    const gracesHuddle = directHuddle(grace, administrator.user.name);
+    await expect(gracesHuddle).toContainText("2 people");
+    await expect(adasHuddle).toContainText("2 people");
+    await expect.poll(() => hears(grace, administrator.user.id), { timeout: 15_000 }).toBe(true);
+    await expect.poll(() => hears(page, her.id), { timeout: 15_000 }).toBe(true);
+    // The direct message's row in each of their sidebars ends with the huddle's mark.
+    await expect(directMark(page, her.name)).toHaveAttribute("title", "Grace and you are in the huddle");
+    await expect(directMark(grace, administrator.user.name)).toHaveAttribute("title", "Ada and you are in the huddle");
+
+    for (const huddle of [gracesHuddle, adasHuddle]) await huddle.getByRole("button", { name: "Leave", exact: true }).click();
+    await expect(adasHuddle).toHaveCount(0);
+    await expect.poll(sessionsLeftOpen).toEqual([]);
+    await context.close();
+  });
+
+  test("someone in a room's huddle invites others of the room from Invite people, which rings those who keep its notifications on, to decline or join by, and lists whoever isn't in the huddle yet", async ({ page, browser, baseURL, request }) => {
+    const administrator = await administratorSession(request);
+    const headers = { Cookie: cookieHeader(administrator), ...SAME_ORIGIN };
+    const saved = await request.put("/api/account/huddles", { data: SFU_APP, headers });
+    expect(saved.status(), await saved.text()).toBe(200);
+
+    // A room of just Ada, Grace and Linus, who each joined Ember with the join link. Each of the two has
+    // it open, and has clicked in it, so their browser lets it play a sound. Linus has turned the room's
+    // notifications off.
+    const { user: her, context } = await newcomer(browser, baseURL, request, "Grace");
+    const { user: him, context: his } = await newcomer(browser, baseURL, request, "Linus");
+    const room = await roomOfJust(request, [administrator.user, her, him]);
+    const [grace, linus] = [await context.newPage(), await his.newPage()];
+    for (const tab of [grace, linus]) {
+      await keepSounds(tab);
+      await useOwnAddress(tab);
+      await tab.goto(`/rooms/${room.id}`);
+      await tab.getByRole("heading", { level: 1, name: room.name }).click();
+    }
+    const turnedOff = await his.request.put(`/api/rooms/${room.id}/involvement`, { data: { involvement: "nothing" }, headers: SAME_ORIGIN });
+    expect(turnedOff.status(), await turnedOff.text()).toBe(200);
+
+    // Ada starts the room's huddle, which invites nobody. Its buttons begin with Invite people, and it
+    // has no More button, which a phone's has in its place.
+    await useOwnAddress(page);
+    await page.goto(`/rooms/${room.id}`);
+    await signInAsAdministrator(page);
+    await page.getByRole("button", { name: "Start huddle", exact: true }).click();
+    await page.getByRole("dialog", { name: `Start a huddle in ${room.name}` }).getByRole("button", { name: "Start Huddle" }).click();
+    const adasHuddle = huddleOpened(page, room);
+    await expect(adasHuddle).toContainText("1 person");
+    const invite = adasHuddle.getByRole("button", { name: "Invite people", exact: true });
+    await expect(adasHuddle.locator("footer").getByRole("button").first()).toHaveAccessibleName("Invite people");
+    await expect(adasHuddle.getByRole("button", { name: "More", exact: true })).toBeHidden();
+
+    // It lists the room's other two by name, neither ticked, and sends no invitation until one is.
+    await invite.click();
+    const inviting = page.getByRole("dialog", { name: "Invite people" });
+    await expect(inviting.getByRole("heading", { name: "Invite people" })).toBeFocused();
+    await expect(inviting).toContainText(`People in ${room.name} who aren’t in the huddle.`);
+    await expect(inviting.getByRole("listitem")).toHaveText([her.name, him.name]);
+    await expect(inviting.getByRole("status")).toHaveText("Choose one or more people.");
+    const send = inviting.getByRole("button", { name: "Send Invite" });
+    await expect(send).toBeDisabled();
+    // She ticks both and sends it, which closes the list, says who's invited, and gives the button the focus back.
+    for (const { name } of [her, him]) await inviting.getByRole("checkbox", { name }).check();
+    await expect(inviting.getByRole("status")).toHaveText("2 people selected.");
+    await send.click();
+    await expect(inviting).toHaveCount(0);
+    await expect(page.getByRole("alert")).toHaveText("Grace and Linus are invited.");
+    await expect(invite).toBeFocused();
+
+    // Grace's tab shows Ada's invitation into the room's huddle, and rings for it. A second into its
+    // ring, Linus's has shown none and played nothing, as it is with a mention of him there.
+    const invitation = roomInvitationFrom(grace, administrator.user.name, room);
+    await expect(invitation).toBeVisible();
+    await expect.poll(() => rings(grace, 1)).toBe(true);
+    await expect(roomInvitationFrom(linus, administrator.user.name, room)).toHaveCount(0);
+    expect(await soundsStarted(linus)).toEqual([]);
+
+    // She declines, which Ada isn't told. Ada invites her again, by herself, and she joins by it.
+    await invitation.getByRole("button", { name: "Decline", exact: true }).click();
+    await expect(invitation).toHaveCount(0);
+    await expect.poll(() => rings(grace)).toBe(false);
+    await expect(adasHuddle).toContainText("1 person");
+    await invite.click();
+    await inviting.getByRole("checkbox", { name: her.name }).check();
+    await expect(inviting.getByRole("status")).toHaveText("1 person selected.");
+    await send.click();
+    await expect(page.getByRole("alert")).toHaveText("Grace is invited.");
+    await expect(invitation).toBeVisible();
+    await invitation.getByRole("button", { name: "Join", exact: true }).click();
+    await grace.getByRole("dialog", { name: `Join the huddle in ${room.name}` }).getByRole("button", { name: "Join Huddle" }).click();
+    const gracesHuddle = huddleOpened(grace, room);
+    await expect(gracesHuddle).toContainText("2 people");
+    await expect(adasHuddle).toContainText("2 people");
+
+    // Now that she's in it, the list has Linus alone, ticked already as the only one to invite. Escape
+    // closes it, and sends nothing.
+    await invite.click();
+    await expect(inviting.getByRole("listitem")).toHaveText([him.name]);
+    await expect(inviting.getByRole("checkbox", { name: him.name })).toBeChecked();
+    await expect(inviting.getByRole("status")).toHaveText("1 person selected.");
+    await page.keyboard.press("Escape");
+    await expect(inviting).toHaveCount(0);
+    await expect(invite).toBeFocused();
+    // Grace, who can't change the room, may invite from it as well, and her list is the same.
+    await gracesHuddle.getByRole("button", { name: "Invite people", exact: true }).click();
+    const hers = grace.getByRole("dialog", { name: "Invite people" });
+    await expect(hers.getByRole("listitem")).toHaveText([him.name]);
+    await hers.getByRole("button", { name: "Cancel", exact: true }).last().click();
+    await expect(hers).toHaveCount(0);
+
+    for (const huddle of [gracesHuddle, adasHuddle]) await huddle.getByRole("button", { name: "Leave", exact: true }).click();
+    await expect(adasHuddle).toHaveCount(0);
+    await expect.poll(sessionsLeftOpen).toEqual([]);
+    await context.close();
+    await his.close();
   });
 });

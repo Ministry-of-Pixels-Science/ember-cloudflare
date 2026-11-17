@@ -1,7 +1,8 @@
-import { createContext, useContext } from "react";
-import type { LiveHuddle, RoomId } from "@ember/protocol";
+import { createContext, useCallback, useContext } from "react";
+import type { DirectoryUser, LiveHuddle, RoomId, User } from "@ember/protocol";
 import { Headset, Link, NavArrowDown } from "@/components/icons/iconoir";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { PeopleContext } from "@/hooks/use-directory";
 import { useHuddle } from "@/hooks/use-huddle";
 import { huddlePath } from "@/hooks/use-route";
 import { copyWithSuccess } from "@/lib/clipboard";
@@ -9,6 +10,7 @@ import { leaveHuddle } from "@/lib/huddle-store";
 import { huddleShortcut } from "@/lib/keyboard";
 import { cn } from "@/lib/utils";
 import { ShortcutTooltip } from "./shortcut-tooltip";
+import { isBot } from "./user-avatar";
 
 /** What a room's header knows of huddles. */
 export interface Huddles {
@@ -22,6 +24,19 @@ export const NO_HUDDLES: Huddles["live"] = {};
 
 /** The huddles going on, and the way into one, for a room's header. */
 export const HuddlesContext = createContext<Huddles>({ live: NO_HUDDLES, preview: () => {} });
+
+/**
+ * Whether someone joins no huddle, as the people directory lists them: a bot, AI agents among them, or
+ * someone who can no longer sign in, deactivated, banned or suspended. Until it lists them, only @ember
+ * is known to join none.
+ */
+export const joinsNoHuddle = (user: User, listed: DirectoryUser | undefined) => isBot(user, listed) || (listed !== undefined && listed.status !== "active");
+
+/** Whether someone joins no huddle, as the people directory lists them now. */
+export function useJoinsNoHuddle(): (user: User) => boolean {
+  const people = useContext(PeopleContext);
+  return useCallback((user: User) => joinsNoHuddle(user, people.get(user.id)), [people]);
+}
 
 /** One half of the button, which a pointer highlights by itself. */
 const HALF = "grid cursor-pointer place-items-center hover:bg-foreground/8 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-foreground";

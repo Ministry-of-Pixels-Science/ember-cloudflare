@@ -13,6 +13,9 @@ import { administratorSession, cookieHeader, expect, newAddress, SAME_ORIGIN, si
 
 const APP_NAME = "Field notes";
 
+/** The box on the page that asks, which lets an app into someone's direct messages and private rooms. */
+const REACH = "Do the same in your direct messages and private rooms";
+
 /** Where the app has the browser sent back: a page of its own on this machine. */
 let app: Server;
 let callback: string;
@@ -58,7 +61,7 @@ async function beginSignIn(request: APIRequestContext, address: string): Promise
   const [, described] = /resource_metadata="([^"]+)"/.exec(challenge) ?? [];
   // What Ember says to ask for, which is everything an app can be let do.
   const [, scope] = /scope="([^"]+)"/.exec(challenge) ?? [];
-  expect(scope).toBe("read write");
+  expect(scope).toBe("read write private");
   const { resource, authorization_servers: [issuer] } = (await (await request.get(described!)).json()) as { resource: string; authorization_servers: string[] };
   const server = (await (await request.get(`${issuer}/.well-known/oauth-authorization-server`)).json()) as Record<string, string>;
   expect(server.issuer).toBe(issuer);
@@ -113,9 +116,10 @@ test.describe("Outside AI", () => {
     await page.goto(signIn.authorize);
     await expect(page).toHaveTitle(/Connect an AI app/);
     await expect(page.getByRole("heading", { level: 1, name: new RegExp(`^Connect ${APP_NAME} to .+\\?$`) })).toBeVisible();
-    await expect(page.getByRole("listitem")).toHaveText(["See the rooms you're in, read their messages and search them, as you can"]);
-    // Sending is theirs to leave out, and allowed unless they do.
-    await expect(page.getByRole("checkbox", { name: "Send messages as you, in the rooms you're in" })).toBeChecked();
+    await expect(page.getByRole("listitem")).toHaveText(["See the open rooms you're in, read their messages and search them, as you can"]);
+    // Sending is theirs to leave out, and allowed unless they do, and their direct messages and private rooms are left out unless they tick them.
+    await expect(page.getByRole("checkbox", { name: "Send messages as you, in the open rooms you're in" })).toBeChecked();
+    await expect(page.getByRole("checkbox", { name: REACH })).not.toBeChecked();
     await expect(page.getByText(`You'll go back to ${new URL(callback).host}.`)).toBeVisible();
     await page.getByRole("button", { name: "Allow", exact: true }).click();
 
@@ -126,11 +130,13 @@ test.describe("Outside AI", () => {
       form: { grant_type: "authorization_code", client_id: signIn.clientId, code: back.get("code")!, code_verifier: VERIFIER, redirect_uri: callback, resource: signIn.resource },
     });
     expect(exchanged.status(), await exchanged.text()).toBe(200);
-    const { access_token: token } = (await exchanged.json()) as { access_token: string };
+    const { access_token: token, scope: given } = (await exchanged.json()) as { access_token: string; scope: string };
+    expect(given).toBe("read write");
 
-    // The app sees the rooms the person who allowed it is in, which their sidebar lists.
+    // The app sees the open rooms the person who allowed it is in, which their sidebar lists.
     const rooms = await roomsFor(request, address, token);
-    const listed = rooms.find(({ kind }) => kind !== "direct")!;
+    expect(rooms.every(({ kind }) => kind === "open")).toBe(true);
+    const listed = rooms[0]!;
     await page.goto("/");
     await expect(page.getByRole("region", { name: "Rooms" }).getByRole("link", { name: listed.name }).first()).toBeVisible();
     // It reads one of them, as the page that asked said it could.
@@ -186,5 +192,29 @@ test.describe("Outside AI", () => {
     expect(back.get("state")).toBe(STATE);
     await page.goto(PROFILE_PATH);
     await expect(page.getByRole("region", { name: "AI apps" })).toContainText("No AI app is connected as you.");
+  });
+
+  test("someone lets an app into their direct messages and private rooms by ticking them, which their profile then says", async ({ page, request, baseURL }) => {
+    const headers = { Cookie: cookieHeader(await administratorSession(request)), ...SAME_ORIGIN };
+    expect((await request.put("/api/account/outside_ai", { data: { on: true }, headers })).status()).toBe(200);
+    const signIn = await beginSignIn(request, `${baseURL}/mcp`);
+
+    await useOwnAddress(page);
+    await page.goto("/");
+    await signInAsAdministrator(page);
+    await page.goto(signIn.authorize);
+    const reach = page.getByRole("checkbox", { name: REACH });
+    await expect(reach).not.toBeChecked();
+    await reach.check();
+    await page.getByRole("button", { name: "Allow", exact: true }).click();
+
+    const back = await cameBack(page);
+    const exchanged = await request.post(signIn.tokenEndpoint, {
+      form: { grant_type: "authorization_code", client_id: signIn.clientId, code: back.get("code")!, code_verifier: VERIFIER, redirect_uri: callback, resource: signIn.resource },
+    });
+    expect(exchanged.status(), await exchanged.text()).toBe(200);
+    expect(((await exchanged.json()) as { scope: string }).scope).toBe("read write private");
+    await page.goto(PROFILE_PATH);
+    await expect(page.getByRole("region", { name: "AI apps" }).getByRole("listitem")).toContainText(["It can send messages as you. It can use your direct messages and private rooms too."]);
   });
 });

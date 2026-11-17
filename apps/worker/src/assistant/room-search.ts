@@ -2,12 +2,15 @@ import { hasWords, MAX_SEARCH_LENGTH, sanitizeSearch, searchTerms, type Message,
 import type { Env } from "../env";
 import { searchIndex } from "../search-index";
 import { matchesOf } from "../searches";
-import { ToolError, type EmberTool } from "./tool-calls";
+import { workspace } from "../workspace";
+import { ToolError, type EmberTool, type Unlogged } from "./tool-calls";
 
 // The first tool Ember runs for @ember and the agents: a search of the room they're asked in, for what was
 // written there besides the messages they read with a question, which it leaves out, so that those don't
 // crowd out what's older. It finds only that room's messages, which everyone who sees the answer can
-// read, as the search page finds them for someone in the room.
+// read, as the search page finds them for someone in the room. What it finds once the room is a DM or a
+// private room, as it may be made while the answer works, is kept out of AI Gateway's logs, with the rest
+// of the answer.
 
 /** The most messages a search answers with, the newest that match. */
 export const MESSAGES_FOUND = 10;
@@ -39,9 +42,11 @@ export function roomSearch(env: Env, roomId: RoomId, read: readonly string[]): E
 /**
  * What a search of room `roomId` for `words` answers: its newest messages with them all, but those
  * `given` with the question, or that there are none. A page of the search holds more matches than a
- * question's conversation has messages, so what's left of a full one is enough to answer with.
+ * question's conversation has messages, so what's left of a full one is enough to answer with. Those
+ * found in a room that's private once they're read are unlogged, as the room may have been made private
+ * since the answer began in the open.
  */
-async function searched(env: Env, roomId: RoomId, given: ReadonlySet<string>, words: unknown): Promise<string> {
+async function searched(env: Env, roomId: RoomId, given: ReadonlySet<string>, words: unknown): Promise<string | Unlogged> {
   if (typeof words !== "string" || !hasWords(words)) throw new ToolError("Give the words to find, as `words`.");
   if (words.length > MAX_SEARCH_LENGTH) throw new ToolError("That's too much to search for. Give one or two words.");
   const { hits, next } = await searchIndex(env).search({ terms: searchTerms(sanitizeSearch(words)), roomIds: [roomId], sort: "newest", after: null });
@@ -52,7 +57,8 @@ async function searched(env: Env, roomId: RoomId, given: ReadonlySet<string>, wo
   if (found.length === 0) return ungiven.length === hits.length ? "No message in this room has those words." : "No message in this room has those words, but for those of the conversation you were given.";
   const more = next !== null || others.length > found.length;
   const count = more ? `The newest ${found.length} messages with those words, of more` : found.length === 1 ? "The only message with those words" : `All ${found.length} messages with those words, newest first`;
-  return [`${count}:`, ...found.map(lineOf)].join("\n\n");
+  const text = [`${count}:`, ...found.map(lineOf)].join("\n\n");
+  return (await workspace(env).isPrivateRoom(roomId)) ? { text, unlogged: true } : text;
 }
 
 /** A message as a search answers with it: when it was written, in UTC, who wrote it, and its text, or its file's name, cut to what a search shows. */

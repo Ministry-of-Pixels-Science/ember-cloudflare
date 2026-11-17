@@ -1,6 +1,7 @@
 // Outside AI: the AI apps, such as Claude and ChatGPT, that people connect to Ember over the Model
 // Context Protocol (https://modelcontextprotocol.io), to read it as them and, where they let it, to
-// send messages as them. An app is given Ember's
+// send messages as them, in the rooms open to everyone, and in their direct messages and private rooms
+// only where they let it into those too. An app is given Ember's
 // address, `/mcp`, and signs in with OAuth, where Ember is the authorization server: it sends the
 // person's browser to a page of Ember's that asks them, and what they allow is a connection, which
 // they can end on their profile. An administrator turns it on, and until one does, none of it answers.
@@ -11,26 +12,41 @@ export const MCP_PATH = "/mcp";
 /** The page an AI app sends a person's browser to, which asks them whether to connect it as them. */
 export const OUTSIDE_AUTHORIZE_PATH = "/oauth/authorize";
 
-/** What a connection can be allowed to do: read as its person, and send messages as them. */
-export const OUTSIDE_SCOPES = ["read", "write"] as const;
+/**
+ * What a connection can be allowed to do: read as its person, and send messages as them, in the rooms
+ * open to everyone that they're in, and with "private", in their direct messages and private rooms too.
+ * "private" gives no tools of its own, so a connection always has reading or sending besides.
+ */
+export const OUTSIDE_SCOPES = ["read", "write", "private"] as const;
 export type OutsideScope = (typeof OUTSIDE_SCOPES)[number];
 
 /** What an app that asks for nothing by name is given: reading alone. */
 export const DEFAULT_OUTSIDE_SCOPES: readonly OutsideScope[] = ["read"];
 
+/** The scopes the page leaves unticked, which a connection has only when its person ticks them: their direct messages and private rooms. */
+export const UNTICKED_OUTSIDE_SCOPES: readonly OutsideScope[] = ["private"];
+
 /** What the page says each scope lets an app do, after "It will be able to". */
 export const OUTSIDE_SCOPE_EXPLAINED: Record<OutsideScope, string> = {
-  read: "See the rooms you're in, read their messages and search them, as you can",
-  write: "Send messages as you, in the rooms you're in",
+  read: "See the open rooms you're in, read their messages and search them, as you can",
+  write: "Send messages as you, in the open rooms you're in",
+  private: "Do the same in your direct messages and private rooms",
 };
 
-/** The scopes among `asked` that the page lets a person leave out: sending, when the app asks to read too. */
-export const optionalOutsideScopes = (asked: readonly OutsideScope[]): OutsideScope[] => (asked.includes("read") ? asked.filter((scope) => scope !== "read") : []);
+/** The scopes among `asked` that the page lets a person leave out: their direct messages and private rooms, and sending, when the app asks to read too. */
+export const optionalOutsideScopes = (asked: readonly OutsideScope[]): OutsideScope[] =>
+  asked.filter((scope) => UNTICKED_OUTSIDE_SCOPES.includes(scope) || (scope !== "read" && asked.includes("read")));
 
-/** What a connection is given of the scopes its app `asked` for, when its person leaves out `without`: all but those of them they may leave out. */
-export function grantedOutsideScopes(asked: readonly OutsideScope[], without: readonly unknown[]): OutsideScope[] {
+/**
+ * What a connection is given of the scopes its app `asked` for, when its person leaves out `without` of
+ * those the page ticks and ticks `ticked` of those it doesn't (`UNTICKED_OUTSIDE_SCOPES`): every one they
+ * may not leave out, and of the rest, those they kept or ticked. So an answer that names none of them
+ * gives what the page ticks, and never their direct messages and private rooms.
+ */
+export function grantedOutsideScopes(asked: readonly OutsideScope[], without: readonly unknown[], ticked: readonly unknown[]): OutsideScope[] {
   const optional = optionalOutsideScopes(asked);
-  return asked.filter((scope) => !(optional.includes(scope) && without.includes(scope)));
+  const chosen = (scope: OutsideScope) => (UNTICKED_OUTSIDE_SCOPES.includes(scope) ? ticked.includes(scope) : !without.includes(scope));
+  return asked.filter((scope) => !optional.includes(scope) || chosen(scope));
 }
 
 /** The most connections a person has: past it, they disconnect one first. */
@@ -93,11 +109,16 @@ export interface OutsideAsked {
   scopes: OutsideScope[];
 }
 
-/** A person's answer to a request: whether to connect the app as them, and which of what it asks they leave out (`optionalOutsideScopes`), if any. */
+/**
+ * A person's answer to a request: whether to connect the app as them, which of what it asks that the
+ * page ticks they leave out, if any, and which of what it leaves unticked they tick, if any
+ * (`grantedOutsideScopes`).
+ */
 export interface OutsideAnswer {
   ask: OutsideAsk;
   allow: boolean;
   without?: OutsideScope[];
+  with?: OutsideScope[];
 }
 
 /** Where the page sends the browser once the person has answered: back to the app, with what it takes from there. */
@@ -125,9 +146,9 @@ export interface OutsideAiSettings {
   on: boolean;
 }
 
-/** The scopes `asked` names that Ember gives, or the ones it gives by default when it names none. */
+/** The scopes `asked` names that Ember gives, with the ones it gives by default when it names none that give tools. */
 export function outsideScopesOf(asked: string | null): OutsideScope[] {
   const named = new Set((asked ?? "").split(" "));
   const given = OUTSIDE_SCOPES.filter((scope) => named.has(scope));
-  return given.length > 0 ? given : [...DEFAULT_OUTSIDE_SCOPES];
+  return given.some((scope) => scope !== "private") ? given : OUTSIDE_SCOPES.filter((scope) => DEFAULT_OUTSIDE_SCOPES.includes(scope) || given.includes(scope));
 }

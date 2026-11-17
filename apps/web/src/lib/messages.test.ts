@@ -1,7 +1,7 @@
 import type { Message } from "@ember/protocol";
 import { describe, expect, it, vi } from "vitest";
 import { displayBody, OPENGRAPH_EMBED_CONTENT_TYPE, previewContent } from "@ember/richtext/dom";
-import { dateLabel, dateTimeLabel, lastReplyLabel, replyQuote, timeLabel, timeline } from "./messages";
+import { dateLabel, dateTimeLabel, lastReplyLabel, newestWrittenBy, replyQuote, timeLabel, timeline } from "./messages";
 
 const at = (iso: string, creatorId = "u1"): Message => ({
   id: iso,
@@ -37,6 +37,22 @@ describe("Group messages by author", () => {
       [true, false],
       [true, true],
     ]);
+  });
+
+  it("groups nothing under a huddle's message, nor it under anything, as it shows its huddle where its author would be", () => {
+    const huddle: Message = { ...at("2026-10-12T09:01:00"), huddle: { startedAt: "2026-10-12T09:01:00.000Z" } };
+    const items = timeline([at("2026-10-12T09:00:00"), huddle, at("2026-10-12T09:02:00")]);
+    expect(items.map((i) => i.threaded)).toEqual([false, false, false]);
+  });
+});
+
+describe("Edit your newest message", () => {
+  it("finds the newest message someone wrote, which the message of a huddle they started isn't", () => {
+    const [first, theirs, second] = [at("2026-10-12T09:00:00"), at("2026-10-12T09:01:00", "u2"), at("2026-10-12T09:02:00")];
+    const huddle: Message = { ...at("2026-10-12T09:03:00"), huddle: { startedAt: "2026-10-12T09:03:00.000Z" } };
+    expect(newestWrittenBy([first, theirs, second, huddle], "u1")).toBe(second);
+    expect(newestWrittenBy([first, theirs, second, huddle], "u2")).toBe(theirs);
+    expect(newestWrittenBy([huddle], "u1")).toBeUndefined();
   });
 });
 

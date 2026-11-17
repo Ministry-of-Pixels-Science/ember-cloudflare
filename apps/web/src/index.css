@@ -477,15 +477,18 @@
       overflow-wrap: break-word;
       text-wrap: balance;
     }
-    /* Campfire makes h1 smaller than Lexxy's h2. */
+    /*
+     * Slack's Big, Medium and Small heading, which the formatting row writes as h1 to h3, each smaller
+     * than the one before, down from Campfire's h1.
+     */
     h1 {
       font-size: 1.4rem;
     }
     h2 {
-      font-size: 1.5rem;
+      font-size: 1.2rem;
     }
     h3 {
-      font-size: 1.25rem;
+      font-size: 1.05rem;
     }
     h4 {
       font-size: 1rem;
@@ -602,10 +605,12 @@
       margin-inline-start: 40px;
     }
 
+    /* Lexxy's space around a divider, with no content margin, as the composer shows it. */
     hr {
       border: 0;
       border-block-end: 1px solid var(--message-rule);
       inline-size: 20%;
+      margin-block: 0.5em;
     }
 
     table {

@@ -1,10 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Room, UserId } from "@ember/protocol";
-import { Microphone, MicrophoneMute, ModernTv, RotateCameraRight, VideoCamera, VideoCameraOff } from "@/components/icons/iconoir";
+import { Microphone, MicrophoneMute, ModernTv, MoreVert, RotateCameraRight, UserPlus, VideoCamera, VideoCameraOff } from "@/components/icons/iconoir";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { useCamerasAllowed, useScreensAllowed } from "@/hooks/use-account";
 import { useNameOf } from "@/hooks/use-directory";
 import { roomName } from "@/lib/directs";
 import { listDevices, sharesScreens, watchDevices } from "@/lib/huddle-devices";
+import { huddlePlace } from "@/lib/huddle-people";
 import { leaveHuddle, muteHuddle, shareHuddleScreen, showHuddleCamera, switchHuddleCamera, type JoinedHuddle } from "@/lib/huddle-store";
 import { muteShortcut } from "@/lib/keyboard";
 import { cn } from "@/lib/utils";
@@ -24,10 +26,14 @@ const ARROW = "min-w-6 rounded-l-none border-l border-background max-md:hidden [
 /** What a phone has in the camera's arrow's place. */
 const IN_ARROWS_PLACE = "md:hidden";
 
-/** What the tab's huddle is called, on its bar and opened: by its room, or just Huddle once the room isn't among this person's. */
+/**
+ * What the tab's huddle is called, on its bar and opened: by its room, "Huddle in Launch", by who it's
+ * with in a direct message, "Huddle with Priya Patel", or just Huddle once the room isn't among this
+ * person's.
+ */
 export function useHuddleName(room: Room | null, meId: UserId): string {
   const nameOf = useNameOf();
-  return room ? `Huddle in ${roomName(room, meId, nameOf)}` : "Huddle";
+  return room ? `Huddle ${huddlePlace(room, roomName(room, meId, nameOf))}` : "Huddle";
 }
 
 /** What a huddle says in place of who's in it, until the room has let the tab in, and while its connection to the room is down. */
@@ -136,6 +142,51 @@ export function ScreenTool({ huddle, className }: { huddle: JoinedHuddle; classN
     <button type="button" title={label} aria-label={label} onClick={() => shareHuddleScreen(!shared)} className={cn(TOOL, shared ? TOOL_ON : TOOL_OFF, className)}>
       <ModernTv />
     </button>
+  );
+}
+
+/** Opens Invite people from a button, which has the focus back once it closes. */
+type Invite = (opener: HTMLElement) => void;
+
+/** Invite people, which opens the list of the room's people to invite into the huddle: a button of its own where the huddle opened has room for one, as on a computer. */
+export function InviteTool({ onInvite }: { onInvite: Invite }) {
+  return (
+    <button type="button" title="Invite people" aria-label="Invite people" onClick={(event) => onInvite(event.currentTarget)} className={cn(TOOL, TOOL_OFF)}>
+      <UserPlus />
+    </button>
+  );
+}
+
+/**
+ * More, last of the huddle's buttons on a phone, where Slack's is, whose menu has what a phone has no
+ * room to give a button: Invite people. The list opens once the menu has closed, when the menu has let
+ * go of the page and of the focus, which the list takes in place of the button.
+ */
+export function MoreTool({ onInvite }: { onInvite: Invite }) {
+  const button = useRef<HTMLButtonElement>(null);
+  const inviting = useRef(false);
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger ref={button} title="More" aria-label="More" className={cn(TOOL, TOOL_OFF, "md:hidden")}>
+        <MoreVert />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        side="top"
+        sideOffset={8}
+        className="min-w-[200px]"
+        onCloseAutoFocus={(event) => {
+          if (!inviting.current || !button.current) return;
+          inviting.current = false;
+          event.preventDefault();
+          onInvite(button.current);
+        }}
+      >
+        <DropdownMenuItem onSelect={() => void (inviting.current = true)}>
+          <UserPlus />
+          Invite people
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

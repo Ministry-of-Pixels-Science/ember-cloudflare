@@ -13,8 +13,10 @@ import {
   type YourOutsideAi,
 } from "@ember/protocol/outside";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ChatRoom } from "../src/chat-room";
 import { toBase64url } from "../src/encoding";
 import { MAX_SHOWN_LENGTH, MESSAGES_FOUND, SENDING_TOO_FAST } from "../src/outside/tools";
+import { SearchIndex } from "../src/search-index";
 import { MAX_OUTSIDE_CLIENTS, OUTSIDE_SENDS_PER_MINUTE } from "../src/workspace";
 import { api, connect, cookieOf, createRoom, direct, freshDeploy, origin, post, roomSql, settle, shown, signIn, upload, workspaceSql, type Session, type Socket } from "./support";
 
@@ -86,12 +88,12 @@ const askOf = (clientId: string, more: Partial<OutsideAsk> = {}): OutsideAsk => 
 });
 
 const describeAsk = (session: Session | null, ask: unknown) => api("/api/outside/asks", { method: "POST", headers: as(session), body: JSON.stringify(ask) });
-const answer = (session: Session | null, ask: unknown, allow: unknown, without?: unknown) =>
-  api("/api/outside/answers", { method: "POST", headers: as(session), body: JSON.stringify({ ask, allow, without }) });
+const answer = (session: Session | null, ask: unknown, allow: unknown, without?: unknown, ticked?: unknown) =>
+  api("/api/outside/answers", { method: "POST", headers: as(session), body: JSON.stringify({ ask, allow, without, with: ticked }) });
 
-/** Where the page sends the browser once `session` allows `ask`, leaving out `without` of what it asks. */
-async function allowed(session: Session, ask: OutsideAsk, without?: unknown): Promise<URL> {
-  const response = await answer(session, ask, true, without);
+/** Where the page sends the browser once `session` allows `ask`, leaving out `without` of what it asks and ticking `ticked`. */
+async function allowed(session: Session, ask: OutsideAsk, without?: unknown, ticked?: unknown): Promise<URL> {
+  const response = await answer(session, ask, true, without, ticked);
   expect(response.status, await response.clone().text()).toBe(200);
   expect(response.headers.get("Cache-Control")).toBe("no-store");
   return new URL(((await response.json()) as OutsideAnswered).redirectTo);
@@ -109,10 +111,10 @@ const exchange = (clientId: string, code: string, more: Record<string, string> =
   api("/oauth/token", form({ grant_type: "authorization_code", client_id: clientId, code, code_verifier: VERIFIER, redirect_uri: BACK, resource: MCP, ...more }));
 const refresh = (clientId: string, refreshToken: string) => api("/oauth/token", form({ grant_type: "refresh_token", client_id: clientId, refresh_token: refreshToken }));
 
-/** Connects the app as `session`, from registering to its tokens, asking as `more` has it, which `session` allows but for `without`. */
-async function connected(session: Session, more: Partial<OutsideAsk> = {}, without?: unknown): Promise<{ clientId: string; tokens: Tokens }> {
+/** Connects the app as `session`, from registering to its tokens, asking as `more` has it, which `session` allows but for `without`, ticking `ticked`. */
+async function connected(session: Session, more: Partial<OutsideAsk> = {}, without?: unknown, ticked?: unknown): Promise<{ clientId: string; tokens: Tokens }> {
   const clientId = await registered();
-  const back = await allowed(session, askOf(clientId, more), without);
+  const back = await allowed(session, askOf(clientId, more), without, ticked);
   const response = await exchange(clientId, back.searchParams.get("code")!);
   expect(response.status, await response.clone().text()).toBe(200);
   return { clientId, tokens: await response.json() };
@@ -170,6 +172,31 @@ async function refusal(token: string, name: string, given: Record<string, unknow
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Waits until `done` says so, looking every few milliseconds. */
+async function until(done: () => boolean): Promise<void> {
+  while (!done()) await sleep(5);
+}
+
+/**
+ * Holds each call of `method` of `prototype`'s objects as it begins, until the test lets them `go` on,
+ * with what waits until as many `calls` have `reached` it. The calls are made in a Durable Object's own
+ * context, and neither it nor the test goes on from the other's promises without taking its context, so
+ * each waits by looking.
+ */
+function holding<T extends object>(prototype: T, method: keyof T & string): { reached: (calls?: number) => Promise<void>; go: () => void } {
+  let [arrived, gone] = [0, false];
+  const held = prototype[method] as (...args: unknown[]) => unknown;
+  vi.spyOn(prototype as Record<string, (...args: unknown[]) => unknown>, method).mockImplementation(async function (this: T, ...args: unknown[]) {
+    arrived++;
+    await until(() => gone);
+    return held.apply(this, args);
+  });
+  return { reached: (calls = 1) => until(() => arrived >= calls), go: () => void (gone = true) };
+}
+
+/** What a tool tells an app of a room it doesn't reach, its person's or not. */
+const NO_ROOM = "No room this connection reaches has that id. list_rooms lists the rooms it reaches.";
 
 /** Waits until room `room` has nothing left in its log for the search index, which it forgets once the index has taken it. */
 async function caughtUp(room: RoomId): Promise<void> {
@@ -250,13 +277,13 @@ describe("Outside AI", () => {
     await setUpOn();
     const unsigned = await asked(null, "tools/list");
     expect(unsigned.status).toBe(401);
-    expect(unsigned.challenge).toBe(`Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp", scope="read write"`);
+    expect(unsigned.challenge).toBe(`Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp", scope="read write private"`);
     expect((await asked("not-a-token", "tools/list")).challenge).toContain('error="invalid_token"');
 
     for (const path of ["/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp"]) {
       const resource = await api(path);
       expect(resource.headers.get("Access-Control-Allow-Origin")).toBe("*");
-      expect(await resource.json()).toEqual({ resource: MCP, authorization_servers: [origin], scopes_supported: ["read", "write"], bearer_methods_supported: ["header"], resource_name: "Ember" });
+      expect(await resource.json()).toEqual({ resource: MCP, authorization_servers: [origin], scopes_supported: ["read", "write", "private"], bearer_methods_supported: ["header"], resource_name: "Ember" });
     }
     expect(await (await api("/.well-known/oauth-authorization-server")).json()).toMatchObject({
       issuer: origin,
@@ -363,15 +390,13 @@ describe("Outside AI", () => {
     const listed = await asked(tokens.access_token, "tools/list");
     expect((listed.result!.tools as Array<{ name: string }>).map(({ name }) => name)).toContain("list_rooms");
 
-    // She sees her rooms, the direct message by the other person's name, and not a private room she isn't in.
+    // She sees the open rooms she's in, and neither her direct message, which she didn't let it into, nor a private room she isn't in.
     const rooms = await roomsFor(tokens.access_token);
     expect(rooms.map(({ name, kind }) => ({ name, kind })).sort((a, b) => a.name.localeCompare(b.name))).toEqual([
-      { name: "Ada Lovelace", kind: "direct" },
       { name: "general", kind: "open" },
       { name: "random", kind: "open" },
     ]);
-    expect(rooms.find(({ kind }) => kind === "direct")!.id).toBe(dm.id);
-    expect(rooms.some(({ id }) => id === secret.id)).toBe(false);
+    expect(rooms.some(({ id }) => id === dm.id || id === secret.id)).toBe(false);
 
     expect(await yours(member)).toEqual([{ id: expect.any(String), name: "Claude", comesBackTo: "claude.example", scopes: ["read"], connectedAt: expect.any(String), usedAt: expect.any(String) }]);
     expect(await yours(administrator)).toEqual([]);
@@ -642,10 +667,10 @@ describe("Outside AI", () => {
 });
 
 describe("What a connected AI app reads", () => {
-  /** Grace's connection's token, with Ada's and her sessions, and the rooms the app lists by name. */
-  async function reading() {
+  /** Grace's connection's token, which she let into her direct messages and private rooms where `privateToo`, with Ada's and her sessions, and the room everyone's in. */
+  async function reading({ privateToo = false } = {}) {
     const sessions = await setUpOn();
-    const { tokens } = await connected(sessions.member);
+    const { tokens } = privateToo ? await connected(sessions.member, { scope: "read private" }, [], ["private"]) : await connected(sessions.member);
     const rooms = Object.fromEntries((await roomsFor(tokens.access_token)).map((room) => [room.name, room.id]));
     return { ...sessions, token: tokens.access_token, general: rooms.general! };
   }
@@ -687,15 +712,14 @@ describe("What a connected AI app reads", () => {
     hopper.close();
   });
 
-  it("reads only the rooms its person is in, their direct messages too", async () => {
-    const { administrator, member, token } = await reading();
+  it("reads only the rooms its person is in, their direct messages too, once they let it into those", async () => {
+    const { administrator, member, token } = await reading({ privateToo: true });
     const secret = await createRoom("Secret plans", { closedTo: [administrator.user.id], as: administrator });
     const dm = await direct(member, administrator);
     const [inSecret, inDm] = [await connect(secret.id, administrator), await connect(dm.id, administrator)];
     await post(inSecret, "<p>The launch is in March</p>");
     const hello = await post(inDm, "<p>Hello, Grace</p>");
 
-    const NO_ROOM = "No room of theirs has that id. list_rooms lists the rooms they're in.";
     expect(await refusal(token, "read_room", { room_id: secret.id })).toBe(NO_ROOM);
     expect(await refusal(token, "read_thread", { room_id: secret.id, message_id: "any" })).toBe(NO_ROOM);
     expect(await refusal(token, "read_room", { room_id: "no-such-room" })).toBe(NO_ROOM);
@@ -709,7 +733,7 @@ describe("What a connected AI app reads", () => {
   });
 
   it("searches the rooms its person is in, newest first, a page at a time, or one of them", async () => {
-    const { administrator, member, token, general } = await reading();
+    const { administrator, member, token, general } = await reading({ privateToo: true });
     const secret = await createRoom("Secret plans", { closedTo: [administrator.user.id], as: administrator });
     const dm = await direct(member, administrator);
     const [inGeneral, inSecret, inDm] = [await connect(general, administrator), await connect(secret.id, administrator), await connect(dm.id, member)];
@@ -738,7 +762,7 @@ describe("What a connected AI app reads", () => {
     expect(rest.matches.map(({ text }) => text)).toEqual(["Quince 2", "Quince 1"]);
     expect(rest.next).toBeNull();
 
-    expect(await refusal(token, "search_messages", { words: "kumquat", room_id: secret.id })).toBe("No room of theirs has that id. list_rooms lists the rooms they're in.");
+    expect(await refusal(token, "search_messages", { words: "kumquat", room_id: secret.id })).toBe(NO_ROOM);
     expect(await refusal(token, "search_messages", { words: " … " })).toBe("Give the words to find, as `words`.");
     expect(await refusal(token, "search_messages", { words: "k".repeat(MAX_SEARCH_LENGTH + 1) })).toBe("That's too much to search for. Give one or two words.");
     for (const socket of [inGeneral, inSecret, inDm]) socket.close();
@@ -781,10 +805,10 @@ describe("What a connected AI app sends", () => {
   type Listed = { tools: Array<{ name: string; annotations: unknown; inputSchema: { required?: string[] } }> };
   type Sent = { room: unknown; message: { id: string; at: string; from: string; text: string; reply_to?: string } };
 
-  /** Grace's connection's token, which she let send, with Ada's and her sessions, and the room everyone's in. */
-  async function sending() {
+  /** Grace's connection's token, which she let send, and into her direct messages and private rooms where `privateToo`, with Ada's and her sessions, and the room everyone's in. */
+  async function sending({ privateToo = false } = {}) {
     const sessions = await setUpOn();
-    const { tokens } = await connected(sessions.member, { scope: "read write" });
+    const { tokens } = await connected(sessions.member, { scope: privateToo ? "read write private" : "read write" }, [], privateToo ? ["private"] : []);
     const rooms = Object.fromEntries((await roomsFor(tokens.access_token)).map((room) => [room.name, room.id]));
     return { ...sessions, token: tokens.access_token, general: rooms.general! };
   }
@@ -843,7 +867,7 @@ describe("What a connected AI app sends", () => {
   });
 
   it("sends what it sends to no bot, though it's to a direct message with one, where what its person writes goes to it", async () => {
-    const { administrator, member, token } = await sending();
+    const { administrator, member, token } = await sending({ privateToo: true });
     const added = await api("/api/account/bots", { method: "POST", headers: { Cookie: administrator.cookie }, body: JSON.stringify({ name: "Build Bot", webhookUrl: "https://bots.example.com/build" }) });
     const { bot } = (await added.json()) as BotAnswer;
     const room = await direct(member, { user: { id: bot.id, name: bot.name }, cookie: "" });
@@ -875,7 +899,7 @@ describe("What a connected AI app sends", () => {
     expect(await refusal(token, "send_message", { room_id: general, text: "word ".repeat(MAX_MESSAGE_LENGTH) })).toBe(MESSAGE_TOO_LONG);
     // Short enough to read as Markdown, and still more than a message holds.
     expect(await refusal(token, "send_message", { room_id: general, text: "w".repeat(MAX_MESSAGE_LENGTH + 1) })).toBe(MESSAGE_TOO_LONG);
-    expect(await refusal(token, "send_message", { room_id: secret.id, text: "Hello" })).toBe("No room of theirs has that id. list_rooms lists the rooms they're in.");
+    expect(await refusal(token, "send_message", { room_id: secret.id, text: "Hello" })).toBe(NO_ROOM);
     expect(await refusal(token, "send_message", { room_id: general, text: "Hello", thread_id: "no-such-message" })).toBe("That message no longer exists");
     // A reply has no thread of its own.
     expect(await refusal(token, "send_message", { room_id: general, text: "Hello", thread_id: yes.id })).toBe("That message no longer exists");
@@ -891,5 +915,189 @@ describe("What a connected AI app sends", () => {
     await found(other.tokens.access_token, "send_message", { room_id: general, text: "The last" });
     expect(await refusal(token, "send_message", { room_id: general, text: "One more" })).toBe(SENDING_TOO_FAST);
     expect(await refusal(other.tokens.access_token, "send_message", { room_id: general, text: "One more" })).toBe(SENDING_TOO_FAST);
+  });
+});
+
+describe("Where a connected AI app reaches", () => {
+  type Found = { matches: Array<{ room: { id: string }; id: string }>; next: number | null };
+
+  /** What `session` says in room `room`, as the room confirms it. */
+  async function said(room: RoomId, session: Session, text: string): Promise<Message> {
+    const socket = await connect(room, session);
+    const message = await post(socket, `<p>${text}</p>`);
+    socket.close();
+    return message;
+  }
+
+  /** The plain text of what room `room` has, oldest first. */
+  const textsIn = async (room: RoomId) => ((await roomSql(room, "SELECT plain_text FROM messages WHERE room_id = ? ORDER BY created_at", room)) as Array<{ plain_text: string }>).map(({ plain_text }) => plain_text);
+
+  /**
+   * Ada and Grace, with outside AI on: the general room, their DM, Leads, a private room of theirs, and
+   * Secret plans, one of Ada's alone, each with a kumquat in it, which the search index has, and Grace's
+   * connection of an app that asks for everything Ember says to ask for, which she allows, ticking
+   * `ticked` of the boxes the page leaves clear.
+   */
+  async function reaching(ticked?: unknown) {
+    const { administrator, member } = await setUpOn();
+    const [{ id: general }] = (await workspaceSql("SELECT id FROM rooms WHERE name = 'general'")) as [{ id: RoomId }];
+    const dm = (await direct(member, administrator)).id;
+    const leads = (await createRoom("Leads", { closedTo: [administrator.user.id, member.user.id], as: administrator })).id;
+    const secret = (await createRoom("Secret plans", { closedTo: [administrator.user.id], as: administrator })).id;
+    const kumquats = {
+      general: await said(general, administrator, "A kumquat for everyone"),
+      dm: await said(dm, administrator, "A kumquat for you, Grace"),
+      leads: await said(leads, member, "A kumquat for the leads"),
+      secret: await said(secret, administrator, "A secret kumquat"),
+    };
+    await Promise.all([general, dm, leads, secret].map(caughtUp));
+    const { tokens } = await connected(member, { scope: "read write private" }, [], ticked);
+    return { administrator, member, general, dm, leads, secret, kumquats, tokens, token: tokens.access_token };
+  }
+
+  /** Ada, `administrator`, makes room `room` private to her and Grace, `member`, once the rooms have heard every revocation that queues. */
+  async function madePrivate(room: RoomId, administrator: Session, member: Session): Promise<void> {
+    const changed = await api(`/api/rooms/${room}`, { method: "PATCH", headers: as(administrator), body: JSON.stringify({ kind: "closed", memberIds: [administrator.user.id, member.user.id] }) });
+    expect(changed.status, await changed.clone().text()).toBe(200);
+    await vi.waitFor(async () => expect(await workspaceSql("SELECT count(*) AS n FROM pending_revocations")).toEqual([{ n: 0 }]), { timeout: 5_000 });
+  }
+
+  /** Ada, `administrator`, opens room `room` to everyone again. */
+  async function opened(room: RoomId, administrator: Session): Promise<void> {
+    const changed = await api(`/api/rooms/${room}`, { method: "PATCH", headers: as(administrator), body: JSON.stringify({ kind: "open" }) });
+    expect(changed.status, await changed.clone().text()).toBe(200);
+  }
+
+  /** What Ember tells the app that asks with `token` of itself, as it starts. */
+  const instructionsFor = async (token: string) =>
+    ((await asked(token, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "Claude", version: "1" } })).result as { instructions: string }).instructions;
+
+  it("is only the open rooms its person is in, as the page leaves their direct messages and private rooms clear", async () => {
+    const { member, general, dm, leads, secret, kumquats, tokens, token } = await reaching();
+    // Nothing ticked, as an answer from a page that knows no box for them sends, gives reading and sending alone.
+    expect(tokens.scope).toBe("read write");
+    expect((await yours(member))!.map(({ scopes }) => scopes)).toEqual([["read", "write"]]);
+
+    const listed = await roomsFor(token);
+    expect(listed.map(({ id }) => id)).toContain(general);
+    expect(listed.every(({ kind }) => kind === "open")).toBe(true);
+    for (const room of [dm, leads, secret]) {
+      expect(await refusal(token, "read_room", { room_id: room })).toBe(NO_ROOM);
+      expect(await refusal(token, "search_messages", { words: "kumquat", room_id: room })).toBe(NO_ROOM);
+      expect(await refusal(token, "send_message", { room_id: room, text: "What did they say?" })).toBe(NO_ROOM);
+    }
+    expect(await refusal(token, "read_thread", { room_id: dm, message_id: kumquats.dm.id })).toBe(NO_ROOM);
+    expect(await refusal(token, "read_thread", { room_id: leads, message_id: kumquats.leads.id })).toBe(NO_ROOM);
+    // A search of everything finds the open room's kumquat alone, and it's told why, as it starts.
+    expect((await found<Found>(token, "search_messages", { words: "kumquat" })).matches.map(({ id }) => id)).toEqual([kumquats.general.id]);
+    expect(await instructionsFor(token)).toContain("they haven't let it into their direct messages and private rooms");
+
+    // What it may send goes to the open rooms alone.
+    await found(token, "send_message", { room_id: general, text: "Kumquats all round" });
+    expect(await textsIn(dm)).toEqual(["A kumquat for you, Grace"]);
+    expect(await textsIn(leads)).toEqual(["A kumquat for the leads"]);
+    expect(await textsIn(general)).toEqual(["A kumquat for everyone", "Kumquats all round"]);
+  });
+
+  it("is their direct messages and private rooms too once they tick them, and still nobody else's", async () => {
+    const { member, general, dm, leads, secret, kumquats, tokens, token } = await reaching(["private"]);
+    expect(tokens.scope).toBe("read write private");
+    expect((await yours(member))!.map(({ scopes }) => scopes)).toEqual([["read", "write", "private"]]);
+
+    const listed = (await roomsFor(token)).map(({ id }) => id);
+    expect(listed).toEqual(expect.arrayContaining([general, dm, leads]));
+    expect(listed).not.toContain(secret);
+    expect((await found<{ messages: Array<{ id: string }> }>(token, "read_room", { room_id: dm })).messages.map(({ id }) => id)).toEqual([kumquats.dm.id]);
+    expect((await found<{ message: { id: string } }>(token, "read_thread", { room_id: leads, message_id: kumquats.leads.id })).message.id).toBe(kumquats.leads.id);
+    expect((await found<Found>(token, "search_messages", { words: "kumquat" })).matches.map(({ id }) => id)).toEqual([kumquats.leads.id, kumquats.dm.id, kumquats.general.id]);
+    expect(await instructionsFor(token)).toContain("their direct messages and private rooms too");
+    await found(token, "send_message", { room_id: leads, text: "Kumquats for the leads all round" });
+    expect(await textsIn(leads)).toEqual(["A kumquat for the leads", "Kumquats for the leads all round"]);
+
+    // A private room she isn't in stays out of reach.
+    expect(await refusal(token, "read_room", { room_id: secret })).toBe(NO_ROOM);
+    expect(await refusal(token, "search_messages", { words: "kumquat", room_id: secret })).toBe(NO_ROOM);
+    expect(await refusal(token, "send_message", { room_id: secret, text: "Hello" })).toBe(NO_ROOM);
+    expect(await textsIn(secret)).toEqual(["A secret kumquat"]);
+  });
+
+  it("is none of a room once it's made private, though its person is still in it", async () => {
+    const { administrator, member, token } = await reaching();
+    const launch = (await createRoom("Launch", { as: administrator })).id;
+    const plan = await said(launch, administrator, "The kumquat launch plan");
+    await caughtUp(launch);
+    expect((await found<{ messages: Array<{ id: string }> }>(token, "read_room", { room_id: launch })).messages.map(({ id }) => id)).toEqual([plan.id]);
+
+    await madePrivate(launch, administrator, member);
+    expect((await roomsFor(token)).map(({ id }) => id)).not.toContain(launch);
+    expect(await refusal(token, "read_room", { room_id: launch })).toBe(NO_ROOM);
+    expect(await refusal(token, "send_message", { room_id: launch, text: "Is it still on?" })).toBe(NO_ROOM);
+    expect((await found<Found>(token, "search_messages", { words: "launch plan" })).matches).toEqual([]);
+  });
+
+  it("is none of a room made private as it reads there, nor of what's said there since", async () => {
+    const { administrator, member, kumquats, token } = await reaching();
+    const launch = (await createRoom("Launch", { as: administrator })).id;
+    const plan = await said(launch, administrator, "The kumquat launch plan");
+    await caughtUp(launch);
+
+    // Each read is held as it begins, past the room's check, while the room is made private and something's said there.
+    const page = holding(ChatRoom.prototype, "outsidePage");
+    const reading = refusal(token, "read_room", { room_id: launch });
+    await page.reached();
+    await madePrivate(launch, administrator, member);
+    await said(launch, administrator, "The launch moves to Friday");
+    page.go();
+    expect(await reading).toBe(NO_ROOM);
+
+    await opened(launch, administrator);
+    const thread = holding(ChatRoom.prototype, "botThread");
+    const readingThread = refusal(token, "read_thread", { room_id: launch, message_id: plan.id });
+    await thread.reached();
+    await madePrivate(launch, administrator, member);
+    const socket = await connect(launch, administrator);
+    await reply(socket, plan, "At the old observatory");
+    socket.close();
+    thread.go();
+    expect(await readingThread).toBe(NO_ROOM);
+
+    await opened(launch, administrator);
+    const search = holding(SearchIndex.prototype, "search");
+    const searching = found<Found>(token, "search_messages", { words: "kumquat" });
+    await search.reached();
+    await madePrivate(launch, administrator, member);
+    await said(launch, administrator, "Bring a kumquat on Friday");
+    await caughtUp(launch);
+    search.go();
+    // What it found in the open room it still reaches is all it's told.
+    expect((await searching).matches.map(({ id }) => id)).toEqual([kumquats.general.id]);
+  });
+
+  it("sends nothing to a room made private as it sends there, unless its person let it into private rooms", async () => {
+    const { administrator, member, token } = await reaching();
+    const everywhere = (await connected(member, { scope: "read write private" }, [], ["private"])).tokens.access_token;
+    const launch = (await createRoom("Launch", { as: administrator })).id;
+
+    // Both sends are held as they begin, past the room's check, while the room is made private.
+    const sending = holding(ChatRoom.prototype, "createOutsideMessage");
+    const sends = [refusal(token, "send_message", { room_id: launch, text: "Is it still on?" }), found(everywhere, "send_message", { room_id: launch, text: "See you on Friday" })];
+    await sending.reached(2);
+    await madePrivate(launch, administrator, member);
+    sending.go();
+    const [refused] = await Promise.all(sends);
+    expect(refused).toBe(NO_ROOM);
+    expect(await textsIn(launch)).toEqual(["See you on Friday"]);
+  });
+
+  it("asks to read too when an app asks for its person's direct messages and private rooms alone, and gives reading alone unless they're ticked", async () => {
+    const { member } = await setUpOn();
+    const clientId = await registered();
+    expect(((await (await describeAsk(member, askOf(clientId, { scope: "private" }))).json()) as OutsideAsked).scopes).toEqual(["read", "private"]);
+    expect((await connected(member, { scope: "private" })).tokens.scope).toBe("read");
+    expect((await connected(member, { scope: "private" }, ["private"])).tokens.scope).toBe("read");
+    expect((await connected(member, { scope: "private" }, [], ["private"])).tokens.scope).toBe("read private");
+    // Ticking them gives them only to an app that asks for them.
+    expect((await connected(member, { scope: "read write" }, [], ["private"])).tokens.scope).toBe("read write");
+    expect((await connected(member, { scope: "write private" }, [], ["private"])).tokens.scope).toBe("write private");
   });
 });

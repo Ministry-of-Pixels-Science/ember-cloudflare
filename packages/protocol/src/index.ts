@@ -7,7 +7,7 @@ import type { YourApp } from "./apps.ts";
 import type { AssistantSettings, YourAssistant } from "./assistant.ts";
 import { isActionId, isActionValue, type Card } from "./cards.ts";
 import type { StoredFile } from "./files.ts";
-import type { HuddlesSettings, LiveHuddle } from "./huddles.ts";
+import type { HuddlesSettings, LiveHuddle, MessageHuddle } from "./huddles.ts";
 import type { OutsideConnection } from "./outside.ts";
 import { MAX_ID_LENGTH } from "./pages.ts";
 import { MAX_PUSH_ENDPOINT_LENGTH } from "./push.ts";
@@ -80,7 +80,7 @@ export type {
   YourAssistantChanges,
 } from "./assistant.ts";
 // And the rest of huddles.ts, from "@ember/protocol/huddles", which only the Huddles card, its setup and the Worker's huddles use.
-export type { HuddleRelayField, HuddleRelaySetup, HuddlesField, HuddlesForgotten, HuddlesSaved, HuddlesSettings, HuddlesSetup, LiveHuddle } from "./huddles.ts";
+export type { HuddleRelayField, HuddleRelaySetup, HuddlesField, HuddlesForgotten, HuddlesSaved, HuddlesSettings, HuddlesSetup, LiveHuddle, MessageHuddle } from "./huddles.ts";
 export {
   FILE_NAME_NOT_KEPT,
   FILE_TOO_LARGE,
@@ -1540,6 +1540,12 @@ export interface Message {
   /** The replies in the message's thread, once it has some, as the room shows them under it. */
   thread?: ThreadSummary;
   /**
+   * The huddle a message is of. The room writes one as a huddle starts there, in the name of whoever
+   * started it, and marks it over once nobody is left in it, and its thread is the huddle's. It shows
+   * the huddle in place of its text, which says only that a huddle started, and can't be edited.
+   */
+  huddle?: MessageHuddle;
+  /**
    * A message deleted while replies in its thread are left, which keeps its place for them: its text, file,
    * cards and boosts are gone, and it goes once its last reply does.
    */
@@ -1689,10 +1695,11 @@ export type ServerFrame =
   | { type: "pong" };
 
 /**
- * What a tab sends on its workspace socket (`/api/socket`): only pings, which the runtime answers
- * without waking the Workspace.
+ * What a tab sends on its workspace socket (`/api/socket`): pings, which the runtime answers without
+ * waking the Workspace, and whether the tab is shown, as that changes, so that the Workspace knows
+ * whether its person has Ember in view anywhere.
  */
-export type WorkspaceClientFrame = { type: "ping" };
+export type WorkspaceClientFrame = { type: "ping" } | { type: "presence.visible"; visible: boolean };
 
 /** What the Workspace sends on a tab's workspace socket. */
 export type WorkspaceServerFrame =
@@ -1734,6 +1741,15 @@ export type WorkspaceServerFrame =
    * the huddle or not, as people join it and leave, and to whoever a change puts in a room with one going on.
    */
   | { type: "room.huddle"; roomId: RoomId; huddle: LiveHuddle | null }
+  /**
+   * Someone in the huddle of a room of theirs, `by`, invites them into it, which rings in every tab they
+   * have open, for them to join from or decline, until they answer it in one, the huddle is over, or
+   * half a minute has passed. Sent only to the people invited, each of whom is in the room and hears
+   * its @mentions of them or more.
+   */
+  | { type: "huddle.invited"; roomId: RoomId; by: UserId }
+  /** They've answered an invitation into a room's huddle, joining from it or declining it, in this tab or another, so it rings in none of them from now on. */
+  | { type: "huddle.answered"; roomId: RoomId }
   /** They've starred or unstarred a room, in this tab or another: their stars as they are now. */
   | { type: "favorites.changed"; favorites: Favorites }
   /** They've given a room of theirs another notification level, in this tab or another. */
@@ -1804,6 +1820,23 @@ export const parseRoomSocketParams = (query: SearchParams): RoomSocketParams & {
   around: messageIdOf(query.get("around")),
   protocol: Number(query.get("protocol")) || 1,
 });
+
+/** What a workspace socket's address tells the Workspace about the tab opening it. */
+export interface WorkspaceSocketParams {
+  /** Whether the tab is shown, which `presence.visible` frames update. */
+  visible: boolean;
+}
+
+/** The query that carries `params` on a workspace socket's address. */
+export const workspaceSocketQuery = ({ visible }: WorkspaceSocketParams) => `?visible=${visible ? 1 : 0}`;
+
+/**
+ * What a workspace socket's address says about its tab, as `workspaceSocketQuery` wrote it. A tab that
+ * doesn't say doesn't count as shown, where one on a room's socket does: an open tab runs the app it
+ * loaded, which once said nothing here, and counting it would keep an invitation's push from someone
+ * who has such a tab open and isn't at it.
+ */
+export const parseWorkspaceSocketParams = (query: SearchParams): WorkspaceSocketParams => ({ visible: query.get("visible") === "1" });
 
 /** The most characters a message's plain text can have. */
 export const MAX_MESSAGE_LENGTH = 10_000;
@@ -1989,7 +2022,9 @@ export function parseClientFrame(raw: string): ClientFrame | null {
 
 /** Parses an untrusted frame from a workspace socket. Returns null for anything malformed. */
 export function parseWorkspaceClientFrame(raw: string): WorkspaceClientFrame | null {
-  return parseObject(raw)?.type === "ping" ? { type: "ping" } : null;
+  const f = parseObject(raw);
+  if (f?.type === "ping") return { type: "ping" };
+  return f?.type === "presence.visible" && typeof f.visible === "boolean" ? { type: "presence.visible", visible: f.visible } : null;
 }
 
 /**

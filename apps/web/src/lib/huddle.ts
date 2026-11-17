@@ -53,6 +53,10 @@ import { reconnectingSocket } from "./reconnecting-socket";
 // again starts each afresh. The tab plays the huddle's own sounds as well (huddle-sounds.ts), through
 // the speaker the voices use.
 //
+// A huddle in a direct message rings the others in it: the tab that starts one asks the room to invite
+// them, and their tabs show the invitation and ring (huddle-invitations.ts). Anyone in a huddle asks
+// the same for whoever they pick of the room's people, from Invite people.
+//
 // A camera goes out in two sizes at once (simulcast) from a browser known to send them, and each tab
 // that watches is sent the one it says it shows: the small one for small tiles, so that a huddle of
 // many costs each of them, and Cloudflare's bill, a small picture apiece.
@@ -83,6 +87,11 @@ export interface HuddleJoin {
   camera: MediaStream | Promise<MediaStream | null> | null;
   /** The speaker the others play through, by its device's id, or empty for the browser's own. */
   speakerId: string;
+  /**
+   * Who the tab invites into the huddle if joining it starts it, the room letting it in with nobody else
+   * there: the others in a direct message, whose huddle rings them, and nobody in a shared room.
+   */
+  invite?: UserId[];
 }
 
 /** Cloudflare's STUN server, by which the browser learns the address the SFU reaches it at, which is all a connection goes by without a relay. */
@@ -624,7 +633,7 @@ function receivingConnection({ kind, vital, receivable, wanted, byName, small, p
 }
 
 /** Joins room `roomId`'s huddle, which starts it when nobody's in it, leaving any the tab was in. */
-export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: HuddleJoin): void {
+export function joinHuddle({ roomId, muted, microphone, camera, speakerId, invite = [] }: HuddleJoin): void {
   leaveHuddle();
   /** The microphone the tab speaks through, and its track, until its person chooses another. */
   let voice = microphone;
@@ -756,6 +765,9 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
     },
     switchCamera() {
       void showOtherCamera();
+    },
+    invite(userIds) {
+      return socket.send({ type: "huddle.invite", userIds });
     },
   };
 
@@ -993,9 +1005,10 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
   /**
    * The room couldn't do what a frame asked for one of the connections, which starts over. A camera or
    * a screen it refused, the huddle showing as many as it does or an administrator having them off, is
-   * taken down instead, and its person is told.
+   * taken down instead, and its person is told, as they are when nobody they invited was.
    */
   function couldNot({ failed, kind = "audio", refused, message }: Extract<HuddleServerFrame, { type: "error" }>) {
+    if (failed === "huddle.invite") return tellOfHuddle(message);
     if (failed === "huddle.listen" || failed === "huddle.answer") return receiving[kind].failed();
     if (failed !== "huddle.publish") return;
     if (refused && kind !== "audio") {
@@ -1022,6 +1035,8 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
           sounds.joined();
           // Its own person speaks by the microphone, now that the room has said who they are.
           if (track && huddle.microphone) speaking.hear(frame.you.id, track);
+          // Whoever starts a direct message's huddle invites the others in it, which being let back in doesn't do again.
+          if (invite.length > 0 && frame.people.every(({ user }) => user.id === frame.you.id)) socket.send({ type: "huddle.invite", userIds: invite });
         }
         show({ connected: true, you: frame.you, people: frame.people });
         for (const kind of HUDDLE_TRACK_KINDS) void sending[kind].publish();

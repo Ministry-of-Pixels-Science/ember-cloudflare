@@ -31,6 +31,7 @@ export const APP_CHANGED = "Someone else changed this app while Ember read its t
 export const APP_URL_REFUSED = "The address must be an https URL, or an http one on localhost";
 export const APP_SIGNED_IN = "This app signs in to its server, so its address and token can't be changed here. Remove it and connect it again to move it.";
 export const APP_SIGN_IN_ENDED = "That sign-in has ended, or isn't one you started. Start it again.";
+export const APP_IS_EMBER = "That's this Ember's own address. Connected to itself, Ember would let its agents read your DMs and private rooms for anyone who asks them.";
 
 /** A tool of an app's, as its server describes it: its name there, what it's called, if that's something else, and what it does. */
 export interface AppTool {
@@ -302,8 +303,22 @@ export function isAppUrl(address: string): boolean {
   return protocol === "https:" || (protocol === "http:" && isLoopback(hostname));
 }
 
+/**
+ * Whether an app at `address`, a URL Ember may ask (`isAppUrl`), would be Ember itself, at one of its
+ * own `hosts`, as `location.host` writes them: at any port, as Cloudflare serves a domain at several,
+ * but on this computer only at the same port, as `wrangler dev` serves Ember beside other servers.
+ */
+export function isAtHost(address: string, hosts: readonly string[]): boolean {
+  const { host, hostname } = new URL(address);
+  const name = hostname.replace(/\.$/, "");
+  return hosts.some((own) => (isLoopback(name) ? own === host : own.toLowerCase().replace(/:\d+$/, "") === name));
+}
+
 // This package is typed without a platform's library, and every platform it runs on has URL.
-declare const URL: { new (url: string): { readonly protocol: string; readonly hostname: string; readonly username: string; readonly password: string }; canParse(url: string): boolean };
+declare const URL: {
+  new (url: string): { readonly protocol: string; readonly host: string; readonly hostname: string; readonly username: string; readonly password: string };
+  canParse(url: string): boolean;
+};
 
 /** localhost, its subdomains and the loopback addresses, where `wrangler dev` and the tests' stand-ins serve. */
 const LOOPBACK_HOST = /^(?:(?:.+\.)?localhost|127(?:\.\d{1,3}){3}|\[::1\])$/;

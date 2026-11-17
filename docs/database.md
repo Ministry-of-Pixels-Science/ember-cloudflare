@@ -327,6 +327,23 @@ Objects, D1 or speed call for something else.
   Cloudflare's Realtime SFU didn't close when asked wait there too (`huddleUnclosed`), for the alarm
   to ask about again, and since the alarm then rings far more often than a failed log is sent again,
   the room keeps when its logs are next due (`logsDue`).
+- **A huddle's message is a message's row.** The message a huddle has in its room is a row of
+  `messages` like any other, in the name of whoever started the huddle, so its time, link,
+  reactions and thread are a message's. What it says of its huddle is JSON in `messages.huddle`
+  (room migration 0066), as a file is in `attachment` and a bot's cards in `cards`: when the huddle
+  started, and once it's over, when it ended and who was in it, by the names and pictures they had
+  then. Who's in it meanwhile isn't kept there, since a tab has that from the room's huddle in its
+  sidebar, so the row is written twice for most huddles, however many come and go. Each write takes
+  the room's next `change_seq`, so a tab that connects again catches up on it, and is logged for the
+  search index, but the row has no `room_events` row: it marks the room unread for nobody, isn't its
+  latest activity, and reaches no push or webhook. The room's object keeps the message's id in its
+  own storage (`huddleMessage`) from before it writes the row, so a write whose answer it never had
+  isn't made twice, and with it when the huddle started, everyone who has been in it, since the
+  huddle's sockets only say who's in it now, and when it was found over. The alarm that says who's
+  in the huddle again brings the message in step with it too, which makes up for a write that
+  failed, and for an object that came back with nobody left in its huddle. A row still unwritten
+  as its huddle ends is written then, saying that it's over, and one deleted before the room heard
+  that it was written stays deleted.
 - **Rooms are named by their ids, and some have no creator.** A room's id names its Durable Object
   too, so it's a 16-character sortable string like a message's rather than an integer, and its kind
   is `open`, `closed` or `direct` rather than Rails' class name. The rooms from before the Workspace
@@ -452,7 +469,12 @@ Objects, D1 or speed call for something else.
   deleted since has none, and isn't pushed. The Workspace finds a message's recipients and badges in
   one query, in the batch that applies the room's events, just after the message's unread marks,
   through the memberships' key, the subscriptions' index led by the person and, for the badge,
-  `index_memberships_on_user_id_and_room_id`. So pushes add no round trip to either object.
+  `index_memberships_on_user_id_and_room_id`. So pushes add no round trip to either object. An
+  invitation into a huddle is pushed by one more statement of that shape, in the call by which its
+  room has the Workspace invite people: it reads the memberships of the people invited by their key,
+  however many the room has, and their subscriptions and badges as a message's does. Nothing is
+  stored of who has Ember in view, which decides who is pushed one: each workspace socket keeps
+  whether its tab is shown in its attachment, as a room's socket does.
 - **A bot is found by its id, so its token needs no index.** Campfire keeps a bot's token in
   `users.bot_token` under a unique index, and finds the bot a key names by its id and token together
   (`User.authenticate_bot`). Ours keeps the token in the same column (workspace migration 0027)

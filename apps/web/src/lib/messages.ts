@@ -62,7 +62,8 @@ function dayOf(message: Message): string {
  * is from another day. It's threaded, without its author's avatar and name, when the one above it is the
  * same person's from no more than five minutes before or after, even across midnight, when it has a separator
  * and still no header. A message deleted while its thread has replies shows neither its author nor its time,
- * so nothing threads under it, and it threads under nothing.
+ * so nothing threads under it, and it threads under nothing. The same goes for a huddle's message, which
+ * shows the headphones and what it says of its huddle where its author would be.
  */
 export function timeline(messages: Message[]): TimelineItem[] {
   return messages.map((message, index) => {
@@ -73,10 +74,16 @@ export function timeline(messages: Message[]): TimelineItem[] {
       message,
       firstOfDay: dayOf(previous) !== dayOf(message),
       threaded:
-        !message.deleted && !previous.deleted && previous.creator.id === message.creator.id && Math.abs(created.getTime() - before.getTime()) <= THREAD_WINDOW_MS,
+        !message.deleted && !previous.deleted && !message.huddle && !previous.huddle && previous.creator.id === message.creator.id && Math.abs(created.getTime() - before.getTime()) <= THREAD_WINDOW_MS,
     };
   });
 }
+
+/**
+ * The newest of `messages` that the person `userId` signs in wrote, which Up Arrow edits. A huddle's
+ * message is in the name of whoever started the huddle, who didn't write it.
+ */
+export const newestWrittenBy = <T extends Message>(messages: T[], userId: UserId): T | undefined => messages.findLast((message) => message.creator.id === userId && !message.huddle);
 
 /**
  * What Quote writes in the composer (reply_controller.js): what the message shows but its link previews,
