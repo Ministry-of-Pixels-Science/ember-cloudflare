@@ -1,15 +1,16 @@
-import type { DirectRoom, LiveHuddle, RoomSettings, Sidebar, SidebarRoom, User } from "@ember/protocol";
-import type { HuddleClientFrame, HuddleServerFrame } from "@ember/protocol/huddles";
-import type { APIRequestContext, Locator, Page } from "@playwright/test";
-import { changeTheWorkspace, cookieHeader, editorField, huddleTilesKeepClear, isolateRoom, listing, openRoom, signInAs, type Session, type Tells, type TestRoom } from "../../fixtures";
+import type { DirectRoom, LiveHuddle, Message, RoomSettings, ServerFrame, Sidebar, SidebarRoom, User } from "@ember/protocol";
+import type { HuddleClientFrame, HuddleServerFrame, MessageHuddle } from "@ember/protocol/huddles";
+import type { APIRequestContext, Locator, Page, WebSocketRoute } from "@playwright/test";
+import { changeTheWorkspace, cookieHeader, editorField, huddleTilesKeepClear, isolateRoom, listing, openRoom, ROOM_SOCKET, signInAs, type Session, type Tells, type TestRoom } from "../../fixtures";
 import { auditScreen } from "./audits";
 import { expect, hasDrawerLayout, openKeyboard, test } from "./fixtures";
 
-// A huddle on a phone: its button in the header of a room or a DM, the preview it starts from, the
-// invitation into one, and the huddle the tab is in, opened and as its bar, which switches between the
-// phone's cameras, keeps its screen awake, and invites people from the menu of its More button. The
-// main test server has no huddles, whose keys Cloudflare would be asked about, so these pages are told
-// that huddles are on, and the huddle a tab joins is the test's own.
+// A huddle on a phone: its button in the header of a room or a DM, its message in the room, the preview
+// it starts from, the invitation into one, and the huddle the tab is in, opened and as its bar, which
+// switches between the phone's cameras, keeps its screen awake, and invites people from the menu of its
+// More button. The main test server has no huddles, whose keys Cloudflare would be asked about, so
+// these pages are told that huddles are on, and the huddle a tab joins is the test's own, as is the
+// message of one.
 
 /** A huddle's socket, for `page.routeWebSocket`. */
 const HUDDLE_SOCKET = /\/api\/rooms\/[^/]+\/huddle/;
@@ -69,6 +70,27 @@ async function standInHuddle(page: Page, you: User, others: User[] = []): Promis
     ws.send(JSON.stringify({ type: "huddle.welcome", you, people, startedAt: new Date().toISOString() } satisfies HuddleServerFrame));
   });
   return said;
+}
+
+/**
+ * Has `room` welcome the page with the message of a huddle `starter` started, after its own messages,
+ * which says `huddle` of it. Answers how to have the message say something else of its huddle.
+ */
+async function standInHuddleMessage(page: Page, room: TestRoom, starter: User, huddle: MessageHuddle): Promise<(huddle: MessageHuddle) => void> {
+  const [text, at] = ["A huddle started", huddle.startedAt];
+  const message: Message = { id: "z".repeat(16), clientMessageId: crypto.randomUUID(), roomId: room.id, creator: starter, body: `<p>${text}</p>`, plainText: text, mentions: [], createdAt: at, updatedAt: at, editedAt: null, boosts: [], huddle };
+  let tab: WebSocketRoute | undefined;
+  let seq = 0;
+  await page.routeWebSocket(ROOM_SOCKET, (ws) => {
+    tab = ws;
+    ws.connectToServer().onMessage((frame) => {
+      const parsed = JSON.parse(String(frame)) as ServerFrame;
+      if (parsed.type !== "welcome") return ws.send(frame);
+      seq = parsed.seq;
+      ws.send(JSON.stringify({ ...parsed, messages: [...parsed.messages, message] } satisfies ServerFrame));
+    });
+  });
+  return (huddle) => tab!.send(JSON.stringify({ type: "message.updated", message: { ...message, huddle }, seq: ++seq } satisfies ServerFrame));
 }
 
 /** Has `room`'s settings answer the page that `members` are in the room and `others`, whom they list as well, aren't. */
@@ -251,6 +273,34 @@ test("a DM's huddle button fits the phone, and so does its row in the sidebar, w
   await expect(mark.locator("img")).toHaveCount(1);
   await expect(mark.getByText("1", { exact: true })).toBeVisible();
   expect((await row.getByText(grace.name).boundingBox())!.width).toBeGreaterThan(40);
+  await screenIsFine();
+});
+
+test("a huddle's message fits the phone, with who's in it and Join easy to tap while the huddle goes on, and who was in it and for how long once it's over", async ({ page, room, participant, screenIsFine }) => {
+  // With more people in it than it shows faces of, the first of them by a name that's one long word, which is the widest it says.
+  const people = await Promise.all(["Wolfeschlegelsteinhausenbergerdorff", "Grace", "Linus", "Margaret", "Katherine"].map(async (name) => (await participant(name)).session.user));
+  const startedAt = new Date(Date.now() - 24 * 60_000).toISOString();
+  const say = await standInHuddleMessage(page, room, people[0]!, { startedAt });
+  const tell = await openRoomWithHuddlesOn(page, room, { startedAt, userIds: people.map(({ id }) => id) });
+  const message = page.getByRole("log").getByRole("article").filter({ has: page.getByRole("heading", { name: /^A huddle / }) });
+  await expect(message.getByRole("heading")).toContainText("A huddle is happeningLIVE");
+  await expect(message).toContainText("Wolfeschlegelsteinhausenbergerdorff, Grace, Linus, and 2 others are in the huddle");
+  await expect(message.locator("img")).toHaveCount(4);
+  await screenIsFine();
+
+  // Join opens the preview the huddle is joined from.
+  await message.getByRole("button", { name: "Join", exact: true }).tap();
+  const preview = page.getByRole("dialog", { name: `Join the huddle in ${room.name}` });
+  await expect(preview.getByRole("button", { name: "Join Huddle" })).toBeVisible();
+  await preview.getByRole("button", { name: "Cancel", exact: true }).last().tap();
+  await expect(preview).toHaveCount(0);
+
+  // Everyone leaves: the Workspace says the huddle is over, and the room what its message says of it now.
+  tell({ type: "room.huddle", roomId: room.id, huddle: null });
+  say({ startedAt, endedAt: new Date().toISOString(), people });
+  await expect(message.getByRole("heading")).toContainText("A huddle happened");
+  await expect(message).toContainText("Wolfeschlegelsteinhausenbergerdorff, Grace, Linus, and 2 others were in the huddle for 24 minutes");
+  await expect(message.getByRole("button", { name: "Join", exact: true })).toHaveCount(0);
   await screenIsFine();
 });
 

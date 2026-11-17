@@ -1,7 +1,7 @@
 import type { AccountSettings, Me, WorkspaceSettings } from "@ember/protocol";
 import { APP_ID_UNKNOWN, APP_SECRET_UNKNOWN, CAMERAS_OFF, RELAY_API_TOKEN_UNKNOWN, RELAY_KEY_ID_UNKNOWN, RELAY_TTL_S, SCREENS_FULL, SCREENS_OFF } from "@ember/protocol/huddles";
 import type { APIRequestContext, Browser, BrowserContext, Locator, Page } from "@playwright/test";
-import { administratorSession, cookieHeader, expect, huddleTilesKeepClear, newAddress, SAME_ORIGIN, signInAsAdministrator, test, useOwnAddress, type TestRoom } from "../../fixtures";
+import { administratorSession, cookieHeader, editorField, expect, huddleTilesKeepClear, newAddress, SAME_ORIGIN, signInAsAdministrator, test, useOwnAddress, type TestRoom } from "../../fixtures";
 import { AI_GATEWAY_ACCOUNT, SFU_APP, TURN_KEY } from "../../projects/workspace-settings";
 import { startFakeSfu, type FakeSfu, type IceServer } from "./fake-sfu";
 
@@ -629,6 +629,79 @@ test.describe("A huddle", () => {
     expect(forgotten.status(), await forgotten.text()).toBe(200);
     await expect(grace.getByRole("button", { name: "Start huddle", exact: true })).toHaveCount(0);
     await expect(start).toHaveCount(0);
+    await context.close();
+  });
+
+  test("a huddle has a message in its room, which says it's happening and who's in it, offers Join, has a thread, and says who was in it and for how long once everyone has left", async ({ page, browser, baseURL, request }) => {
+    const administrator = await administratorSession(request);
+    const saved = await request.put("/api/account/huddles", { data: SFU_APP, headers: { Cookie: cookieHeader(administrator), ...SAME_ORIGIN } });
+    expect(saved.status(), await saved.text()).toBe(200);
+    const room = await roomOfItsOwn(request);
+    /** The huddle's message among the room's, as `of` shows it. */
+    const message = (of: Page) => of.getByRole("log").getByRole("article").filter({ has: of.getByRole("heading", { name: /^A huddle / }) });
+    const joinFrom = (of: Page) => message(of).getByRole("button", { name: "Join", exact: true });
+
+    // Grace, who joins Ember with the join link, has the room open before anyone huddles in it.
+    const { context } = await newcomer(browser, baseURL, request, "Grace");
+    const grace = await context.newPage();
+    await useOwnAddress(grace);
+    await grace.goto(`/rooms/${room.id}`);
+    await expect(grace.getByRole("heading", { level: 1 })).toHaveText(room.name);
+    await expect(message(grace)).toHaveCount(0);
+
+    // Ada starts a huddle there, which the room writes a message of: Grace sees it happening, with Ada in it.
+    await useOwnAddress(page);
+    await page.goto(`/rooms/${room.id}`);
+    await signInAsAdministrator(page);
+    await page.getByRole("button", { name: "Start huddle", exact: true }).click();
+    await page.getByRole("dialog", { name: `Start a huddle in ${room.name}` }).getByRole("button", { name: "Start Huddle" }).click();
+    const adasHuddle = huddleOpened(page, room);
+    await expect(adasHuddle).toContainText("1 person");
+    await expect(message(grace).getByRole("heading")).toContainText("A huddle is happeningLIVE");
+    await expect(message(grace)).toContainText("Ada is in the huddle");
+    await expect(message(grace)).not.toContainText("A huddle started");
+
+    // She joins from the message, by the preview. Behind her huddle, the message names them both, with nothing to join.
+    await joinFrom(grace).click();
+    await grace.getByRole("dialog", { name: `Join the huddle in ${room.name}` }).getByRole("button", { name: "Join Huddle" }).click();
+    const gracesHuddle = huddleOpened(grace, room);
+    await expect(gracesHuddle).toContainText("2 people");
+    await gracesHuddle.getByRole("button", { name: "Minimize huddle" }).filter({ visible: true }).click();
+    await expect(message(grace)).toContainText("Ada and you are in the huddle");
+    await expect(joinFrom(grace)).toHaveCount(0);
+    await adasHuddle.getByRole("button", { name: "Minimize huddle" }).filter({ visible: true }).click();
+    await expect(message(page)).toContainText("Grace and you are in the huddle");
+    await expect(joinFrom(page)).toHaveCount(0);
+
+    // Its thread is the huddle's: Grace replies in it, which the message sums up for them both.
+    await grace.getByRole("heading", { level: 1 }).hover();
+    await message(grace).hover();
+    await message(grace).getByRole("group", { name: "Message actions" }).getByRole("link", { name: "Reply in thread" }).click();
+    const thread = grace.getByRole("complementary", { name: "Thread" });
+    await expect(thread.getByRole("article").first()).toContainText("A huddle is happeningLIVE");
+    await editorField(thread, "Write a reply").fill("Notes from the huddle");
+    await editorField(thread, "Write a reply").press("Enter");
+    await expect(thread.getByRole("article").filter({ hasText: "Notes from the huddle" })).toBeVisible();
+    for (const of of [page, grace]) await expect(message(of).getByRole("link", { name: /^1 reply\b/ })).toBeVisible();
+    await thread.getByRole("link", { name: "Close thread" }).click();
+
+    // Grace leaves, and can join again from the message. Then Ada does, which ends the huddle: the message
+    // says that it happened, who was in it, and for how long, to each of them and to whoever opens the room later.
+    await grace.getByRole("button", { name: "Leave huddle", exact: true }).click();
+    await expect(message(grace)).toContainText("Ada is in the huddle");
+    await expect(joinFrom(grace)).toBeVisible();
+    await expect(message(page)).toContainText("Just you in the huddle");
+    await page.getByRole("button", { name: "Leave huddle", exact: true }).click();
+    for (const [of, who] of [[page, "Grace and you"], [grace, "Ada and you"]] as const) {
+      await expect(message(of).getByRole("heading")).toContainText("A huddle happened");
+      await expect(message(of)).not.toContainText("LIVE");
+      await expect(message(of)).toContainText(new RegExp(`${who} were in the huddle for (less than a minute|1 minute)`));
+      await expect(joinFrom(of)).toHaveCount(0);
+      await expect(message(of).getByRole("link", { name: /^1 reply\b/ })).toBeVisible();
+    }
+    await grace.reload();
+    await expect(message(grace)).toContainText(/Ada and you were in the huddle for (less than a minute|1 minute)/);
+    await expect(message(grace)).toHaveCount(1);
     await context.close();
   });
 

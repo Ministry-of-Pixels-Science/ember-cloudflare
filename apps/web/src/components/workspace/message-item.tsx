@@ -11,6 +11,7 @@ import { cn } from "@/lib/utils";
 import { AgentBadge, isAgent } from "./agent-badge";
 import { Attachment } from "./attachment";
 import { BotCards } from "./bot-card";
+import { HuddleShown, HuddleSummary, HuddleTile, HuddleTitle, isLive } from "./huddle-message";
 import { MessageActionsMenu, type MessageActionsHandle } from "./message-actions-menu";
 import { MessageBody } from "./message-body";
 import { MessageBoosts } from "./message-boosts";
@@ -204,7 +205,10 @@ function Author({ user }: { user: User }) {
   );
 }
 
-/** One message: a 36px avatar gutter, author and time, then the body. */
+/**
+ * One message: a 36px avatar gutter, author and time, then the body. A huddle's message shows its huddle
+ * where its author and its text would be (./huddle-message.tsx).
+ */
 export const MessageItem = memo(function MessageItem({ message, me, threaded: follows, editing: editorOpen, actions, editors, thread, open }: Props) {
   const article = useRef<HTMLElement>(null);
   const menu = useRef<MessageActionsHandle>(null);
@@ -273,15 +277,23 @@ export const MessageItem = memo(function MessageItem({ message, me, threaded: fo
         // messages in a row don't overlap.
         "touch:min-h-11",
         pending && !upload && "opacity-60",
+        // A huddle that's going on tints its message green, as Slack's does, unless its thread is open beside the room.
+        message.huddle && isLive(message.huddle) && !open && "bg-positive/8 hover:bg-positive/8",
         open && "bg-hover",
       )}
     >
       {/* The avatar sits 8px down, level with the author's name, and 4px below where the editor starts. */}
-      {!threaded && <AvatarLink user={message.creator} square className="mt-2 size-9 max-md:size-[30px]" />}
+      {!threaded && (message.huddle ? <HuddleTile huddle={message.huddle} /> : <AvatarLink user={message.creator} square className="mt-2 size-9 max-md:size-[30px]" />)}
 
-      {editing && (message.attachment || message.cards) ? (
+      {editing && (message.attachment || message.cards || message.huddle) ? (
         <FixedMessageEditor ref={attachEditor} onDelete={() => actions.remove(message.id) && editors.returnFocus()} onClose={() => editors.close(message.id)}>
-          {message.attachment ? <Attachment file={message.attachment} /> : message.body !== "" && <MessageBody nodes={shown} mentions={message.mentions} />}
+          {message.attachment ? (
+            <Attachment file={message.attachment} />
+          ) : message.huddle ? (
+            <HuddleShown huddle={message.huddle} roomId={message.roomId} meId={me.id} />
+          ) : (
+            message.body !== "" && <MessageBody nodes={shown} mentions={message.mentions} />
+          )}
           {message.cards && <BotCards cards={message.cards} />}
         </FixedMessageEditor>
       ) : editing ? (
@@ -311,7 +323,7 @@ export const MessageItem = memo(function MessageItem({ message, me, threaded: fo
             <h3 className="contents text-[15px]">{permalink}</h3>
           ) : (
             <h3 className="flex min-h-[22px] items-baseline gap-2 text-[15px] leading-[22px] max-md:flex-wrap max-md:gap-x-2 max-md:gap-y-0.5 max-md:pr-[22px]">
-              <Author user={message.creator} />
+              {message.huddle ? <HuddleTitle huddle={message.huddle} /> : <Author user={message.creator} />}
               {permalink}
               {edited}
             </h3>
@@ -321,11 +333,14 @@ export const MessageItem = memo(function MessageItem({ message, me, threaded: fo
           {/* A grouped message has no header, so its mark follows the text, or the file a bot replaced. Where
               Message options is 44px, the text stops 32px short of the row's end, clear of it. A file message
               shows its file in place of its text, and its upload's
-              card until the room has it. A bot's cards follow, with no text before them where it sent none. */}
+              card until the room has it, and a huddle's message what it says of its huddle. A bot's cards
+              follow, with no text before them where it sent none. */}
           {upload ? (
             <div className={threaded ? "col-start-1 row-start-1" : "touch:pr-8"}>
               <UploadCard upload={upload} />
             </div>
+          ) : message.huddle ? (
+            <HuddleSummary huddle={message.huddle} roomId={message.roomId} meId={me.id} />
           ) : message.attachment ? (
             <div dir="auto" className={threaded ? "col-start-1 row-start-1" : "touch:pr-8"}>
               <Attachment file={message.attachment} />

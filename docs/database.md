@@ -309,6 +309,21 @@ Objects, D1 or speed call for something else.
   Cloudflare's Realtime SFU didn't close when asked wait there too (`huddleUnclosed`), for the alarm
   to ask about again, and since the alarm then rings far more often than a failed log is sent again,
   the room keeps when its logs are next due (`logsDue`).
+- **A huddle's message is a message's row.** The message a huddle has in its room is a row of
+  `messages` like any other, in the name of whoever started the huddle, so its time, link,
+  reactions and thread are a message's. What it says of its huddle is JSON in `messages.huddle`
+  (room migration 0066), as a file is in `attachment` and a bot's cards in `cards`: when the huddle
+  started, and once it's over, when it ended and who was in it, by the names and pictures they had
+  then. Who's in it meanwhile isn't kept there, since a tab has that from the room's huddle in its
+  sidebar, so the row is written twice for most huddles, however many come and go. Each write takes
+  the room's next `change_seq`, so a tab that connects again catches up on it, and is logged for the
+  search index, but the row has no `room_events` row: it marks the room unread for nobody, isn't its
+  latest activity, and reaches no push or webhook. The room's object keeps the message's id in its
+  own storage (`huddleMessage`) from before it writes the row, so a write whose answer it never had
+  isn't made twice, and with it when the huddle started, everyone who has been in it, since the
+  huddle's sockets only say who's in it now, and when it was found over. The alarm that says who's
+  in the huddle again brings the message in step with it too, which makes up for a write that
+  failed, and for an object that came back with nobody left in its huddle.
 - **Rooms are named by their ids, and some have no creator.** A room's id names its Durable Object
   too, so it's a 16-character sortable string like a message's rather than an integer, and its kind
   is `open`, `closed` or `direct` rather than Rails' class name. The rooms from before the Workspace

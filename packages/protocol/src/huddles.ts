@@ -225,6 +225,18 @@ export interface LiveHuddle {
   userIds: UserId[];
 }
 
+/**
+ * A huddle as its message in the room says it (`Message.huddle`): when it started, and once it's over,
+ * when it ended and everyone who was in it, in the order they first joined, named as they were then. A
+ * message without an end is of the huddle going on in its room, and who's in that is the room's
+ * `LiveHuddle`.
+ */
+export interface MessageHuddle {
+  startedAt: string;
+  endedAt?: string;
+  people?: User[];
+}
+
 /** What a tab sends on its huddle's socket. Leaving the huddle is closing the socket. */
 export type HuddleClientFrame =
   /**

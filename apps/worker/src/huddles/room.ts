@@ -27,6 +27,7 @@ import type { Env } from "../env";
 import { CLOSE_REASONS, closedAtOnce, closeTooLarge, isTooLarge, MAX_ROOM_FRAME_SIZE } from "../sockets";
 import { workspace } from "../workspace";
 import type { InvitationPush } from "../workspace-store";
+import type { HuddleNow } from "./message";
 import { relayServers } from "./relay";
 import { acceptAnswer, closeTracks, publishTracks, pullTracks, resizeTracks, SfuError, startSession, TRACKS_PER_REQUEST, type HuddleApp, type Pulled, type SfuApp } from "./sfu";
 
@@ -63,6 +64,9 @@ import { acceptAnswer, closeTracks, publishTracks, pullTracks, resizeTracks, Sfu
 // Someone in the huddle invites others into it through the Workspace too (`huddle.invite`), which
 // knows who's in the room, and has every tab of theirs. Whoever it finds with Ember in view nowhere is
 // pushed the invitation, which the room sends, as it sends its messages' pushes.
+//
+// The room keeps a message of each huddle among its own (./message.ts), which it brings in step as
+// people join and leave: the huddle tells it that they have, and what it is now.
 
 /**
  * The tag on a huddle's sockets, besides the tags a room's own sockets carry. Nobody's id has a colon in
@@ -355,6 +359,8 @@ export class Huddle {
     private readonly wakeBy: (time: number) => Promise<void>,
     /** Sends an invitation's pushes, as the room sends its messages'. */
     private readonly push: (pushes: InvitationPush[]) => Promise<void>,
+    /** Brings the room's message of the huddle in step with it, now that who's in it has changed, once the room's events before it are done. */
+    private readonly changed: () => Promise<unknown>,
   ) {}
 
   /** Whether `ws` is one of the huddle's sockets, rather than one of the room's own. */
@@ -367,6 +373,13 @@ export class Huddle {
     return this.ctx.getWebSockets(HUDDLE_TAG).some((socket) => socket.readyState === WebSocket.OPEN);
   }
 
+  /** The huddle as it is now, which the room's message of it goes by, or null with nobody in it. */
+  now(): HuddleNow | null {
+    const members = this.members();
+    const first = members[0]?.attachment;
+    return first ? { roomId: first.roomId, startedAt: first.startedAt, people: members.map(({ attachment }) => attachment.user) } : null;
+  }
+
   /**
    * Lets `user` into room `roomId`'s huddle, on a socket carrying `tags`, once the room has checked the
    * Workspace's word for them. A huddle that's full, or huddles being off, closes the socket at once
@@ -374,18 +387,20 @@ export class Huddle {
    * closes, and the others hear that they changed rather than that they left and joined. The room,
    * which lets people in one at a time, sets its alarm to check the huddle once someone's in it. The
    * tab is welcomed with `iceServers`, the servers its connections go by, if the room has any for it.
+   * Whoever joins with nobody in the huddle starts one, unless `resumed` says when the room's last
+   * started, which then goes on (./message.ts).
    */
-  async join(user: User, roomId: RoomId, tags: string[], muted: boolean, iceServers: HuddleIceServer[] | null): Promise<Response> {
+  async join(user: User, roomId: RoomId, tags: string[], muted: boolean, iceServers: HuddleIceServer[] | null, resumed?: string): Promise<Response> {
     const app = await this.appNow();
     if (!app) return closedAtOnce(HuddleCloseCode.Off);
     let members = this.members();
     // Whoever joined through an app huddles no longer run through connects again, through this one, to
-    // a huddle that starts with whoever is first.
+    // the huddle as it goes on with whoever is first.
     if (members.some(({ attachment }) => attachment.appId !== app.appId)) {
       this.end(CloseCode.Reconnect);
       members = [];
     }
-    const startedAt = members[0]?.attachment.startedAt ?? new Date().toISOString();
+    const startedAt = members[0]?.attachment.startedAt ?? resumed ?? new Date().toISOString();
     const earlier = members.filter(({ attachment }) => attachment.user.id === user.id);
     if (members.length - earlier.length >= MAX_HUDDLE_PEOPLE) return closedAtOnce(HuddleCloseCode.Full);
 
@@ -1010,9 +1025,10 @@ export class Huddle {
     return true;
   }
 
-  /** Tells the Workspace who's in the huddle now, which has changed, without anything waiting on it. */
+  /** Tells the Workspace who's in the huddle now, which has changed, and has the room bring its message of the huddle in step, without anything waiting on either. */
   private reportSoon(): void {
     this.ctx.waitUntil(this.report());
+    this.ctx.waitUntil(this.changed());
   }
 
   /**

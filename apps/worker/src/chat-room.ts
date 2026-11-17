@@ -74,6 +74,7 @@ import { attachedFile, Blobs, objectKey, previewKey, type Identified, type RoomB
 import type { ImageSize } from "./files/images";
 import { storeArriving, withPreview, type ArrivingFile, type StreamedFile } from "./files/streamed";
 import { NO_STORAGE, type Uploader } from "./files/uploads";
+import { HuddleMessage } from "./huddles/message";
 import { Huddle, HUDDLE_CHECK_MS, HUDDLE_TAG } from "./huddles/room";
 import { base36, sortableId } from "./ids";
 import { sendPushes } from "./push/delivery";
@@ -133,6 +134,8 @@ const UNREADABLE = "That message couldn't be saved.";
 export const EMPTY = "Your message is empty.";
 /** Why the room changes nothing of a bot's message with cards that a person edits, as the editor can't hold a card. */
 const HAS_CARDS = "Messages with cards can't be edited.";
+/** Why it changes nothing of a huddle's message that a person edits: the room writes it, and it shows its huddle rather than its text. */
+const OF_A_HUDDLE = "A huddle's message can't be edited.";
 /** What the room tells a tab running an app older than its protocol, whose messages and edits it refuses. */
 const OUTDATED = "Ember has been updated. Reload the page to keep chatting.";
 /**
@@ -345,12 +348,15 @@ export class ChatRoom extends DurableObject<Env> {
   private readonly seenBy = new Map<string, UserId[]>();
   /** The room's huddle, whose sockets it keeps beside the room's own. */
   private readonly huddle: Huddle;
+  /** The message the room keeps of its huddle, among its own. */
+  private readonly huddleMessage: HuddleMessage;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     // Heartbeats are answered by the runtime without waking the object.
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('{"type":"ping"}', '{"type":"pong"}'));
-    this.huddle = new Huddle(ctx, env, (time) => this.serially(() => this.checkHuddleBy(time)), (pushes) => this.push(pushes));
+    this.huddle = new Huddle(ctx, env, (time) => this.serially(() => this.checkHuddleBy(time)), (pushes) => this.push(pushes), () => this.serially(() => this.keepHuddleMessage()));
+    this.huddleMessage = new HuddleMessage(ctx.storage);
   }
 
   override async fetch(request: Request): Promise<Response> {
@@ -408,7 +414,7 @@ export class ChatRoom extends DurableObject<Env> {
     const iceServers = await this.huddle.iceServers();
     return this.serially(async () => {
       if (await this.revocationsFor(roomId).refuse(tags, authorizedAt)) return closedAtOnce(CloseCode.Reconnect);
-      const response = await this.huddle.join(user, roomId, tags, muted, iceServers);
+      const response = await this.huddle.join(user, roomId, tags, muted, iceServers, await this.huddleMessage.resumed(user.id));
       if (this.huddle.live) await this.checkHuddleBy(Date.now() + HUDDLE_CHECK_MS);
       return response;
     });
@@ -472,6 +478,7 @@ export class ChatRoom extends DurableObject<Env> {
   private async destroy(roomId: RoomId, code: CloseCode): Promise<void> {
     this.huddle.end(code, true);
     for (const socket of this.roomSockets()) this.close(socket, code);
+    await this.huddleMessage.forget();
     while (await this.storeFor(roomId).deleteMessages(MESSAGES_DELETED_AT_ONCE));
     await this.logFor(roomId).forget();
     await this.waitingCallsFor(roomId).forget();
@@ -487,21 +494,32 @@ export class ChatRoom extends DurableObject<Env> {
    * Erases what's left of a deleted room, once R2 has deleted its files. Otherwise, checks the room's
    * huddle, and comes back to check it while one goes on, and sends the room's logs. While a huddle
    * goes on, the alarm rings far more often than a log that failed is sent again, so the logs wait
-   * until they're due.
+   * until they're due, as they do while the room's message of a huddle has yet to catch up with it.
    */
   override async alarm(): Promise<void> {
     const [deleted, undelivered, logsDue] = await this.serially(() =>
       Promise.all([this.ctx.storage.get<RoomId>(DELETED_ROOM), this.ctx.storage.get<RoomId>(UNDELIVERED_ROOM), this.ctx.storage.get<number>(LOGS_DUE)]),
     );
     if (deleted !== undefined) return this.erase(deleted);
-    const nextCheck = await this.huddle.check().catch((error: unknown) => {
-      console.error("Checking the room's huddle failed:", error instanceof Error ? error.name : "unknown error");
-      return Date.now() + HUDDLE_CHECK_MS;
-    });
+    const nextCheck = await this.checkHuddle();
     const logsWait = nextCheck !== null && logsDue !== undefined && logsDue > Date.now();
     if (undelivered !== undefined && !logsWait) await this.sendLogs(undelivered);
     // Logs that waited are due before the huddle's next check, or after it. Logs just sent have set the alarm for whatever is left of them.
     if (nextCheck !== null) await this.serially(() => this.checkHuddleBy(logsWait ? Math.min(nextCheck, logsDue) : nextCheck));
+  }
+
+  /**
+   * Checks the room's huddle, and brings the room's message of it in step with it, which is what makes
+   * up for a message that couldn't be written, or was left saying that a huddle goes on which ended as
+   * the room's object did. Answers when to check next, or null when nothing is left to come back for.
+   */
+  private async checkHuddle(): Promise<number | null> {
+    const nextCheck = await this.huddle.check().catch((error: unknown) => {
+      console.error("Checking the room's huddle failed:", error instanceof Error ? error.name : "unknown error");
+      return Date.now() + HUDDLE_CHECK_MS;
+    });
+    const inStep = await this.serially(() => this.keepHuddleMessage());
+    return inStep ? nextCheck : Math.min(nextCheck ?? Infinity, Date.now() + HUDDLE_CHECK_MS);
   }
 
   /**
@@ -986,6 +1004,7 @@ export class ChatRoom extends DurableObject<Env> {
         if (!message || !(await this.canAdminister(user, message))) return this.refuse(ws, "You can only edit your own messages");
         if (isOutdated(ws)) return this.send(ws, { type: "error", message: OUTDATED, failed: frame.type });
         if (message.cards) return this.send(ws, { type: "error", message: HAS_CARDS, failed: frame.type });
+        if (message.huddle) return this.send(ws, { type: "error", message: OF_A_HUDDLE, failed: frame.type });
         const body = await this.prepare(frame.body);
         if (typeof body === "string") return this.send(ws, { type: "error", message: body, failed: frame.type });
         await this.edit(store, message, body, now);
@@ -2046,6 +2065,29 @@ export class ChatRoom extends DurableObject<Env> {
       if (alarm !== null && (await this.ctx.storage.get(ERASE_DUE)) === undefined) await this.ctx.storage.put(ERASE_DUE, alarm);
     }
     await this.ctx.storage.setAlarm(time);
+  }
+
+  /**
+   * Brings the room's message of its huddle in step with the huddle as it is now, telling everyone in the
+   * room of what that wrote and sending the search index its log: the message as a huddle starts, and
+   * what it says once the huddle is over. The huddle has this done whenever who's in it changes, and
+   * the alarm with each check of the huddle. Answers whether it could: the alarm comes back when not.
+   * A deleted room has no huddle, and has forgotten the message of its last.
+   */
+  private async keepHuddleMessage(): Promise<boolean> {
+    try {
+      const huddle = this.huddle.now();
+      const roomId = huddle?.roomId ?? (await this.huddleMessage.roomId());
+      // No huddle here has had a message.
+      if (roomId === undefined) return true;
+      const frames = await this.huddleMessage.keepUp(this.storeFor(roomId), huddle);
+      for (const frame of frames) this.broadcast(frame);
+      if (frames.length > 0) this.couriersFor(roomId).index.deliver();
+      return true;
+    } catch (error) {
+      console.error("Keeping the message of the room's huddle failed:", error instanceof Error ? error.name : "unknown error");
+      return false;
+    }
   }
 
   /**
