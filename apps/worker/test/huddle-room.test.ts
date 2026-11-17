@@ -2465,6 +2465,30 @@ describe("The room's check of its huddle", () => {
     expect(huddles).toEqual({ [annex]: { startedAt: expect.any(String) as string, userIds: [linus.user.id] } });
   });
 
+  it("has the SFU close what a tab published while the Workspace was saying that its room's settings turn huddles off", async () => {
+    const { ada, sfu } = await huddlesOn();
+    const room = await freshRoom("published-meanwhile");
+    const grace = await signIn("Grace");
+    const adas = await welcomed(room, ada);
+    const fromAda = await publishing(sfu, adas);
+    const graces = await welcomed(room, grace);
+
+    // The Workspace takes its time over the room's check, and Grace's tab publishes her microphone meanwhile.
+    let asked = false;
+    let answer!: () => void;
+    const answered = new Promise<void>((resolve) => (answer = resolve));
+    await answerForWorkspace(room, { huddleApp: async () => APP, huddlesIn: async () => ((asked = true), await answered, { app: APP, allowed: false }) });
+    const checked = checkAt(room, Date.now());
+    await vi.waitFor(() => expect(asked).toBe(true));
+    const fromGrace = await publishing(sfu, graces);
+    answer();
+    await checked;
+
+    for (const socket of [adas, graces]) expect(await socket.closed).toMatchObject({ code: HuddleCloseCode.Off, reason: "Off" });
+    await vi.waitFor(() => expect([fromAda, fromGrace].map((id) => closedOn(sfu, id))).toEqual([["0"], ["0"]]));
+    expect(await kept(room, "huddleUnclosed")).toBeUndefined();
+  });
+
   it("asks the SFU no more than an event may as it ends a full huddle that its room's settings turn off: to close forty microphones beside the tracks it asks about again, and the rest from its next alarm", async () => {
     const { ada, sfu } = await huddlesOn();
     vi.spyOn(console, "warn").mockImplementation(() => {});

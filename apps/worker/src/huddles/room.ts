@@ -540,13 +540,15 @@ export class Huddle {
    * SFU is asked nothing: with huddles off or their app changed there's no asking it as the app those
    * connections are with. A room that's deleted can ask, and has it close what everyone published, so
    * that a tab which kept its connections open is heard by nobody, and hears nobody. So can the check
-   * of a huddle that only its room's settings end (`check`).
+   * of a huddle that only its room's settings end (`check`), which asks about `most` of it at once.
+   * It's what each had published as their socket closed that the SFU closes, so a tab that published
+   * while the room was finding out that the huddle ends is no exception.
    */
-  end(code: CloseCode | HuddleCloseCode, silence = false): void {
+  end(code: CloseCode | HuddleCloseCode, silence = false, most = SILENCED_PER_DELETE): void {
     const members = this.members();
     if (members.length === 0) return;
     for (const { socket } of members) this.close(socket, code, false);
-    if (silence) this.ctx.waitUntil(this.silence(members));
+    if (silence) this.ctx.waitUntil(this.silence(members, most));
     this.reportSoon();
   }
 
@@ -559,7 +561,7 @@ export class Huddle {
    * kept for the room's alarm, which asks about them (`closeUnclosed`), a deleted room's before it
    * erases the room.
    */
-  private async silence(members: Member[], most = SILENCED_PER_DELETE): Promise<void> {
+  private async silence(members: Member[], most: number): Promise<void> {
     const app = await this.appNow().catch(() => undefined);
     if (!app) return;
     const published = HUDDLE_TRACK_KINDS.flatMap((kind) =>
@@ -590,9 +592,8 @@ export class Huddle {
       // Asked afresh, so turning huddles off, for everyone or in this room, ends one within a check. Unanswered, the huddle goes on.
       const app = await this.appIn(members[0]!.attachment.roomId, true).catch(() => undefined);
       if (app === null || (app && members.some(({ attachment }) => attachment.appId !== app.appId))) {
-        this.end(app ? CloseCode.Reconnect : HuddleCloseCode.Off);
         // Where only the room's settings end it, huddles still run through the app, which the SFU is asked as.
-        if (!app) this.ctx.waitUntil(this.silence(members, SILENCED_PER_CHECK));
+        this.end(app ? CloseCode.Reconnect : HuddleCloseCode.Off, !app, SILENCED_PER_CHECK);
       } else {
         for (const { socket } of members.filter((member) => this.isSilent(member, now)).slice(0, REMOVED_PER_CHECK)) this.remove(socket, CloseCode.Reconnect);
         if (app) this.takeDownWhatsOff(app);
