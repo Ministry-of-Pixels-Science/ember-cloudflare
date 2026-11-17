@@ -414,7 +414,7 @@ export class ChatRoom extends DurableObject<Env> {
    */
   private async joinHuddle(user: User, roomId: RoomId, tags: string[], authorizedAt: number, muted: boolean): Promise<Response> {
     // Cloudflare is asked for the relay's servers before the join takes its turn, so that nothing else the room does waits on its answer.
-    const iceServers = await this.huddle.iceServers();
+    const iceServers = await this.huddle.iceServers(roomId);
     return this.serially(async () => {
       if (await this.revocationsFor(roomId).refuse(tags, authorizedAt)) return closedAtOnce(CloseCode.Reconnect);
       const response = await this.huddle.join(user, roomId, tags, muted, iceServers, await this.huddleMessage.resumed(user.id));

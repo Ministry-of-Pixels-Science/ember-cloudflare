@@ -326,7 +326,12 @@ Objects, D1 or speed call for something else.
   alarm can say so with nobody left in it, whatever became of the object meanwhile. The tracks
   Cloudflare's Realtime SFU didn't close when asked wait there too (`huddleUnclosed`), for the alarm
   to ask about again, and since the alarm then rings far more often than a failed log is sent again,
-  the room keeps when its logs are next due (`logsDue`).
+  the room keeps when its logs are next due (`logsDue`). Whether a room allows huddles is a column
+  of the room too, `rooms.huddles_allowed` (workspace migration 0067), 1 until its settings turn
+  them off: the sidebar's statement reads it with the room, the room's settings save it in the
+  `UPDATE` that saves its name and icon, which changes nothing while it's as it was, and the room's
+  object asks the Workspace for it with the app huddles run through, in one call, as someone joins
+  and at each check.
 - **A huddle's message is a message's row.** The message a huddle has in its room is a row of
   `messages` like any other, in the name of whoever started the huddle, so its time, link,
   reactions and thread are a message's. What it says of its huddle is JSON in `messages.huddle`

@@ -365,7 +365,7 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
   const closeHuddlePreview = useCallback(() => setHuddlePreview(null), []);
   const liveHuddles = list?.huddles ?? NO_HUDDLES;
   const huddles = useMemo<Huddles>(() => ({ live: liveHuddles, preview: setHuddlePreview }), [liveHuddles]);
-  // Whether a room has huddles, once they're on: any shared room, and a direct message with someone to huddle with.
+  // Whether a room has huddles, once they're on: a shared room whose settings allow them, and a direct message with someone to huddle with.
   const offersHuddle = (r: Room) => huddlesOn && hasHuddles(r, me.id, (user) => joinsNoHuddle(user, directory.people.get(user.id)));
   // Only a room that's still this person's, and only while it has huddles, has a preview to show.
   const previewedRoom = huddlePreview !== null ? rooms?.find((r) => r.id === huddlePreview) : undefined;
@@ -411,6 +411,15 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
   useEffect(() => {
     openHuddle(opensHuddle.current === visit);
   }, [visit]);
+  // A room whose settings stop allowing huddles has this tab leave the one it's in there, and its person
+  // is told why, so the huddle is over once everyone's tab has heard. The room ends it at its next check
+  // for whoever is in it still.
+  const inHuddleUnallowed = huddleRoom !== null && huddleRoom.kind !== "direct" && huddleRoom.huddles === false;
+  useEffect(() => {
+    if (!inHuddleUnallowed) return;
+    leaveHuddle();
+    flash("alert", "Huddles have been turned off in this room.");
+  }, [inHuddleUnallowed, flash]);
   // What connecting a Memberful account came to, as the address Memberful sent this browser back to says.
   useEffect(() => {
     const message = takeMemberfulFlash();
@@ -678,6 +687,7 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
   // becomes the room's, so that loading the page again, or coming back to it, doesn't offer it again.
   const followHuddleLink = useEffectEvent((room: Room) => {
     if (!huddlesOn) flash("alert", "Huddles are turned off.");
+    else if (room.kind !== "direct" && room.huddles === false) flash("alert", "Huddles are turned off in this room.");
     else if (offersHuddle(room) && huddle?.roomId !== room.id) setHuddlePreview(room.id);
     navigate(roomPath(room.id), { replace: true });
     if (huddle?.roomId === room.id) opensHuddle.current = pageMark();

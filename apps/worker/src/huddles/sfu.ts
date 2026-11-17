@@ -36,6 +36,16 @@ export interface HuddleApp extends SfuApp {
 }
 
 /**
+ * What the Workspace tells a room of huddles in it: the app they run through, or null while they're
+ * off, and whether the room's own settings allow them. A room whose settings don't is told the app all
+ * the same, which it asks the SFU as to close what a huddle there left open.
+ */
+export interface RoomHuddles {
+  app: HuddleApp | null;
+  allowed: boolean;
+}
+
+/**
  * Where the SFU's API is, and the TURN keys' beside it: the browser tests' stand-in, which
  * `REALTIME_SFU_URL` names at a loopback address, or Cloudflare's own.
  */
