@@ -1,4 +1,5 @@
 import type { UserId, WorkspaceServerFrame } from "@ember/protocol";
+import { isViewing } from "./viewing";
 
 /**
  * How long a workspace socket counts after the Workspace last heard from it, as a room socket counts for
@@ -18,14 +19,31 @@ interface SocketPresence {
   userId: UserId;
   /** Whether the tab is in use, as it last said, or since it connected, until it says. */
   active: boolean;
-  /** Whether the tab has said, which has it hear who's active. */
+  /** Whether the tab has said whether it's in use, which has it hear who's active. */
   listening: boolean;
-  /** When the Workspace last heard from the socket, other than its pings: as it connected, or as it last said. */
+  /** Whether the tab is shown, as its address said and its `presence.visible` frames since. */
+  visible: boolean;
+  /** When the Workspace last heard from the socket, other than its pings: as it connected, or as it last said either. */
   heardAt: number;
 }
 
-/** What `socket`'s attachment keeps of its presence, or null for one let in before it kept any. */
-const presenceOf = (socket: WebSocket) => socket.deserializeAttachment() as SocketPresence | null;
+/**
+ * What a workspace socket's attachment keeps of its tab. One the Workspace let in before it kept who the
+ * tab is for keeps whether it's shown once it says so, and nothing before then, and counts as neither in
+ * use nor listening: a socket stays connected when the Workspace takes new code after hibernating.
+ */
+type Kept = SocketPresence | Pick<SocketPresence, "visible" | "heardAt">;
+
+/** What a socket with nothing kept counts as saying, like one whose address didn't say: that its tab isn't shown. */
+const UNSAID: Kept = { visible: false, heardAt: 0 };
+
+const keptOf = (socket: WebSocket) => (socket.deserializeAttachment() as Kept | null) ?? UNSAID;
+
+/** What `socket`'s attachment keeps of its presence, or null for one let in before the Workspace kept who its tab is for. */
+function presenceOf(socket: WebSocket): SocketPresence | null {
+  const kept = keptOf(socket);
+  return "userId" in kept ? kept : null;
+}
 
 /** Sends `data` on `socket`, unless it has closed since, which leaves nothing to clean up. */
 function sendOn(socket: WebSocket, data: string): void {
@@ -39,9 +57,10 @@ function sendOn(socket: WebSocket, data: string): void {
 /**
  * Who's active in the workspace, as Slack shows it: someone with a tab open that's in use, which the
  * Workspace has heard from lately (`PRESENCE_TTL_MS`), and everyone else is away. Each socket keeps its
- * presence in its attachment, which hibernation keeps. What the tabs that listen were last told is kept
- * in memory, and guessed from the sockets once the Workspace wakes. Changes go to the tabs that listen,
- * gathered over `PRESENCE_GATHERING_MS`.
+ * presence in its attachment, which hibernation keeps, with whether its tab is shown, which says who has
+ * Ember in view (`inView`). What the tabs that listen were last told is kept in memory, and guessed from
+ * the sockets once the Workspace wakes. Changes go to the tabs that listen, gathered over
+ * `PRESENCE_GATHERING_MS`.
  */
 export class Presence {
   /** Who the tabs listening were last told is active, or null once the Workspace has woken, until it guesses. */
@@ -55,10 +74,13 @@ export class Presence {
 
   constructor(private readonly ctx: DurableObjectState) {}
 
-  /** Starts keeping the presence of `socket`, one of `userId`'s that has just been let in, in use until it says otherwise. */
-  connected(socket: WebSocket, userId: UserId, now = Date.now()): void {
+  /**
+   * Starts keeping the presence of `socket`, one of `userId`'s that has just been let in, in use until it
+   * says otherwise, and shown or not as its address said (`visible`).
+   */
+  connected(socket: WebSocket, userId: UserId, visible: boolean, now = Date.now()): void {
     this.lastTold();
-    socket.serializeAttachment({ userId, active: true, listening: false, heardAt: now } satisfies SocketPresence);
+    socket.serializeAttachment({ userId, active: true, listening: false, visible, heardAt: now } satisfies SocketPresence);
     this.change(userId);
   }
 
@@ -73,6 +95,27 @@ export class Presence {
     socket.serializeAttachment({ ...presence, active, listening: true, heardAt: now } satisfies SocketPresence);
     if (!presence.listening) sendOn(socket, JSON.stringify({ type: "presence", active: [...told], away: [] } satisfies WorkspaceServerFrame));
     this.change(presence.userId);
+  }
+
+  /**
+   * Keeps whether `socket`'s tab is shown, as it says, which a socket let in before the Workspace kept its
+   * presence says too. That doesn't make the tab in use or not, which it says itself, but it's heard
+   * from, which can make its person active again.
+   */
+  shown(socket: WebSocket, visible: boolean, now = Date.now()): void {
+    const presence = presenceOf(socket);
+    if (!presence) return socket.serializeAttachment({ visible, heardAt: now } satisfies Kept);
+    this.lastTold();
+    socket.serializeAttachment({ ...presence, visible, heardAt: now } satisfies SocketPresence);
+    this.change(presence.userId);
+  }
+
+  /**
+   * Whether `userId` has Ember in view: a tab of theirs has said it's shown, and the Workspace has heard
+   * from it lately, as a room asks of whoever's viewing it (`isViewing`).
+   */
+  inView(userId: UserId, now = Date.now()): boolean {
+    return this.ctx.getWebSockets(userId).some((socket) => socket.readyState === WebSocket.OPEN && isViewing(keptOf(socket), this.ctx.getWebSocketAutoResponseTimestamp(socket), now));
   }
 
   /** Notes that `socket` has closed, or is closing. */

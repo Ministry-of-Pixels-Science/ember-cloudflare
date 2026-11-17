@@ -77,7 +77,7 @@ class WorkspaceSocket extends QuietSocket {
 
   constructor(url: string) {
     super();
-    if (url.endsWith("/api/socket")) WorkspaceSocket.all.push(this);
+    if (new URL(url).pathname === "/api/socket") WorkspaceSocket.all.push(this);
   }
 
   receive(frame: object) {
@@ -785,8 +785,8 @@ describe("Huddles", () => {
     await waitFor(() => expect(WorkspaceSocket.all).toHaveLength(1));
     act(() => WorkspaceSocket.all[0]!.welcome(ada, withHuddles));
     // The tab is in general's huddle, minimized to its bar.
-    const controls = { leave: () => showHuddle(null), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setDevice: vi.fn(), setSmall: vi.fn(), switchCamera: vi.fn() };
-    act(() => showHuddle({ roomId: "general", connected: true, you: ada, people: [], muted: false, microphone: true, microphoneId: "", speakerId: "", camera: null, watched: new Map(), screen: null, screens: new Map(), open: false }, controls));
+    const controls = { leave: () => showHuddle(null), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setThread: vi.fn(), setDevice: vi.fn(), setSmall: vi.fn(), switchCamera: vi.fn(), invite: vi.fn(), setSticker: vi.fn(), react: vi.fn() };
+    act(() => showHuddle({ roomId: "general", connected: true, you: ada, people: [], muted: false, sticker: null, microphone: true, microphoneId: "", speakerId: "", camera: null, watched: new Map(), screen: null, screens: new Map(), open: false, thread: true }, controls));
     try {
       expect(shareButton()).toBeInTheDocument();
       act(() => WorkspaceSocket.all[0]!.receive({ type: "account.updated", account: { ...withHuddles, huddleScreens: false } }));

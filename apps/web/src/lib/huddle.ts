@@ -11,6 +11,7 @@ import {
   SCREENS_FULL,
   type HuddleClientFrame,
   type HuddleIceServer,
+  type HuddlePerson,
   type HuddleServerFrame,
   type HuddleTrackKind,
   type OfferedHuddleTrack,
@@ -37,10 +38,11 @@ import {
   STILL_NO_MICROPHONE,
   type CameraFacing,
 } from "./huddle-devices";
+import { reactionsShown } from "./huddle-reactions";
 import { huddleSounds } from "./huddle-sounds";
 import { huddleSpeaker, type HuddleSpeaker } from "./huddle-speaker";
 import { whoSpeaks, type HuddleSpeaking } from "./huddle-speaking";
-import { endHuddle, leaveHuddle, showHuddle, showSpeaking, tellOfHuddle, type HuddleControls, type JoinedHuddle } from "./huddle-store";
+import { endHuddle, leaveHuddle, showHuddle, showReactions, showSpeaking, tellOfHuddle, type HuddleControls, type JoinedHuddle } from "./huddle-store";
 import { reconnectingSocket } from "./reconnecting-socket";
 
 // A tab's side of a huddle. Its socket to the room (`/api/rooms/:id/huddle`) says who's in the huddle and
@@ -54,7 +56,8 @@ import { reconnectingSocket } from "./reconnecting-socket";
 // the speaker the voices use.
 //
 // A huddle in a direct message rings the others in it: the tab that starts one asks the room to invite
-// them, and their tabs show the invitation and ring (huddle-invitations.ts).
+// them, and their tabs show the invitation and ring (huddle-invitations.ts). Anyone in a huddle asks
+// the same for whoever they pick of the room's people, from Invite people.
 //
 // A camera goes out in two sizes at once (simulcast) from a browser known to send them, and each tab
 // that watches is sent the one it says it shows: the small one for small tiles, so that a huddle of
@@ -242,6 +245,13 @@ function voicesThrough(speaker: HuddleSpeaker, speaking: HuddleSpeaking) {
 
 /** Whether the tab's person is the only one in its huddle, as far as the room has said. */
 const isAlone = ({ connected, you, people }: JoinedHuddle) => connected && people.every(({ user }) => user.id === you?.id);
+
+/** The tab's own `person` as the tab has them, whatever the room last said: as muted as it is, and showing the sticker it shows. */
+function asTheTabHas(person: HuddlePerson, { muted, sticker }: JoinedHuddle): HuddlePerson {
+  if (person.muted === muted && (person.sticker ?? null) === sticker) return person;
+  const { sticker: _, ...rest } = person;
+  return { ...rest, muted, ...(sticker && { sticker }) };
+}
 
 /** What each of a tab's connections to the SFU has of the huddle it's part of. */
 interface Huddled {
@@ -643,6 +653,7 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId, invit
     you: null,
     people: [],
     muted: muted || !track,
+    sticker: null,
     microphone: track !== null,
     microphoneId: microphoneOf(voice),
     speakerId,
@@ -651,6 +662,7 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId, invit
     screen: null,
     screens: new Map(),
     open: true,
+    thread: true,
   };
   let over = false;
   if (track) track.enabled = !huddle.muted;
@@ -668,6 +680,7 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId, invit
   const speaking = whoSpeaks(showSpeaking);
   const voices = voicesThrough(speaker, speaking);
   const sounds = huddleSounds(speaker);
+  const reactions = reactionsShown(showReactions);
 
   const socket = reconnectingSocket<HuddleClientFrame>({
     url: () => huddleSocketUrl(roomId, huddle.muted),
@@ -752,6 +765,9 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId, invit
       show({ open });
       for (const kind of SHOWN_KINDS) receiving[kind].listen();
     },
+    setThread(shown) {
+      if (shown !== huddle.thread) show({ thread: shown });
+    },
     // The tab is sent the size of each camera that its tiles show, so it asks again as they come to show another.
     setSmall(small) {
       smallTiles = small;
@@ -765,13 +781,25 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId, invit
     switchCamera() {
       void showOtherCamera();
     },
+    invite(userIds) {
+      return socket.send({ type: "huddle.invite", userIds });
+    },
+    setSticker(sticker) {
+      if (sticker === huddle.sticker) return;
+      socket.send({ type: "huddle.sticker", sticker });
+      show({ sticker });
+    },
+    // It shows once the room has told the huddle of it, this tab included, so what its person sees is what everyone does.
+    react(emoji) {
+      socket.send({ type: "huddle.react", emoji });
+    },
   };
 
-  /** Shows the huddle with `changes`, the tab's person among its people muted as the tab is. */
+  /** Shows the huddle with `changes`, the tab's person among its people as the tab has them. */
   function show(changes: Partial<JoinedHuddle>) {
     if (over) return;
     const next = { ...huddle, ...changes };
-    const people = next.people.map((person) => (person.user.id === next.you?.id && person.muted !== next.muted ? { ...person, muted: next.muted } : person));
+    const people = next.people.map((person) => (person.user.id === next.you?.id ? asTheTabHas(person, next) : person));
     showHuddle((huddle = { ...next, people }), controls);
     sounds.setAlone(isAlone(huddle));
   }
@@ -964,6 +992,7 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId, invit
     voices.stopAll();
     speaking.stop();
     showSpeaking(new Set());
+    reactions.stop();
     sounds.end(huddle.you !== null);
     speaker.stopAll();
     track?.removeEventListener("ended", microphoneGone);
@@ -1026,6 +1055,8 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId, invit
         // The address said whether the tab was muted as it asked to join, which it may not be now.
         const mine = frame.people.find(({ user }) => user.id === frame.you.id);
         if (mine && mine.muted !== huddle.muted) socket.send({ type: "huddle.mute", muted: huddle.muted });
+        // And the room knows of no sticker a tab showed before it joined again.
+        if (mine && (mine.sticker ?? null) !== huddle.sticker) socket.send({ type: "huddle.sticker", sticker: huddle.sticker });
         // Let in, and not let back in after the tab's connection to the room dropped.
         if (!huddle.you) {
           sounds.joined();
@@ -1034,7 +1065,9 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId, invit
           // Whoever starts a direct message's huddle invites the others in it, which being let back in doesn't do again.
           if (invite.length > 0 && frame.people.every(({ user }) => user.id === frame.you.id)) socket.send({ type: "huddle.invite", userIds: invite });
         }
-        show({ connected: true, you: frame.you, people: frame.people });
+        // Whoever left while the tab's connection to the room was down takes what they sent with them, as one who leaves does.
+        for (const { user } of huddle.people) if (!frame.people.some((person) => person.user.id === user.id)) reactions.forget(user.id);
+        show({ connected: true, you: frame.you, people: frame.people, messageId: frame.messageId });
         for (const kind of HUDDLE_TRACK_KINDS) void sending[kind].publish();
         return listen();
       }
@@ -1049,8 +1082,12 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId, invit
       }
       case "huddle.left":
         for (const kind of HUDDLE_TRACK_KINDS) receiving[kind].forget(frame.userId);
+        reactions.forget(frame.userId);
         if (huddle.people.some(({ user }) => user.id === frame.userId)) sounds.left();
         return show({ people: huddle.people.filter(({ user }) => user.id !== frame.userId) });
+      case "huddle.reacted":
+        if (huddle.people.some(({ user }) => user.id === frame.userId)) reactions.show(frame.userId, frame.emoji);
+        return;
       case "huddle.published":
         return void sending[frame.kind].published(frame.sdp);
       case "huddle.unpublished":

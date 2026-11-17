@@ -571,6 +571,11 @@ push is an outgoing request, of which the Workers Free plan allows 50 per invoca
 pushes past that, for a message with more subscribers or a run of messages sent together, fail and
 are logged; the Paid plan allows 10,000.
 
+An invitation into a huddle is pushed too, from the huddle's room, to the subscriptions of the
+people it reaches who have Ember in view nowhere, as [Huddles](#huddles) describes. Its pushes
+count toward the same 50, so on the Free plan those past that, for an invitation to many people at
+once, fail and are logged.
+
 ### Files
 
 The files people upload go to an R2 bucket, bound as `FILES` in `wrangler.jsonc` and
@@ -612,10 +617,14 @@ API, which has all the model's features, and Grok and Workers AI's through Cloud
 [REST API](https://developers.cloudflare.com/ai-gateway/usage/rest-api/), in Chat Completions, as AI
 Gateway's credits don't pay for Grok at the gateway's
 [xAI endpoint](https://developers.cloudflare.com/ai-gateway/usage/providers/grok/), where xAI answers
-"No credentials presented". Every model and every search goes through the gateway. Ember
-tells OpenAI and xAI not to keep the conversations, as each otherwise does for 30 days. AI Gateway Run
-lets the token send requests through every gateway on the account, with any provider keys stored on
-them, so keep it as safe as those keys.
+"No credentials presented". Every model and every search goes through the gateway. Its logs keep
+what each request asked and was answered, but for a question asked in a DM or a private room, which
+they keep only the model, tokens, cost and time of, with `cf-aig-collect-log-payload: false`, so that
+nobody reading them reads what only that conversation's people do;
+[Logpush](https://developers.cloudflare.com/ai-gateway/observability/logging/logpush/), if you turn it
+on, still exports everything. Ember tells OpenAI and xAI not to keep the conversations, as each
+otherwise does for 30 days. AI Gateway Run lets the token send requests through every gateway on the
+account, with any provider keys stored on them, so keep it as safe as those keys.
 
 The model menu lists the models Ember offers, by their makers, then Workers AI's, each with what a
 million tokens read and a million written cost, as [What it costs](#what-it-costs) says. Claude, GPT
@@ -680,8 +689,9 @@ Mention @ember in a room or a thread, or write to it in a DM, and it answers the
 it's asked in one, typing while its model answers. It reads the thread, its first message and latest 50
 replies, or else the room's latest 20 messages, each after its writer's name, at most about 40,000
 characters of them, and sends them through AI Gateway to the model, whose provider reads them. Its
-answer is a message of its own, in Markdown: links, bold, lists, quotes, code blocks and tables show as
-they do in people's messages, the pictures it links to show in a card under it, and its first web link
+answer is a message of its own, in Markdown: links, bold, strikethrough, lists, quotes, code blocks and
+tables show as they do in people's messages, as do emoji, which it's told to write as themselves rather
+than by names such as :tada:, the pictures it links to show in a card under it, and its first web link
 gets a preview, as a pasted link does. Both are only of addresses a person wrote in the messages it
 read, not a bot or @ember itself, or of the pages it came from, and a preview is never of Ember's own
 pages. Any other address shows only as a link, since one the model made up could carry what it read to
@@ -730,9 +740,11 @@ or posts no card Ember keeps, stays the code it's written as, as does one in a l
 answer too long for a message keeps as many of its cards as fit, each whole, and as much of its text as
 fits beside them, counting the cards' text.
 
-What Ember tells @ember and every agent teaches them to make cards: when a card helps, as for where
-something stands, and when to leave one out, as from a conversational reply; each block a card shows,
-with how it shows and what it's for; Slack's markup, which isn't Markdown; what doesn't show; and an
+What Ember tells @ember and every agent teaches them to make cards: when a card helps, as whenever
+someone asks for one, or for where something stands, and when to leave one out, as from a
+conversational reply; that one asked for is made even when the model couldn't find all it should show,
+showing what it found and saying in it what it couldn't; each block a card shows, with how it shows
+and what it's for; Slack's markup, which isn't Markdown; what doesn't show; and an
 example of a focused card. That's about 1,800 tokens of each question on Claude's models. It comes with
 the rest of what's the same from question to question, ahead of the date and where the question's asked,
 so that a provider that caches the start of a prompt on its own, as OpenAI's does, can reuse it.
@@ -794,8 +806,12 @@ is told to say it can't, and that they can pick one that can. While it's on, @em
 times an answer and reads at most 3 pages, each cut to about 10,000 tokens: pages people link to, or
 that its searches find. Its answer is what it writes after it last searches, and a line under it links
 to the pages it cites and the pages it read, by their titles, at most 10, leaving out those the answer
-links to itself. Grok and Workers AI's models can't cite pages with Ember's tool, so their line links to those their searches found,
-each search's first ones first. A model that stops taking the tools is asked again without them, told
+links to itself. Grok's and Workers AI's APIs have no citations of their own, so Ember numbers the pages
+their searches find, counting on across an answer's searches, and asks the model to cite a page by its
+number in brackets, as [2], after what it takes from it. Ember takes those numbers out of the answer,
+but in code, and its line links to the pages they cite, in the order the answer first cites them, with
+any whose address the answer writes; one that cites none has no line, and still counts as searching
+when the switch is turned on. A model that stops taking the tools is asked again without them, told
 it can't search this time. Its searches are written from the conversation, so the provider's search
 sees what the room was asking about. While it's off, @ember is told it can't search, and that an
 administrator can turn Search the web on.
@@ -857,6 +873,17 @@ logs and spend limits tell the agents apart by `agent_id`, as [Ember AI](#ember-
 AI off takes every agent out of its rooms, as it does @ember, and keeps them, to come back as they were
 when it's on again, in the open rooms there are then.
 
+What an agent, or @ember, reads stays in the conversation it's asked in, by Ember's code rather than
+its instructions. It's asked only in a room or DM it's in, and reads that one alone: the conversation
+it's given, and what the room's search finds, which searches no other room. So nothing said in a DM or
+a private room reaches another room through it, or anyone who isn't there, even someone who is in both
+asking elsewhere. Agents join the rooms open to everyone; a private room or a DM has one only when its
+people add it, and a DM's people never change, so nobody can put an agent in someone else's. An agent
+keeps nothing from one question to the next but what the room keeps. In a DM or a private room, every
+call of an app's tool asks first, even [one always allowed](#apps), and AI Gateway's logs keep nothing
+of what's said. The model's provider still reads what it's asked, and a chat bot in the same room reads
+it all by its key, as anyone in the room can.
+
 The Agent badge follows an agent's name wherever it shows, so nobody takes it for a person: on its
 messages, deleted agents' too, on a DM with it alone in the sidebar and the room's header, in the
 mention prompt and New direct message, and on its profile. The profile shows everyone what the agent
@@ -874,7 +901,9 @@ Admin DMs only, with a link to each agent's page and to New agent.
 
 Ember writes the rest of @ember's and each agent's system prompt around their instructions: who they are
 before them, and after them how the chat shows Markdown and pictures, how to show cards, what they may
-do on the web, the date, and where they're asked, last, as it changes from question to question most.
+do on the web, the date and time, and where they're asked, last, as it changes from question to
+question most. The time is in UTC, as Ember doesn't know where each person asking is, so the model is
+told that for them it may still be the day before, or already the next.
 Under What Ember adds around them, on @ember's page and each agent's, a box headed Modify with caution
 keeps it as Ember writes it until Modify is pressed, as a change there can leave a model unsure who it
 is, where it's asked or what the chat can show. Modify opens the template Ember fills in each time it's
@@ -889,7 +918,7 @@ asked, up to 10,000 characters, with what each placeholder stands for:
 | `{{words}}` | About how many words it may answer in, from Answer length |
 | `{{cards}}` | How it can show cards under its answer with Slack payloads: when they help, what they can hold, and an example |
 | `{{web}}` | What it may do on the web, or who could let it |
-| `{{today}}` | Today's date, in UTC |
+| `{{today}}` | Today's date and the time, in UTC, as Tuesday, November 17, 2026 at 01:54 |
 | `{{instructions}}` | The instructions, which it needs once |
 
 The preview above it follows what's typed, and the box says why Ember can't take a template, before
@@ -919,12 +948,16 @@ with more than 4 MB. A server that asks for a sign-in is connected by [signing i
 
 An administrator picks the tools each agent may use, and an agent calls one only once someone allows
 that call, on a card in the room, unless the administrator has that agent's calls of the tool always
-allowed.
+allowed, which counts in open rooms alone: in a DM or a private room every call asks first, so that
+nothing said there goes to an app unless someone in it allows it.
 
 - **The address** is an `https` one, or `http` on `localhost`, for a server you're developing, with no
   name and password in it. Ember asks only that address: it follows no redirect, and it looks the name
   up first and refuses one that resolves to a private address, as [link previews](#security-notes) do,
-  so a server can't send Ember, or the token, anywhere else.
+  so a server can't send Ember, or the token, anywhere else. Ember's own address is refused too, the
+  one you're using and any other it knows reaches it, at any port: its MCP server, for
+  [outside AI](#outside-ai), would have the agents read what your sign-in to it reads, DMs and private
+  rooms too, for whoever asks them. An app connected at one before isn't called.
 - **The token** goes to the server with every request, as `Authorization: Bearer`. Ember keeps it
   encrypted, as it keeps Ember AI's API token, and never shows it again: the app's page says only that
   it has one. Type another to replace it, or check **Send no token** to stop sending one. Either has
@@ -989,11 +1022,13 @@ allowed.
   cut short. One click is answered at a time on a card. Agents' own answers still get no buttons
   that act.
 - **Always allow** is an administrator's, for one agent and one tool: a box under each picked tool in
-  the agent's Tools card. That agent's calls of that tool are then made at once, with nobody asked,
-  for anyone who can ask the agent, so keep it for tools that only read, or whose every use you'd
-  allow. The room still sees each call: Ember posts a card saying which agent used which app, the
-  tool, and what it was called with, before it makes the call, and makes none it can't show, whether
-  the room wouldn't take the card or there are more than 3,000 characters to show. A call that then
+  the agent's Tools card. That agent's calls of that tool in rooms open to everyone are then made at
+  once, with nobody asked, for anyone who can ask the agent, so keep it for tools that only read, or
+  whose every use you'd allow. In a DM or a private room each call asks first all the same, and one
+  the agent was about to make when its room was made private isn't made. The room still sees each
+  call: Ember posts a card saying which agent used which app, the tool, and what it was called with,
+  before it makes the call, and makes none it can't show, whether the room wouldn't take the card or
+  there are more than 3,000 characters to show. A call that then
   isn't made after all, as Ember finds its server has changed the tool or can't get through to it, has its card changed to say so. Uncheck the box
   and the tool asks first again, from the next call. It ends by itself when the tool is taken from
   the agent, or when Ember finds its server has changed it: from then on the tool asks first, even
@@ -1092,11 +1127,12 @@ the same client, made as them, and kept beside Ember's, sealed for that app and 
 ### Outside AI
 
 An AI app, such as Claude or ChatGPT, can connect to Ember and read it as one of the people in it,
-and send messages as them if they let it. Ember is an [MCP](https://modelcontextprotocol.io) server
-for that, at `/mcp` on its own address, the other way round from [Apps](#apps), where Ember's agents
-call other services' servers. It's off until an administrator turns on **Outside AI** on the AI
-assistant tab, which is there whether or not Ember AI is on, and until then nothing about it answers:
-`/mcp`, and the addresses below, answer 404.
+and send messages as them if they let it, in the rooms open to everyone, and in their direct messages
+and private rooms only if they let it into those too. Ember is an
+[MCP](https://modelcontextprotocol.io) server for that, at `/mcp` on its own address, the other way
+round from [Apps](#apps), where Ember's agents call other services' servers. It's off until an
+administrator turns on **Outside AI** on the AI assistant tab, which is there whether or not Ember AI
+is on, and until then nothing about it answers: `/mcp`, and the addresses below, answer 404.
 
 To connect an app, someone gives it Ember's address ending in `/mcp`, which the card and their profile
 show, as a custom connector or MCP server. The app sends their browser to a page of Ember's, which
@@ -1105,18 +1141,24 @@ could do as them, and says which site the browser goes back to, which is what te
 since the name is only what the app calls itself. **Allow** connects it. **Don't allow** goes back
 with nothing.
 
-- **What a connected app can do** is read what the person who connected it can: list the rooms
-  they're in, read a room's messages 40 at a time and a thread's, and search for words across those
-  rooms, the ones they've hidden and their direct messages too, as their own search does. It sees
-  nothing they don't. Its tools are `list_rooms`, `read_room`, `read_thread` and `search_messages`,
-  each marked as only reading.
+- **What a connected app can do** is read the rooms open to everyone that the person who connected
+  it is in: list them, read a room's messages 40 at a time and a thread's, and search for words
+  across those rooms, the ones they've hidden too, as their own search does. It sees nothing they
+  don't. Its tools are `list_rooms`, `read_room`, `read_thread` and `search_messages`, each marked as
+  only reading.
 - **It can send messages as them, if they let it.** The page that asks has a box for that, ticked
   unless they clear it, and their profile says which apps can. `send_message` posts Markdown to a room
-  they're in, or as a reply in a thread, and everyone there sees it as theirs: nothing marks it as
-  sent by an app. It mentions nobody and goes to no bot, so it calls neither @ember, an agent nor a
-  bot's webhook, even in a direct message with one, and one person's apps send at most 20 messages
-  a minute between them. An app that asks for nothing by name only
-  reads.
+  of theirs it reaches, or as a reply in a thread, and everyone there sees it as theirs: nothing marks
+  it as sent by an app. It mentions nobody and goes to no bot, so it calls neither @ember, an agent
+  nor a bot's webhook, even in a direct message with one, and one person's apps send at most 20
+  messages a minute between them. An app that asks for nothing by name only reads.
+- **Their direct messages and private rooms are theirs to let it into.** The page that asks has a
+  box for them, left clear unless they tick it, as Slack's scopes keep direct messages and private
+  channels apart from channels. Ticked, the app lists, reads, searches and, if it may send, sends in
+  those too. Clear, it can do none of that there, and a room that's made private is out of its reach
+  from then on, though they're still in it. Ember gives them only to an answer that says the box was
+  ticked, so a page that doesn't show the box never gives them. Apps connected before Ember asked
+  are kept out of them until they're connected again, and the profile says which apps can use them.
 - **Your profile lists the apps connected as you**, under **AI apps**, with when each was connected
   and last asked Ember anything, and **Disconnect**, which ends what that app was given at once. One
   person has at most 20.
@@ -1131,6 +1173,10 @@ with Ember as the authorization server:
 
 - `/.well-known/oauth-protected-resource/mcp` and `/.well-known/oauth-authorization-server` say
   where, and a request to `/mcp` without a token answers 401 pointing at the first.
+- The scopes are `read`, `write`, for sending, and `private`, for direct messages and private rooms,
+  which gives no tools of its own. A request without a token names all three, and the page that asks
+  gives `write` unless it's cleared and `private` only if it's ticked. An app that asks for `private`
+  alone is asked to read with it.
 - An app names itself by the address of a Client ID Metadata Document, which Ember reads from a
   public address only, or registers itself at `/oauth/register`, 10 times an hour from one address at
   most. Either way it's a public client, with no secret, and proves itself with PKCE (S256).
@@ -1207,6 +1253,31 @@ may refuse while the phone saves its battery. Whatever the browser stopped while
 app, the others' voices, their pictures or the telling of who's speaking, starts again as you come
 back to the page, and a tab that lost the room meanwhile joins the huddle again by itself.
 
+Raise hand, after the screen's button where the huddle is beside the sidebar, and on its bar there,
+shows a raised hand to everyone who has the huddle open: a sticker in the corner of your tile over
+your name, by its emoji and what it's called, as Slack shows one. The arrow beside the button lists
+the stickers there are, Slack's five: Raise hand, Be right back, Yes, No and Done. A sticker stays
+on your tile until you take it off, or show another in its place, and goes with you as you leave.
+While one shows, the button draws it, filled in, and takes it off, as Lower hand for a raised hand
+and as Remove sticker for another. A click on the sticker itself, on your own tile, takes it off
+too, and so does choosing it again. A tile under 176px wide has the sticker's emoji alone.
+
+React, the face after it, opens the reactions and stickers over the huddle's buttons, a tab for
+each. Reactions is the emoji picker: the emoji you pick is sent and the picker closes, as Slack's
+does. On everyone's screen it rises from the base of the people in the huddle for four seconds, over
+your name, as its emoji grows and it fades. While an emoji rises it has a pill in the corner of the
+people, which says who sent the first of them, "You" or their avatar, and how many have come since,
+and a click on it sends the same, as Slack's does. Several can rise at once, each from the next of
+five places, which are right of the people's middle, as Slack's are. Where the people have under
+672px, as beside the huddle's thread, the places are across more of them, and on a phone they stop
+short of the pills. Stickers lists the same five, which is where a phone has them, and closes as you
+choose one. On a phone narrower than 360px, React is in the menu of More, and on a screen too short
+for the two tabs over the emoji, as a phone's held on its side, they're beside them. A reaction
+holds still for someone who has asked their device for less motion, and a screen reader says each
+sticker and each reaction as it shows: "Sam Rivera: Hand raised", "Sam Rivera reacted with 🎉".
+Neither makes a sound or is kept anywhere, the huddle's bar shows no more of them than your own
+sticker on its button, and the room passes on twenty reactions from one tab in ten seconds at most.
+
 A sound plays as someone joins the huddle, yourself included, and another as someone leaves it. While
 you're the only one in it, quiet music plays on a loop, as Slack's does, from five seconds after you
 find yourself alone until someone joins you. The two sounds, and an invitation's ring, were written
@@ -1218,6 +1289,35 @@ copies the huddle's link, which opens the room at the preview, or the huddle onc
 huddle takes up to 50 people and ends when the last of them leaves. A tab is in one huddle at a time,
 and joining a room's huddle from another tab or device leaves it in the first.
 
+A huddle has a message in its room, as Slack's does, which Ember writes as the huddle starts, in the
+name of whoever started it. Where a message has its author's face and name, it has the headphones
+on green and "A huddle is happening", with LIVE beside it, and under that the faces and names of
+whoever is in the huddle, and Join, which opens the preview, in any tab that isn't in it. Once the
+last of them has left it reads "A huddle happened", and says who was in it and for how long: "Sam
+and Priya were in the huddle for 24 minutes". It's a message in what else it has: its time and its
+link, reactions, and a thread, where what a huddle settled can be written down, and search finds it
+by "A huddle started", which it has for its text. But it marks nothing unread, notifies nobody and
+is sent to no webhook, since the sidebar already shows a huddle and an invitation rings whoever is
+wanted in it, and nobody can edit it. Whoever started the huddle can delete it, as can an
+administrator, which leaves the huddle going with no message. Someone who was in a huddle and joins
+the room's again within half a minute of its end goes on with that huddle, under the same message,
+so the last person's lost connection doesn't leave the room two of them. Anyone else starts another.
+
+The huddle shows that thread itself, beside the people in it, where Slack's huddle window has it:
+under Thread, it says what a huddle's thread is for, then what's been written in it, over a composer
+to reply in, with files and links as in any thread. What you send there, everyone in the huddle
+reads as it comes, and it stays in the room, under the huddle's message, once the huddle is over.
+A reply begun in the thread beside the room is there in the huddle to go on with, and the room's has
+it as the huddle's left it. Close thread takes it away, as does Thread, among the huddle's buttons
+after React, which shows it again with the cursor in its composer: closed, it leaves its
+space to the people in the huddle, or to a screen someone shares. The thread is there as a huddle
+opens, in a window at least 1180px wide. A narrower one, or a phone, has the thread in the room,
+from the huddle's message. It comes to the huddle over a connection of its own to the huddle's room,
+whatever page the huddle is open over, and having it there is neither being in the room, which
+doesn't show you among who's here for it, nor reading it: what's said in the room meanwhile still
+marks the room unread, unless it's a reply sent there from the thread too, which you've seen. A
+huddle whose message has been deleted has no thread, and says so.
+
 A direct message has a huddle too, with the headphones at its top and its mark on its row in the
 sidebar, when there's someone in it to huddle with, which a bot or an AI agent isn't, nor anyone who
 can no longer sign in. Starting one there invites the others in it. Wherever they have Ember open,
@@ -1228,8 +1328,30 @@ in a huddle before they've said how they join it, and answering an invitation, e
 down in their other tabs and on their other devices. Whoever started the huddle isn't told of a
 Decline. It stops ringing by itself once the huddle is over, or once they're in it. An invitation
 reaches the people in the direct message who hear its @mentions or more, so nobody who has turned
-its notifications off, and only where Ember is open: a device with Ember closed doesn't ring yet.
-Nothing is kept of an invitation, so one that comes while someone's connection is down is lost.
+its notifications off. Nothing is kept of an invitation, so a tab whose connection is down when one
+comes never shows it.
+
+Anyone in a huddle can invite more of its room's people into it. Invite people, the first button
+along the huddle's base, or in the menu of More, the last before Leave, on a phone, lists the people
+in the room who aren't in the huddle and could join it, by name, 20 at a time under a search once
+there are more. Tick one or more, up to 50, and Send Invite has the room invite them as it does for
+a direct message's huddle, and an invitation into a shared room says which: "Priya Patel invites you
+to a huddle in Launch". Here too, it rings only those who hear the room's @mentions or more, and
+whoever sent it is told who they invited, not who it reached, nor of a Decline.
+
+Whoever an invitation reaches who has Ember in view nowhere is sent it as a push notification too,
+on each browser and phone where they turned notifications on: someone with no tab of Ember open,
+with every one in the background, or with none heard from in the last minute, as on a laptop gone
+to sleep. A tab says whether it's shown as it connects, and each time it's hidden or shown again.
+The notification is titled with who invites them and reads "Invites you to a huddle", and in which
+room for a shared room's, and opening it opens the room, where the huddle is to join. A push
+service keeps it for a minute for a device it can't reach, where it keeps a message's for four
+weeks, so a phone that was off isn't told of a huddle long over. Once shown, it stays until it's
+opened or dismissed: answering the invitation somewhere else, or the huddle ending, doesn't take it
+down. A tab in the background still shows the invitation, and rings if its browser lets it, so
+someone with Ember behind another tab may get both. So may someone looking at a tab left open
+since before Ember was updated to do this: such a tab doesn't say whether it's shown, so it
+doesn't count until it's reloaded.
 
 An administrator turns huddles on under Huddles in community settings, with the switch on its card.
 Huddles run through Cloudflare's [Realtime SFU](https://developers.cloudflare.com/realtime/sfu/),
@@ -1368,8 +1490,10 @@ What a self-hoster should know, beyond keeping the setup password and link to th
 - An administrator can make a sign-in link for anyone, administrators included, which signs in as
   that person for 4 hours, more than once, while the session that showed it is still signed in as an
   administrator. Your own link works only while the session that showed it does, so signing out, a
-  password reset, or a new password saved in another session ends it. Its id travels in the
-  address's fragment, which no log sees.
+  password reset, or a new password saved in another session ends it. A new password saved in the
+  session that showed it, or Disconnect Memberful there, ends every link that session had shown until
+  then, those an administrator showed of other people included, and the ones it shows from then on
+  work. Its id travels in the address's fragment, which no log sees.
 - A file's address is signed and never expires: whoever has it can open the file until its message
   is deleted, as with Active Storage's links. A bot is given the addresses of the files in its rooms,
   with the messages its webhook is sent and those the bot API answers, so it can read them.
@@ -1435,10 +1559,11 @@ What a self-hoster should know, beyond keeping the setup password and link to th
 - Custom CSS runs on every page for everyone, so it's an administrator's to write, like the rest of
   the workspace, and `EMBER_RECOVERY_TOKEN` can take over any account, so keep it set only while
   resetting a password, as above.
-- While [Outside AI](#outside-ai) is on, an AI app someone connects sees what they see, and writes as
-  them if they let it send, until they disconnect it on their profile, and whoever runs that app can
-  read it too. The page that asks them
-  names the site their browser goes back to, since anyone can register an app under any name.
+- While [Outside AI](#outside-ai) is on, an AI app someone connects sees the open rooms they're in,
+  and their direct messages and private rooms only if they tick those, and writes as them if they
+  let it send, until they disconnect it on their profile, and whoever runs that app can read it too.
+  The page that asks them names the site their browser goes back to, since anyone can register an app
+  under any name.
 - `/api/health` tells strangers only whether Ember is up; administrators and whoever sends the
   recovery token hear the rest. QR codes (`/qr_code/<id>`) are drawn for people signed in.
 

@@ -124,8 +124,8 @@ export function MessageActionsMenu({ message, nodes, row, threaded, editable, th
   const menuId = useId();
   const trayId = useId();
   // What Copy text copies: the message's plain text, which holds a bot's cards' too. A file message has none
-  // but its file's name.
-  const text = message.attachment ? null : message.plainText;
+  // but its file's name, and a huddle's message none that it shows.
+  const text = message.attachment || message.huddle ? null : message.plainText;
 
   const show = (byHovering: boolean) => {
     hoverOpened.current = byHovering;
@@ -427,11 +427,12 @@ export function MessageActionsMenu({ message, nodes, row, threaded, editable, th
                 </PageLink>
               </ActionTooltip>
             )}
-            {/* More actions holds Quote and Copy link with a mouse. */}
+            {/* More actions holds Quote and Copy link with a mouse. A huddle's message has nothing of its author's to quote. */}
             {message.attachment ? (
               <FileActions file={message.attachment} />
             ) : (
-              !overlapping && (
+              !overlapping &&
+              !message.huddle && (
                 <ActionTooltip label="Quote">
                   <QuoteButton message={message} nodes={nodes} aria-label="Quote" className={ACTION} onQuote={quote}>
                     <QuoteMessage />
@@ -483,8 +484,8 @@ export function MessageActionsMenu({ message, nodes, row, threaded, editable, th
             hidden={!actionsOpen}
             className={cn(PANEL, "w-max max-w-full justify-self-end overflow-y-auto overscroll-contain p-1 group-data-[panel-above]/menu:-order-1")}
           >
-            {/* Quoting a file message would quote nothing, as its text is empty. */}
-            {!message.attachment && (
+            {/* Quoting a file message would quote nothing, as its text is empty, and a huddle's message shows none of its own. */}
+            {!message.attachment && !message.huddle && (
               <QuoteButton message={message} nodes={nodes} className={ITEM} onQuote={quote}>
                 <QuoteMessage />
                 Quote
@@ -503,8 +504,8 @@ export function MessageActionsMenu({ message, nodes, row, threaded, editable, th
             {editable && (
               <>
                 <hr className="my-1 border-message-border" />
-                {/* The text of a file message, or of a bot's cards, can't be changed, so only the bar's Edit opens their editor. */}
-                {!message.attachment && !message.cards && (
+                {/* The text of a file message, of a bot's cards or of a huddle's message can't be changed, so only the bar's Edit opens their editor. */}
+                {!message.attachment && !message.cards && !message.huddle && (
                   <button type="button" className={ITEM} onClick={edit}>
                     <Edit />
                     Edit message

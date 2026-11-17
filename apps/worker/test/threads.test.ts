@@ -93,6 +93,12 @@ const marked = async (room: RoomId) =>
     )
   ).map((row) => (row as { name: string }).name);
 
+/** Closes `tab`, and waits for room `room` to have let go of its person's sockets, who views nothing of it from then. */
+async function closed(room: RoomId, tab: Client): Promise<void> {
+  tab.close();
+  await vi.waitFor(() => runInDurableObject(roomStub(room), (_room, state: DurableObjectState) => expect(state.getWebSockets(tab.me.id)).toHaveLength(0)));
+}
+
 /** When room `room` was last active, as the sidebar orders DMs by it. */
 const lastMessageAt = async (room: RoomId) => ((await workspaceSql("SELECT last_message_at FROM rooms WHERE id = ?", room)) as [{ last_message_at: string | null }])[0].last_message_at;
 
@@ -329,6 +335,59 @@ describe("Whom a reply reaches", () => {
     expect(await marked(room)).toContain("Grace");
     expect(await lastMessageAt(room)).toBe(sent.createdAt);
   });
+
+  it("neither reads the room through a socket that shows a thread apart from its timeline, as a huddle shows its own, nor counts its person as there for what's said in the room", async () => {
+    const room = await freshRoom("apart");
+    const ada = await connect(room, "Ada", { visible: true });
+    const grace = await signIn("Grace");
+    await post(ada, "<p>Plan</p>");
+    await delivered(room);
+    expect(await marked(room)).toContain("Grace");
+
+    // Opening it in a shown tab reads nothing, nor does the tab's coming back into view.
+    const apart = await connect(room, grace, { visible: true, apart: true });
+    apart.send({ type: "presence.visible", visible: true });
+    await settle(apart);
+    await delivered(room);
+    expect(await marked(room)).toContain("Grace");
+
+    // The room's own socket reads it, and once that's closed, what's said next marks it unread again.
+    const tab = await connect(room, grace, { visible: true });
+    await vi.waitFor(async () => expect(await marked(room)).not.toContain("Grace"));
+    tab.close();
+    await sleep(5);
+    await post(ada, "<p>Still on for Friday?</p>");
+    await delivered(room);
+    expect(await marked(room)).toContain("Grace");
+  });
+
+  it("has a reply sent to the room too seen by whoever was viewing the room as it came, or its thread on a socket apart from the room's timeline, though they left before the Workspace heard of it", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const room = await freshRoom("apart");
+    const ada = await connect(room, "Ada", { visible: true });
+    // Grace, Lin and Max have read the room, which Max keeps open.
+    const [gracesTab, linsTab, max] = [await connect(room, "Grace", { visible: true }), await connect(room, "Lin", { visible: true }), await connect(room, "Max", { visible: true })];
+    const parent = await post(ada, "<p>Plan</p>");
+    await delivered(room);
+    for (const tab of [gracesTab, linsTab]) await closed(room, tab);
+    // Whoever made the room has yet to open it.
+    expect(await marked(room)).toEqual(["Host"]);
+
+    // Grace and Lin each have a socket apart from the room's timeline: hers with the thread open, and his with none.
+    const [grace, lin] = [await connect(room, gracesTab.session, { visible: true, apart: true }), await connect(room, linsTab.session, { visible: true, apart: true })];
+    await openThread(grace, parent.id);
+    await settle(lin);
+
+    // The reply comes while the Workspace can't be reached, and Grace and Max leave before it hears.
+    const reconnect = await cutOff(room);
+    await reply(ada, parent, "<p>Everyone</p>", true);
+    for (const tab of [grace, max]) await closed(room, tab);
+    await vi.waitFor(async () => expect(await runInDurableObject(roomStub(room), (_room, state: DurableObjectState) => state.storage.getAlarm())).not.toBeNull(), { timeout: 5_000 });
+    await reconnect();
+    await runDurableObjectAlarm(roomStub(room));
+    await delivered(room);
+    expect(await marked(room)).toEqual(["Host", "Lin"]);
+  });
 });
 
 describe("Pushing replies", () => {
@@ -401,6 +460,35 @@ describe("Pushing replies", () => {
     await settle(grace);
     await reply(lin, parent, "<p>See you there</p>");
     await vi.waitFor(() => expect(labels()).toEqual(["ada", "ada", "ada", "grace"]), { timeout: 5_000 });
+  });
+
+  it("counts whoever has a thread open on a socket apart from the room's timeline as viewing the thread, while their tab is shown", async () => {
+    const pushed = pushServices();
+    const room = await freshRoom("Launch");
+    const [ada, lin] = [await connect(room, "Ada", { visible: false }), await connect(room, "Lin", { visible: false })];
+    const grace = await signIn("Grace");
+    await subscribe(ada.session, "ada", await pushBrowser());
+    await subscribe(grace, "grace", await pushBrowser());
+    const labels = () => pushed.map(({ label }) => label).sort();
+    const parent = await post(ada, "<p>Launch day?</p>");
+    const apart = await connect(room, grace, { visible: true, apart: true });
+    // Grace follows the thread from her first reply, and is pushed what's said in it, as Ada is, who wrote its message.
+    await reply(apart, parent, "<p>Friday</p>");
+    await reply(lin, parent, "<p>Friday works</p>");
+    await vi.waitFor(() => expect(labels()).toEqual(["ada", "ada", "grace"]), { timeout: 5_000 });
+
+    await openThread(apart, parent.id);
+    await reply(lin, parent, "<p>See you there</p>");
+    await vi.waitFor(() => expect(labels()).toEqual(["ada", "ada", "ada", "grace"]), { timeout: 5_000 });
+    // Nor is one sent to the room too pushed to her, who sees it in the thread.
+    await reply(lin, parent, "<p>All welcome</p>", true);
+    await vi.waitFor(() => expect(labels()).toEqual(["ada", "ada", "ada", "ada", "grace"]), { timeout: 5_000 });
+    // Her tab hidden, she no longer sees what's said there, sent to the room or not.
+    apart.send({ type: "presence.visible", visible: false });
+    await settle(apart);
+    await reply(lin, parent, "<p>Bring the banner</p>");
+    await reply(lin, parent, "<p>And the cake</p>", true);
+    await vi.waitFor(() => expect(labels()).toEqual(["ada", "ada", "ada", "ada", "ada", "ada", "grace", "grace", "grace"]), { timeout: 5_000 });
   });
 
   it("pushes nothing for a message deleted before the room tells the Workspace of it, though its thread keeps its place", async () => {

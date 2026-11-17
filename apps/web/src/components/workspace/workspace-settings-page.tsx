@@ -94,11 +94,11 @@ interface Props {
  * Workspace settings, in six sections, of which the address's fragment shows one, all of them staying
  * drawn so what's typed in one waits there while another shows:
  *
- * - General, where administrators change the workspace's icon, which one picked saves at once, showing it
- *   meanwhile, and Remove icon takes away, then rename the workspace, give it a tagline, and show or hide
- *   the translation buttons, which Save changes saves together, and see which release of Ember this is,
- *   and when a newer one is out, which Check for updates asks GitHub again. Members see its icon, name
- *   and tagline.
+ * - General, where administrators first see which release of Ember this is, and when a newer one is out,
+ *   which Check for updates asks GitHub again, then change the workspace's icon, which one picked saves
+ *   at once, showing it meanwhile, and Remove icon takes away, then rename the workspace, give it a
+ *   tagline, and show or hide the translation buttons, which Save changes saves together. Members see
+ *   its icon, name and tagline.
  *   The rail's icons are in Custom styles (`NavigationIconSettings`), where the project's owner moved
  *   them.
  * - Rooms and permissions: New room, which members don't get while only administrators can create
@@ -411,6 +411,8 @@ export function WorkspaceSettingsPage({
         {settings &&
           (settings.canAdminister ? (
             <>
+              {/* First, so that administrators don't miss a newer release, as the project's owner asked (2026-11-17). */}
+              <EmberVersion check={release} onCheckForUpdates={onCheckForUpdates} onFailed={onFailed} />
               <PicturePicker
                 id="account_logo"
                 src={pickedLogo ?? account.logo ?? STOCK_LOGO}
@@ -471,7 +473,6 @@ export function WorkspaceSettingsPage({
                   Save changes
                 </SubmitButton>
               </form>
-              <EmberVersion check={release} onCheckForUpdates={onCheckForUpdates} onFailed={onFailed} />
             </>
           ) : (
             <>

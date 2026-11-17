@@ -16,10 +16,10 @@ const NOTE = "text-[0.8em] text-muted-foreground max-md:text-[12px]";
 
 /** What the card says of the tools `name` is picked. */
 export const toolsExplained = (name: string) =>
-  `Pick what ${name} may use of the apps you've connected, up to ${MAX_AGENT_TOOLS} tools. Anyone who can ask ${name} could have it use them, with the token each app was connected with, and allows each call on a card first, unless you always allow the tool.`;
+  `Pick what ${name} may use of the apps you've connected, up to ${MAX_AGENT_TOOLS} tools. Anyone who can ask ${name} could have it use them, with the token each app was connected with, and allows each call on a card first. A tool you always allow skips that in open rooms, never in DMs or private rooms.`;
 
 /** What the box under a picked tool says it does for the agent `name`. */
-export const alwaysAllowExplained = (name: string) => `Always allow: ${name} calls it without asking first, and the room is shown each call`;
+export const alwaysAllowExplained = (name: string) => `Always allow: in open rooms, ${name} calls it without asking first, and the room is shown each call`;
 
 /** What the card says in place of its tools, with no app connected. */
 export const NO_APPS_TO_PICK = "No apps are connected yet.";

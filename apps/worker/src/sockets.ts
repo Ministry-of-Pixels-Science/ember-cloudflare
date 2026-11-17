@@ -3,14 +3,18 @@ import { HuddleCloseCode } from "@ember/protocol/huddles";
 
 // What rooms and the Workspace, the Durable Objects that keep sockets, share about closing them.
 
+/** The code a socket that sent a frame too large to read closes with (RFC 6455, section 7.4.1). */
+export const TOO_LARGE = 1009;
+
 /** What a socket closed with each code says, for anyone reading the close. */
-export const CLOSE_REASONS: Record<CloseCode | HuddleCloseCode, string> = {
+export const CLOSE_REASONS: Record<CloseCode | HuddleCloseCode | typeof TOO_LARGE, string> = {
   [CloseCode.Reconnect]: "Reconnect",
   [CloseCode.Revoked]: "Revoked",
   [CloseCode.NotFound]: "NotFound",
   [HuddleCloseCode.Full]: "Full",
   [HuddleCloseCode.Off]: "Off",
   [HuddleCloseCode.Moved]: "Moved",
+  [TOO_LARGE]: "Message too big",
 };
 
 /**
@@ -55,5 +59,5 @@ export function isTooLarge(raw: string | ArrayBuffer, limit: number): boolean {
  * Reading it would hold up every other socket the Durable Object serves.
  */
 export function closeTooLarge(ws: WebSocket): void {
-  if (ws.readyState === WebSocket.OPEN) ws.close(1009, "Message too big");
+  if (ws.readyState === WebSocket.OPEN) ws.close(TOO_LARGE, CLOSE_REASONS[TOO_LARGE]);
 }

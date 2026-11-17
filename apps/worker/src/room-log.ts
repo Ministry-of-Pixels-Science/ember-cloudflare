@@ -25,7 +25,7 @@ export interface RoomEvent {
   /**
    * For a reply sent only to its thread, who the room says is viewing the thread as it sends the event,
    * and for a message in the room, who was viewing the room as it came or is as the room sends it, when
-   * the room knows.
+   * the room knows, with who was viewing its thread as it came, for a reply sent to the room too.
    */
   viewerIds?: UserId[];
   /**

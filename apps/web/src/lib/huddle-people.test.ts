@@ -1,6 +1,6 @@
 import type { DirectRoom, Room, User } from "@ember/protocol";
 import { describe, expect, it } from "vitest";
-import { hasHuddles, huddledWith, huddlePlace, inItNow, inItsHuddle, inTheHuddle, invitedOnceItStarts, sharingScreens } from "./huddle-people";
+import { hasHuddles, huddledWith, huddleLasted, huddlePlace, inItNow, inItsHuddle, inTheHuddle, invitable, invitedNow, invitedOnceItStarts, sharingScreens, wereInTheHuddle } from "./huddle-people";
 
 const [ada, priya, sam, deploys]: User[] = [
   { id: "ada", name: "Ada Lovelace" },
@@ -39,6 +39,18 @@ describe("hasHuddles", () => {
   });
 });
 
+describe("invitable", () => {
+  it("is everyone in the huddle's room but oneself, whoever is in the huddle, and whoever joins none, in the room's order", () => {
+    expect(invitable([sam!, ada!, deploys!, priya!], "ada", new Set(), joinsNone)).toEqual([sam, priya]);
+    expect(invitable([sam!, ada!, deploys!, priya!], "ada", new Set(["ada", "sam"]), joinsNone)).toEqual([priya]);
+  });
+
+  it("is nobody once everyone who could join is in it", () => {
+    expect(invitable([ada!, deploys!, priya!], "ada", new Set(["ada", "priya"]), joinsNone)).toEqual([]);
+    expect(invitable([], "ada", new Set(), joinsNone)).toEqual([]);
+  });
+});
+
 describe("huddlePlace", () => {
   it("is in a shared room, and with whoever a direct message is with", () => {
     expect(huddlePlace(launch, "Launch")).toBe("in Launch");
@@ -51,6 +63,14 @@ describe("invitedOnceItStarts", () => {
     expect(invitedOnceItStarts(["Priya Patel"])).toBe("Priya is invited once it starts.");
     expect(invitedOnceItStarts(["Priya Patel", "Sam Rivera"])).toBe("Priya and Sam are invited once it starts.");
     expect(invitedOnceItStarts(["Priya Patel", "Sam Rivera", "Leo Park", "Maya Chen"])).toBe("Priya, Sam, Leo, and 1 other are invited once it starts.");
+  });
+});
+
+describe("invitedNow", () => {
+  it("names whoever someone in a huddle has invited, by first name up to three", () => {
+    expect(invitedNow(["Priya Patel"])).toBe("Priya is invited.");
+    expect(invitedNow(["Priya Patel", "Sam Rivera"])).toBe("Priya and Sam are invited.");
+    expect(invitedNow(["Priya Patel", "Sam Rivera", "Leo Park", "Maya Chen", "Noor Aziz"])).toBe("Priya, Sam, Leo, and 2 others are invited.");
   });
 });
 
@@ -134,5 +154,43 @@ describe("inItsHuddle", () => {
   it("counts everyone in it, them included, while it lacks a name", () => {
     expect(inItsHuddle([], 1, true)).toBe("2 people are in the huddle");
     expect(inItsHuddle(["Sam Rivera"], 2, true)).toBe("3 people are in the huddle");
+  });
+});
+
+describe("wereInTheHuddle", () => {
+  it("names whoever was in it to someone who wasn't, by first name up to three", () => {
+    expect(wereInTheHuddle(["Sam Rivera"], false)).toBe("Sam was in the huddle");
+    expect(wereInTheHuddle(["Sam Rivera", "Priya Patel"], false)).toBe("Sam and Priya were in the huddle");
+    expect(wereInTheHuddle(["Sam Rivera", "Priya Patel", "Leo Park", "Maya Chen", "Ada Lovelace"], false)).toBe("Sam, Priya, Leo, and 2 others were in the huddle");
+  });
+
+  it("names you last to someone who was in it, and counts the others past the third", () => {
+    expect(wereInTheHuddle([], true)).toBe("Only you were in the huddle");
+    expect(wereInTheHuddle(["Sam Rivera"], true)).toBe("Sam and you were in the huddle");
+    expect(wereInTheHuddle(["Sam Rivera", "Priya Patel", "Leo Park"], true)).toBe("Sam, Priya, Leo, and you were in the huddle");
+    expect(wereInTheHuddle(["Sam Rivera", "Priya Patel", "Leo Park", "Maya Chen"], true)).toBe("Sam, Priya, Leo, and 1 other were in the huddle");
+  });
+
+  it("says so of a huddle that names nobody", () => {
+    expect(wereInTheHuddle([], false)).toBe("Nobody was in the huddle");
+  });
+});
+
+describe("huddleLasted", () => {
+  const lasted = (seconds: number) => huddleLasted("2026-11-10T09:00:00.000Z", new Date(Date.parse("2026-11-10T09:00:00.000Z") + seconds * 1000).toISOString());
+
+  it("counts whole minutes, and says so of less than one", () => {
+    expect(lasted(0)).toBe("less than a minute");
+    expect(lasted(59)).toBe("less than a minute");
+    expect(lasted(60)).toBe("1 minute");
+    expect(lasted(24 * 60 + 40)).toBe("24 minutes");
+    expect(lasted(59 * 60 + 59)).toBe("59 minutes");
+  });
+
+  it("counts hours past the hour, then the minutes left", () => {
+    expect(lasted(60 * 60)).toBe("1 hour");
+    expect(lasted(65 * 60)).toBe("1 hour and 5 minutes");
+    expect(lasted(121 * 60)).toBe("2 hours and 1 minute");
+    expect(lasted(26 * 60 * 60)).toBe("26 hours");
   });
 });

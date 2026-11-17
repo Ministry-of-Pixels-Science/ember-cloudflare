@@ -119,11 +119,13 @@ function readIpv6(text: string, at: number): Read<bigint> {
 
 const bitsOf = (groups: number[]) => groups.reduce((bits, group) => (bits << 16n) | BigInt(group), 0n);
 
-// Ruby's IPAddr predicates, with their handling of IPv4-mapped IPv6 addresses, which only checks the
-// `ffff` bits (`@addr & 0xffff_0000_0000 == 0xffff_0000_0000`).
+// Ruby's IPAddr predicates, except in which IPv6 addresses they take for IPv4-mapped ones. Ruby only
+// checks the `ffff` bits (`@addr & 0xffff_0000_0000 == 0xffff_0000_0000`), which takes a public address
+// anyone with an IPv6 prefix can sign in from, such as 2001:db8:1:2:0:ffff:a00:1, for a private one,
+// and a ban that can't block one of someone's addresses doesn't ban them.
 
-/** The IPv4 address an IPv6 one maps, as Ruby finds one, or null. */
-const mappedV4 = ({ v6, bits }: IpAddress) => (v6 && (bits & 0xffff_0000_0000n) === 0xffff_0000_0000n ? bits & 0xffff_ffffn : null);
+/** The IPv4 address an IPv6 one maps, which only one in ::ffff:0:0/96 does, or null. */
+const mappedV4 = ({ v6, bits }: IpAddress) => (v6 && bits >> 32n === 0xffffn ? bits & 0xffff_ffffn : null);
 
 /** Whether an IPv4 address is in 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 or 169.254.0.0/16. */
 const isLoopbackV4 = (bits: bigint) => (bits & 0xff00_0000n) === 0x7f00_0000n;

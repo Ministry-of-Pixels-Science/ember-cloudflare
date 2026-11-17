@@ -4,9 +4,9 @@ import { prepareBody, writtenBody, type PreparedBody } from "./body";
 import { displayBody, displayMarkup, type DisplayNode, type DisplayPreview } from "./display";
 import { editableBody, mentionSgid } from "./mentions";
 import { parseHtml } from "./parse";
-import { normalizeTweetUrl, previewContent } from "./previews";
+import { MAX_PREVIEW_COPIES_LENGTH, normalizeTweetUrl, previewContent } from "./previews";
 import { htmlEscape } from "./ruby";
-import { innerHtml } from "./serialize";
+import { innerHtml, toHtml } from "./serialize";
 import { corpus, corpusUser, RailsError } from "./testing/corpus";
 import { testUserId, testUsers } from "./testing/users";
 import { descendants, getAttr, isElement, removeAttr, type Element } from "./tree";
@@ -175,6 +175,19 @@ describe("Link previews in messages", () => {
     it("puts the preview in place of a Trix body's text, in each of its divs", () => {
       const nodes = shown(`<div>https://basecamp.com/${trixPreview("https://basecamp.com/", "Basecamp")}</div>`);
       expect(nodes).toEqual([{ kind: "element", name: "div", attrs: {}, children: [expect.objectContaining({ kind: "preview" })] }]);
+    });
+
+    it("puts it in the first div and as many more as MAX_PREVIEW_COPIES_LENGTH has room for, and nothing in the rest", () => {
+      const previewsByDiv = (nodes: DisplayNode[]) => nodes.map((node) => previewsIn([node]).length);
+      const beforeEmptyDivs = (details: Parameters<typeof preview>[0], divs: number) =>
+        shown(`<div>https://basecamp.com/${preview(details)}</div>${"<div></div>".repeat(divs)}`);
+      const copies = Math.floor(MAX_PREVIEW_COPIES_LENGTH / toHtml(parseHtml(stored(preview(basecamp)).html)).length);
+      const nodes = beforeEmptyDivs(basecamp, copies + 1);
+      expect(previewsByDiv(nodes)).toEqual([...Array<number>(copies).fill(1), 0, 0]);
+      expect(textShown(nodes)).toBe("<div></div>".repeat(copies + 2));
+      expect(previewsByDiv(beforeEmptyDivs(basecamp, 1))).toEqual([1, 1]);
+      const long = { ...basecamp, url: `https://example.com/${"a".repeat(MAX_PREVIEW_COPIES_LENGTH)}` };
+      expect(previewsByDiv(beforeEmptyDivs(long, 1))).toEqual([1, 0]);
     });
 
     it("keeps the link with other text, or more than one preview", () => {

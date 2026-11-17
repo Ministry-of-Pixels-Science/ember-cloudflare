@@ -286,7 +286,7 @@ describe("An AI agent", () => {
     const [instructions, ...turns] = body.messages;
     expect(instructions!.content).toMatch(/^You are Scout, an AI agent in the team chat ".*". People ask you things by mentioning @Scout in a room or a thread, or by writing to you directly\.\n\n/);
     expect(instructions!.content).toContain(`${SCOUT.instructions}\n\nWrite in Markdown.`);
-    expect(instructions!.content).toMatch(/\n\nYou're asked in the room "general"\. .* Answer the last one, which Ada Lovelace wrote, in at most about 150 words\.$/);
+    expect(instructions!.content).toMatch(/\n\nYou're asked in the room "general"\. .* Answer the last one, which "Ada Lovelace" wrote, in at most about 150 words\. [^\n]+$/);
     expect(instructions!.content).not.toContain("You are Ember");
     expect(turns).toEqual([
       { role: "user", content: "Ada Lovelace: Are we still on for the picnic?" },
@@ -306,8 +306,8 @@ describe("An AI agent", () => {
     await post(client, `<p>${mention(scout)} what's the forecast?</p>`);
     expect(await nextFrom(client, scout)).toMatchObject({ plainText: "Sunny." });
     const told = questions[0]!.body.messages[0]!.content;
-    expect(told).toMatch(new RegExp(`^You are Scout of .+, asked in the room "general" by Ada Lovelace\\.\n\n${SCOUT.instructions.replace(/[.,]/g, "\\$&")}\n\nWrite at most 150 words\\. You can't search the web or open links\\.`));
-    expect(told).toMatch(/ Today is \w+, \w+ \d+, \d{4}\.$/);
+    expect(told).toMatch(new RegExp(`^You are Scout of .+, asked in the room "general" by "Ada Lovelace"\\.\n\n${SCOUT.instructions.replace(/[.,]/g, "\\$&")}\n\nWrite at most 150 words\\. You can't search the web or open links\\.`));
+    expect(told).toMatch(/ Today is \w+, \w+ \d+, \d{4} at \d{2}:\d{2}\.$/);
     expect(told).not.toContain("{{");
     client.close();
   });
@@ -563,7 +563,7 @@ describe("@ember", () => {
 
     await post(client, `<p>${mention(EMBER)} how's the launch?</p>`);
     expect(await nextFrom(client, EMBER)).toMatchObject({ plainText: "Fine." });
-    expect(questions[0]!.body.messages[0]!.content).toBe(`Be brief.\n\nYou are Ember. Answer Ada Lovelace, in the room "general".`);
+    expect(questions[0]!.body.messages[0]!.content).toBe(`Be brief.\n\nYou are Ember. Answer "Ada Lovelace", in the room "general".`);
     client.close();
   });
 });
@@ -690,7 +690,7 @@ describe("Try it", () => {
     const trial = { ...TRIAL, name: "Grok", model: "xai/grok-4.7", thinking: "low", webSearch: true, question: "who won the latest Packers game?" };
     const questions = internet((asked) => {
       if (asked.url === WEB_SEARCH) return Response.json({ success: true, result: { items: [{ ...DOCS, description: "The Packers won." }] } });
-      if (asked.body.messages.at(-1)?.role === "tool") return chatAnswer("The Packers won.");
+      if (asked.body.messages.at(-1)?.role === "tool") return chatAnswer("The Packers won [1].");
       const call = { id: "call_0", type: "function", function: { name: "web_search", arguments: JSON.stringify({ query: "Packers" }) } };
       return Response.json({ choices: [{ message: { role: "assistant", content: null, tool_calls: [call] }, finish_reason: "tool_calls" }], usage: { completion_tokens: 20 } });
     });

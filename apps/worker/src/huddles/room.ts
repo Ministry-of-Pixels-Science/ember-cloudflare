@@ -20,12 +20,16 @@ import {
   type HuddleIceServer,
   type HuddlePerson,
   type HuddleServerFrame,
+  type HuddleSticker,
   type HuddleTrack,
   type HuddleTrackKind,
 } from "@ember/protocol/huddles";
 import type { Env } from "../env";
-import { CLOSE_REASONS, closedAtOnce, closeTooLarge, isTooLarge, MAX_ROOM_FRAME_SIZE } from "../sockets";
+import { sortableId } from "../ids";
+import { CLOSE_REASONS, closedAtOnce, isTooLarge, MAX_ROOM_FRAME_SIZE, TOO_LARGE } from "../sockets";
 import { workspace } from "../workspace";
+import type { InvitationPush } from "../workspace-store";
+import type { HuddleNow, ResumedHuddle } from "./message";
 import { relayServers } from "./relay";
 import { acceptAnswer, closeTracks, publishTracks, pullTracks, resizeTracks, SfuError, startSession, TRACKS_PER_REQUEST, type HuddleApp, type Pulled, type SfuApp } from "./sfu";
 
@@ -60,7 +64,17 @@ import { acceptAnswer, closeTracks, publishTracks, pullTracks, resizeTracks, Sfu
 // The room tells the Workspace who's in the huddle as they join and leave, and the Workspace tells
 // everyone in the room, in the huddle or not, so their sidebars and the room's header can show it.
 // Someone in the huddle invites others into it through the Workspace too (`huddle.invite`), which
-// knows who's in the room, and has every tab of theirs.
+// knows who's in the room, and has every tab of theirs. Whoever it finds with Ember in view nowhere is
+// pushed the invitation, which the room sends, as it sends its messages' pushes.
+//
+// The sticker someone shows is in their socket's attachment, as whether they're muted is, and the
+// others hear of it as of that. A reaction is kept nowhere: the room tells everyone in the huddle of
+// it as it comes, and it's gone.
+//
+// The room keeps a message of each huddle among its own (./message.ts), which it brings in step as
+// people join and leave: the huddle tells it that they have, and what it is now. The huddle gives the
+// message its id as it starts, and tells it to everyone it welcomes, whose tabs show the message's
+// thread as the huddle's.
 
 /**
  * The tag on a huddle's sockets, besides the tags a room's own sockets carry. Nobody's id has a colon in
@@ -87,6 +101,10 @@ const FRAMES_WAITING = 4;
 /** How often a tab may invite people into the huddle in a minute: each time has the Workspace read who of them is in the room. */
 export const INVITES_A_MINUTE = 20;
 const MINUTE_MS = 60_000;
+
+/** How many of a tab's reactions the room tells the huddle of in ten seconds: everyone in it hears of each. */
+export const REACTIONS_IN_TEN_SECONDS = 20;
+const TEN_SECONDS_MS = 10_000;
 
 /**
  * The most people one check takes out for being unheard. The SFU is asked about each of them once for
@@ -196,6 +214,18 @@ interface Connections {
   receiving?: Receiving;
 }
 
+/** How often a tab has done something in a stretch of time, which started at `since`. */
+interface Tally {
+  since: number;
+  count: number;
+}
+
+/** `tally` with one more counted at `now`, in a stretch `ms` long that takes `most`, or null once the stretch has had that many. */
+function oneMore(tally: Tally | undefined, now: number, ms: number, most: number): Tally | null {
+  const stretch = tally && now - tally.since < ms ? tally : { since: now, count: 0 };
+  return stretch.count < most ? { since: stretch.since, count: stretch.count + 1 } : null;
+}
+
 /** What each of a huddle's sockets remembers across hibernation. */
 export interface HuddleAttachment {
   /** Tells a huddle's socket from one of the room's own. */
@@ -208,7 +238,11 @@ export interface HuddleAttachment {
   openedAt: number;
   /** When the huddle started. */
   startedAt: string;
+  /** The id of the room's message of the huddle. A socket from before huddles named their messages has none, nor does one that joined a huddle of such sockets. */
+  messageId?: string;
   muted: boolean;
+  /** The sticker the person shows, while they show one. A tab they move to starts with none. */
+  sticker?: HuddleSticker;
   /** The SFU app the tab's connections are with: a huddle runs through one. */
   appId: string;
   /** The pair that carries the voices: the tab's microphone, and everyone else's. */
@@ -219,7 +253,9 @@ export interface HuddleAttachment {
   /** The pair that carries the screens people share, once the tab has shared its own or watched another's. */
   screens?: Connections;
   /** How often the tab has invited people into the huddle in the minute that started at `since`, once it has. */
-  inviting?: { since: number; count: number };
+  inviting?: Tally;
+  /** How many reactions of the tab's the room has told the huddle of in the ten seconds that started at `since`, once it has told of one. */
+  reacting?: Tally;
   /** Set once the room has closed the socket itself, having told the others whatever they're to hear of it. */
   revoked?: true;
 }
@@ -267,12 +303,13 @@ const changeConnections = (ws: WebSocket, kind: HuddleTrackKind, changed: (conne
 /** Whether the others can receive what a tab publishes: its sending connection has connected. */
 const isConnected = (publishing: Publishing | undefined) => publishing?.connectedAt !== undefined;
 
-const personOf = ({ user, muted, publishing, cameras, screens }: HuddleAttachment): HuddlePerson => ({
+const personOf = ({ user, muted, sticker, publishing, cameras, screens }: HuddleAttachment): HuddlePerson => ({
   user,
   muted,
   audio: isConnected(publishing),
   video: isConnected(cameras?.publishing),
   screen: isConnected(screens?.publishing),
+  ...(sticker && { sticker }),
 });
 
 const midsOf = (tracks: Array<{ mid: string }>) => tracks.map(({ mid }) => mid);
@@ -351,6 +388,13 @@ export class Huddle {
     private readonly env: Env,
     /** Sets the room's alarm to check the huddle by a time, unless it's set for sooner, once the room's events before it are done. */
     private readonly wakeBy: (time: number) => Promise<void>,
+    /** Sends an invitation's pushes, as the room sends its messages'. */
+    private readonly push: (pushes: InvitationPush[]) => Promise<void>,
+    /**
+     * Brings the room's message of the huddle in step with `now`, the huddle as a change of who's in it
+     * left it, once the room's events before it are done: whoever leaves again before then was in it.
+     */
+    private readonly changed: (now: HuddleNow | null) => Promise<unknown>,
   ) {}
 
   /** Whether `ws` is one of the huddle's sockets, rather than one of the room's own. */
@@ -363,6 +407,15 @@ export class Huddle {
     return this.ctx.getWebSockets(HUDDLE_TAG).some((socket) => socket.readyState === WebSocket.OPEN);
   }
 
+  /** The huddle as it is now, which the room's message of it goes by, or null with nobody in it. */
+  now(): HuddleNow | null {
+    const members = this.members();
+    const first = members[0]?.attachment;
+    if (!first) return null;
+    const { roomId, startedAt, messageId } = first;
+    return { roomId, startedAt, people: members.map(({ attachment }) => attachment.user), ...(messageId !== undefined && { messageId }) };
+  }
+
   /**
    * Lets `user` into room `roomId`'s huddle, on a socket carrying `tags`, once the room has checked the
    * Workspace's word for them. A huddle that's full, or huddles being off, closes the socket at once
@@ -370,28 +423,32 @@ export class Huddle {
    * closes, and the others hear that they changed rather than that they left and joined. The room,
    * which lets people in one at a time, sets its alarm to check the huddle once someone's in it. The
    * tab is welcomed with `iceServers`, the servers its connections go by, if the room has any for it.
+   * Whoever joins with nobody in the huddle starts one, whose message gets its id here, unless
+   * `resumed` is the room's last, which then goes on (./message.ts).
    */
-  async join(user: User, roomId: RoomId, tags: string[], muted: boolean, iceServers: HuddleIceServer[] | null): Promise<Response> {
+  async join(user: User, roomId: RoomId, tags: string[], muted: boolean, iceServers: HuddleIceServer[] | null, resumed?: ResumedHuddle): Promise<Response> {
     const app = await this.appNow();
     if (!app) return closedAtOnce(HuddleCloseCode.Off);
     let members = this.members();
     // Whoever joined through an app huddles no longer run through connects again, through this one, to
-    // a huddle that starts with whoever is first.
+    // the huddle as it goes on with whoever is first. Nothing is told of their going: the Workspace and
+    // the room's message of the huddle hear how this join leaves it, which is going on.
     if (members.some(({ attachment }) => attachment.appId !== app.appId)) {
-      this.end(CloseCode.Reconnect);
+      for (const { socket } of members) this.close(socket, CloseCode.Reconnect, false);
       members = [];
     }
-    const startedAt = members[0]?.attachment.startedAt ?? new Date().toISOString();
+    const { startedAt, messageId } = members[0]?.attachment ?? resumed ?? { startedAt: new Date().toISOString(), messageId: sortableId() };
+    const itsMessage = messageId !== undefined && { messageId };
     const earlier = members.filter(({ attachment }) => attachment.user.id === user.id);
     if (members.length - earlier.length >= MAX_HUDDLE_PEOPLE) return closedAtOnce(HuddleCloseCode.Full);
 
     const { 0: client, 1: server } = new WebSocketPair();
     this.ctx.acceptWebSocket(server, [...tags, HUDDLE_TAG]);
     const now = Date.now();
-    const attachment: HuddleAttachment = { huddle: true, user, roomId, joinedAt: earlier[0]?.attachment.joinedAt ?? now, openedAt: now, startedAt, muted, appId: app.appId };
+    const attachment: HuddleAttachment = { huddle: true, user, roomId, joinedAt: earlier[0]?.attachment.joinedAt ?? now, openedAt: now, startedAt, ...itsMessage, muted, appId: app.appId };
     server.serializeAttachment(attachment);
     for (const { socket } of earlier) this.close(socket, HuddleCloseCode.Moved);
-    send(server, { type: "huddle.welcome", you: user, people: this.people(), startedAt, ...(iceServers && { iceServers }) });
+    send(server, { type: "huddle.welcome", you: user, people: this.people(), startedAt, ...itsMessage, ...(iceServers && { iceServers }) });
     this.broadcast({ type: earlier.length > 0 ? "huddle.changed" : "huddle.joined", person: personOf(attachment) }, server);
     if (earlier.length === 0) this.reportSoon();
     return new Response(null, { status: 101, webSocket: client });
@@ -410,8 +467,13 @@ export class Huddle {
 
   /** Does what a frame from one of the huddle's sockets asks. */
   async message(ws: WebSocket, raw: string | ArrayBuffer): Promise<void> {
+    // A socket the room has closed, as when its person lost the room, can't change anything, even with
+    // frames it sent before it heard.
+    if (ws.readyState !== WebSocket.OPEN) return;
     // A session description is the largest thing a tab sends, and fits a room's largest frame twice over.
-    if (isTooLarge(raw, MAX_ROOM_FRAME_SIZE)) return closeTooLarge(ws);
+    // Whoever sends more leaves the huddle as the room closes their socket, rather than when their tab
+    // answers the close, which it may never do.
+    if (isTooLarge(raw, MAX_ROOM_FRAME_SIZE)) return this.remove(ws, TOO_LARGE);
     const frame = typeof raw === "string" ? parseHuddleClientFrame(raw) : null;
     if (!frame) return send(ws, { type: "error", message: UNRECOGNIZED });
     switch (frame.type) {
@@ -435,6 +497,10 @@ export class Huddle {
         return this.inTurn(this.receiving, frame.kind, ws, frame.type, () => this.answer(ws, frame.kind, frame.sdp));
       case "huddle.invite":
         return this.invite(ws, frame.userIds);
+      case "huddle.sticker":
+        return this.showSticker(ws, frame.sticker);
+      case "huddle.react":
+        return this.react(ws, frame.emoji);
     }
   }
 
@@ -448,7 +514,7 @@ export class Huddle {
   }
 
   /** Takes `socket`'s person out of the huddle: closes it with `code`, tells the others they left, and has the SFU close their tracks. */
-  remove(socket: WebSocket, code: CloseCode | HuddleCloseCode): void {
+  remove(socket: WebSocket, code: CloseCode | HuddleCloseCode | typeof TOO_LARGE): void {
     const attachment = this.close(socket, code);
     if (!attachment) return;
     this.broadcast({ type: "huddle.left", userId: attachment.user.id });
@@ -551,23 +617,42 @@ export class Huddle {
     this.broadcast({ type: "huddle.changed", person: personOf(change(ws, (attachment) => ({ ...attachment, muted }))) }, ws);
   }
 
+  /** Tells the others that `ws`'s person shows `sticker` now, in place of any they showed, or with null, none. */
+  private showSticker(ws: WebSocket, sticker: HuddleSticker | null): void {
+    if ((attachmentOf(ws).sticker ?? null) === sticker) return;
+    this.broadcast({ type: "huddle.changed", person: personOf(change(ws, ({ sticker: _, ...attachment }) => ({ ...attachment, ...(sticker && { sticker }) }))) }, ws);
+  }
+
+  /**
+   * Tells everyone in the huddle that `ws`'s person reacted with `emoji`, their own tab included, which
+   * shows it as the others do. Past as many as the room tells of in ten seconds, a tab's reactions go
+   * unheard, by its own person too.
+   */
+  private react(ws: WebSocket, emoji: string): void {
+    const reacting = oneMore(attachmentOf(ws).reacting, Date.now(), TEN_SECONDS_MS, REACTIONS_IN_TEN_SECONDS);
+    if (!reacting) return;
+    const { user } = change(ws, (attachment) => ({ ...attachment, reacting }));
+    this.broadcast({ type: "huddle.reacted", userId: user.id, emoji });
+  }
+
   /**
    * Invites into the huddle the people `ws`'s person names, but for whoever is in it already: the
-   * Workspace tells those of them who are in the room, on every tab they have open. A tab that has
-   * invited people as often as one may in a minute hears that nobody more is, and so does one whose
-   * invitation the Workspace couldn't be given.
+   * Workspace tells those of them who are in the room, on every tab they have open, and the room pushes
+   * the invitation to whoever the Workspace finds with Ember in view nowhere, without the tab waiting
+   * on it. A tab that has invited people as often as one may in a minute hears that nobody more is, and
+   * so does one whose invitation the Workspace couldn't be given.
    */
   private async invite(ws: WebSocket, userIds: UserId[]): Promise<void> {
-    const now = Date.now();
-    const { user, roomId, inviting } = attachmentOf(ws);
-    const minute = inviting && now - inviting.since < MINUTE_MS ? inviting : { since: now, count: 0 };
-    if (minute.count >= INVITES_A_MINUTE) return send(ws, { type: "error", message: INVITED_TOO_OFTEN, failed: "huddle.invite" });
-    change(ws, (attachment) => ({ ...attachment, inviting: { since: minute.since, count: minute.count + 1 } }));
+    const inviting = oneMore(attachmentOf(ws).inviting, Date.now(), MINUTE_MS, INVITES_A_MINUTE);
+    if (!inviting) return send(ws, { type: "error", message: INVITED_TOO_OFTEN, failed: "huddle.invite" });
+    const { user, roomId } = change(ws, (attachment) => ({ ...attachment, inviting }));
     const inIt = new Set(this.members().map(({ attachment }) => attachment.user.id));
     const invited = userIds.filter((userId) => !inIt.has(userId));
     if (invited.length === 0) return;
     try {
-      await workspace(this.env).inviteToHuddle(roomId, user.id, invited);
+      const pushes = await workspace(this.env).inviteToHuddle(roomId, user.id, invited);
+      // A Workspace still on the code from before it answered pushes, as it may be for some minutes after an update, answers nothing.
+      if (pushes?.length > 0) this.ctx.waitUntil(this.push(pushes));
     } catch (error) {
       console.warn("Inviting people into a huddle failed:", logged(error));
       send(ws, { type: "error", message: NOBODY_INVITED, failed: "huddle.invite" });
@@ -899,7 +984,7 @@ export class Huddle {
    * Closes `socket` itself, with `code`, if it's open, and answers what it remembered. Unless `cut` says
    * not to, the SFU closes its tab's tracks.
    */
-  private close(socket: WebSocket, code: CloseCode | HuddleCloseCode, cut = true): HuddleAttachment | null {
+  private close(socket: WebSocket, code: CloseCode | HuddleCloseCode | typeof TOO_LARGE, cut = true): HuddleAttachment | null {
     if (socket.readyState !== WebSocket.OPEN) return null;
     const attachment = change(socket, (attachment) => ({ ...attachment, revoked: true }));
     socket.close(code, CLOSE_REASONS[code]);
@@ -1003,9 +1088,10 @@ export class Huddle {
     return true;
   }
 
-  /** Tells the Workspace who's in the huddle now, which has changed, without anything waiting on it. */
+  /** Tells the Workspace who's in the huddle now, which has changed, and has the room bring its message of the huddle in step with it as it is now, without anything waiting on either. */
   private reportSoon(): void {
     this.ctx.waitUntil(this.report());
+    this.ctx.waitUntil(this.changed(this.now()));
   }
 
   /**

@@ -157,6 +157,17 @@ export function BellOff(props: IconoirIconProps) {
   );
 }
 
+export function Bold(props: IconoirIconProps) {
+  return (
+    <IconoirIcon name="bold" {...props}>
+      <path
+        d="M12 11.6667H8M12 11.6667C12 11.6667 15.3333 11.6667 15.3333 8.33333C15.3333 5.00002 12 5 12 5C12 5 12 5 12 5H8.6C8.26863 5 8 5.26863 8 5.6V11.6667M12 11.6667C12 11.6667 16 11.6667 16 15.3333C16 19 12 19 12 19C12 19 12 19 12 19H8.6C8.26863 19 8 18.7314 8 18.4V11.6667"
+        {...OUTLINE}
+      />
+    </IconoirIcon>
+  );
+}
+
 export function Box(props: IconoirIconProps) {
   return (
     <IconoirIcon name="box" {...props}>
@@ -264,6 +275,50 @@ export function ClockRotateRight(props: IconoirIconProps) {
         {...LINE}
       />
       <path d="M17 16H21.4C21.7314 16 22 16.2686 22 16.6V21" {...LINE} />
+    </IconoirIcon>
+  );
+}
+
+export function Code(props: IconoirIconProps) {
+  return (
+    <IconoirIcon name="code" {...props}>
+      <path d="M13.5 6L10 18.5" {...LINE} />
+      <path d="M6.5 8.5L3 12L6.5 15.5" {...LINE} />
+      <path d="M17.5 8.5L21 12L17.5 15.5" {...LINE} />
+    </IconoirIcon>
+  );
+}
+
+export function CodeBrackets(props: IconoirIconProps) {
+  return (
+    <IconoirIcon name="code-brackets" {...props}>
+      <path
+        d="M9.00001 21L8.00001 21C6.89544 21 6.00001 20.1057 6.00001 19.0011C6.00001 17.4501 6.00001 15.3443 6 14C6 13 4.5 12 4.5 12C4.5 12 6.00001 11 6.00001 10C6.00001 8.827 6.00001 6.62207 6.00001 4.99914C6.00001 3.89457 6.89544 3 8.00001 3L9.00001 3"
+        {...LINE}
+      />
+      <path
+        d="M15 21L16 21C17.1046 21 18 20.1057 18 19.0011C18 17.4501 18 15.3443 18 14C18 13 19.5 12 19.5 12C19.5 12 18 11 18 10C18 8.827 18 6.62207 18 4.99914C18 3.89457 17.1046 3 16 3L15 3"
+        {...LINE}
+      />
+    </IconoirIcon>
+  );
+}
+
+export function CodeBracketsSquare(props: IconoirIconProps) {
+  return (
+    <IconoirIcon name="code-brackets-square" {...props}>
+      <path
+        d="M10 17L9.33334 17C8.22877 17 7.33334 16.1047 7.33334 15.0002C7.33334 14.3284 7.33334 13.6211 7.33333 13.1111C7.33333 12.5556 6 12 6 12C6 12 7.33333 11.4444 7.33334 10.8889C7.33334 10.4359 7.33334 9.70586 7.33334 8.99998C7.33334 7.89541 8.22877 7 9.33334 7L10 7"
+        {...LINE}
+      />
+      <path
+        d="M14 17L14.6667 17C15.7712 17 16.6667 16.1047 16.6667 15.0002C16.6667 14.3284 16.6667 13.6211 16.6667 13.1111C16.6667 12.5556 18 12 18 12C18 12 16.6667 11.4444 16.6667 10.8889C16.6667 10.4359 16.6667 9.70586 16.6667 8.99998C16.6667 7.89541 15.7712 7 14.6667 7L14 7"
+        {...LINE}
+      />
+      <path
+        d="M21 3.6V20.4C21 20.7314 20.7314 21 20.4 21H3.6C3.26863 21 3 20.7314 3 20.4V3.6C3 3.26863 3.26863 3 3.6 3H20.4C20.7314 3 21 3.26863 21 3.6Z"
+        {...LINE}
+      />
     </IconoirIcon>
   );
 }
@@ -529,6 +584,18 @@ export function Home(props: IconoirIconProps) {
   );
 }
 
+export function HSquare(props: IconoirIconProps) {
+  return (
+    <IconoirIcon name="h-square" {...props}>
+      <path
+        d="M21 3.6V20.4C21 20.7314 20.7314 21 20.4 21H3.6C3.26863 21 3 20.7314 3 20.4V3.6C3 3.26863 3.26863 3 3.6 3H20.4C20.7314 3 21 3.26863 21 3.6Z"
+        {...LINE}
+      />
+      <path d="M10 8V12M10 16V12M10 12H14M14 12L14 8M14 12L14 16" {...LINE} />
+    </IconoirIcon>
+  );
+}
+
 export function Internet(props: IconoirIconProps) {
   return (
     <IconoirIcon name="internet" {...props}>
@@ -543,6 +610,14 @@ export function Internet(props: IconoirIconProps) {
         clipRule="evenodd"
         stroke="currentColor"
       />
+    </IconoirIcon>
+  );
+}
+
+export function Italic(props: IconoirIconProps) {
+  return (
+    <IconoirIcon name="italic" {...props}>
+      <path d="M11 5L14 5M17 5L14 5M14 5L10 19M10 19L7 19M10 19L13 19" {...LINE} />
     </IconoirIcon>
   );
 }
@@ -570,6 +645,19 @@ export function Link(props: IconoirIconProps) {
         d="M10 11.9976C10 14.4893 12.317 16.9952 15.1429 16.9952C15.4776 16.9952 16.581 16.9952 16.8571 16.9952C19.6975 16.9952 22 14.7577 22 11.9976C22 9.6192 20.2903 7.62884 18 7.12383C17.6324 7.04278 17.2499 6.99999 16.8571 6.99999"
         {...LINE}
       />
+    </IconoirIcon>
+  );
+}
+
+export function List(props: IconoirIconProps) {
+  return (
+    <IconoirIcon name="list" {...props}>
+      <path d="M8 6L20 6" {...LINE} />
+      <path d="M4 6.01L4.01 5.99889" {...LINE} />
+      <path d="M4 12.01L4.01 11.9989" {...LINE} />
+      <path d="M4 18.01L4.01 17.9989" {...LINE} />
+      <path d="M8 12L20 12" {...LINE} />
+      <path d="M8 18L20 18" {...LINE} />
     </IconoirIcon>
   );
 }
@@ -750,6 +838,23 @@ export function NavArrowUp(props: IconoirIconProps) {
   );
 }
 
+export function NumberedListLeft(props: IconoirIconProps) {
+  return (
+    <IconoirIcon name="numbered-list-left" {...props}>
+      <path d="M9 5L21 5" {...LINE} />
+      <path d="M5 7L5 3L3.5 4.5" {...LINE} />
+      <path
+        d="M5.5 14L3.5 14L5.40471 11.0371C5.46692 10.9403 5.50215 10.8268 5.47709 10.7145C5.41935 10.4557 5.216 10 4.5 10C3.50001 10 3.5 10.8889 3.5 10.8889C3.5 10.8889 3.5 10.8889 3.5 10.8889L3.5 11.1111"
+        {...LINE}
+      />
+      <path d="M4 19L4.5 19C5.05228 19 5.5 19.4477 5.5 20V20C5.5 20.5523 5.05228 21 4.5 21L3.5 21" {...LINE} />
+      <path d="M3.5 17L5.5 17L4 19" {...LINE} />
+      <path d="M9 12L21 12" {...LINE} />
+      <path d="M9 19L21 19" {...LINE} />
+    </IconoirIcon>
+  );
+}
+
 export function Page(props: IconoirIconProps) {
   return (
     <IconoirIcon name="page" {...props}>
@@ -836,6 +941,21 @@ export function QrCode(props: IconoirIconProps) {
   );
 }
 
+export function Quote(props: IconoirIconProps) {
+  return (
+    <IconoirIcon name="quote" {...props}>
+      <path
+        d="M10 12H5C4.44772 12 4 11.5523 4 11V7.5C4 6.94772 4.44772 6.5 5 6.5H9C9.55228 6.5 10 6.94772 10 7.5V12ZM10 12C10 14.5 9 16 6 17.5"
+        {...ROUND_ENDS}
+      />
+      <path
+        d="M20 12H15C14.4477 12 14 11.5523 14 11V7.5C14 6.94772 14.4477 6.5 15 6.5H19C19.5523 6.5 20 6.94772 20 7.5V12ZM20 12C20 14.5 19 16 16 17.5"
+        {...ROUND_ENDS}
+      />
+    </IconoirIcon>
+  );
+}
+
 export function QuoteMessage(props: IconoirIconProps) {
   return (
     <IconoirIcon name="quote-message" {...props}>
@@ -882,6 +1002,15 @@ export function Search(props: IconoirIconProps) {
         d="M3 11C3 15.4183 6.58172 19 11 19C13.213 19 15.2161 18.1015 16.6644 16.6493C18.1077 15.2022 19 13.2053 19 11C19 6.58172 15.4183 3 11 3C6.58172 3 3 6.58172 3 11Z"
         {...LINE}
       />
+    </IconoirIcon>
+  );
+}
+
+export function Send(props: IconoirIconProps) {
+  return (
+    <IconoirIcon name="send" {...props}>
+      <path d="M22 12L3 20L6.5625 12L3 4L22 12Z" {...LINE} />
+      <path d="M6.5 12L22 12" {...LINE} />
     </IconoirIcon>
   );
 }
@@ -986,6 +1115,18 @@ export function StarSolid(props: IconoirIconProps) {
   );
 }
 
+export function Strikethrough(props: IconoirIconProps) {
+  return (
+    <IconoirIcon name="strikethrough" {...props}>
+      <path d="M3 12L21 12" {...LINE} />
+      <path
+        d="M16.2857 3L10.068 3C7.82129 3 6 4.82129 6 7.06797C6 8.81895 7.12044 10.3735 8.78157 10.9272L12 12M6 21H13.932C16.1787 21 18 19.1787 18 16.932C18 16.2409 17.8255 15.5804 17.512 15"
+        {...LINE}
+      />
+    </IconoirIcon>
+  );
+}
+
 export function SunLight(props: IconoirIconProps) {
   return (
     <IconoirIcon name="sun-light" {...props}>
@@ -1044,6 +1185,24 @@ export function Trash(props: IconoirIconProps) {
         d="M21 6L15.375 6M3 6L8.625 6M8.625 6V4C8.625 2.89543 9.52043 2 10.625 2H13.375C14.4796 2 15.375 2.89543 15.375 4V6M8.625 6L15.375 6"
         {...LINE}
       />
+    </IconoirIcon>
+  );
+}
+
+export function Underline(props: IconoirIconProps) {
+  return (
+    <IconoirIcon name="underline" {...props}>
+      <path d="M16 5V11C16 13.2091 14.2091 15 12 15V15C9.79086 15 8 13.2091 8 11V5" {...LINE} />
+      <path d="M6 19L18 19" {...LINE} />
+    </IconoirIcon>
+  );
+}
+
+export function Upload(props: IconoirIconProps) {
+  return (
+    <IconoirIcon name="upload" {...props}>
+      <path d="M6 20L18 20" {...LINE} />
+      <path d="M12 16V4M12 4L15.5 7.5M12 4L8.5 7.5" {...LINE} />
     </IconoirIcon>
   );
 }

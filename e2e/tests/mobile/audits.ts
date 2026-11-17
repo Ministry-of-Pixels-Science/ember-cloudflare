@@ -142,15 +142,19 @@ function runAudits({ insets, denseTargets }: { insets: SafeArea; denseTargets: s
 
   // Overflow: every box and line of text must fit inside the containers that clip it and the
   // screen, unless a container between them scrolls that way or truncates text on purpose, with an
-  // ellipsis or a line clamp. The page may scroll down to something, but never sideways.
+  // ellipsis or a line clamp, or is folded behind a button that opens it, as Show more is. The page
+  // may scroll down to something, but never sideways.
   const overflow: string[] = [];
+  /** Whether `element` is folded on purpose: a button that says it's closed opens it. */
+  const isFolded = (element: Element) =>
+    element.id !== "" && document.querySelector(`[aria-expanded="false"][aria-controls~="${CSS.escape(element.id)}"]`) !== null;
   /** Why `box` is cut off for good, or null when all of it shows or can be scrolled into view. */
   const cutOff = (node: Node, box: Box, clipping: Element[]): string | null => {
     let [checkX, checkY] = [true, true];
     for (const clipper of clipping) {
       const style = getComputedStyle(clipper);
       if (style.textOverflow === "ellipsis" || /auto|scroll/.test(style.overflowX)) checkX = false;
-      if (style.webkitLineClamp !== "none" || /auto|scroll/.test(style.overflowY)) checkY = false;
+      if (style.webkitLineClamp !== "none" || /auto|scroll/.test(style.overflowY) || isFolded(clipper)) checkY = false;
       const rect = clipper.getBoundingClientRect();
       if (checkX && style.overflowX !== "visible" && (box.left < rect.left - TOLERANCE || box.right > rect.right + TOLERANCE)) {
         return `${describe(node)} spans ${px(box.left)}–${px(box.right)} but ${describe(clipper)} cuts it off at ${px(rect.left)}–${px(rect.right)}`;

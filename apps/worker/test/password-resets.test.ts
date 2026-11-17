@@ -96,12 +96,16 @@ async function expectWrong(response: Response): Promise<void> {
   expect(await response.json()).toEqual({ error: PASSWORD_RESET_CODE_WRONG, field: "code" });
 }
 
-/** Stands in for Cloudflare Email Service's binding, keeping what it's asked to send, and throwing what `refusal` gives, if anything. */
-function fakeBinding(refusal: () => unknown = () => undefined) {
+/**
+ * Stands in for Cloudflare Email Service's binding, keeping what it's asked to send, and throwing what
+ * `refusal` gives, if anything, once `held` lets it answer, if it's given.
+ */
+function fakeBinding(refusal: () => unknown = () => undefined, held?: Promise<void>) {
   const sent: EmailMessageBuilder[] = [];
   const binding = {
     send: async (message: EmailMessageBuilder) => {
       sent.push(message);
+      if (held) await held;
       const refused = refusal();
       if (refused !== undefined) throw refused;
       return { messageId: `<${crypto.randomUUID()}@example.com>` };
@@ -146,6 +150,21 @@ async function codeFor(emailAddress: string): Promise<string> {
 const otherThan = (code: string) => (code === "00000000" ? "11111111" : "00000000");
 
 const count = async (table: string) => ((await workspaceSql(`SELECT count(*) AS n FROM ${table}`)) as Array<{ n: number }>)[0]!.n;
+
+/**
+ * Has the Workspace's database count, from now on, each row that changes where it counts emails and keeps
+ * codes, those a change leaves as they were included, answering how to read how many have.
+ */
+async function countChanges(): Promise<() => Promise<number>> {
+  await workspaceSql("CREATE TABLE changes_made (id INTEGER PRIMARY KEY)");
+  for (const table of ["email_link_requests", "password_resets"]) {
+    for (const change of ["INSERT", "UPDATE", "DELETE"]) {
+      await workspaceSql(`CREATE TRIGGER count_${table}_${change} AFTER ${change} ON ${table} BEGIN INSERT INTO changes_made (id) VALUES (NULL); END`);
+    }
+  }
+  return () => count("changes_made");
+}
+
 const sessionsOf = async (userId: string) => ((await workspaceSql("SELECT count(*) AS n FROM sessions WHERE user_id = ?", userId)) as Array<{ n: number }>)[0]!.n;
 const passwordDigestOf = async (emailAddress: string) =>
   ((await workspaceSql("SELECT password_digest FROM users WHERE email_address = ?", emailAddress)) as Array<{ password_digest: string }>)[0]!.password_digest;
@@ -273,6 +292,31 @@ describe("Reset a forgotten password with an emailed code", () => {
       expect(await count("password_resets")).toBe(1);
     });
 
+    it("changes as much of what's stored before it answers, whoever has the address, leaving every count as it was", async () => {
+      await setUp();
+      const changes = await countChanges();
+      let release!: () => void;
+      const { binding, sent } = fakeBinding(undefined, new Promise<void>((resolve) => (release = resolve)));
+      await withWorkspaceEnv({ EMAIL: binding }, async () => {
+        // While Ada's first code is being sent, her next waits its turn, so it counts no email before it's answered.
+        expect((await ask("ada@example.com")).status).toBe(202);
+        await vi.waitFor(() => expect(sent).toHaveLength(1));
+        const counts = await workspaceSql("SELECT email_address, counted_since, count FROM email_link_requests");
+        const changed: number[] = [];
+        for (const emailAddress of ["nobody@example.com", "ada@example.com"]) {
+          const before = await changes();
+          expect((await ask(emailAddress)).status).toBe(202);
+          changed.push((await changes()) - before);
+          expect(await workspaceSql("SELECT email_address, counted_since, count FROM email_link_requests"), emailAddress).toEqual(counts);
+        }
+        expect(changed[0]).toBeGreaterThan(0);
+        expect(changed[1]).toBe(changed[0]);
+        release();
+        await emailed();
+      });
+      expect(sent).toHaveLength(2);
+    });
+
     it("replaces the code sent before, so only the newest works", async () => {
       await setUp();
       const first = await codeFor("ada@example.com");
@@ -309,6 +353,29 @@ describe("Reset a forgotten password with an emailed code", () => {
       expect(refused).toHaveLength(1);
       expect(await workspaceSql("SELECT count FROM email_link_requests")).toEqual([{ count: 1 }]);
       expect((await reset("ada@example.com", code)).status).toBe(201);
+    });
+
+    it.each([
+      [EMAILS_PER_ADDRESS + 1, 1, EMAILS_PER_ADDRESS + 1, EMAILS_PER_ADDRESS],
+      [EMAILS_PER_ADDRESS + 2, 1, EMAILS_PER_ADDRESS + 1, EMAILS_PER_ADDRESS],
+      [2 * EMAILS_PER_ADDRESS, EMAILS_PER_ADDRESS, 2 * EMAILS_PER_ADDRESS, EMAILS_PER_ADDRESS],
+      [2 * EMAILS_PER_ADDRESS, 2 * EMAILS_PER_ADDRESS, 2 * EMAILS_PER_ADDRESS, 0],
+    ])("of %i asks waiting, the first %i of which the provider refuses, tries to email %i and counts the %i it takes", async (asks, refusals, tried, taken) => {
+      await setUp();
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      let refused = 0;
+      const { binding, sent } = fakeBinding(() => (refused++ < refusals ? new Error("the provider is down") : undefined), held);
+      await withWorkspaceEnv({ EMAIL: binding }, async () => {
+        // The first is being sent while the rest are asked for, so each of them is counted at its turn.
+        for (let n = 1; n <= asks; n++) expect((await ask("ada@example.com")).status).toBe(202);
+        release();
+        await emailed();
+      });
+      expect(sent).toHaveLength(tried);
+      expect(await workspaceSql("SELECT count FROM email_link_requests")).toEqual([{ count: taken }]);
+      expect(await count("password_resets")).toBe(taken > 0 ? 1 : 0);
+      if (taken > 0) expect((await reset("ada@example.com", codeIn(sent.at(-1)!))).status).toBe(201);
     });
 
     it(`lets a network ask ${PASSWORD_RESETS_PER_NETWORK} times an hour until the deployment has Turnstile's keys, then asks Turnstile instead`, async () => {
@@ -413,6 +480,21 @@ describe("Reset a forgotten password with an emailed code", () => {
         await expectWrong(await reset(emailAddress, tried));
       }
       expect((await reset("ada@example.com", code)).status).toBe(201);
+    });
+
+    it("changes what's stored before it answers, whether or not a code works for the address", async () => {
+      await setUp();
+      await joinAsGrace();
+      const code = await codeFor("ada@example.com");
+      const changes = await countChanges();
+      // Nobody, someone without a code, and someone with one, which alone counts the try.
+      for (const emailAddress of ["nobody@example.com", grace.emailAddress, "ada@example.com"]) {
+        const before = await changes();
+        await expectWrong(await reset(emailAddress, otherThan(code)));
+        expect((await changes()) - before, emailAddress).toBeGreaterThan(0);
+      }
+      expect(await workspaceSql("SELECT attempts FROM password_resets")).toEqual([{ attempts: 1 }]);
+      expect(await workspaceSql("SELECT email_address, count FROM email_link_requests")).toEqual([{ email_address: "ada@example.com", count: 1 }]);
     });
 
     it(`takes ${PASSWORD_RESET_CODE_TRIES} tries, the last of which can be right, then stops working`, async () => {

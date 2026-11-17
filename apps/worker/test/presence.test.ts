@@ -10,7 +10,7 @@ afterEach(() => void vi.useRealTimers());
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Says whether `tab` is in use, as the app does once it's welcomed and as that changes. */
-const say = (tab: WorkspaceSocket, active: boolean) => tab.send(JSON.stringify({ type: "presence", active }));
+const say = (tab: WorkspaceSocket, active: boolean) => tab.send(JSON.stringify({ type: "presence.active", active }));
 
 /** The next `presence` frame `tab` hears, with its people sorted, since a frame lists them in no particular order. */
 async function presenceHeard(tab: WorkspaceSocket): Promise<WorkspaceServerFrame> {
@@ -97,7 +97,7 @@ describe("Presence", () => {
   it("refuses a presence that isn't a yes or no, as any frame it can't read", async () => {
     const ada = await signIn("Ada");
     const tab = await openWorkspaceSocket(ada);
-    tab.send(JSON.stringify({ type: "presence", active: "yes" }));
+    tab.send(JSON.stringify({ type: "presence.active", active: "yes" }));
     expect(await tab.next()).toEqual({ type: "error", message: "Unrecognized frame" });
   });
 
@@ -111,6 +111,19 @@ describe("Presence", () => {
     vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + PRESENCE_TTL_MS + 1_000 });
     say(adas, true);
     expect(await presenceHeard(adas)).toEqual(presence([], [grace.user.id]));
+  });
+
+  it("counts a tab's word that it's shown, or hidden, as hearing from it, which has its person active again", async () => {
+    const [ada, grace] = [await signIn("Ada"), await signIn("Grace")];
+    const adas = await listening(ada);
+    const graces = await openWorkspaceSocket(grace);
+    expect(await presenceHeard(adas)).toEqual(presence([grace.user.id]));
+
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + PRESENCE_TTL_MS + 1_000 });
+    say(adas, true);
+    expect(await presenceHeard(adas)).toEqual(presence([], [grace.user.id]));
+    graces.send(JSON.stringify({ type: "presence.visible", visible: false }));
+    expect(await presenceHeard(adas)).toEqual(presence([grace.user.id]));
   });
 
   it("counts the runtime's answers to a tab's pings as hearing from it, which the Workspace sleeps through", async () => {

@@ -7,8 +7,8 @@ import { bodyFromPlainText } from "@ember/richtext";
 
 /** A room's socket, for `page.routeWebSocket`. */
 export const ROOM_SOCKET = /\/api\/rooms\/[^/]+\/socket/;
-/** A tab's workspace socket, for `page.routeWebSocket`. */
-export const WORKSPACE_SOCKET = /\/api\/socket$/;
+/** A tab's workspace socket, for `page.routeWebSocket`, whose address says whether the tab is shown. */
+export const WORKSPACE_SOCKET = /\/api\/socket(\?|$)/;
 
 /**
  * How long a test waits for the room icon picker's 991 KB catalog, which the test server has taken

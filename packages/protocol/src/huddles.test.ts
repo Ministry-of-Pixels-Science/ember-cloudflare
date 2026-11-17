@@ -6,12 +6,14 @@ import {
   appSecretOf,
   CAMERA_SIZES,
   carriesBothSizes,
+  HUDDLE_STICKERS,
   HuddleCloseCode,
   huddleSocketQuery,
   MAX_HUDDLE_CAMERAS,
   MAX_HUDDLE_INVITED,
   MAX_HUDDLE_PEOPLE,
   MAX_HUDDLE_SCREENS,
+  MAX_REACTION_LENGTH,
   MAX_SDP_LENGTH,
   parseHuddleClientFrame,
   parseHuddleRelaySetup,
@@ -236,6 +238,46 @@ describe("a huddle's socket", () => {
     }
   });
 
+  it("reads the sticker a tab's person shows, one of the five there are, or that they've taken theirs off", () => {
+    expect(HUDDLE_STICKERS).toEqual(["hand", "brb", "thumbs-up", "thumbs-down", "done"]);
+    for (const sticker of HUDDLE_STICKERS) expect(read({ type: "huddle.sticker", sticker })).toEqual({ type: "huddle.sticker", sticker });
+    expect(read({ type: "huddle.sticker", sticker: null })).toEqual({ type: "huddle.sticker", sticker: null });
+    expect(read({ type: "huddle.sticker", sticker: "hand", userId: "grace" })).toEqual({ type: "huddle.sticker", sticker: "hand" });
+    // Nothing said isn't taking one off, and a sticker goes by its name here, not by its emoji.
+    for (const sticker of [undefined, "", "wave", "Hand", "\u270B", 7, true, ["hand"], { sticker: "hand" }]) {
+      expect(read({ type: "huddle.sticker", sticker }), JSON.stringify(sticker)).toBeNull();
+    }
+  });
+
+  it("reads the emoji a tab's person reacts with, which is one emoji and nothing else", () => {
+    const [joiner, picture] = ["\u200D", "\uFE0F"];
+    const emoji = [
+      "\u{1F389}",
+      // With a skin tone, and a skin tone by itself, as a picker lists them.
+      "\u{1F44D}\u{1F3FD}",
+      "\u{1F3FD}",
+      // A flag, a letter of one, and the flag of part of a country.
+      "\u{1F1E8}\u{1F1E6}",
+      "\u{1F1E6}",
+      "\u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}",
+      // A keycap, and a heart shown as a picture.
+      `#${picture}\u20E3`,
+      `\u2764${picture}`,
+      // Several joined into one: a family, a flag, and the longest there is, two people kissing, each with a skin tone.
+      ["\u{1F468}", "\u{1F469}", "\u{1F467}", "\u{1F466}"].join(joiner),
+      `\u{1F3F3}${picture}${joiner}\u{1F308}`,
+      ["\u{1F9D1}\u{1F3FB}", `\u2764${picture}`, "\u{1F48B}", "\u{1F9D1}\u{1F3FC}"].join(joiner),
+    ];
+    for (const one of emoji) expect(read({ type: "huddle.react", emoji: one }), one).toEqual({ type: "huddle.react", emoji: one });
+    expect(Math.max(...emoji.map((one) => one.length))).toBe(MAX_REACTION_LENGTH - 1);
+    expect(read({ type: "huddle.react", emoji: "\u{1F389}", userId: "grace" })).toEqual({ type: "huddle.react", emoji: "\u{1F389}" });
+    // Not words or markup, nor more than one emoji, one with anything around it, or the parts that join them.
+    const others = [undefined, null, 7, ["\u{1F389}"], "", " ", "hi", "a", "1", "#", "<b>", "\u{1F389}\u{1F389}", "\u{1F389} ", " \u{1F389}", "\u{1F389}!", "x\u{1F389}", `\u{1F44D}${joiner}`, `${joiner}\u{1F44D}`, picture, "x\u20E3", "\u{1F1E8}\u{1F1E6}\u{1F1E8}\u{1F1E6}"];
+    for (const text of others) expect(read({ type: "huddle.react", emoji: text }), JSON.stringify(text)).toBeNull();
+    // Nor one emoji made longer than any is.
+    expect(read({ type: "huddle.react", emoji: ["\u{1F468}", "\u{1F469}", "\u{1F467}", "\u{1F466}", "\u{1F476}", "\u{1F476}"].join(joiner) })).toBeNull();
+  });
+
   it("refuses anything else", () => {
     for (const frame of [
       { type: "huddle.listen", fresh: false },
@@ -249,6 +291,9 @@ describe("a huddle's socket", () => {
       { type: "huddle.answer", kind: "both", sdp: SDP },
       { type: "huddle.mute" },
       { type: "huddle.mute", muted: "true" },
+      { type: "huddle.sticker" },
+      { type: "huddle.react" },
+      { type: "huddle.reacted", userId: "ada", emoji: "\u{1F389}" },
       { type: "huddle.leave" },
       { type: "huddle.welcome" },
       { type: "message.create", clientMessageId: "1", body: "<p>hi</p>" },

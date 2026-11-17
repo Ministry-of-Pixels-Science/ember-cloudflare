@@ -6,7 +6,8 @@ import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AccountContext, useAccount } from "@/hooks/use-account";
 import { PeopleContext } from "@/hooks/use-directory";
-import { showHuddle, showSpeaking, type JoinedHuddle } from "@/lib/huddle-store";
+import { NO_REACTIONS } from "@/lib/huddle-reactions";
+import { showHuddle, showReactions, showSpeaking, type JoinedHuddle } from "@/lib/huddle-store";
 import { HuddleBar } from "./huddle-bar";
 
 const ada: User = { id: "ada", name: "Ada Lovelace" };
@@ -20,6 +21,7 @@ const huddle = (changes: Partial<JoinedHuddle> = {}): JoinedHuddle => ({
   you: ada,
   people: [inHuddle(sam), inHuddle(ada)],
   muted: false,
+  sticker: null,
   microphone: true,
   microphoneId: "",
   speakerId: "",
@@ -28,6 +30,7 @@ const huddle = (changes: Partial<JoinedHuddle> = {}): JoinedHuddle => ({
   screen: null,
   screens: new Map(),
   open: false,
+  thread: true,
   ...changes,
 });
 /** A camera that's on, as much of one as the bar reads, and a screen that's shared. */
@@ -36,7 +39,7 @@ const SCREEN = {} as MediaStream;
 
 /** The bar of the huddle this tab is in, with what the huddle's controls were asked. */
 function renderBar(joined: JoinedHuddle = huddle(), room: Room | null = general) {
-  const controls = { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setDevice: vi.fn(), setSmall: vi.fn(), switchCamera: vi.fn() };
+  const controls = { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setThread: vi.fn(), setDevice: vi.fn(), setSmall: vi.fn(), switchCamera: vi.fn(), invite: vi.fn(), setSticker: vi.fn(), react: vi.fn() };
   act(() => showHuddle(joined, controls));
   const user = userEvent.setup();
   const view = render(<HuddleBar huddle={joined} room={room} meId="ada" />);
@@ -64,6 +67,7 @@ const state = () => bar().querySelector("[aria-live]");
 afterEach(() => {
   act(() => showHuddle(null));
   act(() => showSpeaking(new Set()));
+  act(() => showReactions(NO_REACTIONS));
   history.replaceState(null, "", "/");
   vi.unstubAllGlobals();
   Reflect.deleteProperty(navigator, "mediaDevices");
@@ -178,11 +182,24 @@ describe("The huddle bar", () => {
     expect(faces().map((face) => face.classList.contains("ring-positive"))).toEqual([false, false, true]);
   });
 
-  it("has no arrows beside its buttons, which choose among devices only in the huddle opened", () => {
+  it("has no arrows beside its buttons, which choose among devices and stickers only in the huddle opened", () => {
     renderBar();
     expect(screen.queryByRole("button", { name: "Microphone and speaker" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Camera" })).not.toBeInTheDocument();
-    for (const name of ["Mute microphone", "Turn on camera"]) expect(screen.getByRole("button", { name })).not.toHaveClass("md:rounded-r-none");
+    expect(screen.queryByRole("button", { name: "Stickers" })).not.toBeInTheDocument();
+    for (const name of ["Mute microphone", "Turn on camera", "Raise hand"]) expect(screen.getByRole("button", { name })).not.toHaveClass("md:rounded-r-none");
+  });
+
+  it("says nothing of the stickers and reactions of the people in it, which show only in the huddle opened", () => {
+    renderBar(huddle({ people: [{ ...inHuddle(sam), sticker: "brb" }, inHuddle(ada)] }));
+    act(() => showReactions({ rising: [{ nth: 1, userId: "sam", emoji: "🎉" }], runs: [{ emoji: "🎉", first: "sam", more: 0 }] }));
+    expect(bar()).not.toHaveTextContent("🎉");
+    expect(screen.queryByRole("list", { name: "Reactions" })).not.toBeInTheDocument();
+    expect(bar()).not.toHaveTextContent("☕");
+    expect(screen.queryByTitle("Be right back")).not.toBeInTheDocument();
+    expect(state()).toHaveTextContent("Sam and you are in the huddle");
+    // Nor has it React, which opens them.
+    expect(screen.queryByRole("button", { name: "React" })).not.toBeInTheDocument();
   });
 });
 
@@ -292,6 +309,40 @@ describe("The huddle bar's screen", () => {
     );
     await user.click(screen.getByRole("button", { name: "Stop sharing screen" }));
     expect(setScreen).toHaveBeenCalledExactlyOnceWith(false);
+  });
+});
+
+describe("The huddle bar's raised hand", () => {
+  it("raises the hand of the tab's person, from a button after the screen's and before the one that opens the huddle, which phones leave to the huddle opened", async () => {
+    browserSharesScreens();
+    const { setSticker, user } = renderBar();
+    const raise = screen.getByRole("button", { name: "Raise hand" });
+    expect(raise).toHaveClass("bg-hover", "max-md:hidden");
+    expect(raise).toHaveAttribute("title", "Raise hand");
+    expect(raise).toHaveTextContent(/^✋$/);
+    const names = screen.getAllByRole("button").map((button) => button.getAttribute("aria-label") ?? button.textContent);
+    expect(names.slice(names.indexOf("Share screen"))).toEqual(["Share screen", "Raise hand", "Open huddle", "Leave"]);
+    await user.click(raise);
+    expect(setSticker).toHaveBeenCalledExactlyOnceWith("hand");
+  });
+
+  it("lowers it once it's raised, filled in ink until then, and takes off another sticker they show, which it draws meanwhile", async () => {
+    const { setSticker, user, rerender } = renderBar(huddle({ sticker: "hand" }));
+    const lower = screen.getByRole("button", { name: "Lower hand" });
+    expect(lower).toHaveClass("bg-foreground", "text-background");
+    expect(lower).toHaveAttribute("title", "Lower hand");
+    expect(lower).toHaveTextContent(/^✋$/);
+    await user.click(lower);
+    expect(setSticker).toHaveBeenCalledExactlyOnceWith(null);
+
+    rerender(<HuddleBar huddle={huddle({ sticker: "done" })} room={general} meId="ada" />);
+    const remove = screen.getByRole("button", { name: "Remove sticker" });
+    expect(remove).toBe(lower);
+    expect(remove).toHaveClass("bg-foreground", "text-background");
+    expect(remove).toHaveAttribute("title", "Remove sticker");
+    expect(remove).toHaveTextContent(/^✅$/);
+    await user.click(remove);
+    expect(setSticker.mock.calls).toEqual([[null], [null]]);
   });
 });
 

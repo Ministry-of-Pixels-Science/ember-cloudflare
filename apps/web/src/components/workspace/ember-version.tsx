@@ -11,7 +11,7 @@ import { betaToTryOf, updateOf, type NamedRelease } from "@/lib/release-check";
 import { cn } from "@/lib/utils";
 import { BUTTON } from "./email-settings";
 
-// The Ember version card at the end of General, for administrators: the release this Ember is, and once
+// The Ember version card at the top of General, for administrators: the release this Ember is, and once
 // GitHub names a newer one, that it's out, with its notes and how to update, as the project's owner
 // asked (2026-10-31), while the rail's Admin has a dot. A copy made with Deploy to Cloudflare gets a pull
 // request for each release once it has the Update Ember workflow, which Cloudflare's copy leaves out
@@ -24,7 +24,8 @@ import { BUTTON } from "./email-settings";
 // Ember to its newest beta, or to adding it, as the project's owner chose (2026-11-10), and the rail's Admin
 // has no dot for it. The box is a little red, as he asked the same day, so the beta reads as experimental.
 // Check for updates, which he asked for (2026-11-11), has the Worker ask GitHub again, as opening Admin
-// does, and under it the card says when GitHub last named the newest release.
+// does, and under it the card says when GitHub last named the newest release. He moved the card from the
+// end of General to its top (2026-11-17), so that it isn't missed.
 
 const NOTE = "text-[0.8em] text-muted-foreground max-md:text-[12px]";
 

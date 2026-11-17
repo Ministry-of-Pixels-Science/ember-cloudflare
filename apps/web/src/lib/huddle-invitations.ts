@@ -38,8 +38,8 @@ export interface HuddlesSeen {
 
 /**
  * What changes the invitations that ring: one that comes, one that's over, as it is once it's answered,
- * in this tab or another of its person's, or has rung for as long as one does, and what the tab now
- * sees of the huddles they're into.
+ * in this tab or another of its person's, once its room is said to be gone, or once it has rung for as
+ * long as one does, and what the tab now sees of the huddles they're into.
  */
 export type InvitationsChange = { type: "invited"; roomId: RoomId; by: UserId; at: number } | { type: "over"; roomId: RoomId } | ({ type: "seen" } & HuddlesSeen);
 

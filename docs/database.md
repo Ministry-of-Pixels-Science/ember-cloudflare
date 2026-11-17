@@ -110,29 +110,42 @@ Objects, D1 or speed call for something else.
 - **Search is one FTS5 table, read from its newest match.** As Campfire's `message_search_index` is,
   it's an FTS5 table with the porter tokenizer holding each message's plain text, and a search
   quotes each word, so that every word has to match and none is read as FTS5's syntax, such as `NOT`
-  or `NEAR`. It reads the newest 1,000 matches off the index, wherever they are, keeps the newest
-  100 in rooms the searcher is in, and only when those 1,000 hold fewer and there may be more does
-  it ask for just those rooms' matches, by whatever plan SQLite picks. The rooms go to it as one
+  or `NEAR`. It walks the index's matches from the newest, wherever they are, keeps the ones in
+  rooms the searcher is in, and stops at 100 and one more, which says there's another page: one
+  statement, whatever the other rooms hold. It used to read the newest 1,000 matches and ask for
+  just the searcher's rooms' only when those held too few, so a second query ran or not by how many
+  matches were in rooms the searcher isn't in, and the time a search took told them whether a word
+  was written there. It still passes over each match in another room, a row's read apiece, as the
+  FTS5 table doesn't tell rooms apart. The rooms go to it as one
   JSON value. Campfire numbers the index's rows by message id, which grows with time. Ours are
   strings, and each room's messages reach the index on their own schedule, so the index numbers the
   messages it takes itself (`search_messages`): a message's time in milliseconds, times 1,024, plus
   its place among that millisecond's. Walking the index from its largest number then goes from the
   newest message, whichever room it's in and however late it came, with nothing to sort, which a
-  test checks with `EXPLAIN QUERY PLAN`, and an edit keeps its number. The index reads the first
-  query a match at a time, and stops at a full page. Over 100,000 messages in 50 rooms, a search for
-  a word in a quarter of them takes 0.3 ms of SQLite for someone in every room, where reading all
-  1,000 matches took 1.2 ms; for someone in one of the 50, reading the 1,000 and then their room's
-  matches takes about 12 ms. A word in one message takes 0.03 ms.
+  test checks with `EXPLAIN QUERY PLAN`, and an edit keeps its number. Over 100,000 messages in 50
+  rooms, a search for a word in a quarter of them takes 0.3 ms of SQLite for someone in every room,
+  where reading all 1,000 matches took 1.2 ms; for someone in one of the 50, passing over the
+  matches in the other 49 on the way to a page of theirs takes about 3 ms, where reading the 1,000
+  and then their room's matches took about 12. A word in one message takes 0.03 ms.
 - **Search filters are conditions on the index's own rows.** Slack narrows a search with modifiers
   such as `in:`, `from:` and `has:link`, which Campfire has none of. The index keeps what they narrow
   by beside each message (search migration 0003): who wrote it, the thread it's in, whether it has a
   link or a file, and, in `search_mentions`, whom it mentions. Includes me finds the messages that
   mention you, are in your DMs, or are in threads you've written in. A search's filters are
-  conditions the probe reads as it walks the index, newest first or oldest, so they cost nothing
-  while the first matches meet them, and only when those don't fill a page does the rest of the
-  search ask SQLite for just the messages that meet them, through an index on the person and the
-  number, or of the messages with links, or files. A search of filters alone walks `search_messages`
-  in the same way. Show more starts past the number of the last match shown, so each page is read as
+  conditions it checks as it walks the index, newest first or oldest, so they cost nothing while the
+  first matches meet them. A search of filters alone has no words to walk, so it walks the messages
+  of the searcher's rooms, and no other room's: each room's through an index that starts with the
+  room (search migration 0004), of just someone's messages there, or the ones with files, with links
+  or in threads, when the search has such a filter, and one recursive query takes whichever room's
+  message comes next, so nothing is sorted and a room is read only as far as the page goes. Includes
+  me has no index, so it's checked message by message. It used to walk every room's newest 1,000
+  messages first, and then someone's in every room, so the time it took told a searcher how much was
+  written in rooms they aren't in, and when: a test checks that it reads the same rows whatever
+  those rooms hold. No search reads 0003's indexes on the person, links and files alone now, which
+  run through every room. Over 300,000 messages in 50 rooms, a page of the messages with files takes
+  0.9 ms of SQLite for someone in every room, where sorting their rooms' took 270 ms, and Includes
+  me 4 ms for someone with five DMs; with nothing to find, it reads every message of their rooms,
+  about 2 µs each. Show more starts past the number of the last match shown, so each page is read as
   the first was, and FTS5's `highlight` gives the words each match matched, as its text has them, for
   results to mark. Workspace migration 0047 had every room log its messages once more, for the index
   to take each with its filters.
@@ -180,6 +193,11 @@ Objects, D1 or speed call for something else.
   the cookie that carries it. We store an HMAC of the token, keyed by `SESSION_SECRET`, so a leaked
   database or backup holds no live sessions; changing the secret still signs everyone out, as
   changing Campfire's does.
+- **Sessions know which sign-in links they've ended.** Campfire's sign-in links are signed ids of
+  their person, which work until they expire. Ours name the session that showed them too, and work
+  only while it's signed in. A new password saved from a profile, and Disconnect Memberful, end the
+  person's other sessions and keep the one that asked, so `sessions.transfers_since` (workspace
+  migration 0064) holds when that was, and a link the session showed before then signs nobody in.
 - **Passwords are scrypt digests.** Campfire keeps bcrypt digests, which Workers could only make
   with bcrypt compiled to WebAssembly. `users.password_digest` holds
   `$scrypt$ln=15,r=8,p=3$<salt>$<hash>` (the PHC string format), made by Node's `crypto.scrypt`,
@@ -311,6 +329,25 @@ Objects, D1 or speed call for something else.
   Cloudflare's Realtime SFU didn't close when asked wait there too (`huddleUnclosed`), for the alarm
   to ask about again, and since the alarm then rings far more often than a failed log is sent again,
   the room keeps when its logs are next due (`logsDue`).
+- **A huddle's message is a message's row.** The message a huddle has in its room is a row of
+  `messages` like any other, in the name of whoever started the huddle, so its time, link,
+  reactions and thread are a message's. What it says of its huddle is JSON in `messages.huddle`
+  (room migration 0066), as a file is in `attachment` and a bot's cards in `cards`: when the huddle
+  started, and once it's over, when it ended and who was in it, by the names and pictures they had
+  then. Who's in it meanwhile isn't kept there, since a tab has that from the room's huddle in its
+  sidebar, so the row is written twice for most huddles, however many come and go. Each write takes
+  the room's next `change_seq`, so a tab that connects again catches up on it, and is logged for the
+  search index, but the row has no `room_events` row: it marks the room unread for nobody, isn't its
+  latest activity, and reaches no push or webhook. The room's object keeps the message's id in its
+  own storage (`huddleMessage`) from before it writes the row, so a write whose answer it never had
+  isn't made twice, and with it when the huddle started, everyone who has been in it, since the
+  huddle's sockets only say who's in it now, and when it was found over. The id is the huddle's to
+  give as it starts, and its sockets carry it, so that each tab that joins is told which message's
+  thread is the huddle's, to show beside the people in it. The alarm that says who's in the huddle
+  again brings the message in step with it too, which makes up for a write that failed, and for an
+  object that came back with nobody left in its huddle. A row still unwritten as its huddle ends is
+  written then, saying that it's over, and one deleted before the room heard that it was written
+  stays deleted.
 - **Rooms are named by their ids, and some have no creator.** A room's id names its Durable Object
   too, so it's a 16-character sortable string like a message's rather than an integer, and its kind
   is `open`, `closed` or `direct` rather than Rails' class name. The rooms from before the Workspace
@@ -395,7 +432,7 @@ Objects, D1 or speed call for something else.
 - **Search results come from the index.** Campfire reads the matching messages in the query that
   finds them. Ours live in their rooms, so the index keeps each message's row as its room sent it,
   boosts and all, as JSON in `search_messages.message` (search migration 0002), and a search answers
-  from that alone. The probe reads it only for matches in the searcher's rooms. Results show a
+  from that alone. A search reads it only for the matches on its page. Results show a
   message as the index last took it, so an edit, a boost or a deletion shows once the room's log
   reaches the index, as a new message is found, where Campfire's are as of the search. Before, on DO
   SQLite the Worker asked each room with matches for its own, six rooms at a time, waking every room
@@ -441,7 +478,12 @@ Objects, D1 or speed call for something else.
   deleted since has none, and isn't pushed. The Workspace finds a message's recipients and badges in
   one query, in the batch that applies the room's events, just after the message's unread marks,
   through the memberships' key, the subscriptions' index led by the person and, for the badge,
-  `index_memberships_on_user_id_and_room_id`. So pushes add no round trip to either object.
+  `index_memberships_on_user_id_and_room_id`. So pushes add no round trip to either object. An
+  invitation into a huddle is pushed by one more statement of that shape, in the call by which its
+  room has the Workspace invite people: it reads the memberships of the people invited by their key,
+  however many the room has, and their subscriptions and badges as a message's does. Nothing is
+  stored of who has Ember in view, which decides who is pushed one: each workspace socket keeps
+  whether its tab is shown in its attachment, as a room's socket does.
 - **A bot is found by its id, so its token needs no index.** Campfire keeps a bot's token in
   `users.bot_token` under a unique index, and finds the bot a key names by its id and token together
   (`User.authenticate_bot`). Ours keeps the token in the same column (workspace migration 0027)
@@ -542,7 +584,11 @@ Objects, D1 or speed call for something else.
   the batch that resets the password, which deletes the person's as the recovery script's reset
   does, so two at once spend it once and a password that can't be saved leaves it working. Their
   subqueries find the person through the unique index on `users.email_address`, and saving one
-  deletes those that have expired, through the index on `expires_at`.
+  deletes those that have expired, through the index on `expires_at`. Asking for a code looks for
+  the account, and trying one counts the try, in a batch that first counts a time nobody was asked
+  for in `email_link_requests`, under a name no address is counted under, and deletes it: a Durable
+  Object keeps an answer back until what it wrote is stored for good, so writing only for an
+  address with an account, or a code, would answer later for it.
 - **A bot's cards are part of its message's row.** Cards, what a Slack-compatible webhook's legacy
   attachments show, are kept as JSON in `messages.cards` (room migration 0034), as a file is, rather
   than in the body as Action Text attachments, which the rich text pipeline would sanitize as

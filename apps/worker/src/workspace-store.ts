@@ -64,8 +64,8 @@ import type { AppId } from "@ember/protocol/apps";
 import type { LiveHuddle } from "@ember/protocol/huddles";
 import { statement, type Db, type Statement } from "./db";
 import type { StoredPicture } from "./files/pictures";
-import { messagePayload, type PushPayload } from "./push/payload";
-import { ADDRESS_TAG_PREFIX, EVERYONE, SESSION_TAG_PREFIX, type Revocation } from "./revocations";
+import { INVITATION_TTL_SECONDS, invitationPayload, messagePayload, type PushPayload } from "./push/payload";
+import { ADDRESS_TAG_PREFIX, EVERYONE, OPEN_ROOMS_ONLY, SESSION_TAG_PREFIX, type Revocation } from "./revocations";
 import type { RoomEvent } from "./room-log";
 
 // The account, its people, their sessions and their rooms, kept by the Workspace in its own SQLite
@@ -405,7 +405,9 @@ export interface SavedPasswordReset {
 /**
  * The sessions a new password ends, all of its person's but `kept`, the one saving it, whose sockets it
  * closes with `code` in every room they're in, due at `dueAt`, and the push subscriptions it forgets with
- * them, all of theirs but those at `pushEndpoint`, its browser's.
+ * them, all of theirs but those at `pushEndpoint`, its browser's. `kept` stays signed in, but the sign-in
+ * links it showed before `dueAt` end with them, since one that someone else has would go on signing them
+ * in (migrations/0064_session_transfers.sql).
  */
 export interface EndedByPassword {
   kept: string;
@@ -582,6 +584,8 @@ export interface SavedRoomChange {
   addedIds: UserId[];
   /** Who it took out, whose sockets there it queued closing. */
   removedIds: UserId[];
+  /** Whether it made a room open to everyone private, which queued turning away what AI apps that reach only open rooms were let send there. */
+  madePrivate: boolean;
   /** Whether the shared order ranks the room, which the sidebars of the people it put in have left out. */
   ranked: boolean;
 }
@@ -621,6 +625,14 @@ export interface MessagePush {
   deliveries: PushDelivery[];
 }
 
+/**
+ * The pushes of an invitation into a huddle, which are as a message's but for how long a push service
+ * keeps each for a browser that's away, in seconds.
+ */
+export interface InvitationPush extends MessagePush {
+  ttl: number;
+}
+
 /** One of someone's push subscriptions, with the user agent of the browser that saved it, if it sent one. */
 export interface StoredPushSubscription {
   id: number;
@@ -628,7 +640,7 @@ export interface StoredPushSubscription {
   userAgent: string | null;
 }
 
-/** A subscription a message is pushed to, and the count its push sets the app's badge to. */
+/** A subscription a message or an invitation is pushed to, and the count its push sets the app's badge to. */
 export interface PushDelivery {
   subscriptionId: number;
   endpoint: string;
@@ -809,6 +821,18 @@ const COUNT_EMAIL_LINK_REQUEST = `INSERT INTO email_link_requests (email_address
 const UNCOUNT_EMAIL_LINK_REQUEST = `UPDATE email_link_requests SET count = count - 1 WHERE email_address = lower(?1) AND counted_since = ?2 AND count > 0`;
 
 /**
+ * A change that leaves what's stored as it was, for the batch of a lookup whose answer mustn't say, by
+ * how soon it comes, whether it found anything to change: a Durable Object keeps its answers back until
+ * what it wrote is stored for good, and D1 takes longer over a batch that writes, so a lookup that wrote
+ * only for some addresses would answer those later. It counts a time nobody was asked for, under a name
+ * no address is counted under, since they're counted in lowercase, and forgets it.
+ */
+const passingChange = (): Statement[] => [
+  statement(`INSERT OR REPLACE INTO email_link_requests (email_address, counted_since, count) VALUES ('Nobody', '', 0)`),
+  statement(`DELETE FROM email_link_requests WHERE email_address = 'Nobody'`),
+];
+
+/**
  * Keeps the code the person ?1 was emailed to reset their password, whose digest is ?2, in place of any
  * they had, for the address ?3 and the password whose digest is ?4, made at ?5 and working until ?6, and
  * not tried yet.
@@ -833,6 +857,17 @@ const TRY_PASSWORD_RESET = `UPDATE password_resets SET attempts = attempts + 1 W
 
 /** Whose that code is, if its digest is ?3. */
 const PASSWORD_RESET_HOLDER = `SELECT user_id FROM password_resets WHERE ${WORKING_PASSWORD_RESET} AND code_digest = ?3`;
+
+/** The active person whose email address is exactly ?, and their password's digest, unless they have no password. */
+const PASSWORD_FOR = `SELECT id, password_digest FROM users WHERE email_address = ? AND status = ${ACTIVE} AND password_digest <> ''`;
+
+interface PasswordRow {
+  id: UserId;
+  password_digest: string;
+}
+
+/** The person `PASSWORD_FOR` found, if anyone. */
+const passwordIn = ([row]: PasswordRow[]) => (row ? { userId: row.id, passwordDigest: row.password_digest } : null);
 
 /** The lowercase email addresses, among those in ?1, a JSON array, that someone has whatever their case. */
 const TAKEN_EMAIL_ADDRESSES = `SELECT lower(email_address) AS email_address FROM users WHERE lower(email_address) IN (SELECT lower(value) FROM json_each(?1))`;
@@ -949,13 +984,14 @@ const DISCONNECT_IDENTITY = `DELETE FROM identities WHERE user_id = ?1 AND issue
 
 /**
  * The same, for someone signing in with a sign-in link, unless they're no longer active, or are a guest
- * while ?7 says guests can't stay signed in, or the session ?8 names, which showed the link, has ended,
- * is a guest's while ?7 says that, or is neither theirs nor an active administrator's.
+ * while ?7 says guests can't stay signed in, or the session ?8 names, which showed the link at ?9, has
+ * ended, has ended the links it showed until after then (`EndedByPassword`), is a guest's while ?7 says
+ * that, or is neither theirs nor an active administrator's.
  */
 const INSERT_TRANSFERRED_SESSION = `INSERT INTO sessions (id, user_id, token_digest, ip_address, user_agent, last_active_at, created_at, updated_at)
   SELECT ?1, id, ?2, ?3, ?4, ?5, ?5, ?5 FROM users WHERE id = ?6 AND status = ${ACTIVE} AND (guest = 0 OR ?7 = 1)
     AND EXISTS (SELECT 1 FROM sessions AS showing JOIN users AS shower ON shower.id = showing.user_id
-      WHERE showing.id = ?8 AND shower.status = ${ACTIVE} AND (shower.guest = 0 OR ?7 = 1)
+      WHERE showing.id = ?8 AND showing.transfers_since <= ?9 AND shower.status = ${ACTIVE} AND (shower.guest = 0 OR ?7 = 1)
         AND (shower.id = users.id OR shower.role = ${ADMINISTRATOR}))`;
 
 /** The session a token's digest names, if its person is still active. */
@@ -1453,6 +1489,13 @@ function messagePushes(roomId: RoomId, { message }: RoomEvent, rows: PushRow[]):
   ];
 }
 
+/** An invitation's pushes, from the subscriptions `INVITATION_PUSHES` found for it: none when it found none. */
+function invitationPushes(roomId: RoomId, rows: InvitationPushRow[]): InvitationPush[] {
+  if (rows.length === 0) return [];
+  const [{ kind, name, inviter_name }] = rows as [InvitationPushRow];
+  return [{ payload: invitationPayload(roomId, { kind, name }, inviter_name), deliveries: rows.map(deliveryOf), ttl: INVITATION_TTL_SECONDS }];
+}
+
 /** Whether `ROOM_RANKED` found that the shared order ranks the room. */
 const isRanked = (rows: unknown[]) => (rows as Array<{ ranked: number }>)[0]?.ranked === 1;
 
@@ -1621,6 +1664,23 @@ export const HUDDLE_INVITEES = `SELECT memberships.user_id FROM memberships JOIN
   WHERE memberships.room_id = ?1 AND memberships.user_id IN (SELECT value FROM json_each(?2))
     AND memberships.involvement IN ('everything', 'mentions') AND users.status = ${ACTIVE}`;
 
+/**
+ * Where an invitation into room ?1's huddle by ?2 is pushed: to the subscriptions of those of the
+ * people a JSON list ?3 names whom it reaches, as `HUDDLE_INVITEES` has it, in the order they were
+ * saved. Guests are left out unless ?4 says they can stay signed in. Each comes with the room, the name
+ * of whoever invites and the count its push sets the badge to, as a message's does.
+ */
+export const INVITATION_PUSHES = `SELECT push_subscriptions.id, push_subscriptions.endpoint, push_subscriptions.p256dh_key, push_subscriptions.auth_key,
+    (SELECT count(*) FROM memberships AS marked WHERE marked.user_id = memberships.user_id AND marked.unread_at IS NOT NULL) AS badge,
+    rooms.kind, rooms.name, (SELECT name FROM users AS inviters WHERE inviters.id = ?2) AS inviter_name
+  FROM rooms
+    JOIN memberships ON memberships.room_id = rooms.id
+    JOIN users ON users.id = memberships.user_id
+    JOIN push_subscriptions ON push_subscriptions.user_id = memberships.user_id
+  WHERE rooms.id = ?1 AND memberships.user_id IN (SELECT value FROM json_each(?3))
+    AND memberships.involvement IN ('everything', 'mentions') AND users.status = ${ACTIVE} AND (users.guest = 0 OR ?4 = 1)
+  ORDER BY push_subscriptions.id`;
+
 /** A room's huddle, as its row keeps it. */
 const HUDDLE = `SELECT huddle_started_at, huddle_user_ids FROM rooms WHERE id = ?`;
 
@@ -1694,6 +1754,14 @@ const KEPT_SUSPENDED_MEMBERSHIP = `EXISTS (SELECT 1 FROM users JOIN rooms ON roo
  */
 export const QUEUE_MEMBER_REVOCATIONS = `INSERT INTO pending_revocations (room_id, tag, code, due_at)
   SELECT room_id, user_id, ?, ? FROM memberships WHERE room_id = ? AND user_id NOT IN (SELECT value FROM json_each(?)) AND NOT ${KEPT_SUSPENDED_MEMBERSHIP}
+  RETURNING id`;
+
+/**
+ * Queues turning away, in a room that's open to everyone as it's made private, what the AI apps that
+ * reach only open rooms were let send there (`OPEN_ROOMS_ONLY`), answering a row if it was open.
+ */
+const QUEUE_OPEN_ROOMS_ONLY_REVOCATION = `INSERT INTO pending_revocations (room_id, tag, code, due_at)
+  SELECT id, ?, ?, ? FROM rooms WHERE id = ? AND kind = 'open'
   RETURNING id`;
 
 /**
@@ -1867,6 +1935,12 @@ interface PushRow extends DeliveryRow {
   kind: RoomKind;
   name: string | null;
   author_name: string;
+}
+
+interface InvitationPushRow extends DeliveryRow {
+  kind: RoomKind;
+  name: string | null;
+  inviter_name: string;
 }
 
 /**
@@ -3172,15 +3246,17 @@ export class WorkspaceStore {
    * Unlinks the account at `issuer` from `userId`, while their password's digest is still
    * `passwordDigest`, as the Worker checked it, and in the same transaction ends the sessions and
    * forgets the push subscriptions `ended` says, queuing closing those sessions' sockets, and forgets
-   * the connections their browsers started and haven't finished, as a new password does. Each
-   * statement checks both, so a password changed meanwhile, or an account disconnected already, changes
-   * nothing. Answers whether it was unlinked, and whether it queued any.
+   * the connections their browsers started and haven't finished, and ends the sign-in links the session
+   * it keeps has shown, as a new password does. Each statement checks both, so a password changed
+   * meanwhile, or an account disconnected already, changes nothing. Answers whether it was unlinked, and
+   * whether it queued any.
    */
   async disconnectIdentity(userId: UserId, issuer: string, passwordDigest: string, ended: EndedByPassword): Promise<Disconnection> {
-    const [queued, , , , unlinked] = await this.db.batch([
+    const [queued, , , , , unlinked] = await this.db.batch([
       // Before their sessions go, which it finds their sockets by, and before the link, which each checks.
       statement(QUEUE_DISCONNECTED_SESSION_REVOCATIONS, userId, issuer, passwordDigest, SESSION_TAG_PREFIX, ended.code, ended.dueAt, ended.kept),
       statement(`DELETE FROM sessions WHERE user_id = ?1 AND id <> ?4 AND ${DISCONNECTING}`, userId, issuer, passwordDigest, ended.kept),
+      statement(`UPDATE sessions SET transfers_since = ?5 WHERE id = ?4 AND ${DISCONNECTING}`, userId, issuer, passwordDigest, ended.kept, ended.dueAt),
       statement(`DELETE FROM push_subscriptions WHERE user_id = ?1 AND endpoint IS NOT ?4 AND ${DISCONNECTING}`, userId, issuer, passwordDigest, ended.pushEndpoint),
       statement(`DELETE FROM pending_identities WHERE user_id = ?1 AND ${DISCONNECTING}`, userId, issuer, passwordDigest),
       statement(DISCONNECT_IDENTITY, userId, issuer, passwordDigest),
@@ -3302,10 +3378,12 @@ export class WorkspaceStore {
   /**
    * Counts a try of the code to reset a password that works, at `now`, for the active person whose email
    * address is exactly `emailAddress`, while it has tries left, answering its digest to check the code
-   * tried against, or null while no code works for them, whoever they are.
+   * tried against, or null while no code works for them, whoever they are. Either way it changes what's
+   * stored (`passingChange`), so that how soon it answers doesn't say which.
    */
   async tryPasswordReset(emailAddress: string, now: string): Promise<string | null> {
-    const [row] = await this.db.all<{ code_digest: string }>(TRY_PASSWORD_RESET, emailAddress, now, PASSWORD_RESET_CODE_TRIES);
+    const results = await this.db.batch([...passingChange(), statement(TRY_PASSWORD_RESET, emailAddress, now, PASSWORD_RESET_CODE_TRIES)]);
+    const [row] = results.at(-1) as Array<{ code_digest: string }>;
     return row?.code_digest ?? null;
   }
 
@@ -3350,11 +3428,16 @@ export class WorkspaceStore {
    * without a password never sign in with one.
    */
   async passwordFor(emailAddress: string): Promise<{ userId: UserId; passwordDigest: string } | null> {
-    const [row] = await this.db.all<{ id: UserId; password_digest: string }>(
-      `SELECT id, password_digest FROM users WHERE email_address = ? AND status = ${ACTIVE} AND password_digest <> ''`,
-      emailAddress,
-    );
-    return row ? { userId: row.id, passwordDigest: row.password_digest } : null;
+    return passwordIn(await this.db.all<PasswordRow>(PASSWORD_FOR, emailAddress));
+  }
+
+  /**
+   * The person `passwordFor` finds, for someone asking to reset their password, which changes what's
+   * stored whether or not there is one (`passingChange`), so that how soon it answers doesn't say which.
+   */
+  async passwordToReset(emailAddress: string): Promise<{ userId: UserId; passwordDigest: string } | null> {
+    const results = await this.db.batch([...passingChange(), statement(PASSWORD_FOR, emailAddress)]);
+    return passwordIn(results.at(-1) as PasswordRow[]);
   }
 
   /**
@@ -3383,13 +3466,15 @@ export class WorkspaceStore {
   }
 
   /**
-   * Starts a session for someone who opened a sign-in link for them that the session `shownBy` showed,
-   * unless they're no longer active, or are a guest while `guests` says guests can't stay signed in, or
-   * that session has ended or is neither theirs nor an active administrator's.
+   * Starts a session for someone who opened a sign-in link for them that the session `shownBy` showed
+   * at `shownAt`, unless they're no longer active, or are a guest while `guests` says guests can't stay
+   * signed in, or that session has ended, has ended the links it showed until then, or is neither theirs
+   * nor an active administrator's.
    */
   async startTransferredSession(
     userId: UserId,
     shownBy: string,
+    shownAt: number,
     guests: boolean,
     sessionId: string,
     tokenDigest: string,
@@ -3397,7 +3482,7 @@ export class WorkspaceStore {
     now: string,
   ): Promise<StoredSession | null> {
     const [, [row]] = (await this.db.batch([
-      statement(INSERT_TRANSFERRED_SESSION, sessionId, tokenDigest, client.ip, client.userAgent, now, userId, guests ? 1 : 0, shownBy),
+      statement(INSERT_TRANSFERRED_SESSION, sessionId, tokenDigest, client.ip, client.userAgent, now, userId, guests ? 1 : 0, shownBy, shownAt),
       statement(SESSION, tokenDigest),
     ])) as [unknown[], SessionRow[]];
     return row ? storedSession(row) : null;
@@ -3850,6 +3935,14 @@ export class WorkspaceStore {
     return userIdsOf(await this.db.all<UserIdRow>(HUDDLE_INVITEES, roomId, JSON.stringify(userIds)));
   }
 
+  /**
+   * The pushes of an invitation into room `roomId`'s huddle by `by`, to those of `userIds` it reaches
+   * who have saved a subscription, and to guests only if `guests` says they can stay signed in.
+   */
+  async invitationPushes(roomId: RoomId, by: UserId, userIds: UserId[], guests: boolean): Promise<InvitationPush[]> {
+    return invitationPushes(roomId, await this.db.all<InvitationPushRow>(INVITATION_PUSHES, roomId, by, JSON.stringify(userIds), guests ? 1 : 0));
+  }
+
   /** The huddle going on in a room, or null when none is. */
   async liveHuddle(roomId: RoomId): Promise<LiveHuddle | null> {
     const [row] = await this.db.all<HuddleRow>(HUDDLE, roomId);
@@ -4008,6 +4101,12 @@ export class WorkspaceStore {
 
   async isMember(roomId: RoomId, userId: UserId): Promise<boolean> {
     return (await this.db.all(MEMBERSHIP, roomId, userId)).length > 0;
+  }
+
+  /** The kind of room `roomId`, a DM's too, or null when there's no such room. */
+  async roomKind(roomId: RoomId): Promise<RoomKind | null> {
+    const [row] = await this.db.all<{ kind: RoomKind }>(`SELECT kind FROM rooms WHERE id = ?`, roomId);
+    return row?.kind ?? null;
   }
 
   /** Whether room `roomId` is a direct conversation between `userId` and `otherId` alone, each an active member of it. */
@@ -4582,9 +4681,10 @@ export class WorkspaceStore {
   /**
    * Saves someone's profile, and a new password when `passwordDigest` is one's, recording when. With a
    * new password, in the same transaction it ends the sessions and forgets the push subscriptions
-   * `ended` says, queuing closing those sessions' sockets, and forgets the accounts elsewhere their old
-   * password started connecting, or connected, if they had one and keep an email address to sign in
-   * with (`UNLINK_ON_NEW_PASSWORD`). Answers whether it queued any.
+   * `ended` says, queuing closing those sessions' sockets, ends the sign-in links the session it keeps
+   * has shown, and forgets the accounts elsewhere their old password started connecting, or connected, if
+   * they had one and keep an email address to sign in with (`UNLINK_ON_NEW_PASSWORD`). Answers whether it
+   * queued any.
    */
   async changeProfile(userId: UserId, { name, emailAddress, bio, passwordDigest }: ProfileChange, now: string, ended: EndedByPassword | null): Promise<boolean> {
     const change = statement(CHANGE_PROFILE, name, emailAddress, bio, passwordDigest, now, userId);
@@ -4596,6 +4696,7 @@ export class WorkspaceStore {
       // Before their sessions go, which it finds their sockets by.
       statement(QUEUE_OTHER_SESSION_REVOCATIONS, SESSION_TAG_PREFIX, ended.code, ended.dueAt, userId, ended.kept),
       statement(`DELETE FROM sessions WHERE user_id = ? AND id <> ?`, userId, ended.kept),
+      statement(`UPDATE sessions SET transfers_since = ? WHERE id = ?`, ended.dueAt, ended.kept),
       statement(`DELETE FROM push_subscriptions WHERE user_id = ? AND endpoint IS NOT ?`, userId, ended.pushEndpoint),
       statement(`DELETE FROM pending_identities WHERE user_id = ?`, userId),
       statement(UNLINK_ON_NEW_PASSWORD, userId, emailAddress),
@@ -4763,16 +4864,17 @@ export class WorkspaceStore {
     if (changes.kind === "open") {
       const grant = statement(GRANT_ROOM_TO_ACTIVE_USERS, roomId, now, now);
       const [updated, added, after, rank] = (await this.db.batch([update, grant, members, ranked])) as UserIdRow[][];
-      return { roomChanged: updated!.length > 0, memberIds: userIdsOf(after!), addedIds: userIdsOf(added!), removedIds: [], ranked: isRanked(rank!) };
+      return { roomChanged: updated!.length > 0, memberIds: userIdsOf(after!), addedIds: userIdsOf(added!), removedIds: [], madePrivate: false, ranked: isRanked(rank!) };
     }
     if (changes.kind !== "closed") {
       const [updated, after] = (await this.db.batch([update, members])) as UserIdRow[][];
       // Nobody new is in it, so nobody's sidebar has left it out.
-      return { roomChanged: updated!.length > 0, memberIds: userIdsOf(after!), addedIds: [], removedIds: [], ranked: false };
+      return { roomChanged: updated!.length > 0, memberIds: userIdsOf(after!), addedIds: [], removedIds: [], madePrivate: false, ranked: false };
     }
     const memberIds = JSON.stringify(changes.memberIds);
-    // Whom it takes out is read before the room's kind changes, which says whether anyone suspended stays.
-    const [, removed, updated, added, after, rank] = (await this.db.batch([
+    // Whether it was open, and whom it takes out, are read before the room's kind changes, which says whether anyone suspended stays.
+    const [madePrivate, , removed, updated, added, after, rank] = (await this.db.batch([
+      statement(QUEUE_OPEN_ROOMS_ONLY_REVOCATION, OPEN_ROOMS_ONLY, code, dueAt, roomId),
       statement(QUEUE_MEMBER_REVOCATIONS, code, dueAt, roomId, memberIds),
       statement(REVOKE_ROOM_FROM_OTHERS, roomId, memberIds),
       update,
@@ -4785,6 +4887,7 @@ export class WorkspaceStore {
       memberIds: userIdsOf(after!),
       addedIds: userIdsOf(added!),
       removedIds: userIdsOf(removed!),
+      madePrivate: madePrivate!.length > 0,
       ranked: isRanked(rank!),
     };
   }

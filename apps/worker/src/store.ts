@@ -1,4 +1,5 @@
 import { PARENT_TEXT_LENGTH, parentTextOf, THREAD_FACES, type Boost, type Card, type Message, type RoomId, type ThreadSummary, type TimelinePage, type User, type UserId } from "@ember/protocol";
+import type { MessageHuddle } from "@ember/protocol/huddles";
 import { hasLinkable, type PreparedBody } from "@ember/richtext";
 import { statement, type Db, type Statement } from "./db";
 import { fileSigner, type FileUrls } from "./files/addresses";
@@ -12,7 +13,8 @@ import type { IndexedMessage, SearchFacts } from "./search-index";
 // whose addresses are signed as it's read, so they're always signed under the secret Ember has now, and a
 // bot's message its cards (migrations/0034_message_cards.sql). A reply in a thread names its parent, and shows
 // in the room's timeline only when it was also sent there, and a parent is read with its thread's summary
-// (migrations/0044_threads.sql).
+// (migrations/0044_threads.sql). A huddle's message keeps what it says of its huddle
+// (migrations/0066_huddle_messages.sql).
 
 interface MessageRow {
   id: string;
@@ -51,6 +53,11 @@ interface MessageRow {
   repliers?: string | null;
   /** For a reply, the start of its parent's plain text, or null once the parent is deleted. */
   parent_text?: string | null;
+  /**
+   * What a huddle's message says of its huddle, as JSON (`MessageHuddle`), or null for any other message,
+   * or missing from a row the search index kept before huddles had messages.
+   */
+  huddle?: string | null;
 }
 
 /** How many replies a message's thread has, and when the newest was written, if it has any. */
@@ -104,8 +111,8 @@ const REPLIES_LEFT = `SELECT id, parent_id, deleted, EXISTS (
   ) AS replies_left
   FROM messages WHERE room_id = ?1 AND id IN (SELECT value FROM json_each(?3))`;
 
-/** Keeps the messages of room `?` a JSON array names for their threads, at a time, without their text, file or cards. */
-const KEEP_FOR_THREADS = `UPDATE messages SET body = '', plain_text = '', mentions = '[]', attachment = NULL, cards = NULL, deleted = 1, updated_at = ?3
+/** Keeps the messages of room `?` a JSON array names for their threads, at a time, without their text, file, cards or huddle. */
+const KEEP_FOR_THREADS = `UPDATE messages SET body = '', plain_text = '', mentions = '[]', attachment = NULL, cards = NULL, huddle = NULL, deleted = 1, updated_at = ?3
   WHERE room_id = ?1 AND id IN (SELECT value FROM json_each(?2))`;
 
 /** Numbers changes to the messages of room ?1 a JSON array ?2 names from ?3, in the order it names them. */
@@ -143,8 +150,24 @@ function logIndexingRepliesTo(roomId: RoomId, message: Message, plainText: strin
   return retold ? [logIndexingReplies(roomId, JSON.stringify([message.id]))] : [];
 }
 
-/** A link written as one, in a message's markup or its cards'. */
-const WRITTEN_LINK = /<a\s[^>]*\bhref=/i;
+/** What a link written as one is read by: where its tag may start, where a tag ends, and where a tag gives an address. */
+const LINK_MARKS = /<a\s|>|\bhref=/gi;
+
+/**
+ * Whether a message's markup, or its cards', has a link written as one: an `<a ` with an `href=` after it
+ * and no `>` between, which is what `/<a\s[^>]*\bhref=/i` matches. That pattern reads on from every `<a `
+ * to the next `>`, or to the text's end, and a bot can fill its cards' plain text with them, so this reads
+ * the text once instead.
+ */
+function hasWrittenLink(markup: string): boolean {
+  let inLinkTag = false;
+  for (const [mark] of markup.matchAll(LINK_MARKS)) {
+    if (mark === ">") inLinkTag = false;
+    else if (mark.startsWith("<")) inLinkTag = true;
+    else if (inLinkTag) return true;
+  }
+  return false;
+}
 
 /**
  * What search filters narrow a search by, as the search index keeps it: who wrote the message, its
@@ -158,9 +181,9 @@ function searchFactsOf(row: MessageRow): SearchFacts {
     creatorId: row.creator_id,
     threadId: row.parent_id ?? (threadOf(row) ? row.id : null),
     hasLink:
-      WRITTEN_LINK.test(row.body) ||
+      hasWrittenLink(row.body) ||
       (row.attachment === null && hasLinkable(row.plain_text)) ||
-      (row.cards !== null && (WRITTEN_LINK.test(row.cards) || hasLinkable(row.cards))),
+      (row.cards !== null && (hasWrittenLink(row.cards) || hasLinkable(row.cards))),
     hasFile: row.attachment !== null,
     mentionIds: [...new Set((JSON.parse(row.mentions) as (User | UserId)[]).map((person) => (typeof person === "string" ? person : person.id)))],
   };
@@ -194,6 +217,7 @@ function toMessage(row: MessageRow): Message {
     // A row the search index kept from before threads has none of their columns.
     ...(row.parent_id != null && { parentId: row.parent_id, alsoSent: row.in_room === 1, parentText: row.parent_text ?? "" }),
     ...(thread && { thread }),
+    ...(row.huddle != null && { huddle: JSON.parse(row.huddle) as MessageHuddle }),
     ...(row.deleted === 1 && { deleted: true }),
   };
 }
@@ -562,6 +586,50 @@ export class MessageStore {
       },
       seq,
     };
+  }
+
+  /**
+   * Stores the message of a huddle `starter` started, in their name, which says `huddle` of it and whose
+   * text is `body`, and answers it with the change's number. It's logged for the search index, as any
+   * message is, and not for the Workspace: a huddle's start marks no room unread, and reaches nobody as
+   * a push or a webhook.
+   */
+  async createHuddle(id: string, starter: User, body: StoredBody, huddle: MessageHuddle, now: string): Promise<{ message: Message; seq: number }> {
+    const clientMessageId = crypto.randomUUID();
+    const seq = await this.change((seq) => [
+      statement(
+        `INSERT INTO messages (id, room_id, client_message_id, creator_id, creator_name, body, plain_text, mentions, created_at, updated_at, change_seq, huddle)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        id,
+        this.roomId,
+        clientMessageId,
+        starter.id,
+        starter.name,
+        body.html,
+        body.plainText,
+        JSON.stringify(body.mentions),
+        now,
+        now,
+        seq,
+        JSON.stringify(huddle),
+      ),
+      logIndexing(this.roomId, id),
+    ]);
+    const message = { id, clientMessageId, roomId: this.roomId, creator: starter, body: body.html, plainText: body.plainText, mentions: body.mentions, createdAt: now, updatedAt: now, editedAt: null, boosts: [], huddle };
+    return { message, seq };
+  }
+
+  /**
+   * Has `message`, a huddle's, say `huddle` of it from now, as its huddle ends, or goes on after all,
+   * logging it for the search index, whose results show it, and answers the message as it is now with
+   * the change's number.
+   */
+  async updateHuddle(message: Message, huddle: MessageHuddle, now: string): Promise<{ message: Message; seq: number }> {
+    const seq = await this.change((seq) => [
+      statement(`UPDATE messages SET huddle = ?, updated_at = ?, change_seq = ? WHERE room_id = ? AND id = ?`, JSON.stringify(huddle), now, seq, this.roomId, message.id),
+      logIndexing(this.roomId, message.id),
+    ]);
+    return { message: { ...message, huddle, updatedAt: now }, seq };
   }
 
   /** Which of `clientMessageIds` the room has stored from `creator`. */

@@ -309,8 +309,9 @@ export async function changeWebSearch(request: Request, env: Env): Promise<Respo
  * @ember's unless it's another `question`, given its format's tools for it, of what the models file lets
  * it do (`webToolsOf`), and what it said, or why it can't: AI Gateway refused the tools, even without the
  * one for reading pages, which it may not have for every model, the model answered without searching,
- * which shows in the pages it cites, as `unsearched` says, or Cloudflare's Web Search API refused the
- * searches Ember ran for it, or it didn't answer at all.
+ * which shows in the pages it cites, or for Grok or one of Workers AI's, in Ember's searches finding none,
+ * as `unsearched` says, or Cloudflare's Web Search API refused the searches Ember ran for it, or it didn't
+ * answer at all.
  */
 export async function searchedBy(
   env: Env,
@@ -327,7 +328,7 @@ export async function searchedBy(
     answered = await askOnce(env, gateway, { ...question, webTools }, signal);
   }
   if ("refusal" in answered) return answered.wrongFormat ? { ...answered, refusal: webToolsRefused(gateway.name, answered.cloudflareSays) } : answered;
-  if (!answered.sources) return answered.searchRefused ?? { status: 422, reason: "model", refusal: unsearched(gateway.name) };
+  if (!answered.sources && !answered.searched) return answered.searchRefused ?? { status: 422, reason: "model", refusal: unsearched(gateway.name) };
   return { webTools: [...webTools], found: shownOf(answered.text) };
 }
 

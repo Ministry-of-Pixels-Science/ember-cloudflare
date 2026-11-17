@@ -59,6 +59,11 @@ describe("The AI apps section of your profile", () => {
     expect(connectionStatus(CHATGPT)).toBe(`From chatgpt.example, connected ${dateTimeLabel(new Date(CONNECTED))}. It hasn't asked Ember anything yet.`);
     // One that may send messages says so.
     expect(connectionStatus({ ...CHATGPT, scopes: ["read", "write"] })).toBe(`From chatgpt.example, connected ${dateTimeLabel(new Date(CONNECTED))}. It can send messages as you. It hasn't asked Ember anything yet.`);
+    // So does one let into your direct messages and private rooms.
+    expect(connectionStatus({ ...CHATGPT, scopes: ["read", "private"] })).toBe(`From chatgpt.example, connected ${dateTimeLabel(new Date(CONNECTED))}. It can use your direct messages and private rooms too. It hasn't asked Ember anything yet.`);
+    expect(connectionStatus({ ...CHATGPT, scopes: ["read", "write", "private"] })).toBe(
+      `From chatgpt.example, connected ${dateTimeLabel(new Date(CONNECTED))}. It can send messages as you. It can use your direct messages and private rooms too. It hasn't asked Ember anything yet.`,
+    );
     expect(screen.queryByText(NOTHING_CONNECTED)).toBeNull();
     expect(screen.getByRole("button", { name: "Disconnect Claude" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Disconnect ChatGPT" })).toBeEnabled();

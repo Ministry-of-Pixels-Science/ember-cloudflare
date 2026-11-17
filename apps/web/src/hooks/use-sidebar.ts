@@ -1,16 +1,5 @@
 import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useReducer, useRef, useState } from "react";
-import {
-  CloseCode,
-  parseServerFrame,
-  type Account,
-  type DirectoryUser,
-  type Me,
-  type RoomId,
-  type User,
-  type UserId,
-  type WorkspaceClientFrame,
-  type WorkspaceServerFrame,
-} from "@ember/protocol";
+import { CloseCode, parseServerFrame, type Account, type DirectoryUser, type Me, type RoomId, type User, type UserId, type WorkspaceClientFrame, type WorkspaceServerFrame } from "@ember/protocol";
 import { fetchMe, fetchSidebar, isSignedOut, workspaceSocketUrl, type SidebarCopy } from "@/lib/api";
 import type { InvitationsChange } from "@/lib/huddle-invitations";
 import { activeStore, watchUse } from "@/lib/presence";
@@ -102,7 +91,8 @@ const isSame = (you: Me, me: Me) => you.id === me.id && you.name === me.name && 
  * administrators' direct messages is. `onAccountChanged` hears the workspace as the socket says it is,
  * each time it connects and whenever an administrator changes it. `onGone` hears of each room the
  * socket says is gone as it leaves the list. `onInvitation` hears of each invitation into a huddle the
- * socket brings this person, and of each they've answered, in this tab or another.
+ * socket brings this person, and of each that's over: one they've answered, in this tab or another,
+ * and one into a room the socket says is gone.
  */
 export function useSidebar(
   me: Me,
@@ -193,6 +183,18 @@ export function useSidebar(
       toldOf = { you: false, account: false };
       unheard = true;
     };
+
+    // Tells the Workspace whether the tab is shown, unless its socket's address or an earlier frame said
+    // so already, since an invitation into a huddle is pushed to whoever has Ember in view nowhere. It's
+    // told as that changes, where a room hears once the change has lasted: a phone can stop a tab soon
+    // after hiding it. Until the Workspace lets the socket in, the welcome tells it.
+    const shown = () => document.visibilityState === "visible";
+    let told: boolean;
+    const tellVisibility = () => {
+      const visible = shown();
+      if (visible !== told && workspace.send({ type: "presence.visible", visible })) told = visible;
+    };
+
     const heardOf = (roomId: RoomId) => roomFrames.current.lastOf.set(roomId, ++roomFrames.current.count);
     const onMessage = (data: string) => {
       const frame = parseServerFrame<WorkspaceServerFrame>(data);
@@ -204,7 +206,8 @@ export function useSidebar(
             return sessionChanged(frame.you);
           }
           workspace.connected();
-          workspace.send({ type: "presence", active: use.inUse() });
+          workspace.send({ type: "presence.active", active: use.inUse() });
+          tellVisibility();
           if (!toldOf.you) signsIn(frame.you);
           if (!toldOf.account) accountChanged(frame.account);
           return reload();
@@ -214,6 +217,8 @@ export function useSidebar(
         case "room.gone":
           heardOf(frame.roomId);
           gone(frame.roomId);
+          // An invitation into its huddle goes with it, though this tab's rooms never had the room.
+          invitation({ type: "over", roomId: frame.roomId });
           return change({ type: "gone", roomId: frame.roomId });
         case "room.unread":
           return change({ type: "marked", roomId: frame.roomId, at: frame.at, count: frame.count });
@@ -285,16 +290,24 @@ export function useSidebar(
     };
 
     reload();
-    const workspace = reconnectingSocket<WorkspaceClientFrame>({ url: workspaceSocketUrl, onMessage, onConnecting, onClose, deploySpreadMs: DEPLOY_SPREAD_MS });
+    const workspace = reconnectingSocket<WorkspaceClientFrame>({
+      url: () => workspaceSocketUrl({ visible: (told = shown()) }),
+      onMessage,
+      onConnecting,
+      onClose,
+      deploySpreadMs: DEPLOY_SPREAD_MS,
+    });
     // A change while the socket isn't let in waits for its welcome, which says how the tab is then.
-    const use = watchUse((inUse) => workspace.send({ type: "presence", active: inUse }));
+    const use = watchUse((inUse) => workspace.send({ type: "presence.active", active: inUse }));
     document.addEventListener("visibilitychange", visibilityChanged);
+    document.addEventListener("visibilitychange", tellVisibility);
     return () => {
       closed = true;
       clearTimeout(waiting);
       workspace.close();
       use.stop();
       document.removeEventListener("visibilitychange", visibilityChanged);
+      document.removeEventListener("visibilitychange", tellVisibility);
     };
   }, [refresh]);
 

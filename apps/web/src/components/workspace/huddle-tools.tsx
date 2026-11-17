@@ -1,15 +1,19 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type Ref } from "react";
 import type { Room, UserId } from "@ember/protocol";
-import { Microphone, MicrophoneMute, ModernTv, RotateCameraRight, VideoCamera, VideoCameraOff } from "@/components/icons/iconoir";
+import { Emoji, MessageText, Microphone, MicrophoneMute, ModernTv, MoreVert, RotateCameraRight, UserPlus, VideoCamera, VideoCameraOff } from "@/components/icons/iconoir";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { PopoverTrigger } from "@/components/ui/popover";
 import { useCamerasAllowed, useScreensAllowed } from "@/hooks/use-account";
 import { useNameOf } from "@/hooks/use-directory";
 import { roomName } from "@/lib/directs";
 import { listDevices, sharesScreens, watchDevices } from "@/lib/huddle-devices";
 import { huddlePlace } from "@/lib/huddle-people";
-import { leaveHuddle, muteHuddle, shareHuddleScreen, showHuddleCamera, switchHuddleCamera, type JoinedHuddle } from "@/lib/huddle-store";
+import { STICKERS } from "@/lib/huddle-stickers";
+import { leaveHuddle, muteHuddle, shareHuddleScreen, showHuddleCamera, showHuddleSticker, switchHuddleCamera, type JoinedHuddle } from "@/lib/huddle-store";
 import { muteShortcut } from "@/lib/keyboard";
 import { cn } from "@/lib/utils";
 import { CameraMenu, MicrophoneMenu } from "./huddle-device-menu";
+import { StickersMenu } from "./huddle-reactions";
 import { ShortcutTooltip } from "./shortcut-tooltip";
 
 /** A huddle button: a 40px square, 44px for fingers, filled in ink while what it switches is on. */
@@ -141,6 +145,122 @@ export function ScreenTool({ huddle, className }: { huddle: JoinedHuddle; classN
     <button type="button" title={label} aria-label={label} onClick={() => shareHuddleScreen(!shared)} className={cn(TOOL, shared ? TOOL_ON : TOOL_OFF, className)}>
       <ModernTv />
     </button>
+  );
+}
+
+/**
+ * Raises the hand of the tab's person in its huddle, which their tile shows until they lower it. While
+ * they show a sticker, the raised hand or another, it's that sticker's emoji, filled in ink, and takes
+ * it off, as Slack's does. In the huddle opened it has an arrow beside it, as Slack's has, which opens
+ * the stickers there are, the raised hand first of them. Phones have neither: their stickers are in
+ * React's panel.
+ */
+export function RaiseHandTool({ huddle, stickers = false }: { huddle: JoinedHuddle; stickers?: boolean }) {
+  const shown = huddle.sticker;
+  const label = shown === null ? "Raise hand" : shown === "hand" ? "Lower hand" : "Remove sticker";
+  const look = shown ? TOOL_ON : TOOL_OFF;
+  const tool = (
+    <button type="button" title={label} aria-label={label} onClick={() => showHuddleSticker(shown ? null : "hand")} className={cn(TOOL, look, stickers ? BESIDE_ARROW : "max-md:hidden")}>
+      <span aria-hidden className="text-[19px] leading-none">
+        {STICKERS[shown ?? "hand"].emoji}
+      </span>
+    </button>
+  );
+  if (!stickers) return tool;
+  return (
+    <span className="flex max-md:hidden">
+      {tool}
+      <StickersMenu huddle={huddle} className={cn(TOOL, look, ARROW)} />
+    </span>
+  );
+}
+
+/**
+ * React, after Raise hand, where Slack's emoji button is: it opens the huddle's reactions and stickers
+ * over its buttons (`HuddleReactions`, which it goes inside). A phone under 360px wide has no room for
+ * it, and has it in More's menu.
+ */
+export function ReactTool() {
+  return (
+    <PopoverTrigger asChild>
+      <button type="button" title="React" aria-label="React" className={cn(TOOL, TOOL_OFF, "data-[state=open]:bg-foreground/12 max-[360px]:hidden")}>
+        <Emoji />
+      </button>
+    </PopoverTrigger>
+  );
+}
+
+/**
+ * Shows the huddle's thread beside the people in it, or closes it, and is filled in ink while it shows:
+ * after React and before More, where Slack's is. The huddle opened has it where it has room for the
+ * thread.
+ */
+export function ThreadTool({ shown, onShow, ref }: { shown: boolean; onShow: (shown: boolean) => void; ref?: Ref<HTMLButtonElement> }) {
+  return (
+    <button ref={ref} type="button" title="Thread" aria-label="Thread" aria-pressed={shown} onClick={() => onShow(!shown)} className={cn(TOOL, shown ? TOOL_ON : TOOL_OFF)}>
+      <MessageText />
+    </button>
+  );
+}
+
+/** Opens something from a button, which has the focus back once it closes. */
+type OpenFrom = (opener: HTMLElement) => void;
+
+/** Invite people, which opens the list of the room's people to invite into the huddle: a button of its own where the huddle opened has room for one, as on a computer. */
+export function InviteTool({ onInvite }: { onInvite: OpenFrom }) {
+  return (
+    <button type="button" title="Invite people" aria-label="Invite people" onClick={(event) => onInvite(event.currentTarget)} className={cn(TOOL, TOOL_OFF)}>
+      <UserPlus />
+    </button>
+  );
+}
+
+interface MoreProps {
+  /** Opens the huddle's reactions and stickers, as React does. */
+  onReact: OpenFrom;
+  /** Opens Invite people, while the huddle's room is among this person's. */
+  onInvite?: OpenFrom;
+}
+
+/**
+ * More, last of the huddle's buttons on a phone, where Slack's is, whose menu has what a phone has no
+ * room to give a button: Invite people, and under 360px wide, React. Without Invite people it's there
+ * only for React. What's chosen opens once the menu has closed, when the menu has let go of the page
+ * and of the focus, which what opens takes in place of the button.
+ */
+export function MoreTool({ onReact, onInvite }: MoreProps) {
+  const button = useRef<HTMLButtonElement>(null);
+  /** What was chosen from the menu, to open once it has closed. */
+  const chosen = useRef<OpenFrom | null>(null);
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger ref={button} title="More" aria-label="More" className={cn(TOOL, TOOL_OFF, "md:hidden", !onInvite && "min-[360px]:hidden")}>
+        <MoreVert />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        side="top"
+        sideOffset={8}
+        className="min-w-[200px]"
+        onCloseAutoFocus={(event) => {
+          const open = chosen.current;
+          chosen.current = null;
+          if (!open || !button.current) return;
+          event.preventDefault();
+          open(button.current);
+        }}
+      >
+        <DropdownMenuItem className="min-[360px]:hidden" onSelect={() => void (chosen.current = onReact)}>
+          <Emoji />
+          React
+        </DropdownMenuItem>
+        {onInvite && (
+          <DropdownMenuItem onSelect={() => void (chosen.current = onInvite)}>
+            <UserPlus />
+            Invite people
+          </DropdownMenuItem>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

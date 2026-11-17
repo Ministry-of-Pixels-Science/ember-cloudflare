@@ -2482,19 +2482,24 @@ describe("Huddles", () => {
     setCamera: vi.fn(),
     setScreen: vi.fn(),
     setOpen: vi.fn((open: boolean) => showHuddle({ ...joinedHuddle()!, open })),
+    setThread: vi.fn(),
     setDevice: vi.fn(),
     setSmall: vi.fn(),
     switchCamera: vi.fn(),
+    invite: vi.fn(() => true),
+    setSticker: vi.fn(),
+    react: vi.fn(),
   } satisfies HuddleControls;
   /** The tab's camera, on: one that doesn't say which way it faces, as a computer's doesn't. */
   const CAMERA = { getVideoTracks: () => [] } as unknown as MediaStream;
   /** Joins `roomId`'s huddle as the preview would, without a microphone or a camera. */
   const join = (roomId: string) => act(() => joinHuddle({ roomId, muted: false, microphone: null, camera: null, speakerId: "" }));
-  /** Serves `sidebar` as this person's rooms, and a search that finds nothing, as the search box and its page ask. */
-  const serveRooms = (sidebar: object = roomList(rooms)) =>
+  /** Serves `sidebar` as this person's rooms, and a search that finds nothing, as the search box and its page ask, and whatever `more` answers. */
+  const serveRooms = (sidebar: object = roomList(rooms), more: Parameters<typeof serve>[0] = {}) =>
     serve({
       "GET /api/sidebar": () => Response.json(sidebar),
       "GET /api/searches?q=": () => Response.json({ search: null, matches: [], next: null, rooms: [], recent: [] }),
+      ...more,
     });
 
   beforeEach(() => {
@@ -2504,7 +2509,7 @@ describe("Huddles", () => {
     // Joining lets the tab into the huddle at once, alone, and shows it opened.
     vi.mocked(joinHuddle).mockImplementation(({ roomId, muted }) =>
       showHuddle(
-        { roomId, connected: true, you: ada, people: [{ user: ada, muted, audio: false, video: false, screen: false }], muted, microphone: true, microphoneId: "", speakerId: "", camera: null, watched: new Map(), screen: null, screens: new Map(), open: true },
+        { roomId, connected: true, you: ada, people: [{ user: ada, muted, audio: false, video: false, screen: false }], muted, sticker: null, microphone: true, microphoneId: "", speakerId: "", camera: null, watched: new Map(), screen: null, screens: new Map(), open: true, thread: true },
         controls,
       ),
     );
@@ -2646,6 +2651,32 @@ describe("Huddles", () => {
     await user.click(screen.getByRole("button", { name: "Leave huddle" }));
     expect(controls.leave).toHaveBeenCalledTimes(1);
     expect(preview()).not.toBeInTheDocument();
+  });
+
+  it("invites whoever is ticked in Invite people, from the huddle opened, and says who's invited", async () => {
+    serveRooms(roomList([...rooms, withGrace]));
+    const { user } = showWorkspace("/rooms/d1", ada, HUDDLES_ON);
+    expect(await roomHeading()).toHaveTextContent("Grace");
+    join("d1");
+    const invite = within(opened()!).getByRole("button", { name: "Invite people" });
+    await user.click(invite);
+    const list = await screen.findByRole("dialog", { name: "Invite people" });
+    // The only other person in the DM, who isn't in the huddle.
+    expect(within(list).getByRole("checkbox", { name: "Grace" })).toBeChecked();
+    await user.click(within(list).getByRole("button", { name: "Send Invite" }));
+    expect(controls.invite).toHaveBeenCalledExactlyOnceWith(["u2"]);
+    expect(list).not.toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent("Grace is invited.");
+    await waitFor(() => expect(invite).toHaveFocus());
+  });
+
+  it("goes to sign in when the session has ended by the time Invite people asks who's in the room", async () => {
+    serveRooms(roomList(rooms), { "GET /api/rooms/general/settings": () => Response.json({ error: "Not signed in" }, { status: 401 }) });
+    const { onSessionChanged, user } = showWorkspace("/rooms/general", ada, HUDDLES_ON);
+    await roomHeading();
+    join("general");
+    await user.click(within(opened()!).getByRole("button", { name: "Invite people" }));
+    await waitFor(() => expect(onSessionChanged).toHaveBeenCalledExactlyOnceWith(null));
   });
 
   it("offers to join a huddle the workspace socket says is going on, with how many are in it", async () => {
@@ -3018,6 +3049,17 @@ describe("Huddles", () => {
       await withDirect();
       await workspaceSends(INVITED);
       expect(invitation()).toBeInTheDocument();
+      await workspaceSends({ type: "room.gone", roomId: "d1" });
+      expect(invitation()).not.toBeInTheDocument();
+    });
+
+    it("goes with a room said to be gone before this tab's rooms had it, as one made and deleted while it connected again", async () => {
+      // Ada's rooms as they were before Grace started a DM with her.
+      showWorkspace("/rooms/general", ada, HUDDLES_ON);
+      await roomHeading();
+      await workspaceSends(INVITED);
+      expect(await screen.findByRole("group", { name: "Someone invites you to a huddle" })).toBeInTheDocument();
+      expect(ringForHuddle).toHaveBeenCalledTimes(1);
       await workspaceSends({ type: "room.gone", roomId: "d1" });
       expect(invitation()).not.toBeInTheDocument();
     });

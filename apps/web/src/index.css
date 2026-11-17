@@ -176,6 +176,10 @@
   --animate-zoom-fade: zoom-fade 300ms ease-out;
   /* And its `.boost--deleting` (boosts.css): a reaction you delete shrinks away. */
   --animate-scale-fade-out: scale-fade-out 0.2s both;
+  /* A reaction in a huddle pops up at the base of the people in it, rises and fades, for as long as it shows (lib/huddle-reactions.ts), */
+  --animate-reaction: reaction 4s ease-out both;
+  /* and its emoji grows as it does, over the name under it, which doesn't. */
+  --animate-reaction-emoji: reaction-emoji 4s ease-out both;
 
   @keyframes shake {
     0% {
@@ -248,6 +252,36 @@
     100% {
       transform: scale(0);
       opacity: 0;
+    }
+  }
+
+  @keyframes reaction {
+    0% {
+      transform: translateY(40%) scale(0.4);
+      opacity: 0;
+    }
+    8% {
+      transform: translateY(0) scale(1.15);
+      opacity: 1;
+    }
+    14% {
+      transform: translateY(0) scale(1);
+    }
+    70% {
+      opacity: 1;
+    }
+    100% {
+      transform: translateY(-13rem) scale(1);
+      opacity: 0;
+    }
+  }
+
+  @keyframes reaction-emoji {
+    14% {
+      transform: scale(1);
+    }
+    100% {
+      transform: scale(1.4);
     }
   }
 }
@@ -477,15 +511,18 @@
       overflow-wrap: break-word;
       text-wrap: balance;
     }
-    /* Campfire makes h1 smaller than Lexxy's h2. */
+    /*
+     * Slack's Big, Medium and Small heading, which the formatting row writes as h1 to h3, each smaller
+     * than the one before, down from Campfire's h1.
+     */
     h1 {
       font-size: 1.4rem;
     }
     h2 {
-      font-size: 1.5rem;
+      font-size: 1.2rem;
     }
     h3 {
-      font-size: 1.25rem;
+      font-size: 1.05rem;
     }
     h4 {
       font-size: 1rem;
@@ -602,10 +639,12 @@
       margin-inline-start: 40px;
     }
 
+    /* Lexxy's space around a divider, with no content margin, as the composer shows it. */
     hr {
       border: 0;
       border-block-end: 1px solid var(--message-rule);
       inline-size: 20%;
+      margin-block: 0.5em;
     }
 
     table {

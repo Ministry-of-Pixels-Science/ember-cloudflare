@@ -49,6 +49,33 @@ describe("Presence", () => {
     expect(ada.log.filter((frame) => frame.type === "typing")).toEqual([]);
   });
 
+  it("has nobody in the room for a socket that shows a thread apart from its timeline, as a huddle shows its own: they aren't among who's here, and neither arrive as it opens nor leave as it closes", async () => {
+    const room = await freshRoom("apart");
+    const ada = await connect(room, "Ada");
+    const grace = await signIn("Grace");
+    const apart = await connect(room, grace, { visible: true, apart: true });
+    expect(names(apart.welcome.present)).toEqual(["Ada"]);
+
+    // Opening the room itself is her arriving, and closing it her leaving, though her other socket stays open.
+    const tab = await connect(room, grace);
+    expect(names(tab.welcome.present)).toEqual(["Ada", "Grace"]);
+    tab.close();
+    expect(await ada.next("presence.left")).toEqual({ type: "presence.left", userId: grace.user.id });
+
+    // Whoever opens the room next finds Ada alone, and the other socket closes without a word to the room.
+    const lin = await connect(room, "Lin");
+    expect(names(lin.welcome.present)).toEqual(["Ada", "Lin"]);
+    apart.close();
+    await tabsOpen(room, grace.user.id, 0);
+    await settle(ada, lin);
+    expect(ada.log.filter((frame) => frame.type.startsWith("presence."))).toEqual([
+      { type: "presence.joined", user: grace.user },
+      { type: "presence.left", userId: grace.user.id },
+      { type: "presence.joined", user: lin.me },
+    ]);
+    expect(lin.log.filter((frame) => frame.type.startsWith("presence."))).toEqual([]);
+  });
+
   it("tells everyone when someone's connection drops without closing", async () => {
     const room = await freshRoom("dropped");
     const ada = await connect(room, "Ada");

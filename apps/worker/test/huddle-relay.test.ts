@@ -133,7 +133,7 @@ describe("A huddle's relay", () => {
     const grace = await signIn("Grace");
 
     const adas = await joinHuddle(room, ada);
-    expect(await adas.next("huddle.welcome")).toEqual({ type: "huddle.welcome", you: ada.user, people: [person(ada)], startedAt: expect.any(String) as string, iceServers: relayServersGiven(2) });
+    expect(await adas.next("huddle.welcome")).toEqual({ type: "huddle.welcome", you: ada.user, people: [person(ada)], startedAt: expect.any(String) as string, messageId: expect.any(String) as string, iceServers: relayServersGiven(2) });
     expect((await welcomeOf(room, grace)).iceServers).toEqual(relayServersGiven(3));
     // Each tab's were made for it, to last a day, by the TURN key huddles were given.
     expect(sfu.relayAsked).toEqual([forATab(), forATab(), forATab()]);
@@ -178,7 +178,7 @@ describe("A huddle's relay", () => {
     ];
     for (const answer of answers) {
       sfu.answerInstead(RELAY_SERVERS, answer);
-      expect(await welcomeOf(room, ada)).toEqual({ type: "huddle.welcome", you: ada.user, people: [person(ada)], startedAt: expect.any(String) as string });
+      expect(await welcomeOf(room, ada)).toEqual({ type: "huddle.welcome", you: ada.user, people: [person(ada)], startedAt: expect.any(String) as string, messageId: expect.any(String) as string });
     }
     expect(warned.mock.calls).toEqual([500, 401, 201, 201].map((status) => ["Cloudflare didn't give the relay's servers:", status]));
     expect(logged.mock.calls).toEqual([["Asking Cloudflare for the relay's servers failed:", "TypeError"]]);

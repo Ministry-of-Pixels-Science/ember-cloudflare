@@ -7,7 +7,7 @@ import type { YourApp } from "./apps.ts";
 import type { AssistantSettings, YourAssistant } from "./assistant.ts";
 import { isActionId, isActionValue, type Card } from "./cards.ts";
 import type { StoredFile } from "./files.ts";
-import type { HuddlesSettings, LiveHuddle } from "./huddles.ts";
+import type { HuddlesSettings, LiveHuddle, MessageHuddle } from "./huddles.ts";
 import type { OutsideConnection } from "./outside.ts";
 import { MAX_ID_LENGTH } from "./pages.ts";
 import { MAX_PUSH_ENDPOINT_LENGTH } from "./push.ts";
@@ -80,7 +80,7 @@ export type {
   YourAssistantChanges,
 } from "./assistant.ts";
 // And the rest of huddles.ts, from "@ember/protocol/huddles", which only the Huddles card, its setup and the Worker's huddles use.
-export type { HuddleRelayField, HuddleRelaySetup, HuddlesField, HuddlesForgotten, HuddlesSaved, HuddlesSettings, HuddlesSetup, LiveHuddle } from "./huddles.ts";
+export type { HuddleRelayField, HuddleRelaySetup, HuddlesField, HuddlesForgotten, HuddlesSaved, HuddlesSettings, HuddlesSetup, LiveHuddle, MessageHuddle } from "./huddles.ts";
 export {
   FILE_NAME_NOT_KEPT,
   FILE_TOO_LARGE,
@@ -1551,6 +1551,12 @@ export interface Message {
   /** The replies in the message's thread, once it has some, as the room shows them under it. */
   thread?: ThreadSummary;
   /**
+   * The huddle a message is of. The room writes one as a huddle starts there, in the name of whoever
+   * started it, and marks it over once nobody is left in it, and its thread is the huddle's. It shows
+   * the huddle in place of its text, which says only that a huddle started, and can't be edited.
+   */
+  huddle?: MessageHuddle;
+  /**
    * A message deleted while replies in its thread are left, which keeps its place for them: its text, file,
    * cards and boosts are gone, and it goes once its last reply does.
    */
@@ -1701,11 +1707,12 @@ export type ServerFrame =
 
 /**
  * What a tab sends on its workspace socket (`/api/socket`): pings, which the runtime answers without
- * waking the Workspace, and whether its person is using it, once it's welcomed and as they stop using it
- * or come back to it. A tab counts as in use from when it connects until it says otherwise, and once it
- * has said, it hears who's active (`presence`).
+ * waking the Workspace; whether its person is using it, once it's welcomed and as they stop using it or
+ * come back to it (`presence.active`), which counts the tab in use from when it connects until it says
+ * otherwise, and has it hear who's active (`presence`) once it has said; and whether the tab is shown,
+ * as that changes, so that the Workspace knows whether its person has Ember in view anywhere.
  */
-export type WorkspaceClientFrame = { type: "ping" } | { type: "presence"; active: boolean };
+export type WorkspaceClientFrame = { type: "ping" } | { type: "presence.active"; active: boolean } | { type: "presence.visible"; visible: boolean };
 
 /** What the Workspace sends on a tab's workspace socket. */
 export type WorkspaceServerFrame =
@@ -1805,13 +1812,21 @@ export interface RoomSocketParams {
    * room has it. Named only until the first welcome, since a socket that connects again keeps the tab's page.
    */
   around?: string;
+  /**
+   * Set on a socket that shows a part of the room apart from its timeline, as a huddle shows its thread
+   * beside the people in it: its tab's person views the thread it opens, and isn't in the room for it.
+   * The room doesn't count them among who's here, isn't read through it, and doesn't take them to be
+   * there to see what's said in it.
+   */
+  apart?: true;
 }
 
 /** The query that carries `params` on a room socket's address, with the revision of the protocol the tab speaks. */
-export const roomSocketQuery = ({ visible, since, around }: RoomSocketParams) =>
+export const roomSocketQuery = ({ visible, since, around, apart }: RoomSocketParams) =>
   `?visible=${visible ? 1 : 0}&protocol=${ROOM_PROTOCOL}` +
   (since === undefined ? "" : `&since=${since}`) +
-  (around === undefined ? "" : `&around=${encodeURIComponent(around)}`);
+  (around === undefined ? "" : `&around=${encodeURIComponent(around)}`) +
+  (apart ? "&apart=1" : "");
 
 /** The part of a `URLSearchParams` that reading a socket's address needs, which the protocol, made for every runtime, names itself. */
 interface SearchParams {
@@ -1833,8 +1848,26 @@ export const parseRoomSocketParams = (query: SearchParams): RoomSocketParams & {
   visible: query.get("visible") !== "0",
   since: parseSeq(query.get("since")),
   around: messageIdOf(query.get("around")),
+  apart: query.get("apart") === "1" || undefined,
   protocol: Number(query.get("protocol")) || 1,
 });
+
+/** What a workspace socket's address tells the Workspace about the tab opening it. */
+export interface WorkspaceSocketParams {
+  /** Whether the tab is shown, which `presence.visible` frames update. */
+  visible: boolean;
+}
+
+/** The query that carries `params` on a workspace socket's address. */
+export const workspaceSocketQuery = ({ visible }: WorkspaceSocketParams) => `?visible=${visible ? 1 : 0}`;
+
+/**
+ * What a workspace socket's address says about its tab, as `workspaceSocketQuery` wrote it. A tab that
+ * doesn't say doesn't count as shown, where one on a room's socket does: an open tab runs the app it
+ * loaded, which once said nothing here, and counting it would keep an invitation's push from someone
+ * who has such a tab open and isn't at it.
+ */
+export const parseWorkspaceSocketParams = (query: SearchParams): WorkspaceSocketParams => ({ visible: query.get("visible") === "1" });
 
 /** The most characters a message's plain text can have. */
 export const MAX_MESSAGE_LENGTH = 10_000;
@@ -2022,7 +2055,8 @@ export function parseClientFrame(raw: string): ClientFrame | null {
 export function parseWorkspaceClientFrame(raw: string): WorkspaceClientFrame | null {
   const f = parseObject(raw);
   if (f?.type === "ping") return { type: "ping" };
-  return f?.type === "presence" && typeof f.active === "boolean" ? { type: "presence", active: f.active } : null;
+  if (f?.type === "presence.active") return typeof f.active === "boolean" ? { type: "presence.active", active: f.active } : null;
+  return f?.type === "presence.visible" && typeof f.visible === "boolean" ? { type: "presence.visible", visible: f.visible } : null;
 }
 
 /**
@@ -2247,8 +2281,6 @@ const MAILBOX_ADDRESS =
 
 /** Whether `address` is an email address Ember can send from or to, as `MAILBOX_ADDRESS` has them, no longer than Ember keeps. */
 export const isEmailAddress = (address: string) => address.length <= MAX_EMAIL_ADDRESS_LENGTH && MAILBOX_ADDRESS.test(address);
-/** A name, in quotes or not, then an address in angle brackets. */
-const NAMED_MAILBOX = /^(.*?)\s*<([^<>]*)>$/s;
 /** What a From line's name can't hold: line breaks and other control characters, quotes, backslashes and angle brackets. */
 const NOT_IN_A_NAME = /[\u0000-\u001f\u007f"\\<>]/;
 /** What has a From line put its name in quotes, since the line's syntax would read it otherwise. */
@@ -2258,16 +2290,28 @@ const QUOTED_IN_A_NAME = /[()[\]:;@,.]/;
 export const EMAIL_FROM_REFUSED = "From must be an email address, such as ember@example.com, or a name and one, such as Ember <ember@example.com>";
 
 /**
+ * The name, in quotes or not, and the address in angle brackets that `typed` ends with, each as typed,
+ * or null when it isn't written so. Split at its last "<" rather than by a pattern, which would try
+ * every place the name could end, and so take a long run of spaces the square of its length to refuse.
+ */
+function namedMailboxOf(typed: string): { name: string; address: string } | null {
+  const open = typed.lastIndexOf("<");
+  if (open === -1 || !typed.endsWith(">")) return null;
+  const address = typed.slice(open + 1, -1);
+  return address.includes(">") ? null : { name: typed.slice(0, open), address };
+}
+
+/**
  * The mailbox `text` gives, as an administrator types a From address: an email address, or a name, in
  * quotes or not, and an address in angle brackets. Null for anything else, as for an address Ember can't
  * send from, or a name a From line can't hold.
  */
 export function mailboxOf(text: string): Mailbox | null {
   const typed = text.trim();
-  const named = NAMED_MAILBOX.exec(typed);
-  const given = named?.[1]?.trim() ?? "";
+  const named = namedMailboxOf(typed);
+  const given = named?.name.trim() ?? "";
   const name = /^".*"$/s.test(given) ? given.slice(1, -1).trim() : given;
-  const address = named ? named[2]!.trim() : typed;
+  const address = named ? named.address.trim() : typed;
   if (!isEmailAddress(address)) return null;
   if (name.length > MAX_USER_NAME_LENGTH || NOT_IN_A_NAME.test(name)) return null;
   return { name: name || null, address };

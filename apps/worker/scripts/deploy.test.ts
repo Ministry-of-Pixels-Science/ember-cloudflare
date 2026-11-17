@@ -94,14 +94,18 @@ afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 const output = (name: string) => (existsSync(path.join(dir, name)) ? readFileSync(path.join(dir, name), "utf8").trim() : null);
 
+/** Has the script take its output for a terminal's, which the suite reads through a pipe. */
+const AT_TERMINAL = ["--import", "data:text/javascript,process.stdout.isTTY=true"];
+
 /**
  * Runs the script, or `script`, with `args` for a Worker whose secrets are `listing`, in a shell like a
- * terminal's unless `env` says it's CI's, Workers Builds' or GitHub Actions', or brings a setup token.
+ * terminal's unless `env` says it's CI's, Workers Builds' or GitHub Actions', or brings a setup token. Its
+ * output is a terminal's there, and a log's in CI, unless `terminal` says otherwise.
  */
 function deploy(
   listing: Listing,
   args: string[] = [],
-  { deployStatus = 0, env = {}, script = SCRIPT }: { deployStatus?: number; env?: Record<string, string>; script?: string } = {},
+  { deployStatus = 0, env = {}, script = SCRIPT, terminal = !env.CI }: { deployStatus?: number; env?: Record<string, string>; script?: string; terminal?: boolean } = {},
 ) {
   const LISTING = Array.isArray(listing) ? JSON.stringify(listing.map((name) => ({ name, type: "secret_text" }))) : listing;
   // The suite itself runs under CI, which the script must hear only from the test.
@@ -128,7 +132,7 @@ function deploy(
   } = process.env;
   // The script reads git's origin, which for this repository's own script would be the origin of whichever clone runs the suite, so git there finds no repository.
   const git = script === SCRIPT ? { GIT_DIR: path.join(dir, "no-repository") } : {};
-  const run = spawnSync(process.execPath, [script, ...args], {
+  const run = spawnSync(process.execPath, [...(terminal ? AT_TERMINAL : []), script, ...args], {
     env: { ...shell, ...git, PATH: `${dir}:${process.env.PATH}`, LISTING, OUT: dir, DEPLOY_STATUS: String(deployStatus), TARGETS: JSON.stringify([WORKER_URL]), ...env },
     encoding: "utf8",
   });
@@ -305,6 +309,21 @@ describe("Installer-protected setup link", () => {
     expect(logs).toContain(`${WORKER_URL}/first_run#token=<your EMBER_SETUP_TOKEN>`);
     expect(logs).toContain(`pnpm exec wrangler secret put EMBER_SETUP_TOKEN, which asks for it, and open ${WORKER_URL}/first_run#token=<the token>`);
     expect(logs).not.toContain("::notice::");
+  });
+
+  it("makes none where its output isn't a terminal's, as the log of a CI that doesn't say it's one isn't", () => {
+    const { status, secrets, logs } = deploy("no worker", [], { terminal: false });
+    expect(status).toBe(0);
+    expect(secrets).not.toHaveProperty("EMBER_SETUP_TOKEN");
+    expect(logs).not.toContain("Set up Ember at");
+    expect(logs).toContain("this log may be public, so this deploy made no token");
+  });
+
+  it("makes none in a CI that gives it a terminal, either", () => {
+    const { secrets, logs } = deploy("no worker", [], { env: { CI: "true" }, terminal: true });
+    expect(secrets).not.toHaveProperty("EMBER_SETUP_TOKEN");
+    expect(logs).not.toContain("Set up Ember at");
+    expect(logs).toContain("this log may be public, so this deploy made no token");
   });
 
   it("says so as a notice under GitHub Actions, where it shows on the run", () => {
