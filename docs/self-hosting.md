@@ -1282,15 +1282,16 @@ The huddle shows that thread itself, beside the people in it, where Slack's hudd
 under Thread, it says what a huddle's thread is for, then what's been written in it, over a composer
 to reply in, with files and links as in any thread. What you send there, everyone in the huddle
 reads as it comes, and it stays in the room, under the huddle's message, once the huddle is over.
-Close thread takes it away, as does Thread, among the huddle's buttons after the screen's, which
-shows it again with the cursor in its composer: closed, it leaves its space to the people in the
-huddle, or to a screen someone shares. The thread is there as a huddle opens, in a window at least
-1180px wide. A narrower one, or a phone, has the thread in the room, from the huddle's message. It
-comes to the huddle over a connection of its own to the huddle's room, whatever page the huddle is
-open over, and having it there is neither being in the room, which doesn't show you among who's
-here for it, nor reading it: what's said in the room meanwhile still marks the room unread, unless
-it's a reply sent there from the thread too, which you've seen. A huddle whose message has been
-deleted has no thread, and says so.
+A reply begun in the thread beside the room is there in the huddle to go on with, and the room's has
+it as the huddle's left it. Close thread takes it away, as does Thread, among the huddle's buttons
+after the screen's, which shows it again with the cursor in its composer: closed, it leaves its
+space to the people in the huddle, or to a screen someone shares. The thread is there as a huddle
+opens, in a window at least 1180px wide. A narrower one, or a phone, has the thread in the room,
+from the huddle's message. It comes to the huddle over a connection of its own to the huddle's room,
+whatever page the huddle is open over, and having it there is neither being in the room, which
+doesn't show you among who's here for it, nor reading it: what's said in the room meanwhile still
+marks the room unread, unless it's a reply sent there from the thread too, which you've seen. A
+huddle whose message has been deleted has no thread, and says so.
 
 A direct message has a huddle too, with the headphones at its top and its mark on its row in the
 sidebar, when there's someone in it to huddle with, which a bot or an AI agent isn't, nor anyone who

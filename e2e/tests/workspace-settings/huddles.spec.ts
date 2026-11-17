@@ -809,21 +809,40 @@ test.describe("A huddle", () => {
     await editorField(page, "Write a message").press("Enter");
     await expect(rowOf(grace, room)).toHaveAccessibleDescription(/\bUnread\b/);
     await expect(replies(gracesHuddle)).toHaveCount(2);
-    const message = page.getByRole("log").getByRole("article").filter({ has: page.getByRole("heading", { name: /^A huddle / }) });
+    const message = page.getByRole("log", { name: `Messages in ${room.name}` }).getByRole("article").filter({ has: page.getByRole("heading", { name: /^A huddle / }) });
     await expect(message.getByRole("link", { name: /^2 replies\b/ })).toBeVisible();
 
-    // Ada opens her huddle again, whose thread is as she left it, and writes once more, which Grace reads over the other room.
-    await huddleBar(page, room).getByRole("button", { name: "Open huddle", exact: true }).click();
+    // Ada opens the thread beside the room, and begins a reply there. Her huddle, opened again over it, has
+    // the thread as she left it, with what she began, which she goes on with there.
+    await message.getByRole("link", { name: /^2 replies\b/ }).click();
+    const roomsThread = page.getByRole("complementary", { name: "Thread", exact: true });
+    const roomsReplyBox = editorField(roomsThread, "Write a reply");
+    await roomsReplyBox.fill("Shipping on");
+    const openHuddle = huddleBar(page, room).getByRole("button", { name: "Open huddle", exact: true });
+    await openHuddle.click();
     await expect(replies(adasHuddle)).toHaveCount(2);
-    await reply(adasHuddle, "Shipping on Friday");
+    await expect(replyBox(adasHuddle)).toHaveText("Shipping on");
+    await replyBox(adasHuddle).fill("Shipping on Friday");
+    // It's one reply that she's writing, so the thread beside the room has it as she left it in the huddle.
+    await adasHuddle.getByRole("button", { name: "Minimize huddle" }).filter({ visible: true }).click();
+    await expect(roomsReplyBox).toHaveText("Shipping on Friday");
+    // She sends it from the huddle, which Grace reads over the other room.
+    await openHuddle.click();
+    await replyBox(adasHuddle).press("Enter");
     await expect(replies(gracesHuddle)).toHaveText([/Here's the checklist/, /Docs are ready/, /Shipping on Friday/]);
 
-    // They leave, which ends the huddle. The room keeps its thread, under the message that says a huddle happened.
+    // They leave, which ends the huddle. The room keeps its thread, under the message that says a huddle
+    // happened. Beside the room, nothing of the reply that's sent is left to send, and the next is written as ever.
     for (const huddle of [gracesHuddle, adasHuddle]) await huddle.getByRole("button", { name: "Leave", exact: true }).click();
     await expect(adasHuddle).toHaveCount(0);
     await expect(message.getByRole("heading")).toContainText("A huddle happened");
-    await message.getByRole("link", { name: /^3 replies\b/ }).click();
-    await expect(page.getByRole("complementary", { name: "Thread" }).getByRole("article")).toHaveText([/A huddle happened/, /Here's the checklist/, /Docs are ready/, /Shipping on Friday/]);
+    await expect(message.getByRole("link", { name: /^3 replies\b/ })).toBeVisible();
+    await expect(roomsThread.getByRole("article")).toHaveText([/A huddle happened/, /Here's the checklist/, /Docs are ready/, /Shipping on Friday/]);
+    await expect(roomsReplyBox).toHaveText("");
+    await roomsReplyBox.fill("Thanks, both");
+    await roomsReplyBox.press("Enter");
+    await expect(roomsThread.getByRole("article")).toHaveText([/A huddle happened/, /Here's the checklist/, /Docs are ready/, /Shipping on Friday/, /Thanks, both/]);
+    await expect(roomsReplyBox).toHaveText("");
     await context.close();
   });
 

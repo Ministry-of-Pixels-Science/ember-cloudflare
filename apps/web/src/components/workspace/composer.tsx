@@ -66,13 +66,38 @@ function readDraft(key: string): string | undefined {
   }
 }
 
-function keepDraft(key: string, body: string | null) {
+/** Keeps `body` as the draft under `key`, or none once it's null, and answers whether it could. */
+function keepDraft(key: string, body: string | null): boolean {
   try {
     if (body === null) localStorage.removeItem(key);
     else localStorage.setItem(key, body);
+    return true;
   } catch {
     // Not kept, then.
+    return false;
   }
+}
+
+/**
+ * The composers showing each draft, by its key, as what has each look again at what's kept of it. A
+ * thread's draft shows twice where its room's huddle is opened over the thread: beside the room, and in
+ * the huddle, which alone can be written in while it covers the other.
+ */
+const showing = new Map<string, Set<() => void>>();
+
+/**
+ * Counts a composer among those showing the draft kept under `key`, until what this answers is called,
+ * as the composer goes. The others then look again at what's kept, which the one that went may have
+ * left other than they have it.
+ */
+function showDraft(key: string, lookAgain: () => void): () => void {
+  const composers = showing.get(key) ?? new Set();
+  showing.set(key, composers.add(lookAgain));
+  return () => {
+    composers.delete(lookAgain);
+    if (composers.size === 0) showing.delete(key);
+    for (const other of composers) other();
+  };
 }
 
 /**
@@ -141,12 +166,13 @@ function useEditorShown(deferred: boolean): boolean {
 
 /**
  * A link pasted in the composer gets the preview of the page it goes to below its paragraph, when the
- * page has one, unless another link is pasted first, or the composer goes. Previews that can't be had
- * are left out without a word.
+ * page has one, unless another link is pasted first, or the editor it was pasted in goes: with the
+ * composer, or as the editor opens again, which `opening` counts. Previews that can't be had are left
+ * out without a word.
  */
-function useLinkPreviews(): (link: PastedLink) => Promise<void> {
+function useLinkPreviews(opening: number): (link: PastedLink) => Promise<void> {
   const pending = useRef<AbortController>(null);
-  useEffect(() => () => pending.current?.abort(), []);
+  useEffect(() => () => pending.current?.abort(), [opening]);
   return async ({ url, insertBelowLink }) => {
     pending.current?.abort();
     const request = (pending.current = new AbortController());
@@ -307,13 +333,17 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
   const [alsoSend, setAlsoSend] = useState(false);
   const key = draftKey(userId, roomId, threadId);
   const [draft, setDraft] = useState(() => readDraft(key));
+  // What's kept of the draft as far as this composer knows: what it read as it opened, or has kept since.
+  const kept = useRef(draft ?? null);
+  // How many times the editor has opened again, with what another composer of its draft left of it.
+  const [reopened, setReopened] = useState(0);
   // Touch screens bring up their keyboard on focus, so there it waits for a tap.
   const [focusOnOpen] = useState(() => !hasTouchKeyboard());
   // Where focus was as the room opened. The editor can be ready a moment later, by when you may have put
   // focus elsewhere, where it's left.
   const [focusAtOpen] = useState(() => document.activeElement);
   const editorShown = useEditorShown(deferEditor);
-  const previewLink = useLinkPreviews();
+  const previewLink = useLinkPreviews(reopened);
   const picked = usePickedFiles();
   // Whether nothing's written, which, with no files picked, leaves Send grey, as Slack's is.
   const [blank, setBlank] = useState(!draft);
@@ -328,14 +358,33 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
   const replied = useRef(false);
   const placeholder = threadId !== undefined ? "Reply…" : `Message ${direct ? "" : "#"}${roomName}`;
 
+  const keep = (body: string | null) => {
+    if (keepDraft(key, body)) kept.current = body;
+  };
+
   // What's written changed, to `body`, or to nothing: the room hears whether you're typing, and it's kept.
   const wrote = (body: string | null) => {
     if (body !== null) onTyping(true);
     else if (!wasBlank.current) onTyping(false);
     wasBlank.current = body === null;
     setBlank(body === null);
-    keepDraft(key, body);
+    keep(body);
   };
+
+  // Another composer of this draft has gone, as a thread's in its huddle goes from over the thread's own,
+  // beside its room. Where it left the draft other than this one has it, what it left is what's written
+  // here: the editor opens again with it, as it opened with the draft it found.
+  const lookAgain = useEffectEvent(() => {
+    const left = readDraft(key) ?? null;
+    if (left === kept.current) return;
+    kept.current = left;
+    wasBlank.current = left === null;
+    setBlank(left === null);
+    setDraft(left ?? undefined);
+    setEditorReady(false);
+    setReopened((times) => times + 1);
+  });
+  useEffect(() => showDraft(key, () => lookAgain()), [key]);
 
   useImperativeHandle(ref, () => ({
     focus: () => editor.current?.focus(),
@@ -387,7 +436,7 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
       // Everyone else stops showing you as typing when your message arrives.
       wasBlank.current = true;
       written.clear();
-      keepDraft(key, null);
+      keep(null);
       setAlsoSend(false);
     }
     written.focus();
@@ -463,6 +512,7 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
             <Suspense fallback={<LoadingEditor placeholder={placeholder} belowFormatting={formattingShown} />}>
               {editorShown ? (
                 <RichTextEditor
+                  key={reopened}
                   ref={editor}
                   label={threadId !== undefined ? "Write a reply" : "Write a message"}
                   placeholder={placeholder}
@@ -471,7 +521,8 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
                   mentionsFrom={mentionPromptSrc(roomId)}
                   // Under the text on touch screens are the keyboard and the home indicator.
                   mentionsAbove={mentionsAbove || hasTouchKeyboard()}
-                  autoFocus={() => replied.current || (autoFocus && focusOnOpen && focusStayedOn(focusAtOpen))}
+                  // Opened again, it leaves focus where it is, with whatever is in front of it now.
+                  autoFocus={() => reopened === 0 && (replied.current || (autoFocus && focusOnOpen && focusStayedOn(focusAtOpen)))}
                   onChange={changed}
                   onFormatChange={formatting.setFormat}
                   onKeyDown={keyDown}
