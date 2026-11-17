@@ -673,6 +673,22 @@ describe("Stay at the newest message", () => {
     expect(jump()).not.toBeInTheDocument();
   });
 
+  it("stays at the newest message as it grows, though the browser scrolls the timeline on its own before that's reported", () => {
+    const { rerender } = render(list({ messages: messages(1, 8) }));
+    const log = screen.getByRole("log");
+    const { heights, resize } = layOut(log);
+    expect(log.scrollTop).toBe(400);
+    // m8 grows 300px, as a message does when its file's text loads, and before that's reported, the browser scrolls
+    // the timeline 50px, as Chrome's scroll anchoring can, which leaves its end 250px below the view.
+    heights.m8 = 400;
+    scrollTo(log, 450);
+    resize();
+    expect(log.scrollTop).toBe(700);
+    rerender(list({ messages: messages(1, 9), arrivals: 1 }));
+    expect(log.scrollTop).toBe(800);
+    expect(jump()).not.toBeInTheDocument();
+  });
+
   it("goes to the end as you send or jump there", () => {
     const { rerender } = render(list({ messages: messages(1, 8) }));
     const log = screen.getByRole("log");

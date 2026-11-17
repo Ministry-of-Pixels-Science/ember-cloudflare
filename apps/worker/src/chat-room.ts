@@ -341,9 +341,10 @@ export class ChatRoom extends DurableObject<Env> {
   private readonly readers = new Set<UserId>();
   /**
    * Who was viewing the room as each of its new messages in the room came, by the message's id, until its
-   * event goes to the Workspace. Someone who saw a message come in has seen it, though they may have left
-   * the room by the time the Workspace hears of it. Kept in memory only: a message the object restarted
-   * since is judged by who's viewing as it's sent, as before.
+   * event goes to the Workspace, with who was viewing its thread, for a reply sent to the room too.
+   * Someone who saw a message come in has seen it, though they may have left the room by the time the
+   * Workspace hears of it. Kept in memory only: a message the object restarted since is judged by who's
+   * viewing the room as it's sent, as before.
    */
   private readonly seenBy = new Map<string, UserId[]>();
   /** The room's huddle, whose sockets it keeps beside the room's own. */
@@ -376,7 +377,7 @@ export class ChatRoom extends DurableObject<Env> {
       if (banned) return closedAtOnce(CloseCode.NotFound);
       return this.joinHuddle(user, roomId, tags, authorizedAt, parseHuddleSocketParams(urlOf(request).searchParams).muted);
     }
-    const { visible, since, around, protocol } = parseRoomSocketParams(urlOf(request).searchParams);
+    const { visible, since, around, apart, protocol } = parseRoomSocketParams(urlOf(request).searchParams);
 
     return this.serially(async () => {
       // Read side by side, so a room that has just woken waits on D1 once.
@@ -384,17 +385,19 @@ export class ChatRoom extends DurableObject<Env> {
       if (refused) return closedAtOnce(CloseCode.Reconnect);
       const { 0: client, 1: server } = new WebSocketPair();
       this.ctx.acceptWebSocket(server, tags);
-      server.serializeAttachment({ user, roomId, visible, protocol, heardAt: Date.now(), ...(banned && { banned }) } satisfies Attachment);
+      server.serializeAttachment({ user, roomId, visible, protocol, heardAt: Date.now(), ...(apart && { apart }), ...(banned && { banned }) } satisfies Attachment);
 
       this.send(server, { ...opening, you: user, present: this.present() });
       // A tab running an older app hears at once that it has to reload, rather than once it sends something.
       if (protocol < ROOM_PROTOCOL) this.send(server, { type: "error", message: OUTDATED });
-      // Everyone else has the list from their own welcome, so they only hear who's new.
-      if (!this.isPresent(user.id, server)) this.broadcast({ type: "presence.joined", user }, server);
+      // Everyone else has the list from their own welcome, so they only hear who's new: nobody is, for
+      // a socket that shows a thread apart from the room's timeline.
+      if (!apart && !this.isPresent(user.id, server)) this.broadcast({ type: "presence.joined", user }, server);
       const couriers = this.couriersFor(roomId);
       // Opening the room in a shown tab reads it, which sends the Workspace the log. Logged next,
-      // rather than before the socket is let in, so the welcome doesn't wait on it.
-      if (visible) void this.serially(() => this.read(roomId, user.id)).catch((error) => console.error("Could not log a read", error));
+      // rather than before the socket is let in, so the welcome doesn't wait on it. A socket that shows
+      // a thread apart from the room's timeline reads nothing of the room.
+      if (visible && !apart) void this.serially(() => this.read(roomId, user.id)).catch((error) => console.error("Could not log a read", error));
       // Otherwise the first socket since the object started sends whatever a restart left in the log.
       else if (!couriers.workspace.checked) couriers.workspace.deliver();
       // And the search index's, which nothing else here sends, and the files to delete.
@@ -1068,7 +1071,7 @@ export class ChatRoom extends DurableObject<Env> {
         const attachment = ws.deserializeAttachment() as Attachment;
         ws.serializeAttachment({ ...attachment, visible: frame.visible, heardAt: Date.now() } satisfies Attachment);
         // Coming back to a tab showing the room reads it.
-        if (frame.visible) await this.read(store.roomId, user.id);
+        if (frame.visible && !attachment.apart) await this.read(store.roomId, user.id);
         return;
       }
       case "card.click": {
@@ -1088,6 +1091,16 @@ export class ChatRoom extends DurableObject<Env> {
   }
 
   /**
+   * Who sees a message in the room as it comes: everyone viewing the room, and for a reply sent there
+   * from the thread it's `inThread`, everyone viewing that thread too, as someone is who has it open
+   * apart from the room, in its huddle.
+   */
+  private viewersOfNew(inThread?: InThread): UserId[] {
+    const viewers = viewersOf(this.ctx);
+    return inThread ? [...new Set([...viewers, ...viewersOf(this.ctx, undefined, inThread.parent.id)])] : viewers;
+  }
+
+  /**
    * Stores a message from `user`, as `posting` says, tells everyone in the room, and its parent as it is
    * now for a reply in a thread, and sends the Workspace and the search index their logs, which the
    * message is in, answering it.
@@ -1096,7 +1109,7 @@ export class ChatRoom extends DurableObject<Env> {
     // Before the batch, which on D1 may save the message even when it fails.
     if (!inThread || inThread.alsoSend) this.readers.clear();
     const { message, seq, parent } = await store.create(sortableId(), clientMessageId, user, body, now, kind, posted, inThread);
-    if (!inThread || inThread.alsoSend) this.seenBy.set(message.id, viewersOf(this.ctx));
+    if (!inThread || inThread.alsoSend) this.seenBy.set(message.id, this.viewersOfNew(inThread));
     this.broadcast({ type: "message.created", message, seq });
     if (parent) this.broadcast({ type: "message.updated", ...parent });
     const couriers = this.couriersFor(store.roomId);
@@ -2126,35 +2139,41 @@ export class ChatRoom extends DurableObject<Env> {
     return sockets.filter((socket) => !huddle.has(socket));
   }
 
-  /** Everyone with at least one open socket, once each. */
+  /**
+   * Everyone with at least one open socket that has them in the room, once each. A socket that shows a
+   * thread apart from the room's timeline doesn't, any more than the huddle's does whose thread it is.
+   */
   private present(): User[] {
     const users = new Map<string, User>();
     for (const socket of this.roomSockets()) {
       if (socket.readyState !== WebSocket.OPEN) continue;
-      const { user } = socket.deserializeAttachment() as Attachment;
-      users.set(user.id, user);
+      const { user, apart } = socket.deserializeAttachment() as Attachment;
+      if (!apart) users.set(user.id, user);
     }
     return [...users.values()];
   }
 
-  /** Whether someone has the room open in a socket other than `except`. */
+  /** Whether someone has the room open in a socket other than `except`, and not just a thread apart from its timeline. */
   private isPresent(userId: UserId, except?: WebSocket): boolean {
-    return this.roomSockets(userId).some((socket) => socket !== except && socket.readyState === WebSocket.OPEN);
+    return this.roomSockets(userId).some((socket) => socket !== except && socket.readyState === WebSocket.OPEN && !(socket.deserializeAttachment() as Attachment).apart);
   }
 
-  /** Closes `socket` with `code` for a revocation, if it's open, and answers whose it was. */
+  /** Closes `socket` with `code` for a revocation, if it's open, and answers whose it was, if it had them in the room. */
   private close(socket: WebSocket, code: CloseCode): User | null {
     if (socket.readyState !== WebSocket.OPEN) return null;
     const attachment = socket.deserializeAttachment() as Attachment;
     socket.serializeAttachment({ ...attachment, revoked: true } satisfies Attachment);
     socket.close(code, CLOSE_REASONS[code]);
-    return attachment.user;
+    return attachment.apart ? null : attachment.user;
   }
 
-  /** Lets everyone know a socket has closed, unless the room closed it for a revocation and said so already. */
+  /**
+   * Lets everyone know a socket has closed, unless the room closed it for a revocation and said so
+   * already, or it never had its person in the room, showing a thread apart from the room's timeline.
+   */
   private leave(ws: WebSocket): void {
-    const { user, revoked, typing } = ws.deserializeAttachment() as Attachment;
-    if (!revoked) this.depart(user, ws, typing === true);
+    const { user, revoked, typing, apart } = ws.deserializeAttachment() as Attachment;
+    if (!revoked && !apart) this.depart(user, ws, typing === true);
   }
 
   /**

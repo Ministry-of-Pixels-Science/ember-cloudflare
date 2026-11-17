@@ -31,7 +31,10 @@ declare module "@37signals/lexxy" {
     getChildrenSize(): number;
     getFirstChild(): LexicalNode | null;
     getLastChild(): LexicalNode | null;
+    getChildAtIndex(index: number): LexicalNode | null;
     append(...nodes: LexicalNode[]): this;
+    /** Puts the cursor at its end, answering the selection. */
+    selectEnd(): RangeSelection;
     select(anchorOffset?: number, focusOffset?: number): unknown;
     selectNext(anchorOffset?: number, focusOffset?: number): unknown;
   }
@@ -65,6 +68,10 @@ declare module "@37signals/lexxy" {
     anchor: Point;
     focus: Point;
     isCollapsed(): boolean;
+    /** Whether the focus comes before the anchor, as when the selection was made leftward. */
+    isBackward(): boolean;
+    /** Writes `text` in place of what's selected, or at the cursor. */
+    insertText(text: string): void;
     /** Whether all that's selected has the format, or what's typed next will, with nothing selected. */
     hasFormat(format: string): boolean;
     /** Turns the format on across what's selected, or off where all of it has it already, or for what's typed next. */
@@ -72,6 +79,7 @@ declare module "@37signals/lexxy" {
     getTextContent(): string;
     setFormat(format: number): void;
     setStyle(style: string): void;
+    clone(): RangeSelection;
   }
 
   /** The parts of Lexical's EditorState that the composer uses. */
@@ -89,7 +97,7 @@ declare module "@37signals/lexxy" {
   export interface LexicalEditor {
     registerCommand<Payload>(command: LexicalCommand<Payload>, listener: (payload: Payload) => boolean, priority: number): () => void;
     /** Calls `listener` after each change to the editor's state, the selection's included. */
-    registerUpdateListener(listener: (update: { editorState: EditorState }) => void): () => void;
+    registerUpdateListener(listener: (update: { editorState: EditorState; tags: Set<string> }) => void): () => void;
     getEditorState(): EditorState;
     update(change: () => void, options?: { discrete?: boolean; tag?: string | string[] }): void;
     /** Lexxy's commands go by name, as its toolbar's buttons send them. */
@@ -101,6 +109,12 @@ declare module "@37signals/lexxy" {
   export const Lexical: {
     ElementNode: typeof ElementNode;
     $getSelection(): unknown;
+    $setSelection(selection: RangeSelection | null): void;
+    /** The selection as it was before the change being made. */
+    $getPreviousSelection(): unknown;
+    /** Tags the change being made, as an update's `tag` does. */
+    $addUpdateTag(tag: string): void;
+    $getRoot(): ElementNode;
     $isRangeSelection(selection: unknown): selection is RangeSelection;
     /** The selection the page's `selection` is in the editor's text, if it's in it. */
     $createRangeSelectionFromDom(selection: Selection | null, editor: LexicalEditor): RangeSelection | null;
@@ -115,14 +129,21 @@ declare module "@37signals/lexxy" {
     $isLineBreakNode(node: LexicalNode | null | undefined): node is LexicalNode;
     $isParagraphNode(node: LexicalNode | null | undefined): node is ParagraphNode;
     $isTextNode(node: LexicalNode | null | undefined): node is TextNode;
+    /** Heard as the text loses focus. */
+    BLUR_COMMAND: LexicalCommand<FocusEvent>;
+    COMMAND_PRIORITY_CRITICAL: number;
     COMMAND_PRIORITY_HIGH: number;
     INSERT_PARAGRAPH_COMMAND: LexicalCommand<undefined>;
     KEY_BACKSPACE_COMMAND: LexicalCommand<KeyboardEvent | null>;
     KEY_SPACE_COMMAND: LexicalCommand<KeyboardEvent>;
+    /** Heard as the page tells the editor its selection moved. */
+    SELECTION_CHANGE_COMMAND: LexicalCommand<undefined>;
     /** Tags a change after which the page's selection is left where it is, rather than put where the editor's is. */
     SKIP_DOM_SELECTION_TAG: string;
     /** Tags a change that undo takes back with the one before it. */
     HISTORY_MERGE_TAG: string;
+    /** Calls each of `unregister` in one. */
+    mergeRegister(...unregister: Array<() => void>): () => void;
   };
 
   /** What an editor allows and holds beyond Lexxy's own. */

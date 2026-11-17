@@ -31,6 +31,10 @@ export interface JoinedHuddle {
   screens: ReadonlyMap<UserId, MediaStream>;
   /** Whether the tab shows the huddle opened, a tile for each person, rather than as its bar. Only then does it watch anyone's camera or screen. */
   open: boolean;
+  /** The room's message of the huddle, by its id, whose thread is the huddle's, once the room has said which it is. A huddle from before huddles named their messages has none. */
+  messageId?: string;
+  /** Whether the huddle, opened, shows its thread beside the people in it, as it does until its person closes it. */
+  thread: boolean;
 }
 
 /** What the tab's huddle takes from outside it, which its header button, its bar, the huddle opened and the shortcuts ask of it. */
@@ -40,6 +44,8 @@ export interface HuddleControls {
   setCamera(on: boolean): void;
   setScreen(shared: boolean): void;
   setOpen(open: boolean): void;
+  /** Shows the huddle's thread beside the people in it, in the huddle opened, or closes it. */
+  setThread(shown: boolean): void;
   /** Says whether the huddle, opened, shows people in tiles small enough for the smaller of the sizes a camera is sent in, which is then the one it's sent. */
   setSmall(small: boolean): void;
   /** Speaks through the microphone `deviceId`, plays through that speaker, or shows that camera, from now. */
@@ -108,6 +114,9 @@ export const shareHuddleScreen = (shared: boolean) => controls?.setScreen(shared
 
 /** Shows the tab's huddle opened, or as its bar again, if it's in one. */
 export const openHuddle = (open: boolean) => controls?.setOpen(open);
+
+/** Shows the thread of the tab's huddle beside the people in it, in the huddle opened, or closes it, if it's in one. */
+export const showHuddleThread = (shown: boolean) => controls?.setThread(shown);
 
 /** Has the tab's huddle be sent the others' cameras in the smaller of their sizes, as while it shows them in small tiles, or in the larger again, if it's in one. */
 export const takeCamerasSmall = (small: boolean) => controls?.setSmall(small);

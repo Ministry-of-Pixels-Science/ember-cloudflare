@@ -929,7 +929,7 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
             {page()}
           </div>
           {huddle?.open && (
-            <RarePage show={({ HuddleView }) => <HuddleView huddle={huddle} room={huddleRoom} meId={me.id} onFailed={failed} />} loading={null} onFailed={failed} />
+            <RarePage show={({ HuddleView }) => <HuddleView huddle={huddle} room={huddleRoom} me={me} onFailed={failed} />} loading={null} onFailed={failed} />
           )}
           <Notices>
             <MovedNotice />

@@ -3,6 +3,7 @@ import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatRoom } from "../src/chat-room";
 import { HUDDLE_RESUMED_MS, HUDDLE_STARTED } from "../src/huddles/message";
+import { HUDDLE_TAG, type HuddleAttachment } from "../src/huddles/room";
 import { MessageStore } from "../src/store";
 import { alarmOf, giveKeys, huddlesOn, joinHuddle, kept, OTHER_APP, ring, setUp, welcomed, type HuddleSocket } from "./huddle-support";
 import { api, connect, createRoom, freshDeploy, freshRoom, post, roomSql, roomStub, settle, signIn, workspaceSql, type Session, type Socket } from "./support";
@@ -76,6 +77,15 @@ function savedUnanswered(): void {
   });
 }
 
+/** Has the sockets in `room`'s huddle name no message, as those do that joined before a huddle named its message as it started. */
+const namingNoMessage = (room: RoomId) =>
+  runInDurableObject(roomStub(room), (_room, state: DurableObjectState) => {
+    for (const socket of state.getWebSockets(HUDDLE_TAG)) {
+      const { messageId: _, ...attachment } = socket.deserializeAttachment() as HuddleAttachment;
+      socket.serializeAttachment(attachment);
+    }
+  });
+
 type Room = { revocationsFor(roomId: RoomId): unknown; serially(work: () => Promise<unknown>): Promise<unknown> };
 
 /**
@@ -113,6 +123,35 @@ describe("A huddle's message in its room", () => {
     await heardNoMore(watching);
     // Whoever opens the room later finds it among the room's messages.
     expect((await connect(room, grace)).welcome.messages).toEqual([message]);
+  });
+
+  it("is named to everyone as they join its huddle, for its thread to be the huddle's, and stays the one it was while the huddle goes on", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() });
+    const { ada } = await huddlesOn();
+    const [grace, linus] = [await signIn("Grace"), await signIn("Linus")];
+    const room = await freshRoom("standup");
+    const watching = await connect(room, linus);
+    const named = async (socket: HuddleSocket) => (await socket.next("huddle.welcome")).messageId;
+
+    const adas = await joinHuddle(room, ada);
+    const messageId = await named(adas);
+    expect((await watching.next("message.created")).message.id).toBe(messageId);
+    const graces = await joinHuddle(room, grace);
+    expect(await named(graces)).toBe(messageId);
+
+    // Back within half a minute of its end, Ada goes on with the huddle it was, under the message it had.
+    await left(graces);
+    await left(adas);
+    await watching.next("message.updated");
+    const back = await joinHuddle(room, ada);
+    expect(await named(back)).toBe(messageId);
+    await left(back);
+
+    // The huddle Grace starts later is another, with a message of its own.
+    vi.setSystemTime(Date.now() + HUDDLE_RESUMED_MS + 1);
+    const later = await named(await joinHuddle(room, grace));
+    expect(later).not.toBe(messageId);
+    expect((await watching.next("message.created")).message.id).toBe(later);
   });
 
   it("marks the room unread for nobody, as a message someone writes there does", async () => {
@@ -232,7 +271,7 @@ describe("A huddle's message in its room", () => {
     // The room goes by what the Workspace last said of the app for half a minute, unless it has restarted since.
     await evictDurableObject(roomStub(room));
     const graces = await joinHuddle(room, grace);
-    expect((await graces.next("huddle.welcome")).startedAt).toBe(startedAt);
+    expect(await graces.next("huddle.welcome")).toMatchObject({ startedAt, messageId: message.id });
     await adas.closed;
     const back = await welcomed(room, ada);
     await heardNoMore(watching);
@@ -264,11 +303,14 @@ describe("A huddle's message in its room", () => {
     const room = await freshRoom("updated");
     const watching = await connect(room, linus);
     const { startedAt, message } = await started(room, ada, watching);
-    // As after an update: the room's object, which starts afresh, has kept nothing of the huddle that its sockets are in.
+    // As after an update: the room's object, which starts afresh, has kept nothing of the huddle that its sockets are in, and they name no message.
     await runInDurableObject(roomStub(room), (_room, state: DurableObjectState) => state.storage.delete("huddleMessage"));
+    await namingNoMessage(room);
     await evictDurableObject(roomStub(room));
 
-    await welcomed(room, grace);
+    // Whoever joins it is named none either, though it gets one.
+    const graces = await joinHuddle(room, grace);
+    expect(await graces.next("huddle.welcome")).not.toHaveProperty("messageId");
     const { message: late } = await watching.next("message.created");
     expect(late).toEqual({ ...written(room, ada), huddle: { startedAt } });
     expect(late.id).not.toBe(message.id);
@@ -283,7 +325,7 @@ describe("A huddle's message in its room", () => {
     vi.spyOn(MessageStore.prototype, "createHuddle").mockRejectedValueOnce(unreachable());
 
     const adas = await joinHuddle(room, ada);
-    const { startedAt } = await adas.next("huddle.welcome");
+    const { startedAt, messageId } = await adas.next("huddle.welcome");
     await heardNoMore(watching);
     expect(failures()).toBe(1);
     // Another message's deletion meanwhile leaves the huddle's to be written.
@@ -291,7 +333,8 @@ describe("A huddle's message in its room", () => {
     watching.send({ type: "message.delete", messageId: (await watching.next("message.created")).message.id });
     await watching.next("message.deleted");
     await ring(room);
-    expect((await watching.next("message.created")).message).toEqual({ ...written(room, ada), huddle: { startedAt } });
+    // It's the message Ada's tab was named as she joined.
+    expect((await watching.next("message.created")).message).toEqual({ ...written(room, ada), id: messageId, huddle: { startedAt } });
     expect(failures()).toBe(1);
   });
 
@@ -392,9 +435,10 @@ describe("A huddle's message in its room", () => {
     const watching = await connect(room, linus);
     const failures = countFailures();
     const { startedAt, message } = await started(room, ada, watching);
-    // The room's object keeps the message as that of an earlier huddle it hasn't found over, which no join leaves it with.
+    // The room's object keeps the message as that of an earlier huddle it hasn't found over, and the one going on has yet to name its own: no join leaves it with either.
     const earlier = new Date(Date.parse(startedAt) - 60_000).toISOString();
     await runInDurableObject(roomStub(room), async (_room, state: DurableObjectState) => state.storage.put("huddleMessage", { ...(await state.storage.get<object>("huddleMessage")), startedAt: earlier }));
+    await namingNoMessage(room);
     await evictDurableObject(roomStub(room));
     vi.spyOn(MessageStore.prototype, "createHuddle").mockRejectedValueOnce(unreachable());
 

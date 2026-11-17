@@ -1,4 +1,4 @@
-import { configure, Extension, Lexical, type LexicalEditor } from "@37signals/lexxy";
+import { configure, Extension, Lexical, type ElementNode, type LexicalEditor, type RangeSelection } from "@37signals/lexxy";
 import { MENTION_CONTENT_TYPE, OPENGRAPH_EMBED_CONTENT_TYPE } from "@ember/richtext/dom";
 import { useEffect, useEffectEvent, useImperativeHandle, useRef, type Ref } from "react";
 import { sameFormat, type FormattingCommand, type LinkDraft, type TextFormat } from "@/lib/formatting";
@@ -155,23 +155,22 @@ const hasFocus = (lexxy: LexxyEditor) => lexxy.editorContentElement?.contains(do
  * that moment would otherwise format what was selected before, and put that back on the page.
  */
 function catchUpWithThePage(lexxy: LexxyEditor) {
-  if (!hasFocus(lexxy)) return;
-  lexxy.editor.update(
-    () => {
-      const selection = Lexical.$getSelection();
-      const onPage = Lexical.$createRangeSelectionFromDom(Lexical.getDOMSelection(window), lexxy.editor);
-      if (!Lexical.$isRangeSelection(selection) || !onPage || (onPage.anchor.is(selection.anchor) && onPage.focus.is(selection.focus))) return;
-      selection.anchor.set(onPage.anchor.key, onPage.anchor.offset, onPage.anchor.type);
-      selection.focus.set(onPage.focus.key, onPage.focus.offset, onPage.focus.type);
-      // What's typed next takes the format of the text the cursor's moved to, as it would once the page told the editor.
-      const text = selection.anchor.getNode();
-      if (selection.isCollapsed() && Lexical.$isTextNode(text)) {
-        selection.setFormat(text.getFormat());
-        selection.setStyle(text.getStyle());
-      }
-    },
-    { discrete: true },
-  );
+  if (hasFocus(lexxy)) lexxy.editor.update(() => $catchUpWithThePage(lexxy.editor), { discrete: true });
+}
+
+/** Has the editor's selection be what's selected on the page, where that's in the text and has moved since the page last told it. */
+function $catchUpWithThePage(editor: LexicalEditor) {
+  const selection = Lexical.$getSelection();
+  const onPage = Lexical.$createRangeSelectionFromDom(Lexical.getDOMSelection(window), editor);
+  if (!Lexical.$isRangeSelection(selection) || !onPage || (onPage.anchor.is(selection.anchor) && onPage.focus.is(selection.focus))) return;
+  selection.anchor.set(onPage.anchor.key, onPage.anchor.offset, onPage.anchor.type);
+  selection.focus.set(onPage.focus.key, onPage.focus.offset, onPage.focus.type);
+  // What's typed next takes the format of the text the cursor's moved to, as it would once the page told the editor.
+  const text = selection.anchor.getNode();
+  if (selection.isCollapsed() && Lexical.$isTextNode(text)) {
+    selection.setFormat(text.getFormat());
+    selection.setStyle(text.getStyle());
+  }
 }
 
 /**
@@ -183,6 +182,63 @@ function changeText(lexxy: LexxyEditor, change: () => void, tag?: string) {
   const focused = hasFocus(lexxy);
   const tags = [...(tag ? [tag] : []), ...(focused ? [] : [Lexical.SKIP_DOM_SELECTION_TAG])];
   lexxy.editor.update(change, { tag: tags });
+}
+
+/**
+ * Keeps the editor's selection while focus is outside the text, as on the formatting row, where the page's
+ * selection moves only as the editor redraws what's under it: Bold, pressed from the keyboard, redraws
+ * what's selected and leaves the page's selection collapsed before it, which the editor would take once the
+ * page told it, so the row's next button would format nothing. As focus leaves, the editor takes what's
+ * selected on the page, which the page may not have told it of yet, as when Tab comes straight after Home.
+ */
+function keepSelectionWhileAway(lexxy: LexxyEditor) {
+  const { editor } = lexxy;
+  // Left off the page, where it would put focus back in the text.
+  const leavingThePage = () => Lexical.$addUpdateTag(Lexical.SKIP_DOM_SELECTION_TAG);
+  return Lexical.mergeRegister(
+    editor.registerCommand(
+      Lexical.BLUR_COMMAND,
+      () => {
+        $catchUpWithThePage(editor);
+        leavingThePage();
+        return false;
+      },
+      Lexical.COMMAND_PRIORITY_CRITICAL,
+    ),
+    editor.registerCommand(
+      Lexical.SELECTION_CHANGE_COMMAND,
+      () => {
+        const kept = Lexical.$getPreviousSelection();
+        if (hasFocus(lexxy) || !Lexical.$isRangeSelection(kept) || !Lexical.$isRangeSelection(Lexical.$getSelection())) return false;
+        Lexical.$setSelection(kept.clone());
+        leavingThePage();
+        return false;
+      },
+      Lexical.COMMAND_PRIORITY_CRITICAL,
+    ),
+    // Lexical keeps the tags of a change that moved only the selection, as formatting what's typed next does,
+    // for the change after it, which would leave the page's selection, and focus, where they are as it puts
+    // focus back in the text, as Escape on the row does. The tags heard here are the ones it keeps.
+    editor.registerUpdateListener(({ tags }) => {
+      tags.delete(Lexical.SKIP_DOM_SELECTION_TAG);
+    }),
+  );
+}
+
+/** Where what's written from outside the text goes: in place of what's selected, or at the cursor, or before the text has had one, at its end. */
+function $writingPlace(): RangeSelection {
+  const selection = Lexical.$getSelection();
+  return Lexical.$isRangeSelection(selection) ? selection : Lexical.$getRoot().selectEnd();
+}
+
+/** Whether what's written at `selection` would follow a word, which an @ would then be part of rather than start a mention. */
+function $followsWord(selection: RangeSelection): boolean {
+  const start = selection.isBackward() ? selection.focus : selection.anchor;
+  const node = start.getNode();
+  if (Lexical.$isTextNode(node) && start.offset > 0) return /\S/.test(node.getTextContent().charAt(start.offset - 1));
+  const before = Lexical.$isTextNode(node) ? node.getPreviousSibling() : start.offset > 0 ? (node as ElementNode).getChildAtIndex(start.offset - 1) : null;
+  // A line break's text is a newline.
+  return before !== null && /\S$/.test(before.getTextContent());
 }
 
 /** A link pasted in the editor, as Lexxy tells of it with `lexxy:insert-link`. */
@@ -212,6 +268,13 @@ export interface RichTextEditorHandle {
   link(draft: LinkDraft): void;
   /** Takes off the link the cursor is in, keeping its text. */
   unlink(): void;
+  /** Writes `text` in place of what's selected, or at the cursor, or at the end before the text has had focus, as an emoji picked is. */
+  insertText(text: string): void;
+  /**
+   * Types @ where the cursor is, after a space if it follows a word, and takes focus, so the people to
+   * mention are listed, as Slack's Mention someone does.
+   */
+  startMention(): void;
   /**
    * In a list, starts its next item, or ends it on an empty one, and in a heading, starts a paragraph
    * after it, as Enter does where it doesn't send. Answers whether it did: elsewhere, it's left to the
@@ -250,6 +313,8 @@ interface Props {
   onKeyDown?: (event: KeyboardEvent) => void;
   /** Called when an address is pasted as a link. */
   onLinkPasted?: (link: PastedLink) => void;
+  /** Called once it's ready to be written in, a moment after it shows. */
+  onReady?: () => void;
   ref?: Ref<RichTextEditorHandle>;
 }
 
@@ -269,6 +334,7 @@ export default function RichTextEditor({
   onFormatChange,
   onKeyDown,
   onLinkPasted,
+  onReady,
   ref,
 }: Props) {
   const host = useRef<HTMLDivElement>(null);
@@ -325,6 +391,19 @@ export default function RichTextEditor({
     unlink: () => {
       if (editor.current) changeText(editor.current, $unlink);
     },
+    insertText: (text) => {
+      if (editor.current) changeText(editor.current, () => $writingPlace().insertText(text));
+    },
+    startMention: () => {
+      const lexxy = editor.current;
+      if (!lexxy) return;
+      // Lexxy lists the people as an @ is typed in the text with focus, after a space or at a line's start.
+      lexxy.focus();
+      changeText(lexxy, () => {
+        const place = $writingPlace();
+        place.insertText($followsWord(place) ? " @" : "@");
+      });
+    },
     startNewBlock: () => (editor.current ? startNewBlock(editor.current) : false),
     catchUp: () => {
       if (editor.current) catchUpWithThePage(editor.current);
@@ -336,6 +415,7 @@ export default function RichTextEditor({
   const keyPressed = useEffectEvent((event: KeyboardEvent) => onKeyDown?.(event));
   const linkPasted = useEffectEvent((link: PastedLink) => onLinkPasted?.(link));
   const ready = useEffectEvent((lexxy: LexxyEditor) => {
+    onReady?.();
     if (!(typeof autoFocus === "function" ? autoFocus() : autoFocus)) return;
     lexxy.focus();
     lexxy.selection.placeCursorAtTheEnd();
@@ -365,10 +445,12 @@ export default function RichTextEditor({
       if ((event as CustomEvent).detail !== LOOK_AGAIN) changed();
     });
     let unfollow: (() => void) | undefined;
+    let unkeep: (() => void) | undefined;
     lexxy.addEventListener(
       "lexxy:initialize",
       () => {
         unfollow = followFormat(lexxy);
+        unkeep = keepSelectionWhileAway(lexxy);
         ready(lexxy);
       },
       { once: true },
@@ -387,6 +469,7 @@ export default function RichTextEditor({
     return () => {
       prompting?.disconnect();
       unfollow?.();
+      unkeep?.();
       lexxy.remove();
       editor.current = null;
     };

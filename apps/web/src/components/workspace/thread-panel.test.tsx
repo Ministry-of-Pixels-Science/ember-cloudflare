@@ -87,6 +87,8 @@ describe("Threads", () => {
     ]);
     expect(within(log).getByText("2 replies")).toBeInTheDocument();
     expect(await screen.findByRole("textbox", { name: "Write a reply" })).toBeInTheDocument();
+    // Under a room's thread is the window's end, which the people @ lists keep clear of by themselves.
+    expect(screen.getByRole("textbox", { name: "Write a reply" })).not.toHaveAttribute("data-mentions-above");
   });
 
   it("shows @ember typing as it answers in the thread, until its reply comes, but not who types in the room", async () => {

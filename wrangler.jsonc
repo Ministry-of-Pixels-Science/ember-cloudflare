@@ -35,7 +35,7 @@
     "directory": "apps/web/dist",
     "binding": "ASSETS",
     "not_found_handling": "404-page",
-    "run_worker_first": ["/*", "!/assets/*", "!/app-version.json", "!/browsers/*", "!/globe.svg", "!/logos/*", "!/lucide/*", "!/iconoir/*", "!/screenshots/*", "!/shortcuts/*", "!/ember-icon.png", "!/assistant-avatar.svg", "!/robots.txt"]
+    "run_worker_first": ["/*", "!/assets/*", "!/app-version.json", "!/browsers/*", "!/globe.svg", "!/logos/*", "!/lucide/*", "!/iconoir/*", "!/emojibase/*", "!/screenshots/*", "!/shortcuts/*", "!/ember-icon.png", "!/assistant-avatar.svg", "!/robots.txt"]
   },
 
   // One ChatRoom object per room, which owns its sockets, presence and (by default) its messages,

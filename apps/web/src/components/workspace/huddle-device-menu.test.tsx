@@ -20,6 +20,7 @@ const huddle = (changes: Partial<JoinedHuddle> = {}): JoinedHuddle => ({
   screen: null,
   screens: new Map(),
   open: true,
+  thread: true,
   ...changes,
 });
 /** The stream of the camera `deviceId`, as much of one as the menu reads. */
@@ -48,7 +49,7 @@ function browserLists(devices: MediaDeviceInfo[], choosesSpeaker = true) {
 
 /** One of a huddle's two menus, shut, with what the huddle's controls were asked. */
 function renderMenu(Menu: typeof MicrophoneMenu, joined: JoinedHuddle = huddle()) {
-  const controls = { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setDevice: vi.fn(), setSmall: vi.fn(), switchCamera: vi.fn(), invite: vi.fn() };
+  const controls = { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setThread: vi.fn(), setDevice: vi.fn(), setSmall: vi.fn(), switchCamera: vi.fn(), invite: vi.fn() };
   act(() => showHuddle(joined, controls));
   const user = userEvent.setup();
   const view = render(<Menu huddle={joined} className="" />);

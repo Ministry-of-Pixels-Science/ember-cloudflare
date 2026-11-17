@@ -1,16 +1,18 @@
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
-import type { Room, User, UserId } from "@ember/protocol";
+import type { Me, Room, User, UserId } from "@ember/protocol";
 import type { HuddlePerson } from "@ember/protocol/huddles";
 import { Collapse, Headset, MicrophoneMute, NavArrowDown } from "@/components/icons/iconoir";
 import { useNameOf } from "@/hooks/use-directory";
 import { useIsSpeaking } from "@/hooks/use-huddle";
+import { useMediaQuery } from "@/hooks/use-media-query";
 import { facesAway } from "@/lib/huddle-devices";
-import { OPEN_HUDDLE, openHuddle, takeCamerasSmall, type JoinedHuddle } from "@/lib/huddle-store";
+import { OPEN_HUDDLE, openHuddle, showHuddleThread, takeCamerasSmall, type JoinedHuddle } from "@/lib/huddle-store";
 import { SCREEN_SHAPE, showsCamerasSmall, stageLayout, TILE_GAP, tilesLayout } from "@/lib/huddle-tiles";
 import { cn } from "@/lib/utils";
 import { HuddleInviteDialog } from "./huddle-invite-dialog";
 import { HuddlePicture } from "./huddle-picture";
-import { CameraTool, InviteTool, LeaveButton, MicrophoneTool, MoreTool, ScreenTool, SwitchCameraTool, useHuddleName, waitingToJoin } from "./huddle-tools";
+import { HuddleThread } from "./huddle-thread";
+import { CameraTool, InviteTool, LeaveButton, MicrophoneTool, MoreTool, ScreenTool, SwitchCameraTool, ThreadTool, useHuddleName, waitingToJoin } from "./huddle-tools";
 import { UserAvatar } from "./user-avatar";
 
 interface Space {
@@ -189,11 +191,14 @@ interface Shaped {
   shape: number;
 }
 
+/** Where the huddle opened has no room for its thread beside the people in it: below 1180px wide, where a room has none for a thread beside it either. */
+const NO_ROOM_FOR_THREAD = "(width < 73.75rem)";
+
 interface Props {
   huddle: JoinedHuddle;
   /** Its room, or null once the room isn't among this person's. */
   room: Room | null;
-  meId: UserId;
+  me: Me;
   /** Hears that the session has ended, when that's why the people to invite didn't load. */
   onFailed: (error: unknown) => void;
 }
@@ -210,11 +215,14 @@ interface Props {
  * that of whoever joined first. Their own shows among the tiles, as they have the screen itself before
  * them. Minimizing it leaves the huddle's bar under the page. Invite people, at the start of its base,
  * opens the list of the room's people to invite, while the room is among this person's. A phone has it
- * in the menu of a More button, the last before Leave, as Slack's does.
+ * in the menu of a More button, the last before Leave, as Slack's does. From 1180px wide the huddle's
+ * thread shows beside the people in it, as in Slack's huddle window, once the room has said which
+ * message is the huddle's, until its person closes it: Thread, after the screen's button, shows it
+ * again.
  */
-export function HuddleView({ huddle, room, meId, onFailed }: Props) {
+export function HuddleView({ huddle, room, me, onFailed }: Props) {
   const nameOf = useNameOf();
-  const name = useHuddleName(room, meId);
+  const name = useHuddleName(room, me.id);
   const minimize = () => openHuddle(false);
   const count = huddle.people.length;
   const [tiles, space] = useSpace();
@@ -238,6 +246,21 @@ export function HuddleView({ huddle, room, meId, onFailed }: Props) {
   useEffect(() => section.current?.focus(), []);
   // The button Invite people was opened from, while it's open.
   const [inviteOpener, setInviteOpener] = useState<HTMLElement | null>(null);
+  // The thread the huddle can show, by its message, where it has the room for it.
+  const narrow = useMediaQuery(NO_ROOM_FOR_THREAD);
+  const threadId = narrow ? undefined : huddle.messageId;
+  const threadTool = useRef<HTMLButtonElement>(null);
+  // A thread its person asks for has the focus in its composer, to write in, where one that shows as the huddle opens leaves it on the huddle.
+  const [threadAsked, setThreadAsked] = useState(false);
+  const showThread = (shown: boolean) => {
+    setThreadAsked(shown);
+    showHuddleThread(shown);
+  };
+  // Close thread goes with the thread, so the focus goes to the button that shows it again.
+  const closeThread = () => {
+    showThread(false);
+    threadTool.current?.focus();
+  };
   return (
     <section
       ref={section}
@@ -267,29 +290,33 @@ export function HuddleView({ huddle, room, meId, onFailed }: Props) {
         </button>
       </header>
 
-      <div ref={tiles} className={cn("flex min-h-0 min-w-0 flex-1 p-6 max-md:p-3", stage ? cn("gap-3", !stage.beside && "flex-col") : "overflow-auto")}>
-        {stage && (
-          <Stage
-            label={screenOf(nameOf(stage.user))}
-            stream={stage.stream}
-            shape={shape}
-            width={stage.screen}
-            onShape={(shape) => setShaped((last) => (last?.userId === stage.user.id && last.shape === shape ? last : { userId: stage.user.id, shape }))}
-            className={stage.beside ? "my-auto ml-auto" : "mx-auto"}
-          />
-        )}
-        {/*
-          By themselves, the tiles' margins center them while they fit, and leave their start in reach
-          once they scroll. With a screen they scroll by themselves, in rows that stay as tall as their
-          tiles, and give way to their scrollbar: beside it, they're in the middle with it while they fit.
-        */}
-        <ul
-          aria-label="In the huddle"
-          className={cn("grid auto-rows-max", !stage ? "m-auto" : stage.beside ? "my-auto mr-auto max-h-full overflow-y-auto" : "min-h-0 flex-1 content-start justify-center overflow-y-auto")}
-          style={{ gap: TILE_GAP, gridTemplateColumns: `repeat(${columns}, ${stage ? `minmax(0, ${width}px)` : `${width}px`})` }}
-        >
-          <Tiles huddle={huddle} staged={stage?.user.id} onEnlarge={setChosen} shape={square ? "aspect-square" : "aspect-[4/3]"} />
-        </ul>
+      <div className="flex min-h-0 flex-1">
+        <div ref={tiles} className={cn("flex min-h-0 min-w-0 flex-1 p-6 max-md:p-3", stage ? cn("gap-3", !stage.beside && "flex-col") : "overflow-auto")}>
+          {stage && (
+            <Stage
+              label={screenOf(nameOf(stage.user))}
+              stream={stage.stream}
+              shape={shape}
+              width={stage.screen}
+              onShape={(shape) => setShaped((last) => (last?.userId === stage.user.id && last.shape === shape ? last : { userId: stage.user.id, shape }))}
+              className={stage.beside ? "my-auto ml-auto" : "mx-auto"}
+            />
+          )}
+          {/*
+            By themselves, the tiles' margins center them while they fit, and leave their start in reach
+            once they scroll. With a screen they scroll by themselves, in rows that stay as tall as their
+            tiles, and give way to their scrollbar: beside it, they're in the middle with it while they fit.
+          */}
+          <ul
+            aria-label="In the huddle"
+            className={cn("grid auto-rows-max", !stage ? "m-auto" : stage.beside ? "my-auto mr-auto max-h-full overflow-y-auto" : "min-h-0 flex-1 content-start justify-center overflow-y-auto")}
+            style={{ gap: TILE_GAP, gridTemplateColumns: `repeat(${columns}, ${stage ? `minmax(0, ${width}px)` : `${width}px`})` }}
+          >
+            <Tiles huddle={huddle} staged={stage?.user.id} onEnlarge={setChosen} shape={square ? "aspect-square" : "aspect-[4/3]"} />
+          </ul>
+        </div>
+        {/* A thread is its message's, so another huddle's is another thread. */}
+        {room && threadId !== undefined && huddle.thread && <HuddleThread key={threadId} room={room} me={me} messageId={threadId} autoFocus={threadAsked} onClose={closeThread} />}
       </div>
 
       <footer className="grid grid-cols-[1fr_auto_1fr] items-center gap-3 border-t bg-background px-4 pt-3 pb-[max(12px,env(safe-area-inset-bottom))] max-md:flex max-md:justify-between max-md:gap-1.5 max-md:px-2.5">
@@ -303,13 +330,14 @@ export function HuddleView({ huddle, room, meId, onFailed }: Props) {
           <CameraTool huddle={huddle} devices />
           <SwitchCameraTool huddle={huddle} />
           <ScreenTool huddle={huddle} />
+          {room && threadId !== undefined && <ThreadTool ref={threadTool} shown={huddle.thread} onShow={showThread} />}
           {room && <MoreTool onInvite={setInviteOpener} />}
         </div>
         <div className="flex justify-end">
           <LeaveButton />
         </div>
       </footer>
-      {room && inviteOpener && <HuddleInviteDialog huddle={huddle} room={room} meId={meId} opener={inviteOpener} onClose={() => setInviteOpener(null)} onFailed={onFailed} />}
+      {room && inviteOpener && <HuddleInviteDialog huddle={huddle} room={room} meId={me.id} opener={inviteOpener} onClose={() => setInviteOpener(null)} onFailed={onFailed} />}
     </section>
   );
 }

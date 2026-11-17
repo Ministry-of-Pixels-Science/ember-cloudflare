@@ -3,10 +3,13 @@ import { act, cleanup, fireEvent, render, screen, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { svgDataUrl } from "@/lib/svg-preview";
+import { fileText, MAX_SHOWN_TEXT_SIZE } from "@/lib/text-preview";
 import { Attachment } from "./attachment";
 
 // jsdom decodes no SVGs, so lib/svg-preview.test.ts tests how they're loaded, and e2e/ shows real ones.
 vi.mock("@/lib/svg-preview", () => ({ svgDataUrl: vi.fn() }));
+// lib/text-preview.test.ts tests how text files are read.
+vi.mock("@/lib/text-preview", async (original) => ({ ...(await original<typeof import("@/lib/text-preview")>()), fileText: vi.fn() }));
 
 /** A file called `name` of `contentType`, as a message has it. */
 const stored = (name: string, contentType: string, overrides: Partial<StoredFile> = {}): StoredFile => {
@@ -156,7 +159,7 @@ describe("Image viewer", () => {
   });
 });
 
-/** Watches for an SVG's preview coming near the view, as the browser's observers do, but only says so when told to. */
+/** Watches for a file's preview coming near the view, as the browser's observers do, but only says so when told to. */
 class FakeIntersectionObserver {
   static made: FakeIntersectionObserver[] = [];
   watched: Element[] = [];
@@ -250,5 +253,109 @@ describe("Safe SVG previews", () => {
     expect(loading.aborted).toBe(false);
     loaded.unmount();
     expect(loading.aborted).toBe(true);
+  });
+});
+
+describe("Text files' text", () => {
+  beforeEach(() => {
+    FakeIntersectionObserver.made = [];
+    vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.mocked(fileText).mockReset();
+  });
+
+  /** Shows `file`, near the view, once its text has loaded, answering where it's shown and its text's code block. */
+  async function shownNear(file: StoredFile) {
+    const { container } = render(<Attachment file={file} />);
+    await act(async () => FakeIntersectionObserver.made.at(-1)!.near());
+    return { container, code: () => container.querySelector("pre") };
+  }
+
+  it("shows a snippet's text above its card once it's within 200px of the timeline's view, with Copy code", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fileText).mockResolvedValue("#!/bin/sh\r\necho deployed\r\n");
+    const snippet = stored("deploy.sh", "application/x-sh", { byteSize: 26 });
+    const { container } = render(
+      <div style={{ overflowY: "auto" }}>
+        <Attachment file={snippet} />
+      </div>,
+    );
+    const [observer] = FakeIntersectionObserver.made;
+    expect(observer!.options).toEqual({ root: container.firstChild, rootMargin: "200px" });
+    expect(fileText).not.toHaveBeenCalled();
+    expect(card("deploy.sh")).toBeInTheDocument();
+    expect(container.querySelector("pre")).toBeNull();
+
+    await act(async () => observer!.near());
+    expect(observer!.disconnected).toBe(true);
+    expect(fileText).toHaveBeenCalledWith(snippet.downloadUrl, expect.any(AbortSignal));
+    const code = container.querySelector("pre")!;
+    // Its lines, as the page reads them, without the last one's end.
+    expect(code.textContent).toBe("#!/bin/sh\necho deployed");
+    expect(code.compareDocumentPosition(card("deploy.sh")!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(screen.queryByRole("button", { name: "Show more" })).not.toBeInTheDocument();
+    // What it copies is the file's text as the file has it.
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+    await user.click(screen.getByRole("button", { name: "Copy code" }));
+    expect(writeText).toHaveBeenCalledWith("#!/bin/sh\r\necho deployed\r\n");
+  });
+
+  it("highlights the text where the file's extension names a language a code block knows, and leaves the rest plain", async () => {
+    vi.mocked(fileText).mockResolvedValue("#!/bin/sh\necho deployed");
+    const script = await shownNear(stored("deploy.sh", "application/x-sh"));
+    await vi.waitFor(() => expect(script.code()!.querySelector(".hljs-built_in")).toHaveTextContent("echo"));
+
+    // With highlight.js loaded, as it now is.
+    const notes = await shownNear(stored("notes.txt", "text/plain"));
+    expect(notes.code()!.innerHTML).toBe("#!/bin/sh\necho deployed");
+  });
+
+  it("folds text past 5 lines or 700 characters behind Show more", async () => {
+    const user = userEvent.setup();
+    for (const text of ["1\n2\n3\n4\n5\n6", "x".repeat(701)]) {
+      vi.mocked(fileText).mockResolvedValue(text);
+      const { code } = await shownNear(stored("notes.txt", "text/plain"));
+      expect(code()).toHaveClass("overflow-y-hidden");
+      const showMore = screen.getByRole("button", { name: "Show more", expanded: false });
+      // It names the text it opens.
+      expect(code()!.id).not.toBe("");
+      expect(showMore).toHaveAttribute("aria-controls", code()!.id);
+      await user.click(showMore);
+      expect(code()).not.toHaveClass("overflow-y-hidden");
+      // Scrolled down while open, it folds back to its first lines.
+      Object.defineProperty(code(), "scrollTop", { value: 120, writable: true });
+      await user.click(screen.getByRole("button", { name: "Show less", expanded: true }));
+      expect(code()).toHaveClass("overflow-y-hidden");
+      expect(code()!.scrollTop).toBe(0);
+      cleanup();
+    }
+
+    for (const text of ["1\n2\n3\n4\n5\n", "x".repeat(700)]) {
+      vi.mocked(fileText).mockResolvedValue(text);
+      const { code } = await shownNear(stored("notes.txt", "text/plain"));
+      expect(code()).not.toHaveClass("overflow-y-hidden");
+      expect(screen.queryByRole("button", { name: "Show more" })).not.toBeInTheDocument();
+      cleanup();
+    }
+  });
+
+  it("shows only the card of a bigger text file, and of one that doesn't load, isn't text, or is only spaces", async () => {
+    render(<Attachment file={stored("server.log", "text/plain", { byteSize: MAX_SHOWN_TEXT_SIZE + 1 })} />);
+    expect(FakeIntersectionObserver.made).toEqual([]);
+    expect(card("server.log")).toBeInTheDocument();
+    cleanup();
+
+    for (const text of [null, " \n\t\n"]) {
+      vi.mocked(fileText).mockResolvedValue(text);
+      const { code } = await shownNear(stored("notes.txt", "text/plain"));
+      expect(fileText).toHaveBeenCalledOnce();
+      expect(card("notes.txt")).toBeInTheDocument();
+      expect(code()).toBeNull();
+      cleanup();
+      vi.mocked(fileText).mockClear();
+    }
   });
 });

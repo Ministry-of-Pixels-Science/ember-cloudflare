@@ -45,11 +45,35 @@ export function togglesMute(event: KeyboardEvent): boolean {
   return event.shiftKey && !event.altKey && !event.isComposing && commandHeld(event);
 }
 
+/**
+ * Cmd+O on a Mac, iPad or iPhone, or Ctrl+O elsewhere, pressed in the composer's text, which picks files to
+ * send, as Slack's Upload from your computer does, in place of the browser's own Open.
+ */
+export function uploadsFiles(event: KeyboardEvent): boolean {
+  if (event.code !== "KeyO" && event.key.toLowerCase() !== "o") return false;
+  return !event.shiftKey && !event.altKey && !event.isComposing && commandHeld(event);
+}
+
+/**
+ * Cmd+Shift+Enter on a Mac, iPad or iPhone, or Ctrl+Shift+Enter elsewhere, pressed in the composer's text,
+ * which writes a text snippet, as Slack's does, where Cmd or Ctrl+Enter alone sends.
+ */
+export function writesSnippet(event: KeyboardEvent): boolean {
+  return event.key === "Enter" && event.shiftKey && !event.altKey && !event.isComposing && commandHeld(event);
+}
+
 /** A shortcut's keys: as a tooltip shows them, and as `aria-keyshortcuts` names them for screen readers. */
 export interface Shortcut {
   keys: string[];
   aria: string;
 }
+
+/** The keys `uploadsFiles` takes on this keyboard. */
+export const uploadShortcut = (apple = appleKeyboard()): Shortcut => (apple ? { keys: ["⌘", "O"], aria: "Meta+O" } : { keys: ["Ctrl", "O"], aria: "Control+O" });
+
+/** The keys `writesSnippet` takes on this keyboard. */
+export const snippetShortcut = (apple = appleKeyboard()): Shortcut =>
+  apple ? { keys: ["⌘", "⇧", "Enter"], aria: "Meta+Shift+Enter" } : { keys: ["Ctrl", "Shift", "Enter"], aria: "Control+Shift+Enter" };
 
 /** The keys `togglesHuddle` takes on this keyboard. */
 export const huddleShortcut = (apple = appleKeyboard()): Shortcut =>
@@ -190,6 +214,8 @@ export const SHORTCUTS: { group: string; rows: ShortcutRow[] }[] = [
       { action: "Send, on a touch screen too", keys: (apple) => [command(apple), "Enter"] },
       { action: "Start a new line, or a list's next item", keys: (apple) => [shift(apple), "Enter"] },
       { action: "Add a link", keys: (apple) => [command(apple), "K"] },
+      { action: "Upload files", keys: (apple) => uploadShortcut(apple).keys },
+      { action: "Write a text snippet", keys: (apple) => snippetShortcut(apple).keys },
       { action: "Edit your last message, with nothing written", keys: () => ["↑"] },
     ],
   },

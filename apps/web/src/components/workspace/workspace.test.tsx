@@ -2459,6 +2459,7 @@ describe("Huddles", () => {
     setCamera: vi.fn(),
     setScreen: vi.fn(),
     setOpen: vi.fn((open: boolean) => showHuddle({ ...joinedHuddle()!, open })),
+    setThread: vi.fn(),
     setDevice: vi.fn(),
     setSmall: vi.fn(),
     switchCamera: vi.fn(),
@@ -2483,7 +2484,7 @@ describe("Huddles", () => {
     // Joining lets the tab into the huddle at once, alone, and shows it opened.
     vi.mocked(joinHuddle).mockImplementation(({ roomId, muted }) =>
       showHuddle(
-        { roomId, connected: true, you: ada, people: [{ user: ada, muted, audio: false, video: false, screen: false }], muted, microphone: true, microphoneId: "", speakerId: "", camera: null, watched: new Map(), screen: null, screens: new Map(), open: true },
+        { roomId, connected: true, you: ada, people: [{ user: ada, muted, audio: false, video: false, screen: false }], muted, microphone: true, microphoneId: "", speakerId: "", camera: null, watched: new Map(), screen: null, screens: new Map(), open: true, thread: true },
         controls,
       ),
     );

@@ -39,6 +39,7 @@ const huddleWith = (...others: User[]): JoinedHuddle => ({
   screen: null,
   screens: new Map(),
   open: true,
+  thread: true,
 });
 
 /** A room's settings, as much of them as Invite people reads: who's in it, of everyone who could be. */
@@ -85,7 +86,7 @@ function Page({ joined, room, people, onClose, onFailed }: PageProps) {
 /** Invite people, opened from its button in the huddle Ada is in, with what the huddle was asked. */
 async function openInvite(room: Room = general, joined: JoinedHuddle = huddleWith(sam), people: People = PEOPLE) {
   const invite = vi.fn((_userIds: string[]) => true);
-  const controls = { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setDevice: vi.fn(), setSmall: vi.fn(), switchCamera: vi.fn(), invite };
+  const controls = { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setThread: vi.fn(), setDevice: vi.fn(), setSmall: vi.fn(), switchCamera: vi.fn(), invite };
   act(() => showHuddle(joined, controls));
   const [onClose, onFailed] = [vi.fn(), vi.fn()];
   const user = userEvent.setup();

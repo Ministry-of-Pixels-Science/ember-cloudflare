@@ -652,6 +652,7 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId, invit
     screen: null,
     screens: new Map(),
     open: true,
+    thread: true,
   };
   let over = false;
   if (track) track.enabled = !huddle.muted;
@@ -752,6 +753,9 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId, invit
       if (open === huddle.open) return;
       show({ open });
       for (const kind of SHOWN_KINDS) receiving[kind].listen();
+    },
+    setThread(shown) {
+      if (shown !== huddle.thread) show({ thread: shown });
     },
     // The tab is sent the size of each camera that its tiles show, so it asks again as they come to show another.
     setSmall(small) {
@@ -1038,7 +1042,7 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId, invit
           // Whoever starts a direct message's huddle invites the others in it, which being let back in doesn't do again.
           if (invite.length > 0 && frame.people.every(({ user }) => user.id === frame.you.id)) socket.send({ type: "huddle.invite", userIds: invite });
         }
-        show({ connected: true, you: frame.you, people: frame.people });
+        show({ connected: true, you: frame.you, people: frame.people, messageId: frame.messageId });
         for (const kind of HUDDLE_TRACK_KINDS) void sending[kind].publish();
         return listen();
       }

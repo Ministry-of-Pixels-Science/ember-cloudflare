@@ -81,6 +81,8 @@ export function threadReducer(state: ThreadState, action: ThreadAction): ThreadS
     case "thread.history":
       return frame.parentId === parentId ? opening(withReplies(paged(state.replies, frame))) : state;
     case "message.created":
+      // A thread can be open before the room has written its message, as a huddle's is that shows it from its start.
+      if (frame.message.id === parentId) return { ...state, parent: frame.message };
       return frame.message.parentId === parentId ? withReplies(roomReducer(state.replies, action)) : state;
     case "message.updated":
       return frame.message.id === parentId ? { ...state, parent: frame.message } : withReplies(roomReducer(state.replies, action));

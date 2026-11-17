@@ -43,9 +43,10 @@ const attachmentMarkup = ({ contentType, html }: Attachment) =>
  * written under jsdom: a text box whose lines are one paragraph of Lexxy's markup, which tells of
  * changes and keys as the editor does, and of addresses pasted in it, below which it shows what's
  * added. Formatting changes only the formatting it tells of, and a link only the text, which it
- * marks `data-linked` with the address. The browser tests in e2e/ write in Lexxy itself.
+ * marks `data-linked` with the address. It lists nobody for an @, and is marked `data-mentions-above`
+ * where the list is to show above the text. The browser tests in e2e/ write in Lexxy itself.
  */
-export default function RichTextEditor({ label, placeholder, rows, initialValue, autoFocus, onChange, onFormatChange, onKeyDown, onLinkPasted, ref }: ComponentProps<typeof Editor>) {
+export default function RichTextEditor({ label, placeholder, rows, initialValue, mentionsAbove, autoFocus, onChange, onFormatChange, onKeyDown, onLinkPasted, onReady, ref }: ComponentProps<typeof Editor>) {
   const box = useRef<HTMLTextAreaElement>(null);
   // Read as soon as they change, as Lexxy's are, and shown once React renders them.
   const attachments = useRef<Attachment[]>([]);
@@ -94,6 +95,17 @@ export default function RichTextEditor({ label, placeholder, rows, initialValue,
       delete box.current!.dataset.linked;
       formatted({ ...format.current, link: false });
     },
+    insertText: (inserted) => {
+      box.current!.setRangeText(inserted, box.current!.selectionStart, box.current!.selectionEnd, "end");
+      onChange?.();
+    },
+    startMention: () => {
+      const text = box.current!;
+      text.focus();
+      const before = text.value.slice(0, text.selectionStart);
+      text.setRangeText(/\S$/.test(before) ? " @" : "@", text.selectionStart, text.selectionEnd, "end");
+      onChange?.();
+    },
     startNewBlock: () => false,
     catchUp: () => {},
   }));
@@ -107,8 +119,9 @@ export default function RichTextEditor({ label, placeholder, rows, initialValue,
     return () => text.removeEventListener("keydown", listener, { capture: true });
   }, []);
 
-  // As it shows, rather than once React gets round to effects, so a test finds it focused when it finds it.
+  // As it shows, rather than once React gets round to effects, so a test finds it ready, and focused, when it finds it.
   useLayoutEffect(() => {
+    onReady?.();
     if (!(typeof autoFocus === "function" ? autoFocus() : autoFocus)) return;
     const text = box.current!;
     text.focus();
@@ -134,6 +147,7 @@ export default function RichTextEditor({ label, placeholder, rows, initialValue,
         aria-label={label}
         placeholder={placeholder}
         rows={rows}
+        data-mentions-above={mentionsAbove || undefined}
         defaultValue={initialValue && writtenBody(initialValue).plainText}
         onChange={() => onChange?.()}
         onPaste={(event) => pasted(event.clipboardData.getData("text/plain"))}

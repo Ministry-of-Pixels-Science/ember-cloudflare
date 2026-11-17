@@ -206,9 +206,10 @@ interface ParagraphMenuProps {
  */
 function ParagraphMenu({ formatting, tabbable, onFocus }: ParagraphMenuProps) {
   const { editor, format } = formatting;
+  const [open, setOpen] = useState(false);
   return (
-    <DropdownMenu>
-      <ShortcutTooltip label={FORMATTING_NAMES.paragraph}>
+    <DropdownMenu open={open} onOpenChange={setOpen}>
+      <ShortcutTooltip label={FORMATTING_NAMES.paragraph} hidden={open}>
         <DropdownMenuTrigger asChild>
           <button
             type="button"

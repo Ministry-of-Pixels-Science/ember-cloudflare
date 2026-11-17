@@ -115,10 +115,10 @@ describe("A room's huddle", () => {
 
     const adas = await joinHuddle(room, ada);
     const welcome = await adas.next("huddle.welcome");
-    expect(welcome).toEqual({ type: "huddle.welcome", you: ada.user, people: [person(ada)], startedAt: expect.stringMatching(/^\d{4}-\d\d-\d\dT[\d:.]+Z$/) as string });
+    expect(welcome).toEqual({ type: "huddle.welcome", you: ada.user, people: [person(ada)], startedAt: expect.stringMatching(/^\d{4}-\d\d-\d\dT[\d:.]+Z$/) as string, messageId: expect.stringMatching(/^[0-9a-z]{16}$/) as string });
 
     const graces = await joinHuddle(room, grace, { muted: true });
-    expect(await graces.next("huddle.welcome")).toEqual({ type: "huddle.welcome", you: grace.user, people: [person(ada), person(grace, { muted: true })], startedAt: welcome.startedAt });
+    expect(await graces.next("huddle.welcome")).toEqual({ type: "huddle.welcome", you: grace.user, people: [person(ada), person(grace, { muted: true })], startedAt: welcome.startedAt, messageId: welcome.messageId });
     expect(await adas.next("huddle.joined")).toEqual({ type: "huddle.joined", person: person(grace, { muted: true }) });
 
     graces.leave();

@@ -289,6 +289,21 @@ export function Code(props: IconoirIconProps) {
   );
 }
 
+export function CodeBrackets(props: IconoirIconProps) {
+  return (
+    <IconoirIcon name="code-brackets" {...props}>
+      <path
+        d="M9.00001 21L8.00001 21C6.89544 21 6.00001 20.1057 6.00001 19.0011C6.00001 17.4501 6.00001 15.3443 6 14C6 13 4.5 12 4.5 12C4.5 12 6.00001 11 6.00001 10C6.00001 8.827 6.00001 6.62207 6.00001 4.99914C6.00001 3.89457 6.89544 3 8.00001 3L9.00001 3"
+        {...LINE}
+      />
+      <path
+        d="M15 21L16 21C17.1046 21 18 20.1057 18 19.0011C18 17.4501 18 15.3443 18 14C18 13 19.5 12 19.5 12C19.5 12 18 11 18 10C18 8.827 18 6.62207 18 4.99914C18 3.89457 17.1046 3 16 3L15 3"
+        {...LINE}
+      />
+    </IconoirIcon>
+  );
+}
+
 export function CodeBracketsSquare(props: IconoirIconProps) {
   return (
     <IconoirIcon name="code-brackets-square" {...props}>
@@ -991,6 +1006,15 @@ export function Search(props: IconoirIconProps) {
   );
 }
 
+export function Send(props: IconoirIconProps) {
+  return (
+    <IconoirIcon name="send" {...props}>
+      <path d="M22 12L3 20L6.5625 12L3 4L22 12Z" {...LINE} />
+      <path d="M6.5 12L22 12" {...LINE} />
+    </IconoirIcon>
+  );
+}
+
 export function Settings(props: IconoirIconProps) {
   return (
     <IconoirIcon name="settings" {...props}>
@@ -1170,6 +1194,15 @@ export function Underline(props: IconoirIconProps) {
     <IconoirIcon name="underline" {...props}>
       <path d="M16 5V11C16 13.2091 14.2091 15 12 15V15C9.79086 15 8 13.2091 8 11V5" {...LINE} />
       <path d="M6 19L18 19" {...LINE} />
+    </IconoirIcon>
+  );
+}
+
+export function Upload(props: IconoirIconProps) {
+  return (
+    <IconoirIcon name="upload" {...props}>
+      <path d="M6 20L18 20" {...LINE} />
+      <path d="M12 16V4M12 4L15.5 7.5M12 4L8.5 7.5" {...LINE} />
     </IconoirIcon>
   );
 }

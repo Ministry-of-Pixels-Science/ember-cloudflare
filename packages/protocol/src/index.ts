@@ -1790,13 +1790,21 @@ export interface RoomSocketParams {
    * room has it. Named only until the first welcome, since a socket that connects again keeps the tab's page.
    */
   around?: string;
+  /**
+   * Set on a socket that shows a part of the room apart from its timeline, as a huddle shows its thread
+   * beside the people in it: its tab's person views the thread it opens, and isn't in the room for it.
+   * The room doesn't count them among who's here, isn't read through it, and doesn't take them to be
+   * there to see what's said in it.
+   */
+  apart?: true;
 }
 
 /** The query that carries `params` on a room socket's address, with the revision of the protocol the tab speaks. */
-export const roomSocketQuery = ({ visible, since, around }: RoomSocketParams) =>
+export const roomSocketQuery = ({ visible, since, around, apart }: RoomSocketParams) =>
   `?visible=${visible ? 1 : 0}&protocol=${ROOM_PROTOCOL}` +
   (since === undefined ? "" : `&since=${since}`) +
-  (around === undefined ? "" : `&around=${encodeURIComponent(around)}`);
+  (around === undefined ? "" : `&around=${encodeURIComponent(around)}`) +
+  (apart ? "&apart=1" : "");
 
 /** The part of a `URLSearchParams` that reading a socket's address needs, which the protocol, made for every runtime, names itself. */
 interface SearchParams {
@@ -1818,6 +1826,7 @@ export const parseRoomSocketParams = (query: SearchParams): RoomSocketParams & {
   visible: query.get("visible") !== "0",
   since: parseSeq(query.get("since")),
   around: messageIdOf(query.get("around")),
+  apart: query.get("apart") === "1" || undefined,
   protocol: Number(query.get("protocol")) || 1,
 });
 

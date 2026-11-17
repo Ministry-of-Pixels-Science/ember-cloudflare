@@ -339,11 +339,13 @@ Objects, D1 or speed call for something else.
   latest activity, and reaches no push or webhook. The room's object keeps the message's id in its
   own storage (`huddleMessage`) from before it writes the row, so a write whose answer it never had
   isn't made twice, and with it when the huddle started, everyone who has been in it, since the
-  huddle's sockets only say who's in it now, and when it was found over. The alarm that says who's
-  in the huddle again brings the message in step with it too, which makes up for a write that
-  failed, and for an object that came back with nobody left in its huddle. A row still unwritten
-  as its huddle ends is written then, saying that it's over, and one deleted before the room heard
-  that it was written stays deleted.
+  huddle's sockets only say who's in it now, and when it was found over. The id is the huddle's to
+  give as it starts, and its sockets carry it, so that each tab that joins is told which message's
+  thread is the huddle's, to show beside the people in it. The alarm that says who's in the huddle
+  again brings the message in step with it too, which makes up for a write that failed, and for an
+  object that came back with nobody left in its huddle. A row still unwritten as its huddle ends is
+  written then, saying that it's over, and one deleted before the room heard that it was written
+  stays deleted.
 - **Rooms are named by their ids, and some have no creator.** A room's id names its Durable Object
   too, so it's a 16-character sortable string like a message's rather than an integer, and its kind
   is `open`, `closed` or `direct` rather than Rails' class name. The rooms from before the Workspace
