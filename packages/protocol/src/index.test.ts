@@ -301,14 +301,14 @@ describe("One live connection per tab outside the open room", () => {
     }
   });
 
-  it("carries whether a tab is shown on its workspace socket's address, which counts it as shown when it doesn't say", () => {
+  it("carries whether a tab is shown on its workspace socket's address, which doesn't count it as shown when it doesn't say", () => {
     expect(workspaceSocketQuery({ visible: true })).toBe("?visible=1");
     expect(workspaceSocketQuery({ visible: false })).toBe("?visible=0");
     const read = (params: Record<string, string>) => parseWorkspaceSocketParams({ get: (name) => params[name] ?? null });
     expect(read({ visible: "1" })).toEqual({ visible: true });
     expect(read({ visible: "0" })).toEqual({ visible: false });
-    expect(read({})).toEqual({ visible: true });
-    expect(read({ visible: "yes" })).toEqual({ visible: true });
+    expect(read({})).toEqual({ visible: false });
+    expect(read({ visible: "yes" })).toEqual({ visible: false });
   });
 
   it("reads the workspace socket's frames as the server sends them", () => {

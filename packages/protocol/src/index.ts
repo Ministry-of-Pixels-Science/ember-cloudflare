@@ -1826,9 +1826,11 @@ export const workspaceSocketQuery = ({ visible }: WorkspaceSocketParams) => `?vi
 
 /**
  * What a workspace socket's address says about its tab, as `workspaceSocketQuery` wrote it. A tab that
- * doesn't say counts as shown: an open tab runs the app it loaded, which once said nothing here.
+ * doesn't say doesn't count as shown, where one on a room's socket does: an open tab runs the app it
+ * loaded, which once said nothing here, and counting it would keep an invitation's push from someone
+ * who has such a tab open and isn't at it.
  */
-export const parseWorkspaceSocketParams = (query: SearchParams): WorkspaceSocketParams => ({ visible: query.get("visible") !== "0" });
+export const parseWorkspaceSocketParams = (query: SearchParams): WorkspaceSocketParams => ({ visible: query.get("visible") === "1" });
 
 /** The most characters a message's plain text can have. */
 export const MAX_MESSAGE_LENGTH = 10_000;

@@ -573,7 +573,8 @@ export class Huddle {
     if (invited.length === 0) return;
     try {
       const pushes = await workspace(this.env).inviteToHuddle(roomId, user.id, invited);
-      if (pushes.length > 0) this.ctx.waitUntil(this.push(pushes));
+      // A Workspace still on the code from before it answered pushes, as it may be for some minutes after an update, answers nothing.
+      if (pushes?.length > 0) this.ctx.waitUntil(this.push(pushes));
     } catch (error) {
       console.warn("Inviting people into a huddle failed:", logged(error));
       send(ws, { type: "error", message: NOBODY_INVITED, failed: "huddle.invite" });

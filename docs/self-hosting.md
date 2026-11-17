@@ -1254,7 +1254,9 @@ service keeps it for a minute for a device it can't reach, where it keeps a mess
 weeks, so a phone that was off isn't told of a huddle long over. Once shown, it stays until it's
 opened or dismissed: answering the invitation somewhere else, or the huddle ending, doesn't take it
 down. A tab in the background still shows the invitation, and rings if its browser lets it, so
-someone with Ember behind another tab may get both.
+someone with Ember behind another tab may get both. So may someone looking at a tab left open
+since before Ember was updated to do this: such a tab doesn't say whether it's shown, so it
+doesn't count until it's reloaded.
 
 An administrator turns huddles on under Huddles in community settings, with the switch on its card.
 Huddles run through Cloudflare's [Realtime SFU](https://developers.cloudflare.com/realtime/sfu/),

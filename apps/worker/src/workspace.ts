@@ -782,6 +782,15 @@ function isCode(code: string, joinCode: string): boolean {
  */
 type Shown = Pick<Viewing, "visible" | "heardAt">;
 
+/**
+ * What a socket with no attachment counts as saying, like one whose address didn't say: that its tab
+ * isn't shown. The Workspace let it in before it kept this, and a socket stays connected when the
+ * Workspace takes new code after hibernating.
+ */
+const UNSAID: Shown = { visible: false, heardAt: 0 };
+
+const shownOf = (tab: WebSocket) => (tab.deserializeAttachment() as Shown | null) ?? UNSAID;
+
 /** Sends `frame` on a workspace socket, unless it has closed since. */
 function send(ws: WebSocket, frame: WorkspaceServerFrame): void {
   try {
@@ -1844,11 +1853,11 @@ export class Workspace extends DurableObject<Env> {
   }
 
   /**
-   * Whether `userId` has Ember in view: a tab of theirs is shown, and the Workspace has heard from it
-   * lately, as a room asks of whoever's viewing it (`isViewing`).
+   * Whether `userId` has Ember in view: a tab of theirs has said it's shown, and the Workspace has heard
+   * from it lately, as a room asks of whoever's viewing it (`isViewing`).
    */
   private hasInView(userId: UserId, now = Date.now()): boolean {
-    return this.ctx.getWebSockets(userId).some((tab) => tab.readyState === WebSocket.OPEN && isViewing(tab.deserializeAttachment() as Shown, this.ctx.getWebSocketAutoResponseTimestamp(tab), now));
+    return this.ctx.getWebSockets(userId).some((tab) => tab.readyState === WebSocket.OPEN && isViewing(shownOf(tab), this.ctx.getWebSocketAutoResponseTimestamp(tab), now));
   }
 
   /**

@@ -71,19 +71,27 @@ const answer = (roomId: string, session?: Session) => api(`/api/rooms/${roomId}/
 /** A room's huddle, as its room's object holds it, with the bindings it reaches the Workspace through. */
 const huddleOf = (room: ChatRoom) => (room as unknown as { huddle: { env: Env } }).huddle;
 
-/** Has room `room`'s invitations fail to reach the Workspace, as while the Workspace restarts. Whatever else its huddle asks the Workspace is answered. */
-async function uninvitable(room: RoomId): Promise<void> {
+type Invitation = Parameters<Workspace["inviteToHuddle"]>;
+
+/**
+ * Has room `room`'s invitations answered by `inviteToHuddle` in the Workspace's place, which is handed
+ * the Workspace's own way of answering one. Whatever else its huddle asks the Workspace is answered.
+ */
+async function invitingBy(room: RoomId, inviteToHuddle: (real: (...invitation: Invitation) => Promise<InvitationPush[]>, ...invitation: Invitation) => Promise<unknown>): Promise<void> {
   await runInDurableObject(roomStub(room), (instance: ChatRoom) => {
     const huddle = huddleOf(instance);
-    const reached = workspace(huddle.env);
-    const cutOff = {
-      huddleApp: () => reached.huddleApp(),
-      reportHuddle: (...report: Parameters<typeof reached.reportHuddle>) => reached.reportHuddle(...report),
-      inviteToHuddle: () => Promise.reject(new Error("The Workspace is unreachable")),
+    const real = workspace(huddle.env);
+    const standIn = {
+      huddleApp: () => real.huddleApp(),
+      reportHuddle: (...report: Parameters<typeof real.reportHuddle>) => real.reportHuddle(...report),
+      inviteToHuddle: (...invitation: Invitation) => inviteToHuddle((...given) => real.inviteToHuddle(...given), ...invitation),
     };
-    huddle.env = { ...huddle.env, WORKSPACE: { getByName: () => cutOff } as unknown as Env["WORKSPACE"] };
+    huddle.env = { ...huddle.env, WORKSPACE: { getByName: () => standIn } as unknown as Env["WORKSPACE"] };
   });
 }
+
+/** Has room `room`'s invitations fail to reach the Workspace, as while the Workspace restarts. */
+const uninvitable = (room: RoomId) => invitingBy(room, () => Promise.reject(new Error("The Workspace is unreachable")));
 
 /** How many rows the Workspace's database reads to answer `query`. */
 async function rowsRead(query: string, ...params: Array<string | number>): Promise<number> {
@@ -347,17 +355,41 @@ describe("Pushing an invitation into a huddle", () => {
     expect(labelsOf(await pushesOf(dm, ada, grace))).toEqual(["grace"]);
     expect(await nextOfAnInvitation(behind)).toEqual(invited(dm, ada));
 
-    // One tab in front is enough, whether its address says it's shown or, as a tab's once did, says nothing.
-    for (const params of [{ visible: true }, undefined]) {
-      const inFront = await openWorkspaceSocket(grace, params);
-      expect(await pushesOf(dm, ada, grace)).toEqual([]);
-      await show(inFront, false);
+    // One tab in front is enough.
+    const inFront = await openWorkspaceSocket(grace, { visible: true });
+    expect(await pushesOf(dm, ada, grace)).toEqual([]);
+    await show(inFront, false);
+    expect(labelsOf(await pushesOf(dm, ada, grace))).toEqual(["grace"]);
+    await show(inFront, true);
+    expect(await pushesOf(dm, ada, grace)).toEqual([]);
+    inFront.ws.close(1000);
+    await inFront.closed;
+    expect(labelsOf(await pushesOf(dm, ada, grace))).toEqual(["grace"]);
+  });
+
+  it("counts out a tab that hasn't said whether it's shown, as one open since before an update hasn't, though its pings come, until it says so", async () => {
+    const { ada } = await huddlesOn();
+    const grace = await signIn("Grace");
+    const dm = (await direct(ada, grace)).id;
+    await subscribe(grace, "grace");
+    // A socket the Workspace let in before it kept this has no attachment, and stays connected when the Workspace takes new code after hibernating.
+    const letInBefore = await openWorkspaceSocket(grace, { visible: true });
+    await runInDurableObject(workspaceStub(), (_workspace, state: DurableObjectState) => {
+      for (const socket of state.getWebSockets(grace.user.id)) socket.serializeAttachment(null);
+    });
+    // And a tab still running the app from before it said opens its next socket at an address that says nothing.
+    const unsaid = await openWorkspaceSocket(grace);
+    for (const tab of [letInBefore, unsaid]) {
+      tab.send('{"type":"ping"}');
+      while ((await tab.next()).type !== "pong");
+    }
+
+    for (const tab of [letInBefore, unsaid]) {
       expect(labelsOf(await pushesOf(dm, ada, grace))).toEqual(["grace"]);
-      await show(inFront, true);
+      expect(await nextOfAnInvitation(tab)).toEqual(invited(dm, ada));
+      await show(tab, true);
       expect(await pushesOf(dm, ada, grace)).toEqual([]);
-      inFront.ws.close(1000);
-      await inFront.closed;
-      expect(labelsOf(await pushesOf(dm, ada, grace))).toEqual(["grace"]);
+      await show(tab, false);
     }
   });
 
@@ -549,6 +581,26 @@ describe("Pushing an invitation into a huddle", () => {
       expect(await nextOfAnInvitation(behind)).toEqual(invited(dm, ada));
       await reached(adas);
       expect(adas.pending("error")).toEqual([]);
+    });
+
+    it("sends no pushes, and fails nothing for whoever invites, while the Workspace is still on the code from before it answered them", async () => {
+      const { ada } = await huddlesOn();
+      const pushed = pushServices();
+      const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const grace = await signIn("Grace");
+      const dm = (await direct(ada, grace)).id;
+      await subscribe(grace, "grace");
+      const behind = await openWorkspaceSocket(grace, { visible: false });
+      const adas = await welcomed(dm, ada);
+      // As that code did, for some minutes after an update: it tells the tabs of whoever is invited, and answers nothing.
+      await invitingBy(dm, async (real, ...invitation) => void (await real(...invitation)));
+
+      invite(adas, grace);
+      expect(await nextOfAnInvitation(behind)).toEqual(invited(dm, ada));
+      await reached(adas);
+      expect(adas.pending("error")).toEqual([]);
+      expect(warned).not.toHaveBeenCalled();
+      expect(pushed).toEqual([]);
     });
   });
 });
