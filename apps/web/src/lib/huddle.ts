@@ -1065,6 +1065,8 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId, invit
           // Whoever starts a direct message's huddle invites the others in it, which being let back in doesn't do again.
           if (invite.length > 0 && frame.people.every(({ user }) => user.id === frame.you.id)) socket.send({ type: "huddle.invite", userIds: invite });
         }
+        // Whoever left while the tab's connection to the room was down takes what they sent with them, as one who leaves does.
+        for (const { user } of huddle.people) if (!frame.people.some((person) => person.user.id === user.id)) reactions.forget(user.id);
         show({ connected: true, you: frame.you, people: frame.people, messageId: frame.messageId });
         for (const kind of HUDDLE_TRACK_KINDS) void sending[kind].publish();
         return listen();

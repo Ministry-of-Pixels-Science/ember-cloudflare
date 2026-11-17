@@ -3528,6 +3528,18 @@ describe("A reaction in a huddle", () => {
     stop();
   });
 
+  it("shows nothing more of someone who left while the tab's connection to the room was down, whose emoji is whoever's still rises", async () => {
+    const room = await joined([person(grace), person(linus)]);
+    room.receive({ type: "huddle.reacted", userId: grace.id, emoji: "🎉" });
+    room.receive({ type: "huddle.reacted", userId: linus.id, emoji: "🎉" });
+    room.drop();
+    await wait(500);
+    socket().open();
+    await welcomed([person(linus)]);
+    expect(rising()).toEqual([[2, linus.id, "🎉"]]);
+    expect(shownReactions().runs).toEqual([{ emoji: "🎉", first: linus.id, more: 1 }]);
+  });
+
   it("shows no more once the tab leaves, and is sent by no tab that's in no huddle", async () => {
     reactInHuddle("🎉");
     const room = await joined();
