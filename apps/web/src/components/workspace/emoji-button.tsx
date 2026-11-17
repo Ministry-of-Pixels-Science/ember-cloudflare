@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense, useRef, useState } from "react";
 import { Emoji } from "@/components/icons/iconoir";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ShortcutTooltip } from "./shortcut-tooltip";
@@ -13,18 +13,22 @@ interface Props {
   className: string;
   /** Writes the emoji picked where the cursor is in the text. */
   onPick: (emoji: string) => void;
-  /** Puts focus back in the text once the picker's closed. */
+  /** Puts focus back in the text once the picker's closed, unless a click or Tab outside it put focus elsewhere. */
   onClosed: () => void;
 }
 
 /** Slack's Emoji, under the composer's text: the emoji picker, over the button, which closes as an emoji's picked. */
 export function EmojiButton({ disabled, className, onPick, onClosed }: Props) {
   const [open, setOpen] = useState(false);
+  const button = useRef<HTMLButtonElement>(null);
+  // Whether the picker's closing as you click or tab outside it, where focus is left. Its own button closes it as
+  // Escape does.
+  const leaving = useRef(false);
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <ShortcutTooltip label="Emoji" hidden={open}>
         <PopoverTrigger asChild>
-          <button type="button" aria-label="Emoji" disabled={disabled} className={className}>
+          <button ref={button} type="button" aria-label="Emoji" disabled={disabled} className={className}>
             <Emoji className="size-[18px] opacity-70" />
           </button>
         </PopoverTrigger>
@@ -35,9 +39,13 @@ export function EmojiButton({ disabled, className, onPick, onClosed }: Props) {
         align="start"
         sideOffset={8}
         className="w-fit overflow-hidden rounded-[12px] p-0"
+        onInteractOutside={(event) => {
+          leaving.current = !button.current?.contains(event.target as Node);
+        }}
         onCloseAutoFocus={(event) => {
           event.preventDefault();
-          onClosed();
+          if (!leaving.current) onClosed();
+          leaving.current = false;
         }}
       >
         <Suspense

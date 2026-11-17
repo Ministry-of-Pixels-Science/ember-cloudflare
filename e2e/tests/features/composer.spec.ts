@@ -687,6 +687,8 @@ test.describe("Formatting row", () => {
 test.describe("Buttons under the text", () => {
   test("names each in a tooltip, as Slack's do", async ({ members }) => {
     const ada = await members.signIn("Ada");
+    // Once the text's ready, which Emoji and Mention someone wait for.
+    await expect(ada.composer()).toBeFocused();
     const tips = [
       ["Attach", "Attach"],
       ["Show formatting", "Hide formatting"],
@@ -796,6 +798,32 @@ test.describe("Buttons under the text", () => {
     await expect(ada.composer()).toHaveText("👍🏻");
   });
 
+  test("puts focus back in the text as Escape, or Emoji again, closes the emoji picker", async ({ members }) => {
+    const ada = await members.signIn("Ada");
+    for (const close of [() => ada.page.keyboard.press("Escape"), () => underText(ada, "Emoji").click()]) {
+      await underText(ada, "Emoji").click();
+      await expect(emojiPicker(ada).getByLabel("Search all emoji")).toBeFocused();
+      await close();
+      await expect(emojiPicker(ada)).toBeHidden();
+      await expect(ada.composer()).toBeFocused();
+    }
+  });
+
+  test("leaves focus where a click outside the emoji picker puts it, as in another composer", async ({ members }) => {
+    const ada = await members.signIn("Ada");
+    const grace = await members.signIn("Grace");
+    await grace.send("Lunch at noon?");
+    await (await ada.actions("Lunch at noon?")).getByRole("link", { name: "Reply in thread" }).click();
+    await ada.page.getByRole("complementary", { name: "Thread" }).getByRole("button", { name: "Emoji", exact: true }).click();
+    // Once its search has loaded, which takes focus as it shows.
+    await expect(emojiPicker(ada).getByLabel("Search all emoji")).toBeFocused();
+    await ada.composer().click();
+    await expect(emojiPicker(ada)).toBeHidden();
+    // The picker hands focus on a moment after it's gone.
+    await ada.page.evaluate(() => new Promise((handedOn) => setTimeout(handedOn)));
+    await expect(ada.composer()).toBeFocused();
+  });
+
   test("starts a mention where the cursor is with Mention someone, listing the room's people", async ({ members, participant }) => {
     const tag = crypto.randomUUID().slice(0, 8);
     await participant(`Jason ${tag}`);
@@ -813,6 +841,24 @@ test.describe("Buttons under the text", () => {
     await ada.composer().press("ArrowDown");
     await ada.composer().press("Tab");
     await expect(ada.composer().getByText(`Jason ${tag}`, { exact: true })).toBeVisible();
+  });
+
+  test("keeps Emoji and Mention someone off until the text they write in is ready", async ({ members }) => {
+    const ada = await members.signIn("Ada");
+    // The editor's code loads once the room has shown its messages. Holding it shows the composer without it.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    await ada.page.route(/\/assets\/rich-text-editor-[^/]+\.js$/, async (route) => {
+      await held;
+      await route.continue();
+    });
+    await ada.page.reload();
+    const button = (name: string) => ada.page.locator("form.composer").getByRole("button", { name, exact: true });
+    await expect(button("Emoji")).toBeDisabled();
+    await expect(button("Mention someone")).toBeDisabled();
+    release();
+    await expect(button("Emoji")).toBeEnabled();
+    await expect(button("Mention someone")).toBeEnabled();
   });
 
   test("shows Send as a grey paper plane until there's something to send, a file too", async ({ members }) => {

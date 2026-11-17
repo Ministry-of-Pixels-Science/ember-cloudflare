@@ -316,6 +316,9 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
   // Whether nothing's written, which, with no files picked, leaves Send grey, as Slack's is.
   const [blank, setBlank] = useState(!draft);
   const [writingSnippet, setWritingSnippet] = useState(false);
+  // Whether the editor can be written in, which Emoji and Mention someone wait for, since what they wrote before
+  // would be lost.
+  const [editorReady, setEditorReady] = useState(false);
   const fileField = useRef<HTMLInputElement>(null);
   // Whether the editor was blank when it last changed, so emptying it tells the room you've stopped once.
   const wasBlank = useRef(!draft);
@@ -471,6 +474,7 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
                   onFormatChange={formatting.setFormat}
                   onKeyDown={keyDown}
                   onLinkPasted={previewLink}
+                  onReady={() => setEditorReady(true)}
                 />
               ) : (
                 <LoadingEditor placeholder={placeholder} belowFormatting={formattingShown} />
@@ -516,11 +520,16 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
                 <TextSquare className="size-[18px] opacity-70" />
               </button>
             </ShortcutTooltip>
-            <EmojiButton disabled={disabled} onPick={(emoji) => editor.current?.insertText(emoji)} onClosed={() => editor.current?.focus()} className={TOOL} />
+            <EmojiButton
+              disabled={disabled || !editorReady}
+              onPick={(emoji) => editor.current?.insertText(emoji)}
+              onClosed={() => editor.current?.focus()}
+              className={TOOL}
+            />
             <ShortcutTooltip label="Mention someone">
               <button
                 type="button"
-                disabled={disabled}
+                disabled={disabled || !editorReady}
                 aria-label="Mention someone"
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={() => editor.current?.startMention()}

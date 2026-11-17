@@ -45,7 +45,7 @@ const attachmentMarkup = ({ contentType, html }: Attachment) =>
  * added. Formatting changes only the formatting it tells of, and a link only the text, which it
  * marks `data-linked` with the address. The browser tests in e2e/ write in Lexxy itself.
  */
-export default function RichTextEditor({ label, placeholder, rows, initialValue, autoFocus, onChange, onFormatChange, onKeyDown, onLinkPasted, ref }: ComponentProps<typeof Editor>) {
+export default function RichTextEditor({ label, placeholder, rows, initialValue, autoFocus, onChange, onFormatChange, onKeyDown, onLinkPasted, onReady, ref }: ComponentProps<typeof Editor>) {
   const box = useRef<HTMLTextAreaElement>(null);
   // Read as soon as they change, as Lexxy's are, and shown once React renders them.
   const attachments = useRef<Attachment[]>([]);
@@ -118,8 +118,9 @@ export default function RichTextEditor({ label, placeholder, rows, initialValue,
     return () => text.removeEventListener("keydown", listener, { capture: true });
   }, []);
 
-  // As it shows, rather than once React gets round to effects, so a test finds it focused when it finds it.
+  // As it shows, rather than once React gets round to effects, so a test finds it ready, and focused, when it finds it.
   useLayoutEffect(() => {
+    onReady?.();
     if (!(typeof autoFocus === "function" ? autoFocus() : autoFocus)) return;
     const text = box.current!;
     text.focus();

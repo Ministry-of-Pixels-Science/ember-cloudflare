@@ -313,6 +313,8 @@ interface Props {
   onKeyDown?: (event: KeyboardEvent) => void;
   /** Called when an address is pasted as a link. */
   onLinkPasted?: (link: PastedLink) => void;
+  /** Called once it's ready to be written in, a moment after it shows. */
+  onReady?: () => void;
   ref?: Ref<RichTextEditorHandle>;
 }
 
@@ -332,6 +334,7 @@ export default function RichTextEditor({
   onFormatChange,
   onKeyDown,
   onLinkPasted,
+  onReady,
   ref,
 }: Props) {
   const host = useRef<HTMLDivElement>(null);
@@ -412,6 +415,7 @@ export default function RichTextEditor({
   const keyPressed = useEffectEvent((event: KeyboardEvent) => onKeyDown?.(event));
   const linkPasted = useEffectEvent((link: PastedLink) => onLinkPasted?.(link));
   const ready = useEffectEvent((lexxy: LexxyEditor) => {
+    onReady?.();
     if (!(typeof autoFocus === "function" ? autoFocus() : autoFocus)) return;
     lexxy.focus();
     lexxy.selection.placeCursorAtTheEnd();
