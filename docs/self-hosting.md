@@ -1253,6 +1253,31 @@ may refuse while the phone saves its battery. Whatever the browser stopped while
 app, the others' voices, their pictures or the telling of who's speaking, starts again as you come
 back to the page, and a tab that lost the room meanwhile joins the huddle again by itself.
 
+Raise hand, after the screen's button where the huddle is beside the sidebar, and on its bar there,
+shows a raised hand to everyone who has the huddle open: a sticker in the corner of your tile over
+your name, by its emoji and what it's called, as Slack shows one. The arrow beside the button lists
+the stickers there are, Slack's five: Raise hand, Be right back, Yes, No and Done. A sticker stays
+on your tile until you take it off, or show another in its place, and goes with you as you leave.
+While one shows, the button draws it, filled in, and takes it off, as Lower hand for a raised hand
+and as Remove sticker for another. A click on the sticker itself, on your own tile, takes it off
+too, and so does choosing it again. A tile under 176px wide has the sticker's emoji alone.
+
+React, the face after it, opens the reactions and stickers over the huddle's buttons, a tab for
+each. Reactions is the emoji picker: the emoji you pick is sent and the picker closes, as Slack's
+does. On everyone's screen it rises from the base of the people in the huddle for four seconds, over
+your name, as its emoji grows and it fades. While an emoji rises it has a pill in the corner of the
+people, which says who sent the first of them, "You" or their avatar, and how many have come since,
+and a click on it sends the same, as Slack's does. Several can rise at once, each from the next of
+five places, which are right of the people's middle, as Slack's are. Where the people have under
+672px, as beside the huddle's thread, the places are across more of them, and on a phone they stop
+short of the pills. Stickers lists the same five, which is where a phone has them, and closes as you
+choose one. On a phone narrower than 360px, React is in the menu of More, and on a screen too short
+for the two tabs over the emoji, as a phone's held on its side, they're beside them. A reaction
+holds still for someone who has asked their device for less motion, and a screen reader says each
+sticker and each reaction as it shows: "Sam Rivera: Hand raised", "Sam Rivera reacted with 🎉".
+Neither makes a sound or is kept anywhere, the huddle's bar shows no more of them than your own
+sticker on its button, and the room passes on twenty reactions from one tab in ten seconds at most.
+
 A sound plays as someone joins the huddle, yourself included, and another as someone leaves it. While
 you're the only one in it, quiet music plays on a loop, as Slack's does, from five seconds after you
 find yourself alone until someone joins you. The two sounds, and an invitation's ring, were written
@@ -1284,7 +1309,7 @@ to reply in, with files and links as in any thread. What you send there, everyon
 reads as it comes, and it stays in the room, under the huddle's message, once the huddle is over.
 A reply begun in the thread beside the room is there in the huddle to go on with, and the room's has
 it as the huddle's left it. Close thread takes it away, as does Thread, among the huddle's buttons
-after the screen's, which shows it again with the cursor in its composer: closed, it leaves its
+after React, which shows it again with the cursor in its composer: closed, it leaves its
 space to the people in the huddle, or to a screen someone shares. The thread is there as a huddle
 opens, in a window at least 1180px wide. A narrower one, or a phone, has the thread in the room,
 from the huddle's message. It comes to the huddle over a connection of its own to the huddle's room,

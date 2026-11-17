@@ -1448,4 +1448,221 @@ test.describe("A huddle", () => {
     await context.close();
     await his.close();
   });
+
+  test("people in a huddle raise their hands and show other stickers, which stay on their tiles until they take them off, and react with emoji, which rise over the people in it for a moment", async ({ page, browser, baseURL, request }) => {
+    const saved = await request.put("/api/account/huddles", { data: SFU_APP, headers: await asAdministrator(request) });
+    expect(saved.status(), await saved.text()).toBe(200);
+    const room = await roomOfItsOwn(request);
+    // By their whole names: a first name can be in the letters and digits that end someone else's.
+    const ada = (await administratorSession(request)).user.name;
+    const tileOf = (huddle: Locator, name: string) => tiles(huddle).filter({ hasText: name });
+    /** The sticker on someone's tile that's called `called`: its emoji, and what it's called. */
+    const stickerOf = (huddle: Locator, name: string, called: string) => tileOf(huddle, name).getByText(called, { exact: true }).locator("xpath=..");
+    /** Where the people in a huddle are, which their reactions rise over. */
+    const peopleIn = (huddle: Locator) => tileList(huddle).locator("xpath=../..");
+    /** Someone's reactions of an emoji that rise in a huddle, each over their name. */
+    const risingOf = (huddle: Locator, name: string, emoji: string) =>
+      peopleIn(huddle)
+        .locator('span[aria-hidden="true"]')
+        .filter({ has: huddle.page().getByText(emoji, { exact: true }) })
+        .filter({ has: huddle.page().getByText(name, { exact: true }) });
+    /** The pills of the emoji that rise in a huddle. */
+    const pillsIn = (huddle: Locator) => huddle.getByRole("list", { name: "Reactions", exact: true }).getByRole("button");
+    /** The animations that move what `shown` finds, by name. */
+    const moving = (shown: Locator) => shown.evaluateAll((all) => all.flatMap((each) => each.getAnimations().map((animation) => (animation as CSSAnimation).animationName)));
+
+    // Ada starts the room's huddle, and Grace joins it.
+    await useOwnAddress(page);
+    await page.goto(`/rooms/${room.id}`);
+    await signInAsAdministrator(page);
+    await page.getByRole("button", { name: "Start huddle", exact: true }).click();
+    await page.getByRole("dialog", { name: `Start a huddle in ${room.name}` }).getByRole("button", { name: "Start Huddle" }).click();
+    const adasHuddle = huddleOpened(page, room);
+    const { user: her, context } = await newcomer(browser, baseURL, request, "Grace");
+    const grace = await context.newPage();
+    const gracesHuddle = await joinByLink(grace, room);
+    for (const huddle of [adasHuddle, gracesHuddle]) await expect(huddle).toContainText("2 people");
+
+    // Ada raises her hand, from the button after the screen's, which lowers it from then on. Both see the
+    // hand, by its emoji and what it's called, in the corner of her tile over her name, and those who
+    // can't see it are told of it. On her own tile it's a button.
+    const [raise, lower, remove] = ["Raise hand", "Lower hand", "Remove sticker"].map((name) => adasHuddle.locator(":scope > footer").getByRole("button", { name, exact: true }));
+    await raise!.click();
+    await expect(lower!).toHaveText("✋");
+    await expect(raise!).toHaveCount(0);
+    for (const huddle of [adasHuddle, gracesHuddle]) {
+      await expect(stickerOf(huddle, ada, "Raise hand")).toHaveText("✋Raise hand");
+      const [tile, corner] = [(await tileOf(huddle, ada).boundingBox())!, (await stickerOf(huddle, ada, "Raise hand").boundingBox())!];
+      expect(corner.x).toBeGreaterThan(tile.x);
+      expect(corner.x + corner.width).toBeLessThan(tile.x + tile.width / 2);
+      expect(corner.y).toBeGreaterThan(tile.y);
+      expect(corner.y + corner.height).toBeLessThan(tile.y + tile.height / 2);
+      await expect(tileOf(huddle, ada).getByText(`${ada}: Hand raised`, { exact: true })).toHaveAttribute("aria-live", "polite");
+    }
+    await expect(tileOf(adasHuddle, ada).getByRole("button", { name: "Remove sticker: Raise hand", exact: true })).toBeVisible();
+    await expect(tileOf(gracesHuddle, ada).getByRole("button")).toHaveCount(0);
+
+    // The arrow beside it opens the stickers there are, under how long one stays, with the raised hand
+    // ticked. Ada shows that she'll be right back in its place, and the button draws that from then on.
+    await adasHuddle.getByRole("button", { name: "Stickers", exact: true }).click();
+    const menu = page.getByRole("menu", { name: "Stickers", exact: true });
+    await expect(menu).toContainText("One stays on until you take it off.");
+    await expect(menu.getByRole("menuitemcheckbox")).toHaveText([/Raise hand$/, /Be right back$/, /Yes$/, /No$/, /Done$/]);
+    await expect(menu.getByRole("menuitemcheckbox", { checked: true })).toHaveText(/Raise hand$/);
+    await menu.getByRole("menuitemcheckbox", { name: "Be right back" }).click();
+    await expect(menu).toHaveCount(0);
+    for (const huddle of [adasHuddle, gracesHuddle]) {
+      await expect(stickerOf(huddle, ada, "Be right back")).toHaveText("☕Be right back");
+      await expect(stickerOf(huddle, ada, "Raise hand")).toHaveCount(0);
+    }
+    await expect(remove!).toHaveText("☕");
+    await expect(lower!).toHaveCount(0);
+
+    // Grace's React, after Raise hand, opens the reactions and stickers over the huddle's buttons, on
+    // Reactions, with the cursor in the search of every emoji.
+    const react = gracesHuddle.getByRole("button", { name: "React", exact: true });
+    await react.click();
+    const panel = grace.getByRole("dialog", { name: "React" });
+    await expect(panel.getByRole("tab", { selected: true })).toHaveText("Reactions");
+    await expect(panel.getByLabel("Search all emoji")).toBeFocused();
+    const [over, button] = [(await panel.boundingBox())!, (await react.boundingBox())!];
+    expect(over.y + over.height).toBeLessThanOrEqual(button.y);
+
+    // She picks the party popper, which closes the panel and leaves the focus on React. It rises over her
+    // name from the base of the people in the huddle, on both their screens, and is said for those who
+    // can't see it. No tile has it. The huddle's thread is beside the people, which leaves them too
+    // little room for their reactions right of their middle alone: the first is from short of it.
+    /** Has Grace pick the party popper in the panel. */
+    const pop = async () => {
+      await panel.getByLabel("Search all emoji").fill("party popper");
+      await panel.getByRole("gridcell", { name: "Party popper", exact: true }).click();
+    };
+    /** Where someone's party popper is over the people on Ada's screen: how far along them its middle is, in hundredths, and how far it is over their base and under their top, in pixels. */
+    const placed = async (name: string) => {
+      const [people, risen] = [(await peopleIn(adasHuddle).boundingBox())!, (await risingOf(adasHuddle, name, "🎉").boundingBox())!];
+      return { along: ((risen.x + risen.width / 2 - people.x) / people.width) * 100, over: people.y + people.height - (risen.y + risen.height), under: risen.y - people.y, people };
+    };
+    await pop();
+    await expect(panel).toHaveCount(0);
+    await expect(react).toBeFocused();
+    await Promise.all([gracesHuddle, adasHuddle].map((huddle) => expect(risingOf(huddle, her.name, "🎉")).toBeVisible()));
+    expect(await moving(risingOf(adasHuddle, her.name, "🎉"))).toEqual(["reaction"]);
+    expect(await moving(risingOf(adasHuddle, her.name, "🎉").getByText("🎉"))).toEqual(["reaction-emoji"]);
+    await expect(adasHuddle.getByRole("complementary", { name: "Huddle thread" })).toBeVisible();
+    const first = await placed(her.name);
+    expect(first.along).toBeCloseTo(45, 0);
+    expect(first.over).toBeGreaterThanOrEqual(0);
+    expect(first.under).toBeGreaterThan(first.people.height / 3);
+    await expect(peopleIn(adasHuddle).getByText(`${her.name} reacted with 🎉`)).toBeAttached();
+    await expect(tiles(adasHuddle).getByText("🎉")).toHaveCount(0);
+
+    // While it rises, the emoji has a pill in the corner of the people, which says whose it is: "You" to
+    // Grace, and her avatar to Ada, who sends the same with a click on it. Hers rises on both screens
+    // too, apart from Grace's, and the pill counts it after the first.
+    await expect(pillsIn(gracesHuddle)).toHaveText(["You🎉"]);
+    await expect(pillsIn(adasHuddle)).toHaveAccessibleName(`${her.name} 🎉: react with 🎉 too`);
+    const pill = (await pillsIn(adasHuddle).boundingBox())!;
+    const { people } = first;
+    expect([people.x + people.width - (pill.x + pill.width), people.y + people.height - (pill.y + pill.height)].map(Math.round)).toEqual([12, 12]);
+    await pillsIn(adasHuddle).click();
+    await Promise.all([gracesHuddle, adasHuddle].map((huddle) => expect(risingOf(huddle, ada, "🎉")).toBeVisible()));
+    expect((await placed(ada)).along).toBeCloseTo(20, 0);
+    await expect(pillsIn(gracesHuddle)).toHaveText(["You+ 1🎉"]);
+    await expect(pillsIn(adasHuddle)).toHaveAccessibleName(`${her.name} + 1 🎉: react with 🎉 too`);
+    // They're gone after a moment, from both, and the pill with the last of them.
+    for (const huddle of [gracesHuddle, adasHuddle]) {
+      for (const name of [her.name, ada]) await expect(risingOf(huddle, name, "🎉")).toHaveCount(0, { timeout: 10_000 });
+      await expect(pillsIn(huddle)).toHaveCount(0, { timeout: 10_000 });
+    }
+
+    // For someone who has asked their computer for less motion, it holds still at their base until it
+    // goes. Ada has closed the thread, so the people have room for it right of their middle, as on Slack.
+    await adasHuddle.getByRole("button", { name: "Thread", exact: true }).click();
+    await expect(adasHuddle.getByRole("complementary", { name: "Huddle thread" })).toHaveCount(0);
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await react.click();
+    await pop();
+    await expect(risingOf(adasHuddle, her.name, "🎉")).toBeVisible();
+    expect(await moving(risingOf(adasHuddle, her.name, "🎉"))).toEqual([]);
+    expect(await moving(risingOf(adasHuddle, her.name, "🎉").getByText("🎉"))).toEqual([]);
+    const still = await placed(her.name);
+    expect(still.along).toBeCloseTo(70, 0);
+    expect(Math.round(still.over)).toBe(12);
+    await page.emulateMedia({ reducedMotion: null });
+
+    // The panel's other tab lists the stickers, in a panel as wide as the emoji's. Grace chooses Yes,
+    // which closes the panel, leaves the focus on React, and shows on her tile on both screens.
+    await react.click();
+    await panel.getByRole("tab", { name: "Stickers" }).click();
+    await expect(panel.getByRole("listitem")).toHaveText([/Raise hand$/, /Be right back$/, /Yes$/, /No$/, /Done$/]);
+    expect((await panel.boundingBox())!.width).toBe(over.width);
+    await panel.getByRole("button", { name: "Yes" }).click();
+    await expect(panel).toHaveCount(0);
+    await expect(react).toBeFocused();
+    for (const huddle of [gracesHuddle, adasHuddle]) await expect(stickerOf(huddle, her.name, "Yes")).toHaveText("👍Yes");
+    // Opened again, it's on Reactions, and Stickers marks the one she shows.
+    await react.click();
+    await expect(panel.getByRole("tab", { selected: true })).toHaveText("Reactions");
+    await panel.getByRole("tab", { name: "Stickers" }).click();
+    await expect(panel.getByRole("button", { pressed: true })).toHaveText(/Yes$/);
+    await grace.keyboard.press("Escape");
+    await expect(panel).toHaveCount(0);
+
+    // In a window too short for the emoji picker, the panel stops as far under the huddle's header as it
+    // is over its buttons, with its tabs beside the emoji, which have the room that leaves.
+    await grace.setViewportSize({ width: 1280, height: 280 });
+    await react.click();
+    await expect(panel.getByRole("tablist")).toHaveAttribute("aria-orientation", "vertical");
+    await expect(panel.getByRole("gridcell", { name: "Grinning face", exact: true })).toBeInViewport({ ratio: 0.9 });
+    /** How far the panel is under the huddle's header, and over React. */
+    const clear = async () => {
+      const [head, held, under] = await Promise.all([gracesHuddle.locator(":scope > header"), panel, react].map(async (each) => (await each.boundingBox())!));
+      return [held!.y - (head!.y + head!.height), under!.y - (held!.y + held!.height)];
+    };
+    await expect.poll(clear).toEqual([8, 8]);
+    await grace.keyboard.press("Escape");
+    await expect(panel).toHaveCount(0);
+    // The tiles there are too narrow for what a sticker is called, and show its emoji alone.
+    const hers = tileOf(gracesHuddle, her.name);
+    expect((await hers.boundingBox())!.width).toBeLessThan(176);
+    await expect(hers.getByText("Yes", { exact: true })).toBeHidden();
+    await expect(hers.getByText("👍", { exact: true })).toBeVisible();
+    await grace.setViewportSize({ width: 1280, height: 720 });
+    await expect(hers.getByText("Yes", { exact: true })).toBeVisible();
+
+    // Whoever joins is shown the stickers that are up. Grace leaves and joins again: she finds Ada's, and
+    // her own went with her.
+    await gracesHuddle.getByRole("button", { name: "Leave", exact: true }).click();
+    await expect(adasHuddle).toContainText("1 person");
+    await joinByLink(grace, room);
+    for (const huddle of [adasHuddle, gracesHuddle]) {
+      await expect(huddle).toContainText("2 people");
+      await expect(stickerOf(huddle, ada, "Be right back")).toBeVisible();
+      await expect(stickerOf(huddle, her.name, "Yes")).toHaveCount(0);
+    }
+
+    // Ada takes hers off with the button that draws it, which raises a hand again from then on.
+    await remove!.click();
+    for (const huddle of [adasHuddle, gracesHuddle]) await expect(stickerOf(huddle, ada, "Be right back")).toHaveCount(0);
+    await expect(raise!).toBeVisible();
+
+    // The huddle's bar has Raise hand too, without the arrow. A hand raised there is on Grace's screen at
+    // once, and on Ada's own tile when she opens the huddle, where a click on it lowers it.
+    await adasHuddle.getByRole("button", { name: "Minimize huddle" }).filter({ visible: true }).click();
+    const bar = huddleBar(page, room);
+    await expect(bar.getByRole("button", { name: "Stickers", exact: true })).toHaveCount(0);
+    await bar.getByRole("button", { name: "Raise hand", exact: true }).click();
+    await expect(bar.getByRole("button", { name: "Lower hand", exact: true })).toBeVisible();
+    await expect(stickerOf(gracesHuddle, ada, "Raise hand")).toBeVisible();
+    await bar.getByRole("button", { name: "Open huddle", exact: true }).click();
+    await expect(lower!).toBeVisible();
+    await tileOf(adasHuddle, ada).getByRole("button", { name: "Remove sticker: Raise hand", exact: true }).click();
+    for (const huddle of [adasHuddle, gracesHuddle]) await expect(stickerOf(huddle, ada, "Raise hand")).toHaveCount(0);
+    await expect(raise!).toBeVisible();
+
+    for (const huddle of [gracesHuddle, adasHuddle]) await huddle.getByRole("button", { name: "Leave", exact: true }).click();
+    await expect(adasHuddle).toHaveCount(0);
+    await expect.poll(sessionsLeftOpen).toEqual([]);
+    await context.close();
+  });
 });

@@ -4,8 +4,9 @@ import { Search } from "@/components/icons/iconoir";
 import { cn } from "@/lib/utils";
 
 // frimousse's shadcn/ui emoji picker (https://frimousse.liveblocks.io/r/emoji-picker), with Iconoir's search
-// icon and Ember's spinner in place of Lucide's, emoji drawn at Slack's picker's size, and a footer that
-// holds more than the emoji the pointer or the arrow keys are on.
+// icon and Ember's spinner in place of Lucide's, emoji drawn at Slack's picker's size, a footer that
+// holds more than the emoji the pointer or the arrow keys are on, and a search sized for fingers on a
+// touch screen, in text large enough that iOS doesn't zoom in on it.
 
 function EmojiPicker({ className, ...props }: React.ComponentProps<typeof EmojiPickerPrimitive.Root>) {
   return (
@@ -19,10 +20,10 @@ function EmojiPicker({ className, ...props }: React.ComponentProps<typeof EmojiP
 
 function EmojiPickerSearch({ className, ...props }: React.ComponentProps<typeof EmojiPickerPrimitive.Search>) {
   return (
-    <div className={cn("flex h-10 items-center gap-2 border-b px-3", className)} data-slot="emoji-picker-search-wrapper">
+    <div className={cn("flex h-10 items-center gap-2 border-b px-3 touch:h-11", className)} data-slot="emoji-picker-search-wrapper">
       <Search className="size-4 shrink-0 opacity-50" />
       <EmojiPickerPrimitive.Search
-        className="flex h-10 w-full rounded-md bg-transparent py-3 text-sm outline-hidden placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50"
+        className="flex h-10 w-full rounded-md bg-transparent py-3 text-sm outline-hidden placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50 touch:h-11 touch:text-base"
         data-slot="emoji-picker-search"
         {...props}
       />

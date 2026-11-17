@@ -7,10 +7,10 @@ import { expect, hasDrawerLayout, openKeyboard, test } from "./fixtures";
 
 // A huddle on a phone: its button in the header of a room or a DM, its message in the room, the preview
 // it starts from, the invitation into one, and the huddle the tab is in, opened and as its bar, which
-// switches between the phone's cameras, keeps its screen awake, and invites people from the menu of its
-// More button. The main test server has no huddles, whose keys Cloudflare would be asked about, so
-// these pages are told that huddles are on, and the huddle a tab joins is the test's own, as is the
-// message of one.
+// switches between the phone's cameras, keeps its screen awake, invites people from the menu of its
+// More button, and has reactions and stickers. The main test server has no huddles, whose keys
+// Cloudflare would be asked about, so these pages are told that huddles are on, and the huddle a tab
+// joins is the test's own, as is the message of one.
 
 /** A huddle's socket, for `page.routeWebSocket`. */
 const HUDDLE_SOCKET = /\/api\/rooms\/[^/]+\/huddle/;
@@ -61,12 +61,20 @@ async function openDirectWithHuddlesOn(page: Page, request: APIRequestContext, r
 /** The room's header. */
 const header = (page: Page) => page.getByRole("navigation", { name: "Page" });
 
-/** Has the huddle the page joins welcome its person, `you`, after `others`, and say nothing more. Answers what the page says to it, in order. */
+/**
+ * Has the huddle the page joins welcome its person, `you`, after `others`, tell the page of its own
+ * reactions, as a room tells everyone in its huddle, and say nothing more. Answers what the page says
+ * to it, in order.
+ */
 async function standInHuddle(page: Page, you: User, others: User[] = []): Promise<HuddleClientFrame[]> {
   const people = [...others, you].map((user) => ({ user, muted: false, audio: false, video: false, screen: false }));
   const said: HuddleClientFrame[] = [];
   await page.routeWebSocket(HUDDLE_SOCKET, (ws) => {
-    ws.onMessage((message) => void said.push(JSON.parse(String(message)) as HuddleClientFrame));
+    ws.onMessage((message) => {
+      const frame = JSON.parse(String(message)) as HuddleClientFrame;
+      said.push(frame);
+      if (frame.type === "huddle.react") ws.send(JSON.stringify({ type: "huddle.reacted", userId: you.id, emoji: frame.emoji } satisfies HuddleServerFrame));
+    });
     ws.send(JSON.stringify({ type: "huddle.welcome", you, people, startedAt: new Date().toISOString() } satisfies HuddleServerFrame));
   });
   return said;
@@ -532,7 +540,8 @@ test("Invite people, from the More button of the huddle you're in, lists the roo
   await opener.tap();
   if (byMenu) {
     const menu = page.getByRole("menu", { name: "More", exact: true });
-    await expect(menu.getByRole("menuitem")).toHaveText(["Invite people"]);
+    // The narrowest phone has React there too, which it has no room to give a button.
+    await expect(menu.getByRole("menuitem")).toHaveText(page.viewportSize()!.width < 360 ? ["React", "Invite people"] : ["Invite people"]);
     await screenIsFine();
     await menu.getByRole("menuitem", { name: "Invite people" }).tap();
     await expect(menu).toHaveCount(0);
@@ -583,6 +592,135 @@ test("Invite people, from the More button of the huddle you're in, lists the roo
   await expect(opener).toBeFocused();
   await opened.getByRole("button", { name: "Unmute microphone" }).tap();
   await expect(opened.getByRole("button", { name: "Mute microphone" })).toBeVisible();
+});
+
+test("a huddle's reactions and stickers, from React among its buttons, or in More's menu on the narrowest phone, fit the phone and leave its keyboard down", async ({ page, room, session, participant, screenIsFine }) => {
+  const ada = (await participant("Ada")).session.user;
+  const said = await standInHuddle(page, session.user, [ada]);
+  await openRoomWithHuddlesOn(page, room);
+  await header(page).getByRole("button", { name: "Start huddle", exact: true }).tap();
+  await page.getByRole("dialog", { name: `Start a huddle in ${room.name}` }).getByRole("button", { name: "Start Huddle" }).tap();
+  const opened = page.locator("#huddle");
+  await expect(opened).toContainText("2 people");
+  const own = opened.getByRole("list", { name: "In the huddle" }).getByRole("listitem").last();
+  /** The picker's emoji, which are as close together as Slack's picker has them. */
+  const EMOJI = "[data-slot=emoji-picker-emoji]";
+
+  // React is among the huddle's buttons, but on a phone too narrow to give it one, which has it in More's
+  // menu. Raise hand isn't: a phone's stickers are in React's panel. Where the huddle is beside the
+  // sidebar, as on the largest phone held on its side, it has Raise hand and its arrow, as a computer does.
+  const narrow = page.viewportSize()!.width < 360;
+  const opener = opened.getByRole("button", { name: narrow ? "More" : "React", exact: true });
+  await expect(opened.getByRole("button", { name: "React", exact: true })).toBeVisible({ visible: !narrow });
+  for (const name of ["Raise hand", "Stickers"]) await expect(opened.getByRole("button", { name, exact: true })).toBeVisible({ visible: !hasDrawerLayout(page) });
+  await screenIsFine();
+  const open = async () => {
+    await opener.tap();
+    if (narrow) await page.getByRole("menu", { name: "More", exact: true }).getByRole("menuitem", { name: "React" }).tap();
+  };
+  await open();
+
+  // The reactions and stickers open between the huddle's header and its buttons, clear of both and of
+  // the screen's sides, on Reactions, with the phone's keyboard left down: the cursor isn't in the
+  // search. A phone held on its side is too short for their tabs over the emoji, which are beside them
+  // there, and the shortest shows two rows of emoji at the least.
+  const panel = page.getByRole("dialog", { name: "React" });
+  /** The least room the panel leaves the huddle's header over it, its buttons under it and the screen's sides, which is none or more where it's between them. */
+  const roomAround = async () => {
+    const [over, head, tool] = await Promise.all([panel, opened.locator(":scope > header"), opened.getByRole("button", { name: "Mute microphone" })].map(async (each) => (await each.boundingBox())!));
+    return Math.min(over!.y - (head!.y + head!.height), tool!.y - (over!.y + over!.height), over!.x, page.viewportSize()!.width - (over!.x + over!.width));
+  };
+  await expect(panel.getByRole("tab", { selected: true })).toHaveText("Reactions");
+  const grinning = panel.getByRole("gridcell", { name: "Grinning face", exact: true });
+  await expect(grinning).toBeVisible();
+  await expect(panel.getByLabel("Search all emoji")).not.toBeFocused();
+  await expect.poll(roomAround).toBeGreaterThanOrEqual(0);
+  const onItsSide = page.viewportSize()!.height < 500;
+  await expect(panel.getByRole("tablist")).toHaveAttribute("aria-orientation", onItsSide ? "vertical" : "horizontal");
+  await expect(panel.getByRole("gridcell", { name: "Upside-down face", exact: true })).toBeInViewport({ ratio: 0.99 });
+  const size = await panel.boundingBox();
+  await screenIsFine({ denseTargets: [EMOJI] });
+
+  // An emoji tapped is sent as a reaction and closes the panel, which is over the people on a phone. Once
+  // the room has told of it, the reaction rises over the person's name from the base of the people in
+  // the huddle, in sight, and no tile has it. The focus is back on the button the panel opened from.
+  await grinning.tap();
+  await expect(panel).toHaveCount(0);
+  const people = opened.getByRole("list", { name: "In the huddle" }).locator("xpath=../..");
+  const rising = people.locator('span[aria-hidden="true"]').filter({ has: page.getByText("😀", { exact: true }) });
+  await expect(rising).toBeInViewport();
+  await expect(rising).toHaveText(`😀${session.user.name}`);
+  // Where the people have under 672px, their reactions are across more of them than right of their
+  // middle, where a computer's are, and under 448px, as on a phone held upright, they stop short of the
+  // pills in the corner: the first is from left of the middle.
+  const [among, risen] = [(await people.boundingBox())!, (await rising.boundingBox())!];
+  expect(((risen.x + risen.width / 2 - among.x) / among.width) * 100).toBeCloseTo(among.width < 448 ? 37.5 : among.width < 672 ? 45 : 57.5, 0);
+  await expect(own.getByText("😀")).toHaveCount(0);
+  expect(said.filter(({ type }) => type === "huddle.react")).toEqual([{ type: "huddle.react", emoji: "😀" }]);
+  await expect(opener).toBeFocused();
+
+  // While it rises, its emoji has a pill in the corner of the people, easy to tap, which sends it again
+  // and counts that. With less motion asked of the phone, the reactions hold still, so what's on the
+  // screen is looked over while they and the pill are on it.
+  const pill = opened.getByRole("list", { name: "Reactions", exact: true }).getByRole("button");
+  await expect(pill).toHaveText("You😀");
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await pill.tap();
+  await expect(pill).toHaveText("You+ 1😀");
+  await screenIsFine();
+  await expect(pill).toBeInViewport({ ratio: 1 });
+  expect(said.filter(({ type }) => type === "huddle.react")).toHaveLength(2);
+  await page.emulateMedia({ reducedMotion: null });
+  await expect(pill).toHaveCount(0, { timeout: 10_000 });
+
+  // Opened again, its other tab lists the stickers, each easy to tap, in a panel as large as it was,
+  // where they scroll if it's too short for them all. One chosen closes the panel, gives the focus back
+  // to the button it opened from, and shows in the corner of the person's tile over their name, within
+  // it, with what it's called where the tile is wide enough for that.
+  await open();
+  await panel.getByRole("tab", { name: "Stickers" }).tap();
+  await expect(panel.getByRole("listitem")).toHaveText([/Raise hand$/, /Be right back$/, /Yes$/, /No$/, /Done$/]);
+  await expect.poll(() => panel.boundingBox()).toEqual(size);
+  await screenIsFine();
+  const last = panel.getByRole("button", { name: "Done" });
+  await last.scrollIntoViewIfNeeded();
+  await expect(last).toBeInViewport({ ratio: 0.99 });
+  await screenIsFine();
+  await panel.getByRole("button", { name: "Raise hand" }).tap();
+  await expect(panel).toHaveCount(0);
+  await expect(opener).toBeFocused();
+  const sticker = own.getByRole("button", { name: "Remove sticker: Raise hand", exact: true });
+  await expect(sticker).toBeInViewport({ ratio: 1 });
+  await expect(sticker).toHaveText("✋Raise hand");
+  const tile = (await own.boundingBox())!;
+  await expect(sticker.getByText("Raise hand", { exact: true })).toBeVisible({ visible: tile.width >= 176 });
+  const shown = (await sticker.boundingBox())!;
+  expect(shown.x + shown.width).toBeLessThanOrEqual(tile.x + tile.width);
+  await expect.poll(() => said.filter(({ type }) => type === "huddle.sticker")).toEqual([{ type: "huddle.sticker", sticker: "hand" }]);
+  await screenIsFine();
+
+  // The huddle's buttons take taps again. Opened again, Stickers marks the raised hand, which a tap takes off.
+  await opened.getByRole("button", { name: "Mute microphone" }).tap();
+  await expect(opened.getByRole("button", { name: "Unmute microphone" })).toBeVisible();
+  await open();
+  await panel.getByRole("tab", { name: "Stickers" }).tap();
+  await expect(panel.getByRole("button", { pressed: true })).toHaveText(/Raise hand$/);
+  await panel.getByRole("button", { name: "Raise hand" }).tap();
+  await expect(sticker).toHaveCount(0);
+  expect(said.filter(({ type }) => type === "huddle.sticker").at(-1)).toEqual({ type: "huddle.sticker", sticker: null });
+
+  // Another is taken off by a tap on it, on the person's own tile.
+  await open();
+  await panel.getByRole("tab", { name: "Stickers" }).tap();
+  await panel.getByRole("button", { name: "Done" }).tap();
+  const done = own.getByRole("button", { name: "Remove sticker: Done", exact: true });
+  await expect(done).toHaveText("✅Done");
+  await done.tap();
+  await expect(done).toHaveCount(0);
+  expect(said.filter(({ type }) => type === "huddle.sticker").slice(-2)).toEqual([
+    { type: "huddle.sticker", sticker: "done" },
+    { type: "huddle.sticker", sticker: null },
+  ]);
 });
 
 test("Invite people, with more people to invite than it lists at once, has a search by name, which stays in sight over the phone's keyboard, and Show more people, and fits the phone", async ({ page, room, session, screenIsFine }) => {
