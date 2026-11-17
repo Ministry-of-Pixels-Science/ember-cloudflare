@@ -17,8 +17,8 @@ import type { Source } from "./gateway";
 const CITATIONS = /[^\S\n]*(?<!\])((?:\[\^?\d{1,3}(?:[^\S\n]*[,–-][^\S\n]*\d{1,3})*\])+)(?![(:[])/g;
 
 /**
- * Where brackets are never a citation: code, as backticks fence it, in a span or a block in a list or a
- * quote, and a web address, up to what ends one, as a closing bracket does, so that its own brackets stay.
+ * Where brackets in a block's text are never a citation: code in a span, as backticks fence it, and a web
+ * address, up to what ends one, as a closing bracket does, so that its own brackets stay.
  */
 const KEPT = /(`+)[\s\S]*?[^`]\1(?!`)|[a-z][a-z\d+.-]*:\/\/[^\s<>()\]"'`]*/gi;
 
@@ -41,6 +41,12 @@ interface Citation {
 interface Uncited {
   text: string;
   citations: Citation[];
+}
+
+/** Where a stretch of a block starts and ends in it. */
+interface Span {
+  from: number;
+  to: number;
 }
 
 /**
@@ -73,23 +79,62 @@ export function citedIn(text: string, pages: readonly Source[]): { text: string;
 
 /**
  * One of an answer's blocks, `block`, from `offset` in it, without the citations it writes of `pages`:
- * none in code but a card's payload's text, and none in a block holding code that isn't fenced with
- * backticks, as a list's indented code is, which only the lexer can tell apart from the list's text.
+ * none in code but a card's payload's text, and none in a list or a quote whose code can't be found in it.
  */
 function blockWithoutCitations(block: Token, offset: number, pages: readonly Source[]): Uncited {
   if (block.type === "code") return isCards(block as Tokens.Code) ? payloadWithoutCitations(block as Tokens.Code, offset, pages) : { text: block.raw, citations: [] };
-  if (holdsUnfencedCode(block)) return { text: block.raw, citations: [] };
-  return withoutCitations(block.raw, offset, pages);
+  const code = codeLinesIn(block);
+  if (code === null) return { text: block.raw, citations: [] };
+  // The text before each code block, and after the last, without its citations, and the code as it's written.
+  const uncited: Uncited = { text: "", citations: [] };
+  let from = 0;
+  for (const span of [...code, { from: block.raw.length, to: block.raw.length }]) {
+    const around = withoutCitations(block.raw.slice(from, span.from), offset + from, pages);
+    uncited.text += around.text + block.raw.slice(span.from, span.to);
+    uncited.citations.push(...around.citations);
+    from = span.to;
+  }
+  return uncited;
 }
 
 /** Whether `code` is a ```slack block, whose payload shows as cards, as answers.ts reads its language. */
 const isCards = (code: Tokens.Code) => (code.lang ?? "").trim().split(/\s/)[0]?.toLowerCase() === "slack";
 
-/** Whether `token` holds code that isn't fenced with backticks, indented or fenced with tildes. */
-function holdsUnfencedCode(token: Token): boolean {
-  const inside: Token[] = [...("tokens" in token && token.tokens ? token.tokens : []), ...(token.type === "list" ? (token as Tokens.List).items : [])];
-  return inside.some((nested) => (nested.type === "code" && !nested.raw.trimStart().startsWith("`")) || holdsUnfencedCode(nested));
+/**
+ * Where in `block` the lines of the code blocks it holds are, as a list or a quote holds them, each from
+ * the start of its first line to the end of its last, or null when one can't be found. The lexer reads them without
+ * the indentation and the quote marks before their lines, so a line of `block` is theirs where it's the
+ * same without those.
+ */
+function codeLinesIn(block: Token): Span[] | null {
+  const lines = block.raw.split("\n");
+  let start = 0;
+  const starts = lines.map((line) => {
+    const at = start;
+    start += line.length + 1;
+    return at;
+  });
+  const spans: Span[] = [];
+  let next = 0;
+  for (const code of codeIn(block)) {
+    const wanted = code.raw.replace(/\n+$/, "").split("\n").map(unmarked);
+    const first = lines.findIndex((_, at) => at >= next && at + wanted.length <= lines.length && wanted.every((line, n) => unmarked(lines[at + n]!) === line));
+    if (first < 0) return null;
+    const last = first + wanted.length - 1;
+    spans.push({ from: starts[first]!, to: starts[last]! + lines[last]!.length });
+    next = last + 1;
+  }
+  return spans;
 }
+
+/** The code blocks `token` holds, as a list's items or a quote do, in the order it holds them. */
+function codeIn(token: Token): Tokens.Code[] {
+  const inside: Token[] = [...("tokens" in token && token.tokens ? token.tokens : []), ...(token.type === "list" ? (token as Tokens.List).items : [])];
+  return inside.flatMap((nested) => (nested.type === "code" ? [nested as Tokens.Code] : codeIn(nested)));
+}
+
+/** A line without the indentation and the quote marks before it. */
+const unmarked = (line: string) => line.replace(/^[\s>]*/, "");
 
 /** `part` of an answer, from `offset` in it, without the citations it writes of `pages` outside code and web addresses, and those citations. */
 function withoutCitations(part: string, offset: number, pages: readonly Source[]): Uncited {
@@ -117,8 +162,7 @@ function withoutCitations(part: string, offset: number, pages: readonly Source[]
  */
 function payloadWithoutCitations(code: Tokens.Code, offset: number, pages: readonly Source[]): Uncited {
   const payload = payloadOf(code.text);
-  const at = code.raw.indexOf(code.text);
-  if (payload === null || at < 0) return { text: code.raw, citations: [] };
+  if (payload === null) return { text: code.raw, citations: [] };
   const citations: Citation[] = [];
   const uncited = (value: unknown, key: string): unknown => {
     if (typeof value === "string" && !ADDRESS_KEY.test(key)) {
@@ -132,7 +176,17 @@ function payloadWithoutCitations(code: Tokens.Code, offset: number, pages: reado
   };
   const shown = uncited(payload, "");
   if (citations.length === 0) return { text: code.raw, citations };
-  return { text: code.raw.slice(0, at) + JSON.stringify(shown, null, 2) + code.raw.slice(at + code.text.length), citations };
+  return { text: refenced(code, JSON.stringify(shown, null, 2)), citations };
+}
+
+/**
+ * The fenced block `code` holding `text` in place of what it held, indented as its opening fence is. The
+ * lexer reads what a fence holds without that indentation, a line for each of its lines.
+ */
+function refenced(code: Tokens.Code, text: string): string {
+  const [opening = "", ...rest] = code.raw.split("\n");
+  const indent = opening.slice(0, opening.length - opening.trimStart().length);
+  return [opening, ...text.split("\n").map((line) => indent + line), ...rest.slice(code.text.split("\n").length)].join("\n");
 }
 
 /**

@@ -34,12 +34,24 @@ describe("What an answer cites of the pages Ember's searches found", () => {
   });
 
   it("leaves code as it's written, however it's fenced or indented, and a web address's own brackets", () => {
-    for (const code of ["```js\nconst first = pages[1];\n```", "~~~js\nconst first = pages[1];\n~~~", "    const first = pages[1];", "- Run it:\n\n      const first = pages[1];\n\n  It's on March 3 [2]."]) {
+    for (const code of ["```js\nconst first = pages[1];\n```", "~~~js\nconst first = pages[1];\n~~~", "    const first = pages[1];"]) {
       expect(citedIn(code, PAGES)).toEqual({ text: code, cited: [] });
     }
     expect(citedIn("Write `list[1]` [2].", PAGES)).toEqual({ text: "Write `list[1]`.", cited: [BLOG] });
-    expect(citedIn("- Run:\n\n  ```js\n  pages[1]\n  ```\n- It's out [3].", PAGES)).toEqual({ text: "- Run:\n\n  ```js\n  pages[1]\n  ```\n- It's out.", cited: [NEWS] });
     expect(citedIn("See [the report](https://example.com/report?ids=[1]) [2].", PAGES)).toEqual({ text: "See [the report](https://example.com/report?ids=[1]).", cited: [BLOG] });
+  });
+
+  it("takes citations out of a list's or a quote's text around the code it holds, but not out of the code", () => {
+    expect(citedIn("- Run it:\n\n      const first = pages[1];\n\n  It's on March 3 [2].\n- Released yesterday [3].", PAGES)).toEqual({
+      text: "- Run it:\n\n      const first = pages[1];\n\n  It's on March 3.\n- Released yesterday.",
+      cited: [BLOG, NEWS],
+    });
+    expect(citedIn("- Run:\n\n  ```js\n  pages[1]\n  ```\n- It's out [3].", PAGES)).toEqual({ text: "- Run:\n\n  ```js\n  pages[1]\n  ```\n- It's out.", cited: [NEWS] });
+    expect(citedIn("> ~~~js\n> const first = pages[1];\n> ~~~\n>\n> It's out [2].", PAGES)).toEqual({ text: "> ~~~js\n> const first = pages[1];\n> ~~~\n>\n> It's out.", cited: [BLOG] });
+    expect(citedIn("- A quote:\n\n  >     const first = pages[1];\n  >\n  > It's out [2].", PAGES)).toEqual({ text: "- A quote:\n\n  >     const first = pages[1];\n  >\n  > It's out.", cited: [BLOG] });
+    // Code begun on an item's number can't be told from the item's text, so the list stays as it's written.
+    const numbered = "1.     const first = pages[1];\n\n   It's out [2].";
+    expect(citedIn(numbered, PAGES)).toEqual({ text: numbered, cited: [] });
   });
 
   it("takes citations out of the text of a card's payload, but not out of its addresses or its JSON's own brackets", () => {
@@ -54,6 +66,8 @@ describe("What an answer cites of the pages Ember's searches found", () => {
     uncited.blocks[0]!.text!.text = "Warriors 112, Lakers 108 <https://example.com/box?ids=[1]|Box score>";
     expect(citedIn(`The score [3].\n\n${card(payload)}`, PAGES)).toEqual({ text: `The score.\n\n${card(uncited)}`, cited: [NEWS] });
     expect(citedIn(card(payload, "Slack json"), PAGES)).toEqual({ text: card(uncited, "Slack json"), cited: [NEWS] });
+    const indented = (block: string) => `  ${block.replaceAll("\n", "\n  ")}`;
+    expect(citedIn(`The score:\n\n${indented(card(payload))}\n\nFinal.`, PAGES)).toEqual({ text: `The score:\n\n${indented(card(uncited))}\n\nFinal.`, cited: [NEWS] });
   });
 
   it("leaves a card's payload as it's written when it cites nothing, or doesn't parse, as it then shows as code", () => {
