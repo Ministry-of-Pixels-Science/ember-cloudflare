@@ -74,7 +74,7 @@ import { attachedFile, Blobs, objectKey, previewKey, type Identified, type RoomB
 import type { ImageSize } from "./files/images";
 import { storeArriving, withPreview, type ArrivingFile, type StreamedFile } from "./files/streamed";
 import { NO_STORAGE, type Uploader } from "./files/uploads";
-import { HuddleMessage } from "./huddles/message";
+import { HuddleMessage, type HuddleNow } from "./huddles/message";
 import { Huddle, HUDDLE_CHECK_MS, HUDDLE_TAG } from "./huddles/room";
 import { base36, sortableId } from "./ids";
 import { sendPushes } from "./push/delivery";
@@ -355,7 +355,7 @@ export class ChatRoom extends DurableObject<Env> {
     super(ctx, env);
     // Heartbeats are answered by the runtime without waking the object.
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('{"type":"ping"}', '{"type":"pong"}'));
-    this.huddle = new Huddle(ctx, env, (time) => this.serially(() => this.checkHuddleBy(time)), (pushes) => this.push(pushes), () => this.serially(() => this.keepHuddleMessage()));
+    this.huddle = new Huddle(ctx, env, (time) => this.serially(() => this.checkHuddleBy(time)), (pushes) => this.push(pushes), (huddle) => this.serially(() => this.keepHuddleMessage(huddle)));
     this.huddleMessage = new HuddleMessage(ctx.storage);
   }
 
@@ -518,7 +518,7 @@ export class ChatRoom extends DurableObject<Env> {
       console.error("Checking the room's huddle failed:", error instanceof Error ? error.name : "unknown error");
       return Date.now() + HUDDLE_CHECK_MS;
     });
-    const inStep = await this.serially(() => this.keepHuddleMessage());
+    const inStep = await this.serially(() => this.keepHuddleMessage(this.huddle.now()));
     return inStep ? nextCheck : Math.min(nextCheck ?? Infinity, Date.now() + HUDDLE_CHECK_MS);
   }
 
@@ -589,7 +589,7 @@ export class ChatRoom extends DurableObject<Env> {
       const ids = await store.messageIdsBy(userId, limit + 1, liftedAt);
       const removed = ids.slice(0, limit);
       if (removed.length === 0) return false;
-      this.broadcastDeletion(await store.delete(removed));
+      await this.deleteEach(store, removed);
       const couriers = this.couriersFor(roomId);
       couriers.index.deliver();
       couriers.files.deliver();
@@ -1165,7 +1165,7 @@ export class ChatRoom extends DurableObject<Env> {
    * everyone in the room and sending the search index its log, and has R2 delete its file, if it has one.
    */
   private async deleteMessage(store: MessageStore, message: Message): Promise<void> {
-    this.broadcastDeletion(await store.delete([message.id]));
+    await this.deleteEach(store, [message.id]);
     const couriers = this.couriersFor(store.roomId);
     couriers.index.deliver();
     if (message.attachment) couriers.files.deliver();
@@ -1185,6 +1185,17 @@ export class ChatRoom extends DurableObject<Env> {
     const seq = await store.removeBoost(boost);
     this.broadcast({ type: "boost.deleted", boostId: boost.id, messageId: boost.messageId, seq });
     this.couriersFor(store.roomId).index.deliver();
+  }
+
+  /**
+   * Deletes each message `ids` names, as `MessageStore.delete` does, telling everyone in the room. The
+   * room's message of its huddle stays deleted when it's one of them, though the room has yet to hear
+   * that it was written (./huddles/message.ts).
+   */
+  private async deleteEach(store: MessageStore, ids: string[]): Promise<void> {
+    const deletion = await store.delete(ids);
+    this.broadcastDeletion(deletion);
+    await this.huddleMessage.deleted(deletion.deletedIds);
   }
 
   /** Tells everyone in the room what deleting messages did: the deletions, then the messages it changed. */
@@ -2068,21 +2079,25 @@ export class ChatRoom extends DurableObject<Env> {
   }
 
   /**
-   * Brings the room's message of its huddle in step with the huddle as it is now, telling everyone in the
-   * room of what that wrote and sending the search index its log: the message as a huddle starts, and
-   * what it says once the huddle is over. The huddle has this done whenever who's in it changes, and
-   * the alarm with each check of the huddle. Answers whether it could: the alarm comes back when not.
-   * A deleted room has no huddle, and has forgotten the message of its last.
+   * Brings the room's message of its huddle in step with `huddle`, the huddle as it is, or null with
+   * nobody in one, telling everyone in the room of what that writes and sending the search index its
+   * log: the message as a huddle starts, and what it says once the huddle is over. The huddle has this
+   * done whenever who's in it changes, with the huddle as that left it, since someone can have left
+   * again by the time the room gets to it, and the alarm with each check of the huddle. Answers whether
+   * it could: the alarm comes back when not. A room deleted by then has forgotten the message of its
+   * last huddle, and gets no other.
    */
-  private async keepHuddleMessage(): Promise<boolean> {
+  private async keepHuddleMessage(huddle: HuddleNow | null): Promise<boolean> {
     try {
-      const huddle = this.huddle.now();
+      if (await this.isDeleted()) return true;
       const roomId = huddle?.roomId ?? (await this.huddleMessage.roomId());
       // No huddle here has had a message.
       if (roomId === undefined) return true;
-      const frames = await this.huddleMessage.keepUp(this.storeFor(roomId), huddle);
-      for (const frame of frames) this.broadcast(frame);
-      if (frames.length > 0) this.couriersFor(roomId).index.deliver();
+      const couriers = this.couriersFor(roomId);
+      await this.huddleMessage.keepUp(this.storeFor(roomId), huddle, (frames) => {
+        for (const frame of frames) this.broadcast(frame);
+        if (frames.length > 0) couriers.index.deliver();
+      });
       return true;
     } catch (error) {
       console.error("Keeping the message of the room's huddle failed:", error instanceof Error ? error.name : "unknown error");

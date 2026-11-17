@@ -323,7 +323,9 @@ Objects, D1 or speed call for something else.
   isn't made twice, and with it when the huddle started, everyone who has been in it, since the
   huddle's sockets only say who's in it now, and when it was found over. The alarm that says who's
   in the huddle again brings the message in step with it too, which makes up for a write that
-  failed, and for an object that came back with nobody left in its huddle.
+  failed, and for an object that came back with nobody left in its huddle. A row still unwritten
+  as its huddle ends is written then, saying that it's over, and one deleted before the room heard
+  that it was written stays deleted.
 - **Rooms are named by their ids, and some have no creator.** A room's id names its Durable Object
   too, so it's a 16-character sortable string like a message's rather than an integer, and its kind
   is `open`, `closed` or `direct` rather than Rails' class name. The rooms from before the Workspace

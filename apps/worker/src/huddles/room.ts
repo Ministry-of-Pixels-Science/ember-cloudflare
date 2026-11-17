@@ -359,8 +359,11 @@ export class Huddle {
     private readonly wakeBy: (time: number) => Promise<void>,
     /** Sends an invitation's pushes, as the room sends its messages'. */
     private readonly push: (pushes: InvitationPush[]) => Promise<void>,
-    /** Brings the room's message of the huddle in step with it, now that who's in it has changed, once the room's events before it are done. */
-    private readonly changed: () => Promise<unknown>,
+    /**
+     * Brings the room's message of the huddle in step with `now`, the huddle as a change of who's in it
+     * left it, once the room's events before it are done: whoever leaves again before then was in it.
+     */
+    private readonly changed: (now: HuddleNow | null) => Promise<unknown>,
   ) {}
 
   /** Whether `ws` is one of the huddle's sockets, rather than one of the room's own. */
@@ -395,9 +398,10 @@ export class Huddle {
     if (!app) return closedAtOnce(HuddleCloseCode.Off);
     let members = this.members();
     // Whoever joined through an app huddles no longer run through connects again, through this one, to
-    // the huddle as it goes on with whoever is first.
+    // the huddle as it goes on with whoever is first. Nothing is told of their going: the Workspace and
+    // the room's message of the huddle hear how this join leaves it, which is going on.
     if (members.some(({ attachment }) => attachment.appId !== app.appId)) {
-      this.end(CloseCode.Reconnect);
+      for (const { socket } of members) this.close(socket, CloseCode.Reconnect, false);
       members = [];
     }
     const startedAt = members[0]?.attachment.startedAt ?? resumed ?? new Date().toISOString();
@@ -1025,10 +1029,10 @@ export class Huddle {
     return true;
   }
 
-  /** Tells the Workspace who's in the huddle now, which has changed, and has the room bring its message of the huddle in step, without anything waiting on either. */
+  /** Tells the Workspace who's in the huddle now, which has changed, and has the room bring its message of the huddle in step with it as it is now, without anything waiting on either. */
   private reportSoon(): void {
     this.ctx.waitUntil(this.report());
-    this.ctx.waitUntil(this.changed());
+    this.ctx.waitUntil(this.changed(this.now()));
   }
 
   /**

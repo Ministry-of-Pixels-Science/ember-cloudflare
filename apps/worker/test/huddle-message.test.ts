@@ -1,6 +1,7 @@
 import type { RoomId, SearchResults } from "@ember/protocol";
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ChatRoom } from "../src/chat-room";
 import { HUDDLE_RESUMED_MS, HUDDLE_STARTED } from "../src/huddles/message";
 import { MessageStore } from "../src/store";
 import { alarmOf, giveKeys, huddlesOn, joinHuddle, kept, OTHER_APP, ring, setUp, welcomed, type HuddleSocket } from "./huddle-support";
@@ -65,6 +66,31 @@ function countFailures(): () => number {
 }
 
 const unreachable = () => new Error("The database is unreachable");
+
+/** Has a write of a huddle's message fail once, though it's saved, as a write to D1 can whose answer is lost. */
+function savedUnanswered(): void {
+  const create = MessageStore.prototype.createHuddle;
+  vi.spyOn(MessageStore.prototype, "createHuddle").mockImplementationOnce(async function (this: MessageStore, ...given) {
+    await create.apply(this, given);
+    throw unreachable();
+  });
+}
+
+type Room = { revocationsFor(roomId: RoomId): unknown; serially(work: () => Promise<unknown>): Promise<unknown> };
+
+/**
+ * Has a room be asked for something else, which takes it `ms`, as it lets the next person into its
+ * huddle, when it looks up whether their access has ended: that takes its turn after their joining, and
+ * before whatever the room hears of its huddle from then on.
+ */
+function busyAsItLetsIn(ms: number): void {
+  const room = ChatRoom.prototype as unknown as Room;
+  const revocationsFor = room.revocationsFor;
+  vi.spyOn(room, "revocationsFor").mockImplementationOnce(function (this: Room, roomId) {
+    void this.serially(() => sleep(ms));
+    return revocationsFor.call(this, roomId);
+  });
+}
 
 beforeEach(freshDeploy);
 afterEach(() => {
@@ -216,6 +242,22 @@ describe("A huddle's message in its room", () => {
     expect((await watching.next("message.updated")).message).toMatchObject({ id: message.id, huddle: { startedAt, people: [ada.user, grace.user] } });
   });
 
+  it("counts whoever was in the huddle as who's in it changed, though they've left again by the time the room gets to its message", async () => {
+    const { ada } = await huddlesOn();
+    const linus = await signIn("Linus");
+    const room = await freshRoom("standup");
+    const watching = await connect(room, linus);
+    // The room is asked for something else as it lets Ada in, and she has left by the time it gets to her joining.
+    busyAsItLetsIn(250);
+
+    const adas = await joinHuddle(room, ada);
+    const { startedAt } = await adas.next("huddle.welcome");
+    await left(adas);
+    const { message } = await watching.next("message.created");
+    expect(message).toEqual({ ...written(room, ada), huddle: { startedAt } });
+    expect((await watching.next("message.updated")).message).toMatchObject({ id: message.id, huddle: { startedAt, people: [ada.user] } });
+  });
+
   it("gives a huddle that was going on before rooms kept messages of them its message as the next person joins", async () => {
     const { ada } = await huddlesOn();
     const [grace, linus] = [await signIn("Grace"), await signIn("Linus")];
@@ -244,6 +286,10 @@ describe("A huddle's message in its room", () => {
     const { startedAt } = await adas.next("huddle.welcome");
     await heardNoMore(watching);
     expect(failures()).toBe(1);
+    // Another message's deletion meanwhile leaves the huddle's to be written.
+    watching.send({ type: "message.create", clientMessageId: crypto.randomUUID(), body: "<p>Wrong room</p>" });
+    watching.send({ type: "message.delete", messageId: (await watching.next("message.created")).message.id });
+    await watching.next("message.deleted");
     await ring(room);
     expect((await watching.next("message.created")).message).toEqual({ ...written(room, ada), huddle: { startedAt } });
     expect(failures()).toBe(1);
@@ -271,6 +317,52 @@ describe("A huddle's message in its room", () => {
     await heardNoMore(watching);
   });
 
+  it("is written saying that the huddle is over when it couldn't be as the huddle started, and nobody is left in it by the room's next check", async () => {
+    const { ada } = await huddlesOn();
+    const linus = await signIn("Linus");
+    const room = await freshRoom("standup");
+    const watching = await connect(room, linus);
+    const failures = countFailures();
+    vi.spyOn(MessageStore.prototype, "createHuddle").mockRejectedValueOnce(unreachable());
+
+    const adas = await joinHuddle(room, ada);
+    const { startedAt } = await adas.next("huddle.welcome");
+    await heardNoMore(watching);
+    await left(adas);
+    const { message } = await watching.next("message.created");
+    expect(message).toEqual({ ...written(room, ada), huddle: { startedAt, endedAt: message.createdAt, people: [ada.user] } });
+    // Nothing is left for the check to make up for.
+    await ring(room);
+    await heardNoMore(watching);
+    expect([failures(), await alarmOf(room)]).toEqual([1, null]);
+    expect(await roomSql(room, "SELECT id FROM messages WHERE room_id = ?", room)).toEqual([{ id: message.id }]);
+    // Back in it within half a minute, Ada finds it the huddle it was, as its message says from then.
+    expect((await (await joinHuddle(room, ada)).next("huddle.welcome")).startedAt).toBe(startedAt);
+    expect((await watching.next("message.updated")).message).toEqual({ ...message, updatedAt: expect.any(String) as string, huddle: { startedAt } });
+  });
+
+  it("says that the huddle is over, though the room never heard of it, when its write failed, was saved all the same, and nobody is left by the next check", async () => {
+    const { ada } = await huddlesOn();
+    const linus = await signIn("Linus");
+    const room = await freshRoom("standup");
+    const watching = await connect(room, linus);
+    countFailures();
+    savedUnanswered();
+
+    const adas = await joinHuddle(room, ada);
+    const { startedAt } = await adas.next("huddle.welcome");
+    await heardNoMore(watching);
+    // Whoever opens the room meanwhile finds the message nobody was told of, of a huddle that's going on.
+    const [saved] = (await connect(room, ada)).welcome.messages;
+    expect(saved).toEqual({ ...written(room, ada), huddle: { startedAt } });
+    await left(adas);
+    const { message } = await watching.next("message.created");
+    expect(message).toEqual({ ...saved, updatedAt: expect.any(String) as string, huddle: { startedAt, endedAt: message.updatedAt, people: [ada.user] } });
+    await ring(room);
+    await heardNoMore(watching);
+    expect((await connect(room, ada)).welcome.messages).toEqual([message]);
+  });
+
   it("says that a huddle is over with a later check when it couldn't as the last person left, though the room's object has started afresh since", async () => {
     const { ada } = await huddlesOn();
     const linus = await signIn("Linus");
@@ -291,6 +383,29 @@ describe("A huddle's message in its room", () => {
     await ring(room);
     expect((await watching.next("message.updated")).message).toMatchObject({ id: message.id, huddle: { startedAt, people: [ada.user] } });
     expect([failures(), await alarmOf(room)]).toEqual([2, null]);
+  });
+
+  it("tells the room that a huddle is over though the message of the one going on can't be written then", async () => {
+    const { ada } = await huddlesOn();
+    const [grace, linus] = [await signIn("Grace"), await signIn("Linus")];
+    const room = await freshRoom("standup");
+    const watching = await connect(room, linus);
+    const failures = countFailures();
+    const { startedAt, message } = await started(room, ada, watching);
+    // The room's object keeps the message as that of an earlier huddle it hasn't found over, which no join leaves it with.
+    const earlier = new Date(Date.parse(startedAt) - 60_000).toISOString();
+    await runInDurableObject(roomStub(room), async (_room, state: DurableObjectState) => state.storage.put("huddleMessage", { ...(await state.storage.get<object>("huddleMessage")), startedAt: earlier }));
+    await evictDurableObject(roomStub(room));
+    vi.spyOn(MessageStore.prototype, "createHuddle").mockRejectedValueOnce(unreachable());
+
+    await welcomed(room, grace);
+    expect((await watching.next("message.updated")).message).toMatchObject({ id: message.id, huddle: { startedAt: earlier, people: [ada.user] } });
+    await heardNoMore(watching);
+    expect(failures()).toBe(1);
+    await ring(room);
+    const { message: second } = await watching.next("message.created");
+    expect(second).toEqual({ ...written(room, ada), huddle: { startedAt } });
+    expect(second.id).not.toBe(message.id);
   });
 
   it("can't be edited, by whoever started the huddle or by an administrator", async () => {
@@ -334,6 +449,27 @@ describe("A huddle's message in its room", () => {
     expect(failures()).toBe(0);
   });
 
+  it("stays deleted when it's deleted before the room has heard that it was written", async () => {
+    const { ada } = await huddlesOn();
+    const room = await freshRoom("standup");
+    const tab = await connect(room, ada);
+    const failures = countFailures();
+    savedUnanswered();
+    const adas = await joinHuddle(room, ada);
+    await adas.next("huddle.welcome");
+    await heardNoMore(tab);
+
+    // Ada opens the room again, finds the message nobody was told of, and deletes it before the room's next check.
+    const [saved] = (await connect(room, ada)).welcome.messages;
+    tab.send({ type: "message.delete", messageId: saved!.id });
+    expect(await tab.next("message.deleted")).toMatchObject({ messageId: saved!.id });
+    await ring(room);
+    await left(adas);
+    await heardNoMore(tab);
+    expect(await roomSql(room, "SELECT id FROM messages WHERE room_id = ?", room)).toEqual([]);
+    expect(failures()).toBe(1);
+  });
+
   it("goes with its room, whose object keeps nothing of it once the room is deleted", async () => {
     const { ada } = await huddlesOn();
     const room = (await createRoom("Short-lived", { as: ada })).id;
@@ -342,6 +478,26 @@ describe("A huddle's message in its room", () => {
     expect(await kept(room, "huddleMessage")).toEqual({ roomId: room, messageId: message.id, startedAt, people: [ada.user], posted: true });
 
     expect((await api(`/api/rooms/${room}`, { method: "DELETE", headers: { Cookie: ada.cookie } })).status).toBe(204);
+    await adas.closed;
+    await sleep(20);
+    expect(await kept(room, "huddleMessage")).toBeUndefined();
+    expect(await roomSql(room, "SELECT id FROM messages WHERE room_id = ?", room)).toEqual([]);
+  });
+
+  it("isn't written in a room that's deleted by the time the room gets to it, with someone still in its huddle as someone else left", async () => {
+    const { ada } = await huddlesOn();
+    const grace = await signIn("Grace");
+    const room = (await createRoom("Short-lived", { as: ada })).id;
+    const tab = await connect(room, ada);
+    const { socket: adas } = await started(room, ada, tab);
+    // The room is deleted before it gets to Grace's joining, and Grace leaves before it has done either.
+    busyAsItLetsIn(300);
+    const graces = await welcomed(room, grace);
+    const deleting = api(`/api/rooms/${room}`, { method: "DELETE", headers: { Cookie: ada.cookie } });
+    await sleep(100);
+    await left(graces);
+
+    expect((await deleting).status).toBe(204);
     await adas.closed;
     await sleep(20);
     expect(await kept(room, "huddleMessage")).toBeUndefined();

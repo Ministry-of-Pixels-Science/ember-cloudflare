@@ -6,9 +6,9 @@ import type { MessageStore, StoredBody } from "../store";
 // A huddle's message, which the room's Durable Object writes in the room as a huddle starts there
 // (src/chat-room.ts), as Slack has one: in the name of whoever started the huddle, it shows that a
 // huddle is going on, and once nobody is left in it, who was in it and for how long. Its thread is the
-// huddle's. The room brings it in step with its huddle (./room.ts) as people join and leave, and again
-// with every check of the huddle, which is what makes up for a write that failed, and for an object that
-// came back with nobody left in its huddle.
+// huddle's. The room brings it in step with its huddle (./room.ts) as it is with each change of who's in
+// it, in the order they come, and again with every check of the huddle, which is what makes up for a
+// write that failed, and for an object that came back with nobody left in its huddle.
 //
 // The room's object keeps the message's id in its own storage from before it writes the message, so
 // that a write whose answer it never had isn't made twice, and with it everyone who has been in the
@@ -43,7 +43,7 @@ interface Kept {
   startedAt: string;
   /** Everyone who has been in the huddle, in the order they first joined. */
   people: User[];
-  /** Whether the room has written the message, and told everyone of it. */
+  /** Whether the room has written the message, and told everyone of it, or has seen it deleted, which leaves nothing to write. */
   posted: boolean;
   /** When the room found nobody left in the huddle, once it has. */
   endedAt?: string;
@@ -84,18 +84,28 @@ export class HuddleMessage {
   }
 
   /**
-   * Brings the message in step with `huddle`, the room's huddle as it is now, or null with nobody in
-   * one, and answers what to tell everyone in the room. A huddle that starts gets a message, in the
-   * name of whoever is first in it. Once nobody is left, the message says when the huddle ended and who
-   * was in it, and should the huddle go on after all, that it's going on. Whatever is thrown leaves
-   * what's kept as it was, for the next time to make up for.
+   * Brings the message in step with `huddle`, the room's huddle as it is, or null with nobody in one,
+   * and has `tell` tell everyone in the room of each thing it writes, as it's written, so that nothing
+   * written goes untold for what fails after it. A huddle that starts gets a message, in the name of
+   * whoever is first in it. Once nobody is left, the message says when the huddle ended and who was in
+   * it, and should the huddle go on after all, that it's going on. Whatever is thrown leaves what's kept
+   * as it was, for the next time to make up for.
    */
-  async keepUp(store: MessageStore, huddle: HuddleNow | null): Promise<HuddleMessageFrame[]> {
+  async keepUp(store: MessageStore, huddle: HuddleNow | null, tell: (frames: HuddleMessageFrame[]) => void): Promise<void> {
     const kept = await this.read();
-    if (kept && kept.startedAt === huddle?.startedAt) return this.goOn(store, kept, huddle);
+    if (kept && kept.startedAt === huddle?.startedAt) return tell(await this.goOn(store, kept, huddle));
     // The huddle the latest message is of is over, and one going on now is another.
-    const ended = kept ? await this.end(store, kept) : [];
-    return huddle ? [...ended, ...(await this.start(store, huddle))] : ended;
+    if (kept) tell(await this.end(store, kept));
+    if (huddle) tell(await this.start(store, huddle));
+  }
+
+  /**
+   * Leaves the latest huddle's message unwritten once the room has deleted it, as one of the messages
+   * `ids` names: one whose write failed, and was saved all the same, isn't written again in its place.
+   */
+  async deleted(ids: string[]): Promise<void> {
+    const kept = await this.read();
+    if (kept && !kept.posted && ids.includes(kept.messageId)) await this.keep({ ...kept, posted: true });
   }
 
   /** Forgets the latest huddle's message, as a deleted room's messages go. */
@@ -108,18 +118,24 @@ export class HuddleMessage {
     return this.post(store, await this.keep({ roomId, messageId: sortableId(), startedAt, people, posted: false }));
   }
 
-  /**
-   * Writes the message `kept` names, in the name of whoever was first in the huddle, and answers it for
-   * everyone to be told of. A write that failed may have been saved all the same, as D1's can be: the
-   * room then has the message, which nobody was told of, and it's written again as it is, for its
-   * change's number. Unless it has been deleted since, and kept for its thread's replies.
-   */
+  /** Writes the message `kept` names, of a huddle that's going on, and answers it for everyone to be told of. */
   private async post(store: MessageStore, kept: Kept): Promise<HuddleMessageFrame[]> {
-    const huddle = { startedAt: kept.startedAt };
-    const now = new Date().toISOString();
+    const told = await this.write(store, kept, { startedAt: kept.startedAt });
+    await this.keep({ ...kept, posted: true });
+    return told;
+  }
+
+  /**
+   * Writes the message `kept` names, which says `huddle` of its huddle, in the name of whoever was first
+   * in it, and answers it for everyone to be told of. A write that failed may have been saved all the
+   * same, as D1's can be: the room then has the message, which nobody was told of, and it's written
+   * again as it is, for its change's number. Unless it has been deleted since, and kept for its thread's
+   * replies.
+   */
+  private async write(store: MessageStore, kept: Kept, huddle: MessageHuddle): Promise<HuddleMessageFrame[]> {
+    const now = huddle.endedAt ?? new Date().toISOString();
     const saved = await store.find(kept.messageId);
     const written = saved ? saved.huddle && (await store.updateHuddle(saved, huddle, now)) : await store.createHuddle(kept.messageId, kept.people[0]!, BODY, huddle, now);
-    await this.keep({ ...kept, posted: true });
     return written ? [{ type: "message.created", ...written }] : [];
   }
 
@@ -135,12 +151,16 @@ export class HuddleMessage {
     return told;
   }
 
-  /** Has the message say that the huddle is over, and who was in it, unless it says so already. One that was never written says nothing. */
+  /**
+   * Has the message say that the huddle is over, and who was in it, unless it says so already. One that
+   * couldn't be written as the huddle started is written saying so.
+   */
   private async end(store: MessageStore, kept: Kept): Promise<HuddleMessageFrame[]> {
     if (kept.endedAt !== undefined) return [];
     const endedAt = new Date().toISOString();
-    const told = kept.posted ? await this.say(store, kept.messageId, { startedAt: kept.startedAt, endedAt, people: kept.people }) : [];
-    await this.keep({ ...kept, endedAt });
+    const over = { startedAt: kept.startedAt, endedAt, people: kept.people };
+    const told = kept.posted ? await this.say(store, kept.messageId, over) : await this.write(store, kept, over);
+    await this.keep({ ...kept, posted: true, endedAt });
     return told;
   }
 
