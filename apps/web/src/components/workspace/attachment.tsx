@@ -129,8 +129,8 @@ function SvgPreview({ file }: { file: StoredFile }) {
 
 /**
  * A text file of up to 64 KiB, as a snippet is, which shows its text above its card once it's within 200px
- * of the timeline's view: as a message shows a code block, with Copy code, and highlighted where the file's
- * name ends in the extension of a language a code block knows. Past 5 lines or 700 characters, the text
+ * of the timeline's view: as a message shows a code block, with Copy code, which copies the text as the file
+ * has it, and highlighted where the file's name ends in the extension of a language a code block knows. Past 5 lines or 700 characters, the text
  * folds behind Show more, as a bot's card folds its text. A file whose bytes turn out not to be text, or to
  * be only spaces, keeps its card alone.
  */
@@ -150,6 +150,7 @@ function TextPreview({ file }: { file: StoredFile }) {
             <Code
               id={textId}
               code={shown}
+              copied={text ?? undefined}
               language={language}
               plain={language === undefined}
               className={cn(long && (open ? "max-h-[min(640px,70dvh)] overflow-y-auto" : FOLDED))}
@@ -162,7 +163,11 @@ function TextPreview({ file }: { file: StoredFile }) {
               type="button"
               aria-expanded={open}
               aria-controls={textId}
-              onClick={() => setOpen(!open)}
+              onClick={() => {
+                // Folded again, it shows its first lines, however far it was scrolled while open.
+                if (open) element.current!.querySelector("pre")!.scrollTop = 0;
+                setOpen(!open);
+              }}
               className="block cursor-pointer text-sm font-medium text-link hover:underline touch:min-h-11"
             >
               {open ? "Show less" : "Show more"}

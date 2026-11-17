@@ -275,6 +275,7 @@ describe("Text files' text", () => {
   }
 
   it("shows a snippet's text above its card once it's within 200px of the timeline's view, with Copy code", async () => {
+    const user = userEvent.setup();
     vi.mocked(fileText).mockResolvedValue("#!/bin/sh\r\necho deployed\r\n");
     const snippet = stored("deploy.sh", "application/x-sh", { byteSize: 26 });
     const { container } = render(
@@ -295,8 +296,11 @@ describe("Text files' text", () => {
     // Its lines, as the page reads them, without the last one's end.
     expect(code.textContent).toBe("#!/bin/sh\necho deployed");
     expect(code.compareDocumentPosition(card("deploy.sh")!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
-    expect(screen.getByRole("button", { name: "Copy code" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Show more" })).not.toBeInTheDocument();
+    // What it copies is the file's text as the file has it.
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+    await user.click(screen.getByRole("button", { name: "Copy code" }));
+    expect(writeText).toHaveBeenCalledWith("#!/bin/sh\r\necho deployed\r\n");
   });
 
   it("highlights the text where the file's extension names a language a code block knows, and leaves the rest plain", async () => {
@@ -321,8 +325,11 @@ describe("Text files' text", () => {
       expect(showMore).toHaveAttribute("aria-controls", code()!.id);
       await user.click(showMore);
       expect(code()).not.toHaveClass("overflow-y-hidden");
+      // Scrolled down while open, it folds back to its first lines.
+      Object.defineProperty(code(), "scrollTop", { value: 120, writable: true });
       await user.click(screen.getByRole("button", { name: "Show less", expanded: true }));
       expect(code()).toHaveClass("overflow-y-hidden");
+      expect(code()!.scrollTop).toBe(0);
       cleanup();
     }
 

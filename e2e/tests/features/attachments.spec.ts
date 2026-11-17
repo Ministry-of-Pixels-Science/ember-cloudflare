@@ -281,6 +281,20 @@ test.describe("Text files' text", () => {
     await notes.getByRole("button", { name: "Show less" }).click();
     expect(await linesShown()).toBe(5);
 
+    // Scrolled to its end while open, a file too long to show whole folds back to its first lines.
+    await upload(request, ada, rooms.general.id, "long.txt", Array.from({ length: 100 }, (_, line) => `Row ${line + 1}`).join("\n"));
+    const long = ada.message("long.txt");
+    const longText = long.locator("pre");
+    await expect(longText).toContainText("Row 100");
+    await long.getByRole("button", { name: "Show more" }).click();
+    const scrolled = await longText.evaluate((pre) => {
+      pre.scrollTop = pre.scrollHeight;
+      return pre.scrollTop;
+    });
+    expect(scrolled).toBeGreaterThan(0);
+    await long.getByRole("button", { name: "Show less" }).click();
+    expect(await longText.evaluate((pre) => pre.scrollTop)).toBe(0);
+
     await expect(downloadLink(ada, "server.log")).toBeVisible();
     await expect(ada.message("server.log").locator("pre")).toHaveCount(0);
   });

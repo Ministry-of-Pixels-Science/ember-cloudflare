@@ -102,9 +102,10 @@ export function CodeBlock({ block, children, ...props }: ComponentProps<"pre"> &
 /**
  * Code shown as a code block, with Copy code: `code`, its text, highlighted once highlight.js has loaded, in
  * `language` or the one it reads as, unless it's `plain`, and `children` where it holds more than text, as
- * `code` null says it does.
+ * `code` null says it does. Copy code copies `copied` where it's given, as a file's text is copied as the
+ * file has it, its line ends and last newline kept, and otherwise what it shows.
  */
-export function Code({ code, language, plain = false, children, ...props }: ComponentProps<"pre"> & { code: string | null; language?: string; plain?: boolean }) {
+export function Code({ code, copied, language, plain = false, children, ...props }: ComponentProps<"pre"> & { code: string | null; copied?: string; language?: string; plain?: boolean }) {
   const pre = useRef<HTMLPreElement>(null);
   const highlighter = useHighlighter(code !== null && !plain);
   const marks = useContext(SearchMarks);
@@ -118,7 +119,7 @@ export function Code({ code, language, plain = false, children, ...props }: Comp
       aria-label="Copy code"
       data-copy-code
       className="absolute top-1.5 right-1.5 flex size-8 cursor-pointer items-center justify-center rounded-[6px] bg-background text-muted-foreground opacity-0 hover:bg-hover group-hover/code:opacity-100 focus-visible:opacity-100 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-foreground touch:size-11 touch:opacity-100 [&_svg]:size-4"
-      onClick={(event) => void copyWithSuccess(event.currentTarget, code ?? (pre.current ? textOf(pre.current) : ""))}
+      onClick={(event) => void copyWithSuccess(event.currentTarget, copied ?? code ?? (pre.current ? textOf(pre.current) : ""))}
     >
       <Copy />
     </button>,
