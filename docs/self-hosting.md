@@ -680,8 +680,9 @@ Mention @ember in a room or a thread, or write to it in a DM, and it answers the
 it's asked in one, typing while its model answers. It reads the thread, its first message and latest 50
 replies, or else the room's latest 20 messages, each after its writer's name, at most about 40,000
 characters of them, and sends them through AI Gateway to the model, whose provider reads them. Its
-answer is a message of its own, in Markdown: links, bold, lists, quotes, code blocks and tables show as
-they do in people's messages, the pictures it links to show in a card under it, and its first web link
+answer is a message of its own, in Markdown: links, bold, strikethrough, lists, quotes, code blocks and
+tables show as they do in people's messages, as do emoji, which it's told to write as themselves rather
+than by names such as :tada:, the pictures it links to show in a card under it, and its first web link
 gets a preview, as a pasted link does. Both are only of addresses a person wrote in the messages it
 read, not a bot or @ember itself, or of the pages it came from, and a preview is never of Ember's own
 pages. Any other address shows only as a link, since one the model made up could carry what it read to
@@ -730,9 +731,11 @@ or posts no card Ember keeps, stays the code it's written as, as does one in a l
 answer too long for a message keeps as many of its cards as fit, each whole, and as much of its text as
 fits beside them, counting the cards' text.
 
-What Ember tells @ember and every agent teaches them to make cards: when a card helps, as for where
-something stands, and when to leave one out, as from a conversational reply; each block a card shows,
-with how it shows and what it's for; Slack's markup, which isn't Markdown; what doesn't show; and an
+What Ember tells @ember and every agent teaches them to make cards: when a card helps, as whenever
+someone asks for one, or for where something stands, and when to leave one out, as from a
+conversational reply; that one asked for is made even when the model couldn't find all it should show,
+showing what it found and saying in it what it couldn't; each block a card shows, with how it shows
+and what it's for; Slack's markup, which isn't Markdown; what doesn't show; and an
 example of a focused card. That's about 1,800 tokens of each question on Claude's models. It comes with
 the rest of what's the same from question to question, ahead of the date and where the question's asked,
 so that a provider that caches the start of a prompt on its own, as OpenAI's does, can reuse it.
@@ -794,8 +797,12 @@ is told to say it can't, and that they can pick one that can. While it's on, @em
 times an answer and reads at most 3 pages, each cut to about 10,000 tokens: pages people link to, or
 that its searches find. Its answer is what it writes after it last searches, and a line under it links
 to the pages it cites and the pages it read, by their titles, at most 10, leaving out those the answer
-links to itself. Grok and Workers AI's models can't cite pages with Ember's tool, so their line links to those their searches found,
-each search's first ones first. A model that stops taking the tools is asked again without them, told
+links to itself. Grok's and Workers AI's APIs have no citations of their own, so Ember numbers the pages
+their searches find, counting on across an answer's searches, and asks the model to cite a page by its
+number in brackets, as [2], after what it takes from it. Ember takes those numbers out of the answer,
+but in code, and its line links to the pages they cite, in the order the answer first cites them, with
+any whose address the answer writes; one that cites none has no line, and still counts as searching
+when the switch is turned on. A model that stops taking the tools is asked again without them, told
 it can't search this time. Its searches are written from the conversation, so the provider's search
 sees what the room was asking about. While it's off, @ember is told it can't search, and that an
 administrator can turn Search the web on.
@@ -874,7 +881,9 @@ Admin DMs only, with a link to each agent's page and to New agent.
 
 Ember writes the rest of @ember's and each agent's system prompt around their instructions: who they are
 before them, and after them how the chat shows Markdown and pictures, how to show cards, what they may
-do on the web, the date, and where they're asked, last, as it changes from question to question most.
+do on the web, the date and time, and where they're asked, last, as it changes from question to
+question most. The time is in UTC, as Ember doesn't know where each person asking is, so the model is
+told that for them it may still be the day before, or already the next.
 Under What Ember adds around them, on @ember's page and each agent's, a box headed Modify with caution
 keeps it as Ember writes it until Modify is pressed, as a change there can leave a model unsure who it
 is, where it's asked or what the chat can show. Modify opens the template Ember fills in each time it's
@@ -889,7 +898,7 @@ asked, up to 10,000 characters, with what each placeholder stands for:
 | `{{words}}` | About how many words it may answer in, from Answer length |
 | `{{cards}}` | How it can show cards under its answer with Slack payloads: when they help, what they can hold, and an example |
 | `{{web}}` | What it may do on the web, or who could let it |
-| `{{today}}` | Today's date, in UTC |
+| `{{today}}` | Today's date and the time, in UTC, as Tuesday, November 17, 2026 at 01:54 |
 | `{{instructions}}` | The instructions, which it needs once |
 
 The preview above it follows what's typed, and the box says why Ember can't take a template, before
