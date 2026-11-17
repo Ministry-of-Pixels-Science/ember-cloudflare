@@ -230,6 +230,106 @@ test.describe("Safe SVG previews", () => {
   });
 });
 
+test.describe("Text files' text", () => {
+  test("shows a snippet's text above its card, to everyone, highlighted where its name says it's code, and copies it as written", async ({ members }) => {
+    const ada = await members.signIn("Ada");
+    const grace = await members.signIn("Grace");
+    await ada.page.locator("form.composer").getByRole("button", { name: "Attach", exact: true }).click();
+    await ada.page.getByRole("menuitem", { name: /^Text snippet/ }).click();
+    const dialog = ada.page.getByRole("dialog", { name: "Create a text snippet" });
+    await dialog.getByLabel("Title (optional)").fill("deploy.sh");
+    await dialog.getByLabel("Content").fill("#!/bin/sh\necho deployed");
+    await dialog.getByRole("button", { name: "Create snippet" }).click();
+    await ada.page.getByRole("button", { name: "Send Message" }).click();
+
+    for (const member of [ada, grace]) {
+      const text = member.message("deploy.sh").locator("pre");
+      await expect(text.locator(".hljs-built_in")).toHaveText("echo");
+      expect(await text.textContent()).toBe("#!/bin/sh\necho deployed");
+      const [shown, card] = [await text.boundingBox(), await downloadLink(member, "deploy.sh").boundingBox()];
+      expect(shown!.y + shown!.height).toBeLessThanOrEqual(card!.y);
+    }
+
+    await grace.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    const block = grace.message("deploy.sh").locator(".code-block");
+    await block.hover();
+    await block.getByRole("button", { name: "Copy code" }).click();
+    await expect.poll(() => grace.page.evaluate(() => navigator.clipboard.readText())).toBe("#!/bin/sh\necho deployed");
+  });
+
+  test("folds a text file's text past five lines behind Show more, and shows a bigger one's card alone", async ({ members, request, rooms }) => {
+    const ada = await members.signIn("Ada");
+    await upload(request, ada, rooms.general.id, "server.log", "x".repeat(64 * 1024 + 1));
+    await upload(request, ada, rooms.general.id, "notes.txt", Array.from({ length: 12 }, (_, line) => `Line ${line + 1}`).join("\n"));
+    const notes = ada.message("notes.txt");
+    const text = notes.locator("pre");
+    await expect(text).toContainText("Line 12");
+    // How many of its lines show, within its padding.
+    const linesShown = () =>
+      text.evaluate((pre) => {
+        const style = getComputedStyle(pre);
+        return Math.round((pre.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom)) / parseFloat(style.lineHeight));
+      });
+    expect(await linesShown()).toBe(5);
+    // Show more has a line of its own, under the text and over the card.
+    const showMore = notes.getByRole("button", { name: "Show more" });
+    const [shown, button, card] = [await text.boundingBox(), await showMore.boundingBox(), await downloadLink(ada, "notes.txt").boundingBox()];
+    expect(shown!.y + shown!.height).toBeLessThanOrEqual(button!.y);
+    expect(button!.y + button!.height).toBeLessThanOrEqual(card!.y);
+    await showMore.click();
+    expect(await linesShown()).toBe(12);
+    await notes.getByRole("button", { name: "Show less" }).click();
+    expect(await linesShown()).toBe(5);
+
+    // Scrolled to its end while open, a file too long to show whole folds back to its first lines.
+    await upload(request, ada, rooms.general.id, "long.txt", Array.from({ length: 100 }, (_, line) => `Row ${line + 1}`).join("\n"));
+    const long = ada.message("long.txt");
+    const longText = long.locator("pre");
+    await expect(longText).toContainText("Row 100");
+    await long.getByRole("button", { name: "Show more" }).click();
+    const scrolled = await longText.evaluate((pre) => {
+      pre.scrollTop = pre.scrollHeight;
+      return pre.scrollTop;
+    });
+    expect(scrolled).toBeGreaterThan(0);
+    await long.getByRole("button", { name: "Show less" }).click();
+    expect(await longText.evaluate((pre) => pre.scrollTop)).toBe(0);
+
+    await expect(downloadLink(ada, "server.log")).toBeVisible();
+    await expect(ada.message("server.log").locator("pre")).toHaveCount(0);
+  });
+
+  test("keeps the timeline at its end as a long snippet sent there shows its text", async ({ members, participant }) => {
+    // Enough before it that the timeline scrolls.
+    await (await participant("Grace")).sayAll(Array.from({ length: 20 }, (_, n) => `Earlier ${n + 1}`));
+    const ada = await members.signIn("Ada");
+    await expect(ada.message("Earlier 20")).toBeVisible();
+    await ada.page.locator("form.composer").getByRole("button", { name: "Attach", exact: true }).click();
+    await ada.page.getByRole("menuitem", { name: /^Text snippet/ }).click();
+    const dialog = ada.page.getByRole("dialog", { name: "Create a text snippet" });
+    await dialog.getByLabel("Title (optional)").fill("steps.sh");
+    await dialog.getByLabel("Content").fill(Array.from({ length: 12 }, (_, line) => `echo "step ${line + 1}"`).join("\n"));
+    await dialog.getByRole("button", { name: "Create snippet" }).click();
+    await ada.page.getByRole("button", { name: "Send Message" }).click();
+
+    await expect(ada.message("steps.sh").getByRole("button", { name: "Show more" })).toBeVisible();
+    await expect.poll(() => ada.outOfView(downloadLink(ada, "steps.sh"))).toBe(0);
+  });
+
+  test("shows an HTML file's markup as its text, where nothing in it runs or loads", async ({ members, request, rooms }) => {
+    const ada = await members.signIn("Ada");
+    const requested: string[] = [];
+    ada.page.on("request", (sent) => requested.push(new URL(sent.url()).pathname));
+    const markup = `<img src="/text/image.png" onerror="fetch('/text/onerror')"><script>fetch("/text/script")</script>`;
+    await upload(request, ada, rooms.general.id, "page.html", markup, "text/html");
+    const text = ada.message("page.html").locator("pre");
+    await expect(text.locator(".hljs-tag").first()).toBeVisible();
+    expect(await text.textContent()).toBe(markup);
+    await expect(text.locator("img, script")).toHaveCount(0);
+    expect(requested.filter((path) => path.startsWith("/text/"))).toEqual([]);
+  });
+});
+
 test.describe("Upload progress", () => {
   test("shows each upload's card until the room posts its file, and why one failed", async ({ members }) => {
     const ada = await members.signIn("Ada");
