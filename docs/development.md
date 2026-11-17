@@ -85,12 +85,19 @@ names, so `E2E_BROWSER=webkit pnpm test:features` runs just the features. Every 
 or iPad is WebKit, as an iPhone app of Ember's would be, and CI runs these beside the Chromium ones.
 WebKit can't be told about a notch, so its iPhones report no safe-area insets, and the few tests
 that drive Chromium's DevTools run in Chromium alone. Playwright can't hand WebKit a 304, so a route
-that changes the server's answer goes through `answerChanged` in `e2e/fixtures.ts`. WebKit's phones
-have no mouse wheel, nor notifications and push, which Safari on an iPhone has only for Ember on the
-Home Screen, and a page has WebKit's camera and microphone only once it's granted them. On a Mac,
-WebKit's Tab skips links and buttons unless Option is held, and a click focuses neither, as in
-Safari, so the tests that press Tab, or expect a clicked link to have focus, fail there; CI runs
-WebKit on Linux, where they pass.
+that changes the server's answer goes through `answerChanged` in `e2e/fixtures.ts`, which asks the
+server for the whole answer. WebKit can let go of what a script sets on an object such as
+`navigator.mediaDevices` once nothing else holds it, handing the page a fresh one, so a stand-in for
+part of the browser goes on its prototype. WebKit on Linux names a download with an underscore for
+each space, which `downloadName` reads past, and Playwright's WebKit sends no click after a tap whose
+pointerdown the page cancelled, as the emoji picker's emoji do, though Safari on an iPhone does.
+WebKit's phones have no mouse wheel, nor notifications and push, which Safari on an iPhone has only
+for Ember on the Home Screen, and a page has WebKit's camera and microphone only once it's granted
+them. On a Mac, WebKit's Tab skips links and buttons unless Option is held, and a click focuses
+neither, as in Safari, End and Home scroll rather than move the cursor, and its iPhones draw a
+`<select>` 23px tall, too small a target for the phones' audit, so the tests that press those keys,
+expect a clicked link to have focus, or show a select on a phone fail there; CI runs WebKit on Linux,
+where they pass.
 
 Before the other suites start, the `first-run` project sets up the test server through the Set up
 Ember page, as its first visitor would. The `workspace-settings` suites, which change the whole

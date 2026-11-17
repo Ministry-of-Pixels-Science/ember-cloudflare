@@ -136,6 +136,8 @@ declare module "@37signals/lexxy" {
     INSERT_PARAGRAPH_COMMAND: LexicalCommand<undefined>;
     KEY_BACKSPACE_COMMAND: LexicalCommand<KeyboardEvent | null>;
     KEY_SPACE_COMMAND: LexicalCommand<KeyboardEvent>;
+    /** Heard as Tab, or Shift and Tab, is pressed in the text, before focus moves. */
+    KEY_TAB_COMMAND: LexicalCommand<KeyboardEvent>;
     /** Heard as the page tells the editor its selection moved. */
     SELECTION_CHANGE_COMMAND: LexicalCommand<undefined>;
     /** Tags a change after which the page's selection is left where it is, rather than put where the editor's is. */

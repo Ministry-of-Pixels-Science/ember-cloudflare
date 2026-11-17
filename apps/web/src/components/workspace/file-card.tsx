@@ -19,7 +19,7 @@ export function FileCard({ file }: { file: StoredFile }) {
     <div className="my-[5px] inline-flex w-fit max-w-full items-center gap-2.5 rounded-[10px] border px-2.5 py-2">
       <Page className="size-9 flex-none rounded-[7px] bg-surface p-[7px]" />
       <span className="min-w-0 flex-1 font-medium wrap-anywhere">{file.name}</span>
-      <a href={file.downloadUrl} className={cn(ACTION, "ios-pwa:hidden")}>
+      <a href={file.downloadUrl} download className={cn(ACTION, "ios-pwa:hidden")}>
         <Download className="size-[1.3em]" />
         <span className="sr-only">Download {file.name}</span>
       </a>

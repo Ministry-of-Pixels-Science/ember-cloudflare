@@ -1,6 +1,6 @@
 import { PASSWORD_TOO_SHORT, SIGN_IN_REJECTED } from "@ember/protocol";
 import type { Page } from "@playwright/test";
-import { ADMINISTRATOR, administratorOn, drawnPicture, editorField, invitation, logOut, shownPicture, signInAsAdministrator, useOwnAddress, variantType } from "../../fixtures";
+import { ADMINISTRATOR, administratorOn, downloadName, drawnPicture, editorField, invitation, logOut, shownPicture, signInAsAdministrator, useOwnAddress, variantType } from "../../fixtures";
 import { expect, test, unique } from "./fixtures";
 
 const signInHeading = (page: Page) => page.getByRole("heading", { level: 1, name: "Sign in to Ember" });
@@ -264,7 +264,7 @@ test.describe("QR codes for links", () => {
     await expect(viewer.locator("img[src^='blob:']")).toBeVisible();
     const download = grace.page.waitForEvent("download");
     await viewer.getByRole("link", { name: "Download file" }).click();
-    expect((await download).suggestedFilename()).toBe("QR code.svg");
+    expect(downloadName(await download)).toBe("QR code.svg");
     expect(asked.filter((path) => path.startsWith("/qr_code/"))).toEqual([]);
   });
 });

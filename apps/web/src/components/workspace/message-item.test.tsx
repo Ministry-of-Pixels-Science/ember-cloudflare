@@ -194,6 +194,7 @@ describe("Image, video and file previews", () => {
       // Hidden in Ember added to an iPhone's or iPad's home screen, which can't download.
       const download = within(article).getByRole("link", { name: "Download Q3 report.pdf" });
       expect(download).toHaveAttribute("href", report.downloadUrl);
+      expect(download).toHaveAttribute("download", "");
       expect(download).toHaveClass("ios-pwa:hidden");
       cleanup();
     }
@@ -259,6 +260,7 @@ describe("Download and share files", () => {
     expect(barNames()).toEqual(["👍Thumbs up", "👏Clapping", "👋Waving hand", "More reactions", "Reply in thread", "Download", "Copy link"]);
     const download = within(actionBar()).getByRole("link", { name: "Download" });
     expect(download).toHaveAttribute("href", report.downloadUrl);
+    expect(download).toHaveAttribute("download", "");
     expect(download).toHaveClass("ios-pwa:hidden");
   });
 

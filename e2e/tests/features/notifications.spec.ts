@@ -143,7 +143,8 @@ test.describe("Turn on notifications", () => {
     const dialog = setup(grace.page);
     await expect(dialog.getByRole("heading", { level: 1 })).toHaveText("Notifications aren’t configured");
     await expect(dialog.getByRole("status")).toHaveText("Ask your workspace administrator to configure Web Push on this server.");
-    await expect(dialog.locator("details")).not.toBeVisible();
+    // None of the help shows: it's in the page, hidden, as two sections in Safari.
+    await expect(dialog.locator("details").filter({ visible: true })).toHaveCount(0);
     await expect(dialog.getByRole("button", { name: "Close" })).toBeFocused();
     await dialog.getByRole("button", { name: "Close" }).click();
     await expect(dialog).toBeHidden();

@@ -567,7 +567,7 @@ function FileActions({ file }: { file: StoredFile }) {
   return (
     <>
       <ActionTooltip label="Download">
-        <a href={file.downloadUrl} aria-label="Download" className={cn(ACTION, "ios-pwa:hidden")}>
+        <a href={file.downloadUrl} download aria-label="Download" className={cn(ACTION, "ios-pwa:hidden")}>
           <Download />
         </a>
       </ActionTooltip>

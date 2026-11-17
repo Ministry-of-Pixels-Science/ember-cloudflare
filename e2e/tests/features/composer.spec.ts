@@ -71,10 +71,14 @@ const pressAsSelectionMoves = (member: Member, alter: "extend" | "move", letters
 /** Tells the editor the page's selection moved, as the page does a moment after the text under it's redrawn, though not always before the next key. */
 const pageTellsTheEditor = (member: Member) => member.page.evaluate(() => document.dispatchEvent(new Event("selectionchange")));
 
-/** Moves the cursor to the line's start, as Home does, and focus to the formatting row's Bold, before the page has told the editor the cursor moved. */
+/**
+ * Moves the cursor to the line's start, as Home does, then presses Shift and Tab, which takes focus to the formatting
+ * row's Bold, before the page has told the editor the cursor moved.
+ */
 const homeThenToTheRow = (member: Member) =>
-  member.composer().evaluate(() => {
+  member.composer().evaluate((text) => {
     getSelection()!.modify("move", "backward", "lineboundary");
+    text.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", code: "Tab", shiftKey: true, bubbles: true, cancelable: true }));
     document.querySelector<HTMLButtonElement>("form.composer [role=toolbar] button[aria-label=Bold]")!.focus();
   });
 

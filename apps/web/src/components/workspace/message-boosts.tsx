@@ -1,4 +1,4 @@
-import { useContext, useId, useLayoutEffect, useRef, useState, type Ref } from "react";
+import { useContext, useId, useImperativeHandle, useLayoutEffect, useRef, useState, type Ref } from "react";
 import { MAX_BOOST_LENGTH, type Boost, type Me, type Message } from "@ember/protocol";
 import { isAllEmoji } from "@ember/richtext/dom";
 import { ArrowUp, Emoji, Minus, Xmark } from "@/components/icons/iconoir";
@@ -183,11 +183,16 @@ function BoostPill({ boost, hint, onDelete }: { boost: Boost; hint: string; onDe
  */
 function CustomReaction({ me, fieldRef, onAdd, onCancel }: { me: Me; fieldRef?: Ref<HTMLInputElement>; onAdd: (content: string) => void; onCancel: () => void }) {
   const form = useRef<HTMLFormElement>(null);
+  const field = useRef<HTMLInputElement>(null);
   const hint = useId();
   const [content, setContent] = useState("");
   const left = MAX_BOOST_LENGTH - content.length;
 
+  useImperativeHandle(fieldRef, () => field.current!);
   useScrollIntoView(form);
+  // The field takes focus without the browser scrolling to it, since the form scrolls itself into view: Safari
+  // scrolls to a field focused as it's added once the frame's callbacks have run, which stops that scroll as it starts.
+  useLayoutEffect(() => field.current!.focus({ preventScroll: true }), []);
 
   return (
     <form
@@ -207,12 +212,11 @@ function CustomReaction({ me, fieldRef, onAdd, onCancel }: { me: Me; fieldRef?: 
       <label className="flex min-w-0 cursor-text items-center gap-[0.4ch] self-stretch pl-[0.2em] touch:-my-px touch:pl-1.5">
         <UserAvatar user={me} className="size-[22px] touch:size-7" />
         <input
-          ref={fieldRef}
+          ref={field}
           name="content"
           type="text"
           aria-label="Custom reaction"
           aria-describedby={hint}
-          autoFocus
           autoComplete="off"
           autoCorrect="off"
           enterKeyHint="send"

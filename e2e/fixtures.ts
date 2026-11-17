@@ -1,4 +1,4 @@
-import { test as base, expect, type APIRequestContext, type APIResponse, type Browser, type BrowserContext, type Locator, type Page, type Route, type WebSocketRoute } from "@playwright/test";
+import { test as base, expect, type APIRequestContext, type APIResponse, type Browser, type BrowserContext, type Download, type Locator, type Page, type Route, type WebSocketRoute } from "@playwright/test";
 import { roomSocketQuery, type Account, type Bootstrap, type ClientFrame, type Invitation, type LiveHuddle, type Message, type ServerFrame, type Sidebar, type User, type WorkspaceServerFrame, type WorkspaceSettings } from "@ember/protocol";
 import { bodyFromPlainText } from "@ember/richtext";
 
@@ -160,6 +160,11 @@ export interface PushOptions {
   on?: boolean;
 }
 
+/** The name `download` was offered under, which WebKit on Linux suggests with an underscore for each space. */
+export function downloadName(download: Download): string {
+  return download.suggestedFilename().replaceAll("_", " ");
+}
+
 /**
  * Lets every page in `context` read the clipboard, and write to it, which WebKit lets a page do
  * without asking, so it has no permission to grant for that.
@@ -170,13 +175,14 @@ export async function allowClipboard(context: BrowserContext): Promise<void> {
 }
 
 /**
- * Answers `route` with the server's answer, its JSON changed by `change`. An answer with nothing to
- * change goes as it came: a refusal, or a 304 for a copy the page has, which Playwright can't hand
- * WebKit, so its request goes on to the server, which answers it the same.
+ * Answers `route` with the server's answer, its JSON changed by `change`, or with a refusal as it came.
+ * It asks for the whole answer, leaving out what the page says it has a copy of: a 304 can't be handed
+ * to WebKit, and the page's request sent on to the server instead could find the data changed by then
+ * and bring the page the server's answer unchanged.
  */
 export async function answerChanged<T>(route: Route, change: (body: T) => unknown): Promise<void> {
-  const response = await route.fetch();
-  if (response.status() === 304) return route.continue();
+  const headers = Object.fromEntries(Object.entries(route.request().headers()).filter(([name]) => !name.startsWith("if-")));
+  const response = await route.fetch({ headers });
   if (!response.ok()) return route.fulfill({ response });
   await route.fulfill({ response, json: change((await response.json()) as T) });
 }

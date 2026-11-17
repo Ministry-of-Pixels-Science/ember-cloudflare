@@ -130,19 +130,21 @@ type PhoneWindow = Window & { camerasAsked?: MediaTrackConstraints[]; screensKep
  * In the page, before it loads: has the browser be a phone's, with a camera over its screen and one on
  * its back, each of which says which way it faces, and of which it opens one at a time, as a phone
  * does. Each shows the picture of the browser's made-up camera. What the page asks of them is kept for
- * the test.
+ * the test. Like the other stand-ins here, it's on the browser's prototype: WebKit can let go of what's
+ * set on `navigator.mediaDevices` itself, once nothing else holds it, and hand the page a fresh one.
  */
 function phoneCameras(): void {
   const cameras = [
     { deviceId: "front", label: "Front Camera", facingMode: "user" },
     { deviceId: "back", label: "Back Camera", facingMode: "environment" },
   ];
-  const media = navigator.mediaDevices;
-  const [open, list] = [media.getUserMedia.bind(media), media.enumerateDevices.bind(media)];
+  const { getUserMedia, enumerateDevices } = MediaDevices.prototype;
+  const media = () => navigator.mediaDevices;
+  const [open, list] = [(constraints?: MediaStreamConstraints) => getUserMedia.call(media(), constraints), () => enumerateDevices.call(media())];
   const opened: MediaStreamTrack[] = [];
   const asked: MediaTrackConstraints[] = ((window as PhoneWindow).camerasAsked = []);
   const exactly = (constraint: ConstrainDOMString | undefined) => (constraint as { exact?: string } | undefined)?.exact;
-  media.getUserMedia = async (constraints) => {
+  MediaDevices.prototype.getUserMedia = async (constraints) => {
     if (!constraints?.video) return open(constraints);
     const video = constraints.video === true ? {} : constraints.video;
     asked.push(video);
@@ -157,7 +159,7 @@ function phoneCameras(): void {
     opened.push(track);
     return stream;
   };
-  media.enumerateDevices = async () => [
+  MediaDevices.prototype.enumerateDevices = async () => [
     ...(await list()).filter(({ kind }) => kind !== "videoinput"),
     ...cameras.map(({ deviceId, label }) => ({ kind: "videoinput", deviceId, label, groupId: "" }) as MediaDeviceInfo),
   ];
@@ -166,9 +168,9 @@ function phoneCameras(): void {
 /** In the page, before it loads: keeps what the browser hands the page each time the page has it keep the screen awake, for the test. */
 function keepWhatKeepsAwake(): void {
   const kept: WakeLockSentinel[] = ((window as PhoneWindow).screensKept = []);
-  const request = navigator.wakeLock.request.bind(navigator.wakeLock);
-  navigator.wakeLock.request = async (type) => {
-    const lock = await request(type);
+  const { request } = WakeLock.prototype;
+  WakeLock.prototype.request = async function (type) {
+    const lock = await request.call(this, type);
     kept.push(lock);
     return lock;
   };
@@ -188,21 +190,25 @@ async function letScreenBeKeptAwake(page: Page): Promise<void> {
   await cdp.send("Browser.grantPermissions", { permissions: ["wakeLockScreen", "audioCapture", "videoCapture"], browserContextId: targetInfo.browserContextId });
 }
 
-/** Where a page keeps the connection that stands in for the SFU's, which sends it the screens it watches. */
-type SentScreens = Window & { screensSent?: RTCPeerConnection };
+/** Where a page keeps the connection that stands in for the SFU's, which sends it the screens it watches, and the picture they show. */
+type SentScreens = Window & { screensSent?: RTCPeerConnection; screenPicture?: MediaStreamTrack };
 
 /**
  * In the page: a connection of its own that sends it `count` screens, as the SFU's would, each the
  * picture of its made-up camera, as wide as a screen is. Answers its offer of them, which names an
- * address of its own, as the SFU's does, and the media section each is on.
+ * address of its own, as the SFU's does, and the media section each is on. The connection before it is
+ * closed, as the SFU's would be, and each sends copies of one picture, which the page keeps, so the
+ * browser never lets go of the camera's picture while copies of it play.
  */
 async function offerScreens(count: number): Promise<{ sdp: string; mids: string[] }> {
-  const picture = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } });
+  const sending = window as SentScreens;
+  sending.screensSent?.close();
+  sending.screenPicture ??= (await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } })).getVideoTracks()[0]!;
   const connection = new RTCPeerConnection();
-  const sent = Array.from({ length: count }, () => connection.addTransceiver(picture.getVideoTracks()[0]!.clone(), { direction: "sendonly" }));
+  const sent = Array.from({ length: count }, () => connection.addTransceiver(sending.screenPicture!.clone(), { direction: "sendonly" }));
   await connection.setLocalDescription(await connection.createOffer());
   if (!connection.localDescription!.sdp.includes("a=candidate:")) await new Promise((resolve) => connection.addEventListener("icecandidate", resolve, { once: true }));
-  (window as SentScreens).screensSent = connection;
+  sending.screensSent = connection;
   return { sdp: connection.localDescription!.sdp, mids: sent.map(({ mid }) => mid!) };
 }
 
@@ -377,7 +383,11 @@ test("the preview a huddle starts from, with its microphone and speaker to choos
   await header(page).getByRole("button", { name: "Start huddle", exact: true }).tap();
   const preview = page.getByRole("dialog", { name: `Start a huddle in ${room.name}` });
   await expect(preview.getByRole("combobox", { name: "Microphone" })).toBeVisible();
-  await expect(preview.getByRole("combobox", { name: "Speaker" })).toBeVisible();
+  // Speaker, where the browser has speakers a page may play through, as Chromium's made-up ones are, and WebKit on Linux has none.
+  const speakers = await page.evaluate(
+    async () => "setSinkId" in HTMLMediaElement.prototype && (await navigator.mediaDevices.enumerateDevices()).some(({ kind, deviceId }) => kind === "audiooutput" && deviceId !== ""),
+  );
+  await expect(preview.getByRole("combobox", { name: "Speaker" })).toBeVisible({ visible: speakers });
   await expect(preview.getByRole("combobox", { name: "Camera" })).toHaveCount(0);
   await screenIsFine();
 
@@ -390,7 +400,7 @@ test("the preview a huddle starts from, with its microphone and speaker to choos
 test("the preview of a huddle going on, for someone with no microphone to use, fits the phone", async ({ page, room, participant, screenIsFine }) => {
   // As a browser answers once its person has said no.
   await page.addInitScript(() => {
-    navigator.mediaDevices.getUserMedia = () => Promise.reject(new DOMException("Permission denied", "NotAllowedError"));
+    MediaDevices.prototype.getUserMedia = () => Promise.reject(new DOMException("Permission denied", "NotAllowedError"));
   });
   const userIds = await Promise.all(["Ada", "Grace", "Linus"].map(async (name) => (await participant(name)).session.user.id));
   await openRoomWithHuddlesOn(page, room, { startedAt: new Date().toISOString(), userIds });
@@ -651,7 +661,9 @@ test("a huddle's reactions and stickers, from React among its buttons, or in Mor
   // An emoji tapped is sent as a reaction and closes the panel, which is over the people on a phone. Once
   // the room has told of it, the reaction rises over the person's name from the base of the people in
   // the huddle, in sight, and no tile has it. The focus is back on the button the panel opened from.
-  await grinning.tap();
+  // Playwright's WebKit sends no click after a tap whose pointerdown the page cancelled, as the picker's
+  // emoji do to keep the focus where it is, though Safari on an iPhone does, so WebKit clicks it.
+  await (page.context().browser()?.browserType().name() === "webkit" ? grinning.click() : grinning.tap());
   await expect(panel).toHaveCount(0);
   const people = opened.getByRole("list", { name: "In the huddle" }).locator("xpath=../..");
   const rising = people.locator('span[aria-hidden="true"]').filter({ has: page.getByText("😀", { exact: true }) });

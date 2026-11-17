@@ -1,6 +1,6 @@
 import type { Room, Sidebar, WorkspaceServerFrame } from "@ember/protocol";
 import type { APIRequestContext, BrowserContext, Page, WebSocketRoute } from "@playwright/test";
-import { administratorSession, allowClipboard, answerChanged, connectWorkspace, cookieHeader, createRoom, invitation, keepOtherRoomsOut, listing, makeAdministrator, rowsWithStars, signInAs, WORKSPACE_SOCKET } from "../../fixtures";
+import { administratorSession, allowClipboard, answerChanged, connectWorkspace, cookieHeader, createRoom, downloadName, invitation, keepOtherRoomsOut, listing, makeAdministrator, rowsWithStars, signInAs, WORKSPACE_SOCKET } from "../../fixtures";
 import { expect, test, unique, type Member } from "./fixtures";
 
 /**
@@ -503,8 +503,7 @@ test.describe("QR codes for links", () => {
     // It saves the code and stays open.
     const download = ada.page.waitForEvent("download");
     await viewer.getByRole("link", { name: "Download file" }).click();
-    // WebKit on Linux names the download with an underscore for its space.
-    expect((await download).suggestedFilename().replace("_", " ")).toBe("QR code.svg");
+    expect(downloadName(await download)).toBe("QR code.svg");
     await expect(viewer).toBeVisible();
     expect(new URL(ada.page.url()).pathname).toBe(`/rooms/${roomId}`);
 
