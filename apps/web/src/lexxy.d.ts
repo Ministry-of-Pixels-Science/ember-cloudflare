@@ -9,6 +9,8 @@ declare module "@37signals/lexxy" {
     getType(): string;
     is(node: LexicalNode | null | undefined): boolean;
     getParent(): ElementNode | null;
+    /** The node, or its ancestor, that's a child of the root. */
+    getTopLevelElement(): LexicalNode | null;
     getIndexWithinParent(): number;
     getNextSiblings(): LexicalNode[];
     getPreviousSibling(): LexicalNode | null;
@@ -27,6 +29,8 @@ declare module "@37signals/lexxy" {
     updateFromJSON(serialized: Record<string, unknown>): this;
     getChildren(): LexicalNode[];
     getChildrenSize(): number;
+    getFirstChild(): LexicalNode | null;
+    getLastChild(): LexicalNode | null;
     append(...nodes: LexicalNode[]): this;
     select(anchorOffset?: number, focusOffset?: number): unknown;
     selectNext(anchorOffset?: number, focusOffset?: number): unknown;

@@ -5,7 +5,17 @@ import { HEADING_TAGS, NOT_IN_CODE_BLOCKS, PLAIN_TEXT, type FormattingCommand, t
 // where it has them, which split a paragraph of lines at the line the cursor is on, as Slack formats a
 // line, and what the row shows of the text where the cursor is.
 
-const { $createTextNode, $findMatchingParent, $getNodeByKey, $getSelection, $isRangeSelection, $isTextNode, INSERT_PARAGRAPH_COMMAND } = Lexical;
+const {
+  $createTextNode,
+  $findMatchingParent,
+  $getNodeByKey,
+  $getSelection,
+  $isLineBreakNode,
+  $isParagraphNode,
+  $isRangeSelection,
+  $isTextNode,
+  INSERT_PARAGRAPH_COMMAND,
+} = Lexical;
 
 /** What Lexxy's `selection.getFormat()` tells of the text where the cursor is: nothing, outside the text. */
 interface LexxyFormat {
@@ -142,8 +152,30 @@ function $format(lexxy: FormattedEditor, command: FormattingCommand) {
       lexxy.contents.toggleCodeBlock();
       return;
     case "divider":
-      editor.dispatchCommand("insertHorizontalDivider");
+      $insertDivider(editor);
       return;
+  }
+}
+
+/**
+ * Puts a divider at the cursor, as Lexxy's button does, splitting the line there, then takes away the line
+ * break, or the empty line, that the split leaves on either side of it: so a divider goes under the line
+ * whose end the cursor's at, and in place of an empty one, as after a new line or a list.
+ */
+function $insertDivider(editor: LexicalEditor) {
+  editor.dispatchCommand("insertHorizontalDivider");
+  // Lexxy leaves the cursor at the start of the line after the divider.
+  const selection = $getSelection();
+  const below = $isRangeSelection(selection) ? selection.anchor.getNode().getTopLevelElement() : null;
+  const above = below?.getPreviousSibling()?.getPreviousSibling();
+  if ($isParagraphNode(below)) {
+    const first = below.getFirstChild();
+    if ($isLineBreakNode(first)) first.remove();
+  }
+  if ($isParagraphNode(above)) {
+    const last = above.getLastChild();
+    if ($isLineBreakNode(last)) last.remove();
+    else if (above.getChildrenSize() === 0) above.remove();
   }
 }
 

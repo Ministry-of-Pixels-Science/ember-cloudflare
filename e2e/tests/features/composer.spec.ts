@@ -496,6 +496,26 @@ test.describe("Formatting row", () => {
     await expect(grace.message("Above").locator(".message-content hr")).toHaveCount(1);
   });
 
+  test("puts a divider in place of an empty line, as after a new line or a list, leaving no line break", async ({ members }) => {
+    const ada = await members.signIn("Ada");
+    const grace = await members.signIn("Grace");
+    await ada.composer().pressSequentially("Plans");
+    await ada.composer().press("Shift+Enter");
+    await tool(ada, "Divider").click();
+    await tool(ada, "Bulleted list").click();
+    await ada.composer().pressSequentially("Milk");
+    await ada.composer().press("Shift+Enter");
+    await ada.composer().press("Shift+Enter");
+    await tool(ada, "Divider").click();
+    await ada.composer().pressSequentially("That's all");
+    await ada.composer().press("Enter");
+    const content = grace.message("Plans").locator(".message-content");
+    await expect(content.locator(":scope > *")).toHaveText(["Plans", "", "Milk", "", "That's all"]);
+    await expect(content.locator(":scope > hr")).toHaveCount(2);
+    await expect(content.locator(":scope > ul")).toHaveCount(1);
+    await expect(content.locator("br")).toHaveCount(0);
+  });
+
   test("formats Markdown as it's typed", async ({ members }) => {
     const ada = await members.signIn("Ada");
     const grace = await members.signIn("Grace");
