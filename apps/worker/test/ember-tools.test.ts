@@ -20,10 +20,11 @@ const ACCOUNT_ID = "0123456789abcdef0123456789abcdef";
 const API_TOKEN = "an-api-token-with-ai-gateway-run_0123456";
 const [CLAUDE, GPT, GROK, GLM] = ["anthropic/claude-sonnet-5.5", "openai/gpt-6.1-sol", "xai/grok-4.7", "@cf/zai-org/glm-4.7-flash"];
 
-/** A request the fake AI Gateway was sent. */
+/** A request the fake AI Gateway was sent, and what it told the gateway's logs of keeping what it carried, if anything. */
 interface Asked {
   url: string;
   body: Record<string, unknown> & { tools?: unknown[]; messages?: unknown[]; input?: unknown[] };
+  logsKeep: string | null;
 }
 
 /** What a model does in a turn: calls the room's search for each of `calls`, or answers `text`. */
@@ -72,7 +73,7 @@ beforeEach(async () => {
   refusing = () => null;
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const request = new Request(input, init);
-    const sent = { url: request.url, body: (await request.json()) as Asked["body"] };
+    const sent = { url: request.url, body: (await request.json()) as Asked["body"], logsKeep: request.headers.get("cf-aig-collect-log-payload") };
     asked.push(sent);
     const refused = refusing(sent);
     if (refused) return refused;
@@ -554,6 +555,32 @@ describe("An answer that waits at a call", () => {
       tool_call_id: "call_3",
       content: `[2] Launch time\n${time.url}\nIt starts at noon.\n\nCite a page you use by its number in brackets, such as [2], after what you take from it.`,
     });
+  });
+
+  it("keeps the rest of an answer out of AI Gateway's logs from a call that came to what they mustn't keep, once it has waited, and its searches of the web", async () => {
+    const call = (id: string, name: string, args: Record<string, string>) => ({ id, type: "function", function: { name, arguments: JSON.stringify(args) } });
+    const turn = (message: Record<string, unknown>) => ({ object: "chat.completion", choices: [{ index: 0, message, finish_reason: "tool_calls" in message ? "tool_calls" : "stop" }], usage: { completion_tokens: 50 } });
+    const answers = [
+      turn({ role: "assistant", content: null, tool_calls: [call("call_1", "read_dm", {}), call("call_2", "send", { to: "ada" })] }),
+      turn({ role: "assistant", content: null, tool_calls: [call("call_3", "web_search", { query: "tangerine" })] }),
+      turn({ role: "assistant", content: "Ada knows the code." }),
+    ];
+    refusing = ({ url }) => Response.json(url.endsWith("/ai/websearch/") ? { success: true, result: { items: [] } } : answers.shift());
+    const readDm: EmberTool = { name: "read_dm", description: "Reads a DM.", takes: { type: "object" }, run: async () => ({ text: "The launch code is tangerine.", unlogged: true }) };
+    const given = [readDm, ...tools];
+    const gateway = gatewayFor(GROK, "chat");
+
+    const waiting = waitingIn(await askWaiting(bindings, gateway, { ...question, tools: given, webTools: ["search"] }, 5_000));
+    expect(waiting.asks).toEqual({ id: "call_2", name: "send", input: { to: "ada" } });
+    expect(waiting.paused.question.unlogged).toBe(true);
+    expect(await goOn(bindings, gateway, given, kept(waiting.paused), true, 5_000)).toMatchObject({ text: "Ada knows the code." });
+    // Only the first request, made before the DM was read, is kept whole.
+    expect(asked.map(({ url, logsKeep }) => [new URL(url).pathname.split("/ai/")[1], logsKeep])).toEqual([
+      ["v1/chat/completions", null],
+      ["v1/chat/completions", "false"],
+      ["websearch/", "false"],
+      ["v1/chat/completions", "false"],
+    ]);
   });
 
   it("tells a model refused going on once a call is allowed what every call of its answer did, as it's asked again without the tools, so that it doesn't answer as if they hadn't", async () => {

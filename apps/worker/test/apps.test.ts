@@ -3,6 +3,7 @@ import type { AgentSettings, NewAgent } from "@ember/protocol/agents";
 import {
   AGENT_TOOLS_FULL,
   APP_CHANGED,
+  APP_IS_EMBER,
   APP_URL_REFUSED,
   APPS_FORBIDDEN,
   APPS_FULL,
@@ -19,9 +20,10 @@ import {
   type ToolPick,
 } from "@ember/protocol/apps";
 import { ASSISTANT_OFF } from "@ember/protocol/assistant";
+import { evictDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fingerprintOf, MAX_TOOL_SCHEMA_LENGTH } from "../src/apps/mcp";
-import { api, apiWith, builtPages, cookieOf, freshDeploy, shown, workspaceSql, type Session } from "./support";
+import { api, apiWith, builtPages, cookieOf, freshDeploy, origin, shown, workspaceSql, workspaceStub, type Session } from "./support";
 
 // Apps: the MCP servers an administrator connects on the AI assistant tab, whose tools Ember reads from
 // them over Streamable HTTP. A fake server stands behind `fetch`, answering as the protocol has it.
@@ -283,6 +285,28 @@ describe("Connecting an app", () => {
     expect((await refusalOf(await connect(administrator, { name: "Tracker", url: LOCAL, token: "a\nb" }), 422)).field).toBe("token");
     expect(asked).toEqual([]);
     expect(((await (await listApps(administrator)).json()) as Apps).apps).toEqual([]);
+  });
+
+  it("refuses Ember's own address, wherever it knows it's reached, at any port, before asking anything, and moving an app there", async () => {
+    const administrator = await setUp();
+    const known = { custom_domain: "chat.example.com", deployed_address: "ember.ada.workers.dev", other_addresses: ["old.example.com"] };
+    await workspaceSql("UPDATE accounts SET settings = json_patch(COALESCE(settings, '{}'), ?)", JSON.stringify(known));
+    await evictDurableObject(workspaceStub());
+    const own = { error: APP_IS_EMBER, field: "url" };
+
+    const beginSignIn = (body: unknown) => api("/api/account/app-sign-ins", { method: "POST", headers: as(administrator), body: JSON.stringify(body) });
+    for (const url of [`${origin}/mcp`, "https://EMBER.test:8443/mcp", "https://chat.example.com/mcp", "https://ember.ada.workers.dev/mcp", "https://old.example.com/mcp"]) {
+      expect(await refusalOf(await connect(administrator, { name: "Ember", url }), 422), url).toEqual(own);
+      expect(await refusalOf(await beginSignIn({ name: "Ember", url }), 422), url).toEqual(own);
+    }
+    expect(asked).toEqual([]);
+    expect(((await (await listApps(administrator)).json()) as Apps).apps).toEqual([]);
+
+    const app = await appOf(await connect(administrator, { name: "Tracker", url: LOCAL }), 201);
+    asked = [];
+    expect(await refusalOf(await change(administrator, app.id, { url: "https://chat.example.com/mcp" }), 422)).toEqual(own);
+    expect(asked).toEqual([]);
+    expect(await appOf(await show(administrator, app.id))).toMatchObject({ url: LOCAL });
   });
 
   it("says why when the server refuses the token, asks for a sign-in, isn't there, or doesn't answer as one, and connects nothing", async () => {

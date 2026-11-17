@@ -1,6 +1,6 @@
 import { MAX_FILE_SIZE, type LinkPreview, type User } from "@ember/protocol";
 import { OPENGRAPH_EMBED_CONTENT_TYPE, previewContent } from "@ember/richtext/dom";
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PeopleContext } from "@/hooks/use-directory";
@@ -43,7 +43,9 @@ function touchScreen() {
 }
 
 const sendButton = () => screen.getByRole("button", { name: "Send Message" });
-const formattingOptions = () => screen.getByRole("button", { name: "Rich text" });
+const showFormatting = () => screen.getByRole("button", { name: "Show formatting" });
+const formattingRow = () => screen.queryByRole("toolbar", { name: "Formatting" });
+const tool = (name: string) => within(formattingRow()!).getByRole("button", { name });
 const attachFiles = () => screen.getByLabelText("Attach a file");
 
 afterEach(() => {
@@ -52,11 +54,12 @@ afterEach(() => {
 });
 
 describe("Composer", () => {
-  it("has the text box on top, with Attach files, Formatting options and Send below", async () => {
+  it("has the formatting row over the text box, with Attach files, Show formatting and Send below", async () => {
     const { input } = await showComposer();
+    expect(formattingRow()).toBeInTheDocument();
     expect(input).toHaveAttribute("placeholder", "Message #general");
     expect(attachFiles().closest("label")).toHaveAttribute("title", "Attach files");
-    expect(formattingOptions()).toHaveAttribute("title", "Formatting options");
+    expect(showFormatting()).toHaveAttribute("title", "Hide formatting");
     expect(sendButton()).toHaveAttribute("title", "Send message");
   });
 
@@ -120,18 +123,212 @@ describe("Group DMs and DM names", () => {
   });
 });
 
-describe("Formatting toolbar", () => {
-  it("shows the toolbar while Formatting options is pressed, keeping focus in the text", async () => {
+describe("Formatting row", () => {
+  it("hides the row while Show formatting is let go, keeping focus in the text, as this browser remembers", async () => {
     const { input, user, view } = await showComposer();
     const form = view.container.querySelector("form")!;
-    await user.click(formattingOptions());
-    expect(formattingOptions()).toHaveAttribute("aria-pressed", "true");
-    expect(form).toHaveAttribute("data-toolbar");
+    expect(showFormatting()).toHaveAttribute("aria-pressed", "true");
+    expect(form).toHaveAttribute("data-formatting");
+
+    await user.click(showFormatting());
+    expect(showFormatting()).toHaveAttribute("aria-pressed", "false");
+    expect(showFormatting()).toHaveAttribute("title", "Show formatting");
+    expect(formattingRow()).not.toBeInTheDocument();
+    expect(form).not.toHaveAttribute("data-formatting");
     expect(input).toHaveFocus();
 
-    await user.click(formattingOptions());
-    expect(formattingOptions()).toHaveAttribute("aria-pressed", "false");
-    expect(form).not.toHaveAttribute("data-toolbar");
+    view.unmount();
+    await showComposer();
+    expect(formattingRow()).not.toBeInTheDocument();
+    await user.click(showFormatting());
+    expect(formattingRow()).toBeInTheDocument();
+  });
+
+  it("starts hidden on touch screens, whose keyboard leaves the composer little room", async () => {
+    touchScreen();
+    await showComposer();
+    expect(formattingRow()).not.toBeInTheDocument();
+    expect(showFormatting()).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("has Slack's buttons in Slack's order, each named with its keys", async () => {
+    await showComposer();
+    expect(within(formattingRow()!).getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual([
+      "Bold",
+      "Italic",
+      "Underline",
+      "Strikethrough",
+      "Paragraph",
+      "Link",
+      "Ordered list",
+      "Bulleted list",
+      "Blockquote",
+      "Code",
+      "Code block",
+      "Divider",
+    ]);
+    expect(tool("Strikethrough")).toHaveAttribute("aria-keyshortcuts", "Control+Shift+X");
+    expect(tool("Link")).toHaveAttribute("aria-keyshortcuts", "Control+Shift+U");
+    expect(tool("Divider")).not.toHaveAttribute("aria-keyshortcuts");
+  });
+
+  it("lights a button while its formatting is on where the cursor is, keeping focus in the text", async () => {
+    const { input, user } = await showComposer();
+    await user.click(tool("Bold"));
+    await user.click(tool("Bulleted list"));
+    expect(tool("Bold")).toHaveAttribute("aria-pressed", "true");
+    expect(tool("Bulleted list")).toHaveAttribute("aria-pressed", "true");
+    expect(tool("Ordered list")).toHaveAttribute("aria-pressed", "false");
+    expect(input).toHaveFocus();
+
+    await user.click(tool("Ordered list"));
+    expect(tool("Bulleted list")).toHaveAttribute("aria-pressed", "false");
+    expect(tool("Ordered list")).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("formats from Slack's keys, with the row hidden too, leaving Cmd or Ctrl+B, I and U to the editor", async () => {
+    const { input, user } = await showComposer();
+    await user.type(input, "struck");
+    await user.keyboard("{Control>}{Shift>}X{/Shift}{/Control}");
+    expect(tool("Strikethrough")).toHaveAttribute("aria-pressed", "true");
+
+    await user.click(showFormatting());
+    await user.keyboard("{Control>}{Shift>}({/Shift}{/Control}");
+    await user.click(showFormatting());
+    expect(tool("Blockquote")).toHaveAttribute("aria-pressed", "true");
+
+    await user.keyboard("{Control>}b{/Control}");
+    expect(tool("Bold")).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("styles the line from the Paragraph menu, its style ticked, and puts focus back in the text", async () => {
+    const { input, user } = await showComposer();
+    await user.click(tool("Paragraph"));
+    expect(screen.getByRole("menuitemradio", { name: "Paragraph" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["Paragraph", "Big headingH1", "Medium headingH2", "Small headingH3"]);
+
+    await user.click(screen.getByRole("menuitemradio", { name: /Medium heading/ }));
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    await waitFor(() => expect(input).toHaveFocus());
+
+    await user.click(tool("Paragraph"));
+    expect(screen.getByRole("menuitemradio", { name: /Medium heading/ })).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("greys out what a code block has no use for, and its keys", async () => {
+    const { input, user } = await showComposer();
+    await user.click(tool("Code block"));
+    expect(tool("Code block")).toHaveAttribute("aria-pressed", "true");
+    for (const name of ["Bold", "Italic", "Underline", "Strikethrough", "Link", "Code", "Divider"]) expect(tool(name), name).toBeDisabled();
+    for (const name of ["Paragraph", "Ordered list", "Bulleted list", "Blockquote", "Code block"]) expect(tool(name), name).toBeEnabled();
+
+    input.focus();
+    await user.keyboard("{Control>}{Shift>}X{/Shift}{/Control}");
+    await user.click(tool("Code block"));
+    expect(tool("Strikethrough")).toBeEnabled();
+    expect(tool("Strikethrough")).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("is one stop in the tab order, whose arrow keys move along it, and Escape goes back to the text", async () => {
+    const { input, user } = await showComposer();
+    await user.tab({ shift: true });
+    expect(tool("Bold")).toHaveFocus();
+    await user.keyboard("{ArrowRight}");
+    expect(tool("Italic")).toHaveFocus();
+    await user.keyboard("{End}");
+    expect(tool("Divider")).toHaveFocus();
+    await user.keyboard("{ArrowRight}");
+    expect(tool("Bold")).toHaveFocus();
+    await user.keyboard("{ArrowLeft}{ArrowLeft}");
+    expect(tool("Code block")).toHaveFocus();
+
+    await user.keyboard("{Escape}");
+    expect(input).toHaveFocus();
+    await user.tab({ shift: true });
+    expect(tool("Code block")).toHaveFocus();
+  });
+
+  it("formats from the keyboard, leaving focus on the button for the next", async () => {
+    const { user } = await showComposer();
+    await user.tab({ shift: true });
+    await user.keyboard("{Enter}");
+    expect(tool("Bold")).toHaveAttribute("aria-pressed", "true");
+    expect(tool("Bold")).toHaveFocus();
+    await user.keyboard("{ArrowRight} ");
+    expect(tool("Italic")).toHaveAttribute("aria-pressed", "true");
+    expect(tool("Italic")).toHaveFocus();
+  });
+});
+
+describe("Link", () => {
+  /** The composer, `text` written in it, and `selected` selected, or else the cursor after the text. */
+  async function written(text: string, selected = "") {
+    const shown = await showComposer();
+    await shown.user.type(shown.input, text);
+    if (selected) {
+      const start = text.indexOf(selected);
+      (shown.input as HTMLTextAreaElement).setSelectionRange(start, start + selected.length);
+    }
+    return shown;
+  }
+
+  it("links what's selected through Link's dialog, taking an address without a scheme as a web address", async () => {
+    const { input, user } = await written("Read the docs", "the docs");
+    await user.click(tool("Link"));
+    const dialog = screen.getByRole("dialog", { name: "Add link" });
+    expect(within(dialog).getByLabelText("Text")).toHaveValue("the docs");
+    expect(within(dialog).getByLabelText("Link")).toHaveFocus();
+    expect(within(dialog).queryByRole("button", { name: "Remove link" })).not.toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Save" })).toBeDisabled();
+
+    await user.type(within(dialog).getByLabelText("Link"), "example.com/docs{Enter}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await waitFor(() => expect(input).toHaveAttribute("data-linked", "https://example.com/docs"));
+    expect(input).toHaveFocus();
+    expect(input).toHaveValue("Read the docs");
+    expect(tool("Link")).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("opens from Cmd or Ctrl+Shift+U and Cmd or Ctrl+K, with the row hidden too, starting at the text with nothing selected", async () => {
+    const { input, user } = await written("See ");
+    await user.click(showFormatting());
+    await user.keyboard("{Control>}{Shift>}U{/Shift}{/Control}");
+    const dialog = screen.getByRole("dialog", { name: "Add link" });
+    expect(within(dialog).getByLabelText("Text")).toHaveFocus();
+
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await waitFor(() => expect(input).toHaveFocus());
+    await user.keyboard("{Control>}k{/Control}");
+    expect(screen.getByRole("dialog", { name: "Add link" })).toBeInTheDocument();
+  });
+
+  it("writes the address as the text when the text's left blank, and leaves the text as it was on Cancel", async () => {
+    const { input, user } = await written("See ");
+    await user.click(tool("Link"));
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await waitFor(() => expect(input).toHaveFocus());
+    expect(input).toHaveValue("See ");
+
+    await user.click(tool("Link"));
+    await user.type(within(screen.getByRole("dialog")).getByLabelText("Link"), "https://example.com{Enter}");
+    await waitFor(() => expect(input).toHaveValue("See https://example.com"));
+  });
+
+  it("edits the link the cursor is in, or takes it off, keeping its text", async () => {
+    const { input, user } = await written("Read the docs", "the docs");
+    await user.click(tool("Link"));
+    await user.type(within(screen.getByRole("dialog")).getByLabelText("Link"), "example.com{Enter}");
+    await waitFor(() => expect(input).toHaveAttribute("data-linked"));
+
+    await user.click(tool("Link"));
+    const dialog = screen.getByRole("dialog", { name: "Edit link" });
+    expect(within(dialog).getByLabelText("Link")).toHaveValue("https://example.com");
+    await user.click(within(dialog).getByRole("button", { name: "Remove link" }));
+    await waitFor(() => expect(input).not.toHaveAttribute("data-linked"));
+    expect(input).toHaveValue("Read the docs");
+    expect(tool("Link")).toHaveAttribute("aria-pressed", "false");
   });
 });
 
@@ -154,15 +351,11 @@ describe("Send from the keyboard", () => {
     expect(onSend).toHaveBeenCalledWith("<p>line one<br>line two</p>", false);
   });
 
-  it("starts a new line on Enter while the toolbar shows, sends on Ctrl+Enter, and then hides the toolbar", async () => {
+  it("sends on Enter with the formatting row showing, as Slack's does, and keeps the row", async () => {
     const { onSend, input, user } = await showComposer();
-    await user.click(formattingOptions());
-    await user.type(input, "one{Enter}two");
-    expect(onSend).not.toHaveBeenCalled();
-
-    await user.keyboard("{Control>}{Enter}{/Control}");
-    expect(onSend).toHaveBeenCalledExactlyOnceWith("<p>one<br>two</p>", false);
-    expect(formattingOptions()).toHaveAttribute("aria-pressed", "false");
+    await user.type(input, "one{Enter}");
+    expect(onSend).toHaveBeenCalledExactlyOnceWith("<p>one</p>", false);
+    expect(formattingRow()).toBeInTheDocument();
   });
 
   it("sends only from the Send button on touch screens", async () => {
