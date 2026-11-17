@@ -802,9 +802,14 @@ export function describeOutsideAsk(ask: OutsideAsk): Promise<OutsideAsked> {
   return request<OutsideAsked>("/api/outside/asks", { method: "POST", body: JSON.stringify(ask) });
 }
 
-/** Answers `ask`, whether to connect its app as you, leaving out `without` of what it asks, answering where to send the browser: back to the app. Fails as `describeOutsideAsk` does, and with a 409 when you have as many connected as one may. */
-export async function answerOutsideAsk(ask: OutsideAsk, allow: boolean, without: OutsideScope[] = []): Promise<string> {
-  return (await request<OutsideAnswered>("/api/outside/answers", { method: "POST", body: JSON.stringify({ ask, allow, without } satisfies OutsideAnswer) })).redirectTo;
+/**
+ * Answers `ask`, whether to connect its app as you, leaving out `without` of what it asks, and with
+ * `ticked` of it, which Ember gives where the page leaves its box unticked only when it's ticked,
+ * answering where to send the browser: back to the app. Fails as `describeOutsideAsk` does, and with a
+ * 409 when you have as many connected as one may.
+ */
+export async function answerOutsideAsk(ask: OutsideAsk, allow: boolean, without: OutsideScope[] = [], ticked: OutsideScope[] = []): Promise<string> {
+  return (await request<OutsideAnswered>("/api/outside/answers", { method: "POST", body: JSON.stringify({ ask, allow, without, with: ticked } satisfies OutsideAnswer) })).redirectTo;
 }
 
 /** Ends the connection `id` of yours, answering the ones you have left. Fails with a 401 ApiError once the session has ended, a 409 while outside AI is off, and a 404 once the connection has ended. */

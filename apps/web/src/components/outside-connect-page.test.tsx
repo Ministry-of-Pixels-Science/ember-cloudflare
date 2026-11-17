@@ -86,7 +86,7 @@ describe("The page that asks whether to connect an AI app", () => {
     await user.click(await screen.findByRole("button", { name: "Allow" }));
 
     await waitFor(() => expect(loadPage).toHaveBeenCalledExactlyOnceWith(ALLOWED));
-    expect(sent[1]).toEqual(["POST /api/outside/answers", { ask: ASK, allow: true, without: [] }]);
+    expect(sent[1]).toEqual(["POST /api/outside/answers", { ask: ASK, allow: true, without: [], with: [] }]);
     expect(screen.queryByRole("checkbox")).toBeNull();
     expect(screen.getByRole("button", { name: "Allow" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Don't allow" })).toBeDisabled();
@@ -100,7 +100,7 @@ describe("The page that asks whether to connect an AI app", () => {
     await user.click(await screen.findByRole("button", { name: "Don't allow" }));
 
     await waitFor(() => expect(loadPage).toHaveBeenCalledExactlyOnceWith(refused));
-    expect(sent[1]).toEqual(["POST /api/outside/answers", { ask: ASK, allow: false, without: [] }]);
+    expect(sent[1]).toEqual(["POST /api/outside/answers", { ask: ASK, allow: false, without: [], with: [] }]);
   });
 
   it("offers what an app asks beside reading, such as sending messages, with a box to leave it out", async () => {
@@ -109,7 +109,7 @@ describe("The page that asks whether to connect an AI app", () => {
     const user = open();
 
     const send = await screen.findByRole("checkbox", { name: OUTSIDE_SCOPE_EXPLAINED.write });
-    expect(OUTSIDE_SCOPE_EXPLAINED.write).toBe("Send messages as you, in the rooms you're in");
+    expect(OUTSIDE_SCOPE_EXPLAINED.write).toBe("Send messages as you, in the open rooms you're in");
     expect(send).toBeChecked();
     expect(screen.getByText("And, if you let it:")).toBeVisible();
     // Reading isn't a choice: it's what connecting an app is.
@@ -120,7 +120,7 @@ describe("The page that asks whether to connect an AI app", () => {
     await user.click(screen.getByRole("button", { name: "Allow" }));
 
     await waitFor(() => expect(loadPage).toHaveBeenCalledExactlyOnceWith(ALLOWED));
-    expect(sent[1]).toEqual(["POST /api/outside/answers", { ask: ASK, allow: true, without: ["write"] }]);
+    expect(sent[1]).toEqual(["POST /api/outside/answers", { ask: ASK, allow: true, without: ["write"], with: [] }]);
     expect(send).toBeDisabled();
   });
 
@@ -131,7 +131,56 @@ describe("The page that asks whether to connect an AI app", () => {
 
     await user.click(await screen.findByRole("button", { name: "Allow" }));
     await waitFor(() => expect(loadPage).toHaveBeenCalledOnce());
-    expect(sent[1]).toEqual(["POST /api/outside/answers", { ask: ASK, allow: true, without: [] }]);
+    expect(sent[1]).toEqual(["POST /api/outside/answers", { ask: ASK, allow: true, without: [], with: ["write"] }]);
+  });
+
+  it("leaves your direct messages and private rooms out unless you tick their box, which an app asks for beside the rest", async () => {
+    const everything = () => Response.json({ ...CLAUDE, scopes: ["read", "write", "private"] } satisfies OutsideAsked);
+    const sent = serve({ "POST /api/outside/asks": everything, "POST /api/outside/answers": () => Response.json({ redirectTo: ALLOWED }) });
+    const user = open();
+
+    const reach = await screen.findByRole("checkbox", { name: OUTSIDE_SCOPE_EXPLAINED.private });
+    expect(OUTSIDE_SCOPE_EXPLAINED.private).toBe("Do the same in your direct messages and private rooms");
+    expect(reach).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: OUTSIDE_SCOPE_EXPLAINED.write })).toBeChecked();
+    // The boxes follow what they widen.
+    expect(screen.getAllByRole("checkbox").map((box) => box.closest("label")!.textContent)).toEqual([OUTSIDE_SCOPE_EXPLAINED.write, OUTSIDE_SCOPE_EXPLAINED.private]);
+    expect(screen.getAllByRole("listitem").map((item) => item.textContent)).toEqual([OUTSIDE_SCOPE_EXPLAINED.read]);
+
+    await user.click(screen.getByRole("button", { name: "Allow" }));
+    await waitFor(() => expect(loadPage).toHaveBeenCalledOnce());
+    expect(sent[1]).toEqual(["POST /api/outside/answers", { ask: ASK, allow: true, without: ["private"], with: ["write"] }]);
+  });
+
+  it("lets an app into your direct messages and private rooms once you tick their box, and out again once you clear it", async () => {
+    const everything = () => Response.json({ ...CLAUDE, scopes: ["read", "write", "private"] } satisfies OutsideAsked);
+    const sent = serve({ "POST /api/outside/asks": everything, "POST /api/outside/answers": () => Response.json({ redirectTo: ALLOWED }) });
+    const user = open();
+
+    const reach = await screen.findByRole("checkbox", { name: OUTSIDE_SCOPE_EXPLAINED.private });
+    await user.click(reach);
+    expect(reach).toBeChecked();
+    await user.click(screen.getByRole("checkbox", { name: OUTSIDE_SCOPE_EXPLAINED.write }));
+    await user.click(reach);
+    expect(reach).not.toBeChecked();
+    await user.click(reach);
+    await user.click(screen.getByRole("button", { name: "Allow" }));
+
+    await waitFor(() => expect(loadPage).toHaveBeenCalledOnce());
+    expect(sent[1]).toEqual(["POST /api/outside/answers", { ask: ASK, allow: true, without: ["write"], with: ["private"] }]);
+    expect(reach).toBeDisabled();
+  });
+
+  it("says nothing of the boxes when you don't allow an app, though you've ticked one", async () => {
+    const everything = () => Response.json({ ...CLAUDE, scopes: ["read", "write", "private"] } satisfies OutsideAsked);
+    const sent = serve({ "POST /api/outside/asks": everything, "POST /api/outside/answers": () => Response.json({ redirectTo: ALLOWED }) });
+    const user = open();
+
+    await user.click(await screen.findByRole("checkbox", { name: OUTSIDE_SCOPE_EXPLAINED.private }));
+    await user.click(screen.getByRole("button", { name: "Don't allow" }));
+
+    await waitFor(() => expect(loadPage).toHaveBeenCalledOnce());
+    expect(sent[1]).toEqual(["POST /api/outside/answers", { ask: ASK, allow: false, without: [], with: [] }]);
   });
 
   it("lists as what it will do the one thing an app asks, with no box, when that isn't reading", async () => {

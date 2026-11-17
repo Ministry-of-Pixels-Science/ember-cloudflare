@@ -248,6 +248,9 @@ export interface OutsideAccess {
   resource: string | null;
 }
 
+/** As whom an AI app acts, and what it's allowed, which say which rooms it reaches. */
+export type OutsideReach = Pick<OutsideAccess, "userId" | "scopes">;
+
 /** The person an AI app sends a message as, in a room they're in, as the room keeps who wrote it. */
 export interface OutsideSender {
   user: User;
@@ -456,6 +459,9 @@ const addressesOf = (account: Pick<JoinableAccount, "customDomain" | "deployedAd
 
 /** Whether a room of `kind` is private, a DM or a private room, whose people alone read what's said there. */
 const isPrivate = (kind: RoomKind | null) => kind !== "open";
+
+/** Whether an AI app connected with `scopes` reaches a room of `kind`: one open to everyone, and with "private", a DM or a private room too. */
+const reaches = (scopes: readonly OutsideScope[], kind: RoomKind | null) => !isPrivate(kind) || scopes.includes("private");
 
 /** The levels someone who `picked` them has of @ember's dials, where each starts for one they haven't picked, no higher than `most`. */
 const levelsOf = (picked: AssistantPicks | null, most: AnswerLevels): AnswerLevels =>
@@ -1645,26 +1651,29 @@ export class Workspace extends DurableObject<Env> {
     return (await this.outside.connectionsOf(person.user.id, new Date().toISOString())).map(shownConnection);
   }
 
-  /** The rooms `userId` is in, as an AI app connected as them lists them. */
-  async outsideRooms(userId: UserId): Promise<SidebarRoom[]> {
-    return (await this.store.roomsFor(userId)).rooms;
-  }
-
-  /** The rooms an AI app connected as `userId` may read and search: the ones they're in, those they've hidden and their direct messages too, as their own search has them. */
-  async outsideReadable(userId: UserId): Promise<Room[]> {
-    return (await this.store.searcherOf(userId, null)).rooms;
+  /** The rooms an AI app connected as `userId` with `scopes` lists: those they're in that it reaches (`reaches`). */
+  async outsideRooms({ userId, scopes }: OutsideReach): Promise<SidebarRoom[]> {
+    return (await this.store.roomsFor(userId)).rooms.filter(({ kind }) => reaches(scopes, kind));
   }
 
   /**
-   * The person `userId` as an AI app connected as them sends a message to room `roomId`, with when this
-   * checked, as a room's socket has it: null unless they're in the room, or "limited" once their apps
-   * have sent as many in a minute as they may.
+   * The rooms an AI app connected as `userId` with `scopes` may read and search: those it reaches
+   * (`reaches`) of the rooms they're in, the ones they've hidden too, as their own search has them.
    */
-  async outsideSender(userId: UserId, roomId: RoomId): Promise<OutsideSender | "limited" | null> {
+  async outsideReadable({ userId, scopes }: OutsideReach): Promise<Room[]> {
+    return (await this.store.searcherOf(userId, null)).rooms.filter(({ kind }) => reaches(scopes, kind));
+  }
+
+  /**
+   * The person `userId` as an AI app connected as them with `scopes` sends a message to room `roomId`,
+   * with when this checked, as a room's socket has it: null unless they're in the room and it's one the
+   * app reaches (`reaches`), or "limited" once their apps have sent as many in a minute as they may.
+   */
+  async outsideSender({ userId, scopes }: OutsideReach, roomId: RoomId): Promise<OutsideSender | "limited" | null> {
     // Before anything is read, as `roomAccess` takes it.
     const authorizedAt = Date.now();
-    const [[user], { member }] = await Promise.all([this.store.peopleWithIds([userId]), this.store.roomAccess(roomId, userId, null)]);
-    if (!user || !member) return null;
+    const [[user], { member }, kind] = await Promise.all([this.store.peopleWithIds([userId]), this.store.roomAccess(roomId, userId, null), this.store.roomKind(roomId)]);
+    if (!user || !member || !reaches(scopes, kind)) return null;
     return this.outsideSends.attempt(userId) ? { user, authorizedAt } : "limited";
   }
 
