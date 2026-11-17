@@ -94,6 +94,17 @@ export default function RichTextEditor({ label, placeholder, rows, initialValue,
       delete box.current!.dataset.linked;
       formatted({ ...format.current, link: false });
     },
+    insertText: (inserted) => {
+      box.current!.setRangeText(inserted, box.current!.selectionStart, box.current!.selectionEnd, "end");
+      onChange?.();
+    },
+    startMention: () => {
+      const text = box.current!;
+      text.focus();
+      const before = text.value.slice(0, text.selectionStart);
+      text.setRangeText(/\S$/.test(before) ? " @" : "@", text.selectionStart, text.selectionEnd, "end");
+      onChange?.();
+    },
     startNewBlock: () => false,
     catchUp: () => {},
   }));

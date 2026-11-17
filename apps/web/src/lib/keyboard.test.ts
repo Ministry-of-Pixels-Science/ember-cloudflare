@@ -11,8 +11,12 @@ import {
   pressedAlone,
   savesEdit,
   sendsMessage,
+  snippetShortcut,
   togglesHuddle,
   togglesMute,
+  uploadShortcut,
+  uploadsFiles,
+  writesSnippet,
 } from "./keyboard";
 
 function pointer(coarse: boolean) {
@@ -278,6 +282,53 @@ describe("opensShortcuts", () => {
   });
 });
 
+describe("uploadsFiles", () => {
+  it("takes Ctrl+O, but on Apple's devices, which take Cmd+O", () => {
+    on("Win32");
+    expect(uploadsFiles(press("o", { code: "KeyO", ctrlKey: true }))).toBe(true);
+    expect(uploadsFiles(press("o", { code: "KeyO", metaKey: true }))).toBe(false);
+    on("MacIntel");
+    expect(uploadsFiles(press("o", { code: "KeyO", metaKey: true }))).toBe(true);
+    expect(uploadsFiles(press("o", { code: "KeyO", ctrlKey: true }))).toBe(false);
+  });
+
+  it("leaves O alone, with other modifiers, or while an input method composes", () => {
+    on("Win32");
+    expect(uploadsFiles(press("o", { code: "KeyO" }))).toBe(false);
+    for (const modifier of ["altKey", "shiftKey", "metaKey", "isComposing"]) {
+      expect(uploadsFiles(press("o", { code: "KeyO", ctrlKey: true, [modifier]: true })), modifier).toBe(false);
+    }
+  });
+
+  it("names its keys as the keyboard does, and as screen readers hear them", () => {
+    expect(uploadShortcut(true)).toEqual({ keys: ["⌘", "O"], aria: "Meta+O" });
+    expect(uploadShortcut(false)).toEqual({ keys: ["Ctrl", "O"], aria: "Control+O" });
+  });
+});
+
+describe("writesSnippet", () => {
+  it("takes Ctrl+Shift+Enter, but on Apple's devices, which take Cmd+Shift+Enter", () => {
+    on("Linux x86_64");
+    expect(writesSnippet(press("Enter", { ctrlKey: true, shiftKey: true }))).toBe(true);
+    expect(writesSnippet(press("Enter", { metaKey: true, shiftKey: true }))).toBe(false);
+    on("MacIntel");
+    expect(writesSnippet(press("Enter", { metaKey: true, shiftKey: true }))).toBe(true);
+  });
+
+  it("leaves Cmd or Ctrl+Enter to send, and Shift+Enter to break the line", () => {
+    on("Win32");
+    expect(writesSnippet(press("Enter", { ctrlKey: true }))).toBe(false);
+    expect(writesSnippet(press("Enter", { shiftKey: true }))).toBe(false);
+    expect(writesSnippet(press("Enter", { ctrlKey: true, shiftKey: true, altKey: true }))).toBe(false);
+    expect(writesSnippet(press("Enter", { ctrlKey: true, shiftKey: true, isComposing: true }))).toBe(false);
+  });
+
+  it("names its keys as the keyboard does, and as screen readers hear them", () => {
+    expect(snippetShortcut(true)).toEqual({ keys: ["⌘", "⇧", "Enter"], aria: "Meta+Shift+Enter" });
+    expect(snippetShortcut(false)).toEqual({ keys: ["Ctrl", "Shift", "Enter"], aria: "Control+Shift+Enter" });
+  });
+});
+
 describe("SHORTCUTS", () => {
   it("names Cmd and Option on an Apple keyboard, and Ctrl and Alt on another", () => {
     const keys = (apple: boolean) => SHORTCUTS.flatMap(({ rows }) => rows.flatMap((row) => row.keys(apple)));
@@ -293,6 +344,12 @@ describe("SHORTCUTS", () => {
     expect(format.map(({ action }) => action)).toEqual(["Bold", "Italic", "Underline", "Strikethrough", "Link", "Ordered list", "Bulleted list", "Blockquote", "Code", "Code block"]);
     expect(format.find(({ action }) => action === "Link")!.keys(true)).toEqual(formattingKeys("link", true)!.keys);
     expect(format.find(({ action }) => action === "Code block")!.keys(false)).toEqual(formattingKeys("codeBlock", false)!.keys);
+  });
+
+  it("lists the + menu's keys as the menu shows them", () => {
+    const writing = SHORTCUTS.find(({ group }) => group === "Write a message")!.rows;
+    expect(writing.find(({ action }) => action === "Upload files")!.keys(true)).toEqual(uploadShortcut(true).keys);
+    expect(writing.find(({ action }) => action === "Write a text snippet")!.keys(false)).toEqual(snippetShortcut(false).keys);
   });
 
   it("lists the huddle keys as their buttons' tooltips show them", () => {

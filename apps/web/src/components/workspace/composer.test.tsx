@@ -12,6 +12,15 @@ import { editorLoaded } from "./editor";
 // and every test starts before its code has loaded.
 vi.mock("./editor", async (importOriginal) => ({ ...(await importOriginal<typeof import("./editor")>()), editorLoaded: vi.fn(() => false) }));
 
+// The emoji picker, without Emojibase's data, which isn't served here: one emoji to pick.
+vi.mock("./emoji-panel", () => ({
+  default: ({ onPick }: { onPick: (emoji: string) => void }) => (
+    <button type="button" onClick={() => onPick("🎉")}>
+      🎉
+    </button>
+  ),
+}));
+
 async function showComposer({ typing = [] as User[], disabled = false, roomId = "r1", threadId = undefined as string | undefined, direct = false, autoFocus = true } = {}) {
   const onSend = vi.fn((_body: string, _alsoSend: boolean) => true);
   const onSendFiles = vi.fn((_files: File[], _alsoSend: boolean) => {});
@@ -46,7 +55,8 @@ const sendButton = () => screen.getByRole("button", { name: "Send Message" });
 const showFormatting = () => screen.getByRole("button", { name: "Show formatting" });
 const formattingRow = () => screen.queryByRole("toolbar", { name: "Formatting" });
 const tool = (name: string) => within(formattingRow()!).getByRole("button", { name });
-const attachFiles = () => screen.getByLabelText("Attach a file");
+/** The file picker that Upload from your computer and Cmd or Ctrl+O open. */
+const fileField = () => document.querySelector<HTMLInputElement>('input[type="file"]')!;
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -54,13 +64,14 @@ afterEach(() => {
 });
 
 describe("Composer", () => {
-  it("has the formatting row over the text box, with Attach files, Show formatting and Send below", async () => {
-    const { input } = await showComposer();
+  it("has the formatting row over the text box, and Slack's buttons below it in Slack's order", async () => {
+    const { input, view } = await showComposer();
     expect(formattingRow()).toBeInTheDocument();
     expect(input).toHaveAttribute("placeholder", "Message #general");
-    expect(attachFiles().closest("label")).toHaveAttribute("title", "Attach files");
-    expect(showFormatting()).toHaveAttribute("title", "Hide formatting");
-    expect(sendButton()).toHaveAttribute("title", "Send message");
+    const below = [...view.container.querySelectorAll("form button")].filter((button) => !button.closest("[role=toolbar]"));
+    expect(below.map((button) => button.getAttribute("aria-label") ?? button.textContent)).toEqual(["Attach", "Show formatting", "Emoji", "Mention someone", "Send Message"]);
+    expect(fileField()).toHaveAttribute("multiple");
+    expect(fileField()).not.toBeVisible();
   });
 
   it("focuses the text box as the room opens", async () => {
@@ -132,7 +143,6 @@ describe("Formatting row", () => {
 
     await user.click(showFormatting());
     expect(showFormatting()).toHaveAttribute("aria-pressed", "false");
-    expect(showFormatting()).toHaveAttribute("title", "Show formatting");
     expect(formattingRow()).not.toBeInTheDocument();
     expect(form).not.toHaveAttribute("data-formatting");
     expect(input).toHaveFocus();
@@ -427,20 +437,18 @@ describe("Attach files", () => {
 
   it("waits to send the files picked with Attach files, in order of their names, however often they're picked", async () => {
     const { user } = await showComposer();
-    expect(attachFiles()).toHaveAttribute("type", "file");
-    expect(attachFiles()).toHaveAttribute("multiple");
-    await user.upload(attachFiles(), [fileOf("b.txt"), fileOf("A.pdf"), fileOf("a.txt")]);
+    await user.upload(fileField(), [fileOf("b.txt"), fileOf("A.pdf"), fileOf("a.txt")]);
     expect(chips()).toEqual(["Remove A.pdf", "Remove a.txt", "Remove b.txt"]);
 
-    await user.upload(attachFiles(), fileOf("a.txt"));
+    await user.upload(fileField(), fileOf("a.txt"));
     expect(chips()).toEqual(["Remove A.pdf", "Remove a.txt", "Remove a.txt", "Remove b.txt"]);
-    expect(attachFiles()).toHaveValue("");
+    expect(fileField()).toHaveValue("");
   });
 
   it("shows a picture's thumbnail, and a file icon for anything else, over its name up to its last dot and its extension", async () => {
     const { made } = thumbnails();
     const { user } = await showComposer();
-    await user.upload(attachFiles(), [fileOf("moon.jpg", { type: "image/jpeg" }), fileOf("archive.tar.gz", { type: "application/gzip" }), fileOf("README")]);
+    await user.upload(fileField(), [fileOf("moon.jpg", { type: "image/jpeg" }), fileOf("archive.tar.gz", { type: "application/gzip" }), fileOf("README")]);
 
     const moon = screen.getByRole("button", { name: "Remove moon.jpg" });
     expect(made).toEqual(["blob:moon.jpg"]);
@@ -458,7 +466,7 @@ describe("Attach files", () => {
   it("takes a file back out when its chip is pressed, letting go of its thumbnail", async () => {
     const { revoked } = thumbnails();
     const { user, onSendFiles } = await showComposer();
-    await user.upload(attachFiles(), [fileOf("moon.jpg", { type: "image/jpeg" }), fileOf("notes.txt")]);
+    await user.upload(fileField(), [fileOf("moon.jpg", { type: "image/jpeg" }), fileOf("notes.txt")]);
     await user.click(screen.getByRole("button", { name: "Remove moon.jpg" }));
     expect(chips()).toEqual(["Remove notes.txt"]);
     expect(revoked).toEqual(["blob:moon.jpg"]);
@@ -470,7 +478,7 @@ describe("Attach files", () => {
   it("sends the files, each as a message of its own, before what's written, and empties the list", async () => {
     const { onSend, onSendFiles, input, user } = await showComposer();
     const [b, a] = [fileOf("b.txt"), fileOf("a.txt")];
-    await user.upload(attachFiles(), [b, a]);
+    await user.upload(fileField(), [b, a]);
     await user.type(input, "Here they are{Enter}");
     expect(onSendFiles).toHaveBeenCalledExactlyOnceWith([a, b], false);
     expect(onSend).toHaveBeenCalledExactlyOnceWith("<p>Here they are</p>", false);
@@ -484,7 +492,7 @@ describe("Attach files", () => {
     const onSendFiles = vi.fn();
     const user = userEvent.setup();
     render(<Composer roomId="r1" roomName="general" userId="u1" typing={[]} disabled={false} deferEditor onSend={() => true} onSendFiles={onSendFiles} onTyping={() => {}} />);
-    await user.upload(attachFiles(), fileOf("a.txt"));
+    await user.upload(fileField(), fileOf("a.txt"));
     await user.click(sendButton());
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
     expect(onSendFiles).toHaveBeenCalledExactlyOnceWith([expect.objectContaining({ name: "a.txt" })], false);
@@ -493,7 +501,7 @@ describe("Attach files", () => {
 
   it("sends files with nothing written", async () => {
     const { onSend, onSendFiles, user } = await showComposer();
-    await user.upload(attachFiles(), fileOf("a.txt"));
+    await user.upload(fileField(), fileOf("a.txt"));
     await user.click(sendButton());
     expect(onSendFiles).toHaveBeenCalledOnce();
     expect(onSend).not.toHaveBeenCalled();
@@ -505,7 +513,7 @@ describe("Attach files", () => {
 
   it("holds on to the files while the room is disconnected, when files can't be picked", async () => {
     const { onSendFiles, composer, input, user } = await showComposer({ disabled: true });
-    expect(attachFiles()).toBeDisabled();
+    expect(fileField()).toBeDisabled();
     act(() => composer.current!.addFiles([fileOf("a.txt")]));
     await user.type(input, "{Enter}");
     expect(onSendFiles).not.toHaveBeenCalled();
@@ -535,6 +543,105 @@ describe("Attach files", () => {
   });
 });
 
+describe("The buttons under the text", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  // Hidden from screen readers, as everything but the menu is, while the menu's open.
+  const attach = () => screen.getByRole("button", { name: "Attach", hidden: true });
+
+  it("greys Send out until something's written or a file's picked, as Slack's is", async () => {
+    const { input, user } = await showComposer();
+    expect(sendButton()).toHaveAttribute("data-empty");
+    await user.type(input, "Hi");
+    expect(sendButton()).not.toHaveAttribute("data-empty");
+
+    await user.type(input, "{Enter}");
+    expect(sendButton()).toHaveAttribute("data-empty");
+    await user.upload(fileField(), fileOf("a.txt"));
+    expect(sendButton()).not.toHaveAttribute("data-empty");
+  });
+
+  it("offers Text snippet and Upload from your computer from +, an × while they show, which opens the file picker", async () => {
+    const { input, user } = await showComposer();
+    const picking = vi.spyOn(fileField(), "click").mockImplementation(() => {});
+    expect(attach().querySelector("svg")).toHaveClass("iconoir-plus");
+    await user.click(attach());
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Text snippetCtrl+Shift+Enter", "Upload from your computerCtrl+O"]);
+    expect(screen.getByRole("menuitem", { name: /Upload/ })).toHaveAttribute("aria-keyshortcuts", "Control+O");
+    expect(attach().querySelector("svg")).toHaveClass("iconoir-xmark");
+
+    await user.click(screen.getByRole("menuitem", { name: /Upload from your computer/ }));
+    expect(picking).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(attach().querySelector("svg")).toHaveClass("iconoir-plus");
+    await waitFor(() => expect(input).toHaveFocus());
+  });
+
+  it("opens the file picker on Cmd or Ctrl+O, and Text snippet on Cmd or Ctrl+Shift+Enter, which doesn't send", async () => {
+    const { input, onSend, user } = await showComposer();
+    const picking = vi.spyOn(fileField(), "click").mockImplementation(() => {});
+    await user.type(input, "Hello");
+    await user.keyboard("{Control>}o{/Control}");
+    expect(picking).toHaveBeenCalledOnce();
+
+    await user.keyboard("{Control>}{Shift>}{Enter}{/Shift}{/Control}");
+    expect(onSend).not.toHaveBeenCalled();
+    expect(await screen.findByRole("dialog", { name: "Create a text snippet" })).toBeInTheDocument();
+  });
+
+  it("adds a text snippet as a text file named after its title, to send with the next message", async () => {
+    const { input, onSendFiles, user } = await showComposer();
+    await user.click(attach());
+    await user.click(screen.getByRole("menuitem", { name: /Text snippet/ }));
+    const dialog = await screen.findByRole("dialog", { name: "Create a text snippet" });
+    const create = within(dialog).getByRole("button", { name: "Create snippet" });
+    await waitFor(() => expect(within(dialog).getByLabelText("Content")).toHaveFocus());
+    expect(create).toBeDisabled();
+
+    await user.type(within(dialog).getByLabelText("Content"), "echo hi");
+    await user.type(within(dialog).getByLabelText("Title (optional)"), "deploy.sh");
+    await user.click(create);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(chips()).toEqual(["Remove deploy.sh"]);
+    await waitFor(() => expect(input).toHaveFocus());
+
+    await user.click(sendButton());
+    const [snippet] = onSendFiles.mock.calls[0]![0];
+    expect(snippet!.type).toBe("text/plain");
+    expect(await snippet!.text()).toBe("echo hi");
+  });
+
+  it("names an untitled snippet Untitled.txt, and creates it on Cmd or Ctrl+Enter", async () => {
+    const { user } = await showComposer();
+    await user.keyboard("{Control>}{Shift>}{Enter}{/Shift}{/Control}");
+    const dialog = await screen.findByRole("dialog", { name: "Create a text snippet" });
+    await user.type(within(dialog).getByLabelText("Content"), "First line{Enter}Second line{Control>}{Enter}{/Control}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(chips()).toEqual(["Remove Untitled.txt"]);
+  });
+
+  it("writes the emoji picked where the cursor is, and puts focus back in the text", async () => {
+    const { input, user } = await showComposer();
+    await user.type(input, "Party ");
+    await user.click(screen.getByRole("button", { name: "Emoji" }));
+    await user.click(await screen.findByRole("button", { name: "🎉" }));
+    expect(input).toHaveValue("Party 🎉");
+    expect(screen.queryByRole("dialog", { name: "Emoji" })).not.toBeInTheDocument();
+    await waitFor(() => expect(input).toHaveFocus());
+  });
+
+  it("types @ for the people to mention, after a space where the cursor follows a word, keeping focus in the text", async () => {
+    const { input, user } = await showComposer();
+    await user.click(screen.getByRole("button", { name: "Mention someone" }));
+    expect(input).toHaveValue("@");
+    expect(input).toHaveFocus();
+
+    await user.type(input, "{Backspace}Thanks");
+    await user.click(screen.getByRole("button", { name: "Mention someone" }));
+    expect(input).toHaveValue("Thanks @");
+  });
+});
+
 describe("Pasting into the composer", () => {
   afterEach(() => vi.restoreAllMocks());
 
@@ -555,7 +662,7 @@ describe("250 MB file limit", () => {
 
   it("leaves out files over 250 MB, saying so under the others until more are picked, dropped or pasted", async () => {
     const { input, user, view, onSendFiles } = await showComposer();
-    await user.upload(attachFiles(), [
+    await user.upload(fileField(), [
       fileOf("huge.mov", { size: MAX_FILE_SIZE + 1 }),
       fileOf("fits.mov", { size: MAX_FILE_SIZE }),
       fileOf("vast.iso", { size: MAX_FILE_SIZE + 1 }),
@@ -571,13 +678,13 @@ describe("250 MB file limit", () => {
     expect(screen.getByRole("alert")).toBe(alert);
 
     // Picking more says only what's wrong with them.
-    await user.upload(attachFiles(), fileOf("enormous.zip", { size: MAX_FILE_SIZE + 1 }));
+    await user.upload(fileField(), fileOf("enormous.zip", { size: MAX_FILE_SIZE + 1 }));
     expect(screen.getByRole("alert")).toHaveTextContent(tooLarge("enormous.zip"), { normalizeWhitespace: false });
     fireEvent.drop(view.container.querySelector("form")!, { dataTransfer: { files: [fileOf("small.txt")] } });
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 
     // Pasting anything clears it, even text.
-    await user.upload(attachFiles(), fileOf("enormous.zip", { size: MAX_FILE_SIZE + 1 }));
+    await user.upload(fileField(), fileOf("enormous.zip", { size: MAX_FILE_SIZE + 1 }));
     fireEvent.paste(input, { clipboardData: clipboard() });
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
@@ -651,7 +758,7 @@ describe("Reply in a thread", () => {
 
   it("sends files to the room too while Also send is ticked", async () => {
     const { onSendFiles, user } = await showComposer({ threadId: "m1" });
-    await user.upload(attachFiles(), new File(["hi"], "notes.txt", { type: "text/plain" }));
+    await user.upload(fileField(), new File(["hi"], "notes.txt", { type: "text/plain" }));
     await user.click(alsoSend());
     await user.click(sendButton());
     expect(onSendFiles).toHaveBeenCalledExactlyOnceWith([expect.objectContaining({ name: "notes.txt" })], true);
