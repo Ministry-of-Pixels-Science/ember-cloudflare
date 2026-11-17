@@ -14,8 +14,9 @@ describe("Plain-text version of a message", () => {
 
   it("ends blocks with blank lines and breaks with newlines, trimming the last", () => {
     expect(read("<h1>Title</h1><p>a</p><p>b<br>c</p>")).toBe("Title\n\na\n\nb\nc");
+    expect(read("<h2>Medium</h2><h3>Small</h3><h6>Smallest</h6>")).toBe("Medium\n\nSmall\n\nSmallest");
     expect(read("<div>a</div><div>b</div>")).toBe("a\nb");
-    expect(read("<h2>no</h2><pre>break</pre><table><tr><td>x</td><td>y</td></tr></table>")).toBe("nobreakxy");
+    expect(read("<pre>no</pre><pre>break</pre><table><tr><td>x</td><td>y</td></tr></table>")).toBe("nobreakxy");
   });
 
   it("quotes quotes and bullets lists, nested ones indented", () => {
