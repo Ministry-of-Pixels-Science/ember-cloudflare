@@ -393,14 +393,14 @@ describe("Instructions", () => {
     expect(preview()).toHaveTextContent(aroundExplained("@ember"));
     expect(preview()).toHaveTextContent(`You are Ember, the AI assistant in the team chat "Analytical Engines".`);
     expect(preview()).toHaveTextContent("Your instructions");
-    expect(preview()).toHaveTextContent("You're asked in a direct message. Its messages follow, oldest first, each after its writer's name. Answer the last one, which Ada Lovelace wrote, as a helpful teammate would: plainly, and in at most about 400 words.");
+    expect(preview()).toHaveTextContent(`You're asked in a direct message. Its messages follow, oldest first, each after its writer's name. Answer the last one, which "Ada Lovelace" wrote, as a helpful teammate would: plainly, and in at most about 400 words.`);
     expect(preview()).toHaveTextContent("You can't search the web or open links.");
   });
 
   it("shows @ember told to answer no longer than Limits let it answer anyone", () => {
     serve();
     showCard(on("anthropic/claude-sonnet-5.5", { ...TOP_LEVELS, length: "short" }));
-    expect(preview()).toHaveTextContent("Answer the last one, which Ada Lovelace wrote, as a helpful teammate would: plainly, and in at most about 150 words.");
+    expect(preview()).toHaveTextContent(`Answer the last one, which "Ada Lovelace" wrote, as a helpful teammate would: plainly, and in at most about 150 words.`);
   });
 
   it("shows @ember told it can search the web while Search the web is on", () => {
@@ -460,7 +460,7 @@ describe("Instructions", () => {
     await user.click(modify());
     await user.clear(templateBox());
     await user.paste(`  ${SCRIBE}\n`);
-    expect(preview()).toHaveTextContent("You are Ember, the scribe of Analytical Engines. Your instructions Answer Ada Lovelace in at most 400 words.");
+    expect(preview()).toHaveTextContent(`You are Ember, the scribe of Analytical Engines. Your instructions Answer "Ada Lovelace" in at most 400 words.`);
     expect(within(preview()).getByText("Modified")).toBeInTheDocument();
     expect(save()).toBeEnabled();
     await user.click(saveTemplate());

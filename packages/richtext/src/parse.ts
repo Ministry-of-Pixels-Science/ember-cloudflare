@@ -5,12 +5,15 @@ import { html, Parser, TokenizerMode, type Token, type TreeAdapter, type TreeAda
 import {
   BODY,
   MAX_ATTRIBUTES,
+  MAX_COPIED_ATTRIBUTES_LENGTH,
   MAX_REOPENED_ELEMENTS,
   MAX_TREE_DEPTH,
   ParseLimitError,
   withoutByteOrderMark,
   type HtmlParser,
+  type Reading,
 } from "./markup";
+import { attributesHtml } from "./serialize";
 import {
   append,
   createComment,
@@ -33,11 +36,11 @@ import {
  * Parses `markup` in the context of an element named `context` (a `body` by default), as
  * `Nokogiri::HTML5::DocumentFragment` does: without scripting, so `<noscript>` holds markup, with a
  * template's contents as its children, and with a leading byte order mark dropped. Throws
- * `ParseLimitError` past Gumbo's limits.
+ * `ParseLimitError` past Gumbo's limits, and Ember's own.
  */
-export const parseHtml: HtmlParser = (markup, context = BODY) => {
+export const parseHtml: HtmlParser = (markup, context = BODY, reading = { copiedAttributesLength: 0 }) => {
   const contextElement = createElement(context.name, [], context.namespace);
-  const parser = GumboParser.getFragmentParser(contextElement, { treeAdapter, scriptingEnabled: false });
+  const parser = GumboParser.getFragmentParser(contextElement, { treeAdapter: countingCopies(reading), scriptingEnabled: false });
   // Without scripting, a noscript context leaves the tokenizer in its data state, as in Gumbo,
   // where parse5 switches it to RAWTEXT either way
   if (context.name === "noscript" && context.namespace === HTML_NAMESPACE) parser.tokenizer.state = TokenizerMode.DATA;
@@ -116,6 +119,35 @@ const treeAdapter: TreeAdapter<TreeMap> = {
   updateNodeSourceCodeLocation: () => {},
 };
 
+/**
+ * The tree adapter for a parse of `reading`, which counts the attributes of each copy the parse makes
+ * of a formatting element. parse5 makes every element of a tag from the tag's own list of attributes,
+ * so an element made from a list that has made one already is a copy: one reopened, or one of the
+ * adoption agency's, which parse5 gives no method to override.
+ */
+function countingCopies(reading: Reading): TreeAdapter<TreeMap> {
+  const used = new Set<Token.Attribute[]>();
+  return {
+    ...treeAdapter,
+    createElement: (name, namespace, attrs) => {
+      const element = treeAdapter.createElement(name, namespace, attrs);
+      if (attrs.length === 0) return element;
+      if (used.has(attrs)) countCopy(reading, element);
+      else used.add(attrs);
+      return element;
+    },
+  };
+}
+
+/**
+ * Counts a copy's attributes in its reading, as long as the stored form writes them, up to Ember's
+ * `MAX_COPIED_ATTRIBUTES_LENGTH` in all.
+ */
+function countCopy(reading: Reading, copy: Element): void {
+  reading.copiedAttributesLength += attributesHtml(copy.attrs, { escapeAttributeBrackets: true }).length;
+  if (reading.copiedAttributesLength > MAX_COPIED_ATTRIBUTES_LENGTH) throw new ParseLimitError("copied");
+}
+
 // --- Gumbo's limits -----------------------------------------------------------------------------
 
 /**
@@ -124,7 +156,8 @@ const treeAdapter: TreeAdapter<TreeMap> = {
  * pending in a table can reopen formatting elements past the limit unchecked), and counts the
  * open elements, the fragment's root `html` included (nokogiri's ext/nokogiri/gumbo.c). Attributes
  * are counted as the tokenizer finishes each name, before a duplicate is dropped, on end tags too.
- * It also keeps Ember's limit on reopened formatting elements, and moves children in linear time.
+ * It also keeps Ember's limit on reopened formatting elements, as its tree adapter keeps the one on
+ * the attributes they're copied with (`countingCopies`), and moves children in linear time.
  * parse5 exports its parser class for its own use, so package.json pins the version this hooks into.
  */
 class GumboParser extends Parser<TreeMap> {

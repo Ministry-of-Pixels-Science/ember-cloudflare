@@ -27,17 +27,19 @@ import {
   MAX_CONTENT_ATTACHMENT_DEPTH,
   sanitizeContentAttribute,
 } from "./content";
-import { BODY, parseReplacement, setInnerHtml, type HtmlParser } from "./markup";
+import { BODY, forOneReading, parseReplacement, setInnerHtml, type HtmlParser } from "./markup";
 import { mentionSgid } from "./mentions";
 import { previewContent, removeSoloUnfurledLinkText } from "./previews";
 import { chomp, htmlEscape, presence, strip } from "./ruby";
 import { ACTION_TEXT, ATTACHMENT_ATTRIBUTES, AUTO_LINK, CONTENT_FILTER, sanitize, sanitizeTags, scrub } from "./sanitize";
 import { toHtml } from "./serialize";
 import {
+  ancestors,
   createElement,
   createFragment,
   descendants,
   detach,
+  elementChildren,
   getAttr,
   isElement,
   removeAttr,
@@ -63,7 +65,8 @@ interface Partials {
  */
 export function presentMessage(parse: HtmlParser, body: string, resolve: ResolveMention, mention: Partials["mention"], host = ""): string {
   const partials = { mention, preview: opengraphEmbedPartial };
-  return toHtml(renderFiltered(parse, filterMessage(parse, body, resolve, host), resolve, partials, host), { escapeAttributeBrackets: true });
+  const read = forOneReading(parse);
+  return toHtml(renderFiltered(read, filterMessage(read, body, resolve, host), resolve, partials, host), { escapeAttributeBrackets: true });
 }
 
 const MENTION_MARKER = "ember-mention";
@@ -87,7 +90,8 @@ export function canonicalize(parse: HtmlParser, body: string, resolve: ResolveMe
     mention: (user) => `<${MENTION_MARKER} user="${htmlEscape(user.id)}"></${MENTION_MARKER}>`,
     preview: (embed) => `<${PREVIEW_MARKER} index="${previews.push(embed) - 1}"></${PREVIEW_MARKER}>`,
   };
-  const content = withoutLayout(renderFiltered(parse, filterStored(parse, body, resolve), resolve, markers, ""));
+  const read = forOneReading(parse);
+  const content = withoutLayout(renderFiltered(read, filterStored(read, body, resolve), resolve, markers, ""));
   const replacements = new Map<Node, Node[]>();
   for (const node of descendants(content)) {
     if (!isElement(node)) continue;
@@ -128,7 +132,7 @@ function previewAttachment(embed: OpengraphEmbed): Element {
  * SanitizeTags and SanitizeAttributes. The first reads the body's plain text, which can raise.
  */
 export function filterMessage(parse: HtmlParser, body: string, resolve: ResolveMention, host = ""): Fragment {
-  const plainText = contentToPlainText(parse, loadContent(parse, body), resolve);
+  const plainText = readPlainText(parse, body, resolve);
   const content = loadContent(parse, body);
   removeSoloUnfurledLinkText(parse, content, plainText, host);
   return sanitizeFiltered(parse, content);
@@ -139,8 +143,14 @@ export function filterMessage(parse: HtmlParser, body: string, resolve: ResolveM
  * applies as a message shows, but still raising where reading its plain text does.
  */
 function filterStored(parse: HtmlParser, body: string, resolve: ResolveMention): Fragment {
-  contentToPlainText(parse, loadContent(parse, body), resolve);
+  readPlainText(parse, body, resolve);
   return sanitizeFiltered(parse, loadContent(parse, body));
+}
+
+/** The body's plain text, in a reading of its own: the one `parse` is for reads the body again, and copies as much. */
+function readPlainText(parse: HtmlParser, body: string, resolve: ResolveMention): string {
+  const read = forOneReading(parse);
+  return contentToPlainText(read, loadContent(read, body), resolve);
 }
 
 /** SanitizeTags, then SanitizeAttributes. */
@@ -166,6 +176,8 @@ function withoutLayout(fragment: Fragment): Fragment {
 class Renderer {
   /** The `content` attributes of rendered attachments, by the stand-ins that replace them. */
   private readonly contents = new Map<string, string>();
+  /** What `renderContent` made of each content it rendered, by its depth and the content. */
+  private readonly renderedContents = new Map<string, string>();
 
   constructor(
     private readonly parse: HtmlParser,
@@ -178,6 +190,13 @@ class Renderer {
    * `render_action_text_content(content)` for content `depth` content attachments down: its
    * attachments and galleries rendered, then sanitized with Action Text's allowlist, which leaves
    * the stand-ins for mentions and previews as they are.
+   *
+   * Unlike Rails, a gallery renders only its own attachments, and the galleries in what an
+   * attachment's content rendered stay as that level rendered them. Rails counts the gallery
+   * attachments in what a gallery's attachments rendered as the gallery's too, and renders the
+   * galleries in rendered content again at every level above them, so galleries nested in one
+   * another's attachments multiplied the rendering and its markup at each level, however deep
+   * content renders.
    */
   render(content: Fragment, depth: number): string {
     const parse = this.parse;
@@ -192,9 +211,9 @@ class Renderer {
     replaceEach(attachments);
     const galleries = new Map<Node, Node[]>();
     for (const gallery of attachmentGalleryNodes(content)) {
-      const members = descendants(gallery).filter(
-        (node): node is Element => isElement(node, ATTACHMENT_TAG) && getAttr(node, "presentation") === "gallery",
-      );
+      if (isInsideAttachment(gallery)) continue;
+      // A gallery's elements are all gallery attachments
+      const members = elementChildren(gallery);
       let rendered = "";
       for (const member of members) {
         const node = this.withContent(member);
@@ -230,9 +249,20 @@ class Renderer {
     }
   }
 
-  /** A content attachment's content, rendered without a layout, as deep as content renders. */
+  /**
+   * A content attachment's content, rendered without a layout, as deep as content renders. Content
+   * renders the same each time at a depth, and a gallery renders its attachments a second time, so
+   * each rendering is kept: rendered twice, nested galleries would double the work at every level.
+   */
   private renderContent(content: string, depth: number): string {
-    return depth < MAX_CONTENT_ATTACHMENT_DEPTH ? `${this.render(loadContent(this.parse, content), depth + 1)}\n` : "";
+    if (depth >= MAX_CONTENT_ATTACHMENT_DEPTH) return "";
+    const key = `${depth} ${content}`;
+    let rendered = this.renderedContents.get(key);
+    if (rendered === undefined) {
+      rendered = `${this.render(loadContent(this.parse, content), depth + 1)}\n`;
+      this.renderedContents.set(key, rendered);
+    }
+    return rendered;
   }
 
   /**
@@ -261,6 +291,9 @@ class Renderer {
     return createElement(rendered.name, attrs, rendered.namespace);
   }
 }
+
+/** Whether a node is part of what an attachment rendered, which is all a rendered attachment holds. */
+const isInsideAttachment = (node: Node) => ancestors(node).some((ancestor) => isElement(ancestor, ATTACHMENT_TAG));
 
 /**
  * `Attachment#with_full_attributes`'s node: the node's attachment attributes, in Action Text's

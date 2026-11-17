@@ -1465,8 +1465,10 @@ What a self-hoster should know, beyond keeping the setup password and link to th
 - An administrator can make a sign-in link for anyone, administrators included, which signs in as
   that person for 4 hours, more than once, while the session that showed it is still signed in as an
   administrator. Your own link works only while the session that showed it does, so signing out, a
-  password reset, or a new password saved in another session ends it. Its id travels in the
-  address's fragment, which no log sees.
+  password reset, or a new password saved in another session ends it. A new password saved in the
+  session that showed it, or Disconnect Memberful there, ends every link that session had shown until
+  then, those an administrator showed of other people included, and the ones it shows from then on
+  work. Its id travels in the address's fragment, which no log sees.
 - A file's address is signed and never expires: whoever has it can open the file until its message
   is deleted, as with Active Storage's links. A bot is given the addresses of the files in its rooms,
   with the messages its webhook is sent and those the bot API answers, so it can read them.

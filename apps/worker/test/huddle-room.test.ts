@@ -308,6 +308,26 @@ describe("A room's huddle", () => {
     expect(await adas.next("huddle.left")).toEqual({ type: "huddle.left", userId: grace.user.id });
     expect(sfu.asked).toEqual([]);
   });
+
+  it("takes whoever sends a frame larger than a room takes out of the huddle as it closes their socket, though their tab never answers the close", async () => {
+    const { ada, sfu } = await huddlesOn();
+    const room = await freshRoom("too-large");
+    const grace = await signIn("Grace");
+    const adas = await welcomed(room, ada);
+    const graces = await welcomed(room, grace);
+    await publishing(sfu, adas);
+    const fromGrace = await publishing(sfu, graces);
+    await listen(graces, true);
+    const toGrace = newest(sfu);
+    // As when a tab never answers the close: the room hears nothing more of the socket.
+    await runInDurableObject(roomStub(room), (instance: ChatRoom) => void vi.spyOn((instance as unknown as { huddle: Huddle }).huddle, "left").mockImplementation(() => {}));
+
+    graces.sendRaw(" ".repeat(MAX_ROOM_FRAME_SIZE + 1));
+    expect((await graces.closed).code).toBe(1009);
+    expect(await adas.next("huddle.left")).toEqual({ type: "huddle.left", userId: grace.user.id });
+    await vi.waitFor(() => expect([closedOn(sfu, fromGrace), closedOn(sfu, toGrace)]).toEqual([["0"], ["0"]]));
+    expect(await remembered(room)).toMatchObject([{ user: ada.user }]);
+  });
 });
 
 describe("What a huddle asks of the Realtime SFU", () => {
@@ -2046,6 +2066,21 @@ describe("Who a huddle is for", () => {
     expect(await (await joinHuddle(room, grace)).closed).toMatchObject({ code: CloseCode.NotFound });
     await reached(adas);
     expect(adas.pending("huddle.joined")).toHaveLength(1);
+  });
+
+  it("ignores what a socket sent before it heard it was closed", async () => {
+    const { ada } = await huddlesOn();
+    const room = await freshRoom("late");
+    const grace = await signIn("Grace");
+    const adas = await welcomed(room, ada);
+    const graces = await welcomed(room, grace);
+
+    await roomStub(room).revoke(room, [{ tag: grace.user.id, code: CloseCode.Revoked }], Date.now());
+    graces.send({ type: "huddle.mute", muted: true });
+
+    expect(await adas.next("huddle.left")).toEqual({ type: "huddle.left", userId: grace.user.id });
+    await reached(adas);
+    expect(adas.pending("huddle.changed")).toEqual([]);
   });
 
   it("takes someone who leaves the room out of its huddle too", async () => {

@@ -150,8 +150,24 @@ function logIndexingRepliesTo(roomId: RoomId, message: Message, plainText: strin
   return retold ? [logIndexingReplies(roomId, JSON.stringify([message.id]))] : [];
 }
 
-/** A link written as one, in a message's markup or its cards'. */
-const WRITTEN_LINK = /<a\s[^>]*\bhref=/i;
+/** What a link written as one is read by: where its tag may start, where a tag ends, and where a tag gives an address. */
+const LINK_MARKS = /<a\s|>|\bhref=/gi;
+
+/**
+ * Whether a message's markup, or its cards', has a link written as one: an `<a ` with an `href=` after it
+ * and no `>` between, which is what `/<a\s[^>]*\bhref=/i` matches. That pattern reads on from every `<a `
+ * to the next `>`, or to the text's end, and a bot can fill its cards' plain text with them, so this reads
+ * the text once instead.
+ */
+function hasWrittenLink(markup: string): boolean {
+  let inLinkTag = false;
+  for (const [mark] of markup.matchAll(LINK_MARKS)) {
+    if (mark === ">") inLinkTag = false;
+    else if (mark.startsWith("<")) inLinkTag = true;
+    else if (inLinkTag) return true;
+  }
+  return false;
+}
 
 /**
  * What search filters narrow a search by, as the search index keeps it: who wrote the message, its
@@ -165,9 +181,9 @@ function searchFactsOf(row: MessageRow): SearchFacts {
     creatorId: row.creator_id,
     threadId: row.parent_id ?? (threadOf(row) ? row.id : null),
     hasLink:
-      WRITTEN_LINK.test(row.body) ||
+      hasWrittenLink(row.body) ||
       (row.attachment === null && hasLinkable(row.plain_text)) ||
-      (row.cards !== null && (WRITTEN_LINK.test(row.cards) || hasLinkable(row.cards))),
+      (row.cards !== null && (hasWrittenLink(row.cards) || hasLinkable(row.cards))),
     hasFile: row.attachment !== null,
     mentionIds: [...new Set((JSON.parse(row.mentions) as (User | UserId)[]).map((person) => (typeof person === "string" ? person : person.id)))],
   };

@@ -5,6 +5,8 @@ import { describe, expect, it } from "vitest";
 import { openDb, statement } from "../src/db";
 import type { Env } from "../src/env";
 import { MIGRATIONS, migrate, SEARCH_MIGRATIONS, type Scope } from "../src/migrations";
+import { searchStatement, type IndexSearch } from "../src/search-index";
+import { WorkspaceStore } from "../src/workspace-store";
 import { apiWith, connect, freshRoom, objectSql, post, roomSql, roomStub, searchIndexStub, sharedD1, workspaceStub } from "./support";
 
 /** The tables each kind of object keeps. A migration's new tables go under the scope it names. */
@@ -298,6 +300,101 @@ describe("Durable Object SQLite or D1", () => {
       kept("general", "visitor"),
       { room_id: "launch", user_id: "visitor", created_at: now, updated_at: now },
     ]);
+  });
+
+  it("keeps the sessions from before they said when their sign-in links ended, whose links go on working, and takes one as the release before saves it", async () => {
+    // D1 runs the same SQL, at setup, with no sessions from before to keep.
+    if (sharedD1()) return;
+    // A new room's storage stands in for a Workspace's from before, since a Workspace migrates as it opens.
+    const room = await freshRoom("sessions-before");
+    const { sessions, linked } = await runInDurableObject(roomStub(room), async (_room, state: DurableObjectState) => {
+      state.storage.sql.exec("CREATE TABLE d1_migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE)");
+      for (const { name, sql } of MIGRATIONS.filter(({ scope, name }) => scope === "workspace" && name < "0064")) {
+        state.storage.sql.exec(sql);
+        state.storage.sql.exec("INSERT INTO d1_migrations (name) VALUES (?)", name);
+      }
+      state.storage.sql.exec("INSERT INTO users (id, name, created_at, updated_at) VALUES ('u1', 'Grace', 'now', 'now')");
+      // A session as it was saved before, and as the release before saves one still.
+      const signIn = (id: string) =>
+        state.storage.sql.exec(
+          `INSERT INTO sessions (id, user_id, token_digest, ip_address, user_agent, last_active_at, created_at, updated_at)
+           VALUES (?, 'u1', ?, '203.0.113.7', 'Firefox', '2026-11-16T00:00:00.000Z', '2026-11-16T00:00:00.000Z', '2026-11-16T00:00:00.000Z')`,
+          id,
+          `digest of ${id}`,
+        );
+      signIn("laptop");
+      // What a Workspace does as it opens.
+      const store = new WorkspaceStore(openDb(env as unknown as Env, state.storage, "workspace"));
+      signIn("phone");
+      // A link the laptop showed an hour before the update signs a tablet in after it.
+      const hourAgo = Date.now() - 60 * 60_000;
+      const linked = await store.startTransferredSession("u1", "laptop", hourAgo, false, "tablet", "digest of tablet", { ip: null, userAgent: null }, new Date().toISOString());
+      return { sessions: state.storage.sql.exec("SELECT id, transfers_since FROM sessions ORDER BY id").toArray(), linked };
+    });
+    expect(sessions).toEqual([
+      { id: "laptop", transfers_since: 0 },
+      { id: "phone", transfers_since: 0 },
+      { id: "tablet", transfers_since: 0 },
+    ]);
+    expect(linked).toMatchObject({ id: "tablet", user: { id: "u1", name: "Grace" } });
+  });
+
+  it("gives a search index from before its indexes by room those, so a search of filters alone finds what it held", async () => {
+    // A new room's storage stands in for the search index's from before, since the index migrates as it opens, on either backend.
+    const room = await freshRoom("search-index-before");
+    const { early, indexes, found } = await runInDurableObject(roomStub(room), (_room, state: DurableObjectState) => {
+      const { sql } = state.storage;
+      sql.exec("CREATE TABLE d1_migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE)");
+      for (const { name, sql: migration } of SEARCH_MIGRATIONS.filter(({ name }) => name < "0004")) {
+        sql.exec(migration);
+        sql.exec("INSERT INTO d1_migrations (name) VALUES (?)", name);
+      }
+      // Twelve messages, by turns in general and leads: Ada's and Grace's two at a time, every fourth with
+      // a link, every third with a file, and each room's first a thread's.
+      for (let i = 0; i < 12; i++) {
+        sql.exec(
+          `INSERT INTO search_messages (id, message_id, room_id, message, creator_id, thread_id, has_link, has_file) VALUES (?, ?, ?, '{}', ?, ?, ?, ?)`,
+          i + 1,
+          `m${i + 1}`,
+          i % 2 === 0 ? "general" : "leads",
+          i % 4 < 2 ? "ada" : "grace",
+          i < 2 ? `m${i + 1}` : null,
+          i % 4 === 0 ? 1 : 0,
+          i % 3 === 0 ? 1 : 0,
+        );
+      }
+      /** The numbers of general's messages that meet `filters`, newest first. */
+      const numbers = (filters: Partial<IndexSearch> = {}) => {
+        const { sql: query, values } = searchStatement({ terms: "", roomIds: ["general"], sort: "newest", after: null, ...filters });
+        return sql
+          .exec<{ number: number }>(query, ...values)
+          .toArray()
+          .map(({ number }) => number);
+      };
+      // Before the index has them, a search that reads by one of its new indexes can't run.
+      let early = "found";
+      try {
+        numbers({ creatorId: "ada" });
+      } catch (error) {
+        early = String(error);
+      }
+      migrate(state.storage, "search");
+      const indexes = sql.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'search_messages' AND name GLOB '*room_id*' ORDER BY name");
+      return {
+        early,
+        indexes: indexes.toArray().map(({ name }) => name),
+        found: { all: numbers(), from: numbers({ creatorId: "ada" }), links: numbers({ hasLink: true }), files: numbers({ hasFile: true }), threads: numbers({ inThread: true }) },
+      };
+    });
+    expect(early).toMatch(/no such index/);
+    expect(indexes).toEqual([
+      "index_search_messages_in_threads_on_room_id_and_id",
+      "index_search_messages_on_room_id_and_creator_id_and_id",
+      "index_search_messages_on_room_id_and_id",
+      "index_search_messages_with_files_on_room_id_and_id",
+      "index_search_messages_with_links_on_room_id_and_id",
+    ]);
+    expect(found).toEqual({ all: [11, 9, 7, 5, 3, 1], from: [9, 5, 1], links: [9, 5, 1], files: [7, 1], threads: [1] });
   });
 
   it("runs a batch as one transaction: if a statement fails, the ones before it are undone", async () => {

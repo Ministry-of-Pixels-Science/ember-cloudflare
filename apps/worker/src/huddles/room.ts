@@ -25,7 +25,7 @@ import {
 } from "@ember/protocol/huddles";
 import type { Env } from "../env";
 import { sortableId } from "../ids";
-import { CLOSE_REASONS, closedAtOnce, closeTooLarge, isTooLarge, MAX_ROOM_FRAME_SIZE } from "../sockets";
+import { CLOSE_REASONS, closedAtOnce, isTooLarge, MAX_ROOM_FRAME_SIZE, TOO_LARGE } from "../sockets";
 import { workspace } from "../workspace";
 import type { InvitationPush } from "../workspace-store";
 import type { HuddleNow, ResumedHuddle } from "./message";
@@ -441,8 +441,13 @@ export class Huddle {
 
   /** Does what a frame from one of the huddle's sockets asks. */
   async message(ws: WebSocket, raw: string | ArrayBuffer): Promise<void> {
+    // A socket the room has closed, as when its person lost the room, can't change anything, even with
+    // frames it sent before it heard.
+    if (ws.readyState !== WebSocket.OPEN) return;
     // A session description is the largest thing a tab sends, and fits a room's largest frame twice over.
-    if (isTooLarge(raw, MAX_ROOM_FRAME_SIZE)) return closeTooLarge(ws);
+    // Whoever sends more leaves the huddle as the room closes their socket, rather than when their tab
+    // answers the close, which it may never do.
+    if (isTooLarge(raw, MAX_ROOM_FRAME_SIZE)) return this.remove(ws, TOO_LARGE);
     const frame = typeof raw === "string" ? parseHuddleClientFrame(raw) : null;
     if (!frame) return send(ws, { type: "error", message: UNRECOGNIZED });
     switch (frame.type) {
@@ -479,7 +484,7 @@ export class Huddle {
   }
 
   /** Takes `socket`'s person out of the huddle: closes it with `code`, tells the others they left, and has the SFU close their tracks. */
-  remove(socket: WebSocket, code: CloseCode | HuddleCloseCode): void {
+  remove(socket: WebSocket, code: CloseCode | HuddleCloseCode | typeof TOO_LARGE): void {
     const attachment = this.close(socket, code);
     if (!attachment) return;
     this.broadcast({ type: "huddle.left", userId: attachment.user.id });
@@ -933,7 +938,7 @@ export class Huddle {
    * Closes `socket` itself, with `code`, if it's open, and answers what it remembered. Unless `cut` says
    * not to, the SFU closes its tab's tracks.
    */
-  private close(socket: WebSocket, code: CloseCode | HuddleCloseCode, cut = true): HuddleAttachment | null {
+  private close(socket: WebSocket, code: CloseCode | HuddleCloseCode | typeof TOO_LARGE, cut = true): HuddleAttachment | null {
     if (socket.readyState !== WebSocket.OPEN) return null;
     const attachment = change(socket, (attachment) => ({ ...attachment, revoked: true }));
     socket.close(code, CLOSE_REASONS[code]);

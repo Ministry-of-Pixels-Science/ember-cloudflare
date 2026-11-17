@@ -1,6 +1,6 @@
 import { TRANSFER_PATH, type LinkSignIn, type Me, type NewWorkspace, type PersonAnswer, type ProfileAnswer, type UserId } from "@ember/protocol";
 import { env } from "cloudflare:workers";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { tokenDigest } from "../src/auth";
 import type { Env } from "../src/env";
 import { newTransferId, TRANSFER_LINK_EXPIRY_MS, transferOf } from "../src/transfers";
@@ -58,23 +58,24 @@ async function expectRefused(response: Response, why: string) {
 }
 
 beforeEach(freshDeploy);
+afterEach(() => vi.useRealTimers());
 
 describe("Private sign-in link", () => {
   describe("its id", () => {
-    const someone = { userId: "someone", sessionId: "0123456789abcdef" };
+    const someone = { userId: "someone", sessionId: "0123456789abcdef", shownAt: 0 };
 
-    it("names whom it signs in and the session that showed it until it expires, 4 hours after it's made", async () => {
-      const transferId = await newTransferId(someone, SECRET, 0);
+    it("names whom it signs in, the session that showed it and when, until it expires, 4 hours after it's shown", async () => {
+      const transferId = await newTransferId(someone, SECRET);
       expect(transferId).toMatch(/^someone\.0123456789abcdef\.[0-9a-z]+\.[\w-]+$/);
       expect(await transferOf(transferId, SECRET, 0)).toEqual(someone);
       expect(await transferOf(transferId, SECRET, TRANSFER_LINK_EXPIRY_MS - 1)).toEqual(someone);
       expect(await transferOf(transferId, SECRET, TRANSFER_LINK_EXPIRY_MS)).toBeNull();
       const dotted = { ...someone, userId: "some.one" };
-      expect(await transferOf(await newTransferId(dotted, SECRET, 0), SECRET, 0)).toEqual(dotted);
+      expect(await transferOf(await newTransferId(dotted, SECRET), SECRET, 0)).toEqual(dotted);
     });
 
     it("names nobody once changed, or when another secret signed it", async () => {
-      const [userId, sessionId, expiresAt, signature] = (await newTransferId(someone, SECRET, 0)).split(".") as [string, string, string, string];
+      const [userId, sessionId, expiresAt, signature] = (await newTransferId(someone, SECRET)).split(".") as [string, string, string, string];
       const later = (TRANSFER_LINK_EXPIRY_MS * 2).toString(36);
       const flipped = `${signature.slice(0, -1)}${signature.endsWith("A") ? "B" : "A"}`;
       const changes = [
@@ -87,7 +88,7 @@ describe("Private sign-in link", () => {
         `${userId}.${expiresAt}.${signature}`,
       ];
       for (const changed of changes) expect(await transferOf(changed, SECRET, 0), changed).toBeNull();
-      expect(await transferOf(await newTransferId(someone, "another secret", 0), SECRET, 0)).toBeNull();
+      expect(await transferOf(await newTransferId(someone, "another secret"), SECRET, 0)).toBeNull();
     });
 
     it("names nobody when it isn't one", async () => {
@@ -99,7 +100,7 @@ describe("Private sign-in link", () => {
 
   it("comes with your profile, whenever it loads or saves, shown by your session", async () => {
     const administrator = await setUp();
-    const yours = { userId: administrator.user.id, sessionId: await sessionIdOf(administrator) };
+    const yours = { userId: administrator.user.id, sessionId: await sessionIdOf(administrator), shownAt: expect.any(Number) as number };
     expect(await transferOf(await yourTransferId(administrator), SECRET, Date.now())).toEqual(yours);
 
     const saved = (await (await api("/api/users/me/profile", { method: "PATCH", headers: as(administrator), body: JSON.stringify({ bio: "Countess" }) })).json()) as ProfileAnswer;
@@ -117,7 +118,7 @@ describe("Private sign-in link", () => {
     const sessionId = await sessionIdOf(administrator);
     for (const userId of [grace, administrator.user.id]) {
       const { transferId } = await personAnswer(administrator, userId);
-      expect(await transferOf(transferId!, SECRET, Date.now())).toEqual({ userId, sessionId });
+      expect(await transferOf(transferId!, SECRET, Date.now())).toEqual({ userId, sessionId, shownAt: expect.any(Number) });
     }
     for (const userId of [banned, removed, bot]) expect(await personAnswer(administrator, userId), userId).not.toHaveProperty("transferId");
     expect(await personAnswer(people[0]!, administrator.user.id)).not.toHaveProperty("transferId");
@@ -154,14 +155,14 @@ describe("Private sign-in link", () => {
     const administrator = await setUp();
     const grace = await signIn("Grace Hopper");
     const [, sessionId, expiresAt, signature] = (await yourTransferId(grace)).split(".") as [string, string, string, string];
-    const graces = { userId: grace.user.id, sessionId };
+    const graces = { userId: grace.user.id, sessionId, shownAt: Date.now() };
 
     const refused = {
-      expired: await newTransferId(graces, SECRET, Date.now() - TRANSFER_LINK_EXPIRY_MS - 1),
+      expired: await newTransferId({ ...graces, shownAt: graces.shownAt - TRANSFER_LINK_EXPIRY_MS - 1 }, SECRET),
       "for someone else": `${administrator.user.id}.${sessionId}.${expiresAt}.${signature}`,
-      "signed with another secret": await newTransferId(graces, "another secret", Date.now()),
-      "for nobody": await newTransferId({ ...graces, userId: "nobody" }, SECRET, Date.now()),
-      "shown by no session": await newTransferId({ ...graces, sessionId: "nosession" }, SECRET, Date.now()),
+      "signed with another secret": await newTransferId(graces, "another secret"),
+      "for nobody": await newTransferId({ ...graces, userId: "nobody" }, SECRET),
+      "shown by no session": await newTransferId({ ...graces, sessionId: "nosession" }, SECRET),
       "made up": "nonsense",
     };
     for (const [why, transferId] of Object.entries(refused)) await expectRefused(await transfer(transferId, administrator), why);
@@ -211,6 +212,26 @@ describe("Private sign-in link", () => {
     for (const [i, transferId] of [...theirs, later].entries()) await expectRefused(await transfer(transferId), `link ${i}`);
     // Grace's own link was shown by her session, which goes on.
     expect((await transfer(graces)).status).toBe(201);
+  });
+
+  it("answers 400 for every link a session showed before it gave its person a new password, though those it shows from then on work", async () => {
+    const administrator = await setUp();
+    const grace = await signIn("Grace Hopper");
+    const links = async () => [await yourTransferId(administrator), (await personAnswer(administrator, grace.user.id)).transferId!];
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() });
+    const before = await links();
+    const opened = await transferred(before[0]!);
+
+    // A millisecond later.
+    vi.setSystemTime(Date.now() + 1);
+    const changes = { password: "difference engine", currentPassword: ada.password };
+    const saved = await api("/api/users/me/profile", { method: "PATCH", headers: as(administrator), body: JSON.stringify(changes) });
+    expect(saved.status).toBe(200);
+    // The session one of them started ends with her other sessions, and none starts another.
+    expect(await whoIs(opened.cookie)).toBe(401);
+    for (const [i, transferId] of before.entries()) await expectRefused(await transfer(transferId), `link ${i}`);
+    for (const transferId of [((await saved.json()) as ProfileAnswer).transferId, ...(await links())]) expect((await transfer(transferId)).status).toBe(201);
+    expect(await whoIs(administrator.cookie)).toMatchObject({ id: administrator.user.id });
   });
 
   it("answers 400 for a link an administrator showed of someone else once they're no longer an active administrator, though their own still works", async () => {
