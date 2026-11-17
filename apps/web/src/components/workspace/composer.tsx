@@ -1,6 +1,6 @@
 import { Suspense, useEffect, useEffectEvent, useImperativeHandle, useLayoutEffect, useRef, useState, type Ref } from "react";
-import { MAX_FILE_SIZE, type User } from "@ember/protocol";
-import { OPENGRAPH_EMBED_CONTENT_TYPE, previewContent } from "@ember/richtext/dom";
+import { MAX_FILE_SIZE, type LinkPreview, type User } from "@ember/protocol";
+import { hasPreview, linkedUrls, OPENGRAPH_EMBED_CONTENT_TYPE, previewContent, writtenBody } from "@ember/richtext/dom";
 import { AtSign, Page, Send, TextSquare, XmarkCircle } from "@/components/icons/iconoir";
 import { useNameOf } from "@/hooks/use-directory";
 import { fetchLinkPreview, mentionPromptSrc } from "@/lib/api";
@@ -164,23 +164,81 @@ function useEditorShown(deferred: boolean): boolean {
   return shown;
 }
 
+/** Adds the preview of a link in a message that has gone, which came after it did. */
+export type AddPreview = (preview: LinkPreview) => void;
+
+/** The preview asked for of a pasted link: the link, and how to stop asking for it. */
+interface Asking {
+  url: string;
+  request: AbortController;
+  preview: Promise<LinkPreview | null>;
+  /** Set once the message with the link has gone, which the preview goes after, rather than below the link. */
+  sent?: boolean;
+}
+
+/** What the composer knows of the previews of what's written. */
+interface DraftPreviews {
+  /** The preview asked for of the link pasted last. */
+  asking: Asking | null;
+  /** The links whose previews it has asked for. */
+  asked: Set<string>;
+  /** Whether it has added a preview, so that one taken out of what's written stays out. */
+  added: boolean;
+}
+
+const noPreviews = (): DraftPreviews => ({ asking: null, asked: new Set(), added: false });
+
 /**
  * A link pasted in the composer gets the preview of the page it goes to below its paragraph, when the
  * page has one, unless another link is pasted first, or the editor it was pasted in goes: with the
  * composer, or as the editor opens again, which `opening` counts. Previews that can't be had are left
- * out without a word.
+ * out without a word. As Slack adds a link's preview a moment after its message, a preview still on its
+ * way as the message goes is added to the message once it comes, or else that of its first link typed
+ * rather than pasted, unless a preview was added to what was written, or taken out of it.
  */
-function useLinkPreviews(opening: number): (link: PastedLink) => Promise<void> {
-  const pending = useRef<AbortController>(null);
-  useEffect(() => () => pending.current?.abort(), [opening]);
-  return async ({ url, insertBelowLink }) => {
-    pending.current?.abort();
-    const request = (pending.current = new AbortController());
-    const preview = await fetchLinkPreview(url, request.signal).catch(() => null);
-    if (!preview || request.signal.aborted) return;
+function useLinkPreviews(opening: number) {
+  const draft = useRef(noPreviews());
+  useEffect(
+    () => () => {
+      draft.current.asking?.request.abort();
+      draft.current = noPreviews();
+    },
+    [opening],
+  );
+
+  const pasted = async ({ url, insertBelowLink }: PastedLink) => {
+    const previews = draft.current;
+    previews.asking?.request.abort();
+    const request = new AbortController();
+    const asking: Asking = { url, request, preview: fetchLinkPreview(url, request.signal).catch(() => null) };
+    previews.asking = asking;
+    previews.asked.add(url);
+    const preview = await asking.preview;
+    if (!preview || request.signal.aborted || asking.sent) return;
+    previews.added = true;
     const content = previewContent({ href: preview.url, url: preview.image ?? undefined, filename: preview.title, description: preview.description });
     insertBelowLink(content, { attachment: { contentType: OPENGRAPH_EMBED_CONTENT_TYPE } });
   };
+
+  /** Has `addPreview` add the preview that's to go after the message `body`, which has just gone, once it comes. */
+  const sent = (body: string, addPreview: AddPreview) => {
+    const { asking, asked, added } = draft.current;
+    draft.current = noPreviews();
+    const text = added || hasPreview(body) ? null : writtenBody(body).plainText;
+    if (asking && text?.includes(asking.url)) asking.sent = true;
+    else asking?.request.abort();
+    if (text === null) return;
+    const pastedPreview = asking?.sent ? asking.preview : Promise.resolve(null);
+    void pastedPreview.then((found) => found ?? typedLinkPreview(text, asked)).then((found) => found && addPreview(found));
+  };
+
+  return { pasted, sent };
+}
+
+/** The preview of the first link to a web page in the plain text `text` whose preview wasn't `asked` for as it was pasted. */
+async function typedLinkPreview(text: string, asked: Set<string>): Promise<LinkPreview | null> {
+  const typed = linkedUrls(text).find((url) => /^https?:\/\//i.test(url) && !asked.has(url));
+  return typed === undefined ? null : fetchLinkPreview(typed).catch(() => null);
 }
 
 /** A file picked to send, keyed, since two can share a name. */
@@ -295,8 +353,11 @@ interface Props {
    * to the room is ticked for that, until they've gone.
    */
   threadId?: string;
-  /** Sends a message, its body markup, answering whether it went: one that didn't stays to be changed. */
-  onSend: (body: string, alsoSend: boolean) => boolean;
+  /**
+   * Sends a message, its body markup, answering how to add the preview of a link in it that comes once
+   * it has gone, or null when it didn't go: then it stays to be changed.
+   */
+  onSend: (body: string, alsoSend: boolean) => AddPreview | null;
   /** Sends files, each as a message of its own, before the message written with them. */
   onSendFiles: (files: File[], alsoSend: boolean) => void;
   onTyping: (active: boolean) => void;
@@ -343,7 +404,7 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
   // focus elsewhere, where it's left.
   const [focusAtOpen] = useState(() => document.activeElement);
   const editorShown = useEditorShown(deferEditor);
-  const previewLink = useLinkPreviews(reopened);
+  const linkPreviews = useLinkPreviews(reopened);
   const picked = usePickedFiles();
   // Whether nothing's written, which, with no files picked, leaves Send grey, as Slack's is.
   const [blank, setBlank] = useState(!draft);
@@ -431,8 +492,11 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
     const written = editor.current;
     if (!written) return;
     if (!written.isBlank()) {
+      const body = written.value();
       // One the room won't take, as when it's too long, stays to be cut down.
-      if (!onSend(written.value(), alsoSend)) return;
+      const addPreview = onSend(body, alsoSend);
+      if (!addPreview) return;
+      linkPreviews.sent(body, addPreview);
       // Everyone else stops showing you as typing when your message arrives.
       wasBlank.current = true;
       written.clear();
@@ -526,7 +590,7 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
                   onChange={changed}
                   onFormatChange={formatting.setFormat}
                   onKeyDown={keyDown}
-                  onLinkPasted={previewLink}
+                  onLinkPasted={linkPreviews.pasted}
                   onReady={() => setEditorReady(true)}
                 />
               ) : (

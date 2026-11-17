@@ -1033,10 +1033,10 @@ export async function leaveRoom(roomId: RoomId): Promise<void> {
 }
 
 /**
- * The preview of the page `url` goes to, for a link pasted in the composer, or null when it has none, as
+ * The preview of the page `url` goes to, for a link in the composer, or null when it has none, as
  * Campfire's unfurl_controller.js asks for it. The page has none when it answers 204.
  */
-export async function fetchLinkPreview(url: string, signal: AbortSignal): Promise<LinkPreview | null> {
+export async function fetchLinkPreview(url: string, signal?: AbortSignal): Promise<LinkPreview | null> {
   const preview = await request<Partial<LinkPreview>>("/api/unfurl", { method: "POST", body: JSON.stringify({ url }), signal });
   return preview.title && preview.url ? (preview as LinkPreview) : null;
 }

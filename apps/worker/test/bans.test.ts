@@ -1088,12 +1088,13 @@ describe("What a ban blocks", () => {
     expect(readOnly.welcome.messages.map(({ id }) => id)).toEqual([adas.id, hals.id]);
     readOnly.send({ type: "message.create", clientMessageId: "refused", body: "Can I?" });
     readOnly.send({ type: "message.update", messageId: hals.id, body: "Edited" });
+    readOnly.send({ type: "message.preview", clientMessageId: "hals", preview: { title: "Hal's", url: "https://example.com/", image: null, description: "A page" } });
     readOnly.send({ type: "message.delete", messageId: hals.id });
     readOnly.send({ type: "boost.create", messageId: adas.id, content: "👍" });
     readOnly.send({ type: "boost.delete", boostId: boost.id });
     const refused = { type: "error", message: "Request failed (429)" };
     expect(await readOnly.next("error")).toEqual({ ...refused, clientMessageId: "refused", failed: "message.create" });
-    for (const failed of ["message.update", "message.delete", "boost.create", "boost.delete"]) expect(await readOnly.next("error")).toEqual({ ...refused, failed });
+    for (const failed of ["message.update", "message.preview", "message.delete", "boost.create", "boost.delete"]) expect(await readOnly.next("error")).toEqual({ ...refused, failed });
 
     readOnly.send({ type: "typing.start" });
     expect(await adaInLobby.next("typing")).toEqual({ type: "typing", user: hal.user, typing: true });

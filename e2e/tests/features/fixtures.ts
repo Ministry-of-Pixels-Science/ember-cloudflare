@@ -199,7 +199,7 @@ export const test = app.extend<{ rooms: Rooms; members: Members }>({
         await context.addCookies([session.cookie]);
         contexts.push(context);
         if (!serverRooms) await showRooms(context, rooms);
-        // A pasted link gets no preview, unless a test answers with one, so no test reaches the Internet.
+        // A link written gets no preview, pasted or typed, unless a test answers with one, so no test reaches the Internet.
         await context.route("**/api/unfurl", (route) => route.fulfill({ status: 204 }));
         const page = await context.newPage();
         await beforeOpen?.(page);

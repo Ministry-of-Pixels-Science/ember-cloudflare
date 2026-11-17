@@ -5,7 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PeopleContext } from "@/hooks/use-directory";
 import { createRef } from "react";
-import { Composer, RoomDeleted, type ComposerHandle } from "./composer";
+import { Composer, RoomDeleted, type AddPreview, type ComposerHandle } from "./composer";
 import { editorLoaded } from "./editor";
 
 // The editor here is test-setup.ts's stand-in for Lexxy, a text box whose lines are one paragraph,
@@ -21,8 +21,13 @@ vi.mock("./emoji-panel", () => ({
   ),
 }));
 
+/** What `onSend` answers for a message that went, where nothing's to come after it. */
+const went: AddPreview = () => {};
+
 async function showComposer({ typing = [] as User[], disabled = false, roomId = "r1", threadId = undefined as string | undefined, direct = false, autoFocus = true, mentionsAbove = false } = {}) {
-  const onSend = vi.fn((_body: string, _alsoSend: boolean) => true);
+  // Hears a link's preview that comes once the message has gone.
+  const addPreview = vi.fn((_preview: LinkPreview) => {});
+  const onSend = vi.fn((_body: string, _alsoSend: boolean): AddPreview | null => addPreview);
   const onSendFiles = vi.fn((_files: File[], _alsoSend: boolean) => {});
   const onTyping = vi.fn();
   const composer = createRef<ComposerHandle>();
@@ -45,7 +50,7 @@ async function showComposer({ typing = [] as User[], disabled = false, roomId = 
   );
   // The editor loads as the first composer shows.
   const input = await within(view.container).findByRole("textbox", { name: threadId === undefined ? "Write a message" : "Write a reply" });
-  return { onSend, onSendFiles, onTyping, composer, view, user: userEvent.setup(), input };
+  return { onSend, addPreview, onSendFiles, onTyping, composer, view, user: userEvent.setup(), input };
 }
 
 function touchScreen() {
@@ -98,7 +103,7 @@ describe("Composer", () => {
     expect((await showComposer({ mentionsAbove: true })).input).toHaveAttribute("data-mentions-above");
   });
 
-  const room = { roomId: "r1", roomName: "general", userId: "u1", typing: [], disabled: false, onSend: () => true, onSendFiles: () => {}, onTyping: () => {} };
+  const room = { roomId: "r1", roomName: "general", userId: "u1", typing: [], disabled: false, onSend: () => went, onSendFiles: () => {}, onTyping: () => {} };
 
   it("holds the editor back while the room's first messages are on their way, which loading it would delay", async () => {
     // React has the editor's code from an earlier composer, so it would show at once if it weren't held back.
@@ -142,7 +147,7 @@ describe("Composer", () => {
 
 describe("Group DMs and DM names", () => {
   it("asks for a message to the others in a DM by name, without the #", async () => {
-    render(<Composer roomId="d1" roomName="Grace and Linus" direct userId="u1" typing={[]} disabled={false} onSend={() => true} onSendFiles={() => {}} onTyping={() => {}} />);
+    render(<Composer roomId="d1" roomName="Grace and Linus" direct userId="u1" typing={[]} disabled={false} onSend={() => went} onSendFiles={() => {}} onTyping={() => {}} />);
     expect(await screen.findByRole("textbox", { name: "Write a message" })).toHaveAttribute("placeholder", "Message Grace and Linus");
   });
 });
@@ -403,7 +408,7 @@ describe("Send from the keyboard", () => {
 
   it("keeps what's written when the room won't take it, as when it's too long", async () => {
     const { onSend, input, user } = await showComposer();
-    onSend.mockReturnValue(false);
+    onSend.mockReturnValue(null);
     await user.type(input, "Too much{Enter}");
     expect(onSend).toHaveBeenCalledExactlyOnceWith("<p>Too much</p>", false);
     expect(input).toHaveValue("Too much");
@@ -504,7 +509,7 @@ describe("Attach files", () => {
     (await showComposer()).view.unmount();
     const onSendFiles = vi.fn();
     const user = userEvent.setup();
-    render(<Composer roomId="r1" roomName="general" userId="u1" typing={[]} disabled={false} deferEditor onSend={() => true} onSendFiles={onSendFiles} onTyping={() => {}} />);
+    render(<Composer roomId="r1" roomName="general" userId="u1" typing={[]} disabled={false} deferEditor onSend={() => went} onSendFiles={onSendFiles} onTyping={() => {}} />);
     await user.upload(fileField(), fileOf("a.txt"));
     await user.click(sendButton());
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
@@ -911,7 +916,7 @@ describe("Reply with a quote", () => {
     const composer = createRef<ComposerHandle>();
     const onTyping = vi.fn();
     render(
-      <Composer ref={composer} roomId="r1" roomName="general" userId="u1" typing={[]} disabled={false} onSend={() => true} onSendFiles={() => {}} onTyping={onTyping} />,
+      <Composer ref={composer} roomId="r1" roomName="general" userId="u1" typing={[]} disabled={false} onSend={() => went} onSendFiles={() => {}} onTyping={onTyping} />,
     );
     const input = await screen.findByRole("textbox", { name: "Write a message" });
     await userEvent.setup().type(input, "Unsent");
@@ -941,7 +946,7 @@ describe("Reply with a quote", () => {
         typing={[]}
         disabled={false}
         deferEditor={deferEditor}
-        onSend={() => true}
+        onSend={() => went}
         onSendFiles={() => {}}
         onTyping={onTyping}
       />
@@ -1033,6 +1038,87 @@ describe("Link previews while writing", () => {
     over.view.unmount();
     expect(fetch.mock.calls[0]![1].signal!.aborted).toBe(true);
   });
+
+  describe("once the message has gone", () => {
+    /** Answers each ask for a link's preview with `preview` once `answer` is called. */
+    function slowPreviews(preview: LinkPreview) {
+      let answer!: () => void;
+      const answered = new Promise<void>((resolve) => (answer = resolve));
+      const fetch = previews(async () => {
+        await answered;
+        return Response.json(preview);
+      });
+      return { fetch, answer: () => act(async () => answer()) };
+    }
+
+    it("adds a pasted link's preview that comes after the message went to the message, rather than below the link", async () => {
+      const { fetch, answer } = slowPreviews(basecamp);
+      const { onSend, addPreview, user, view } = await showComposer();
+      await user.paste("https://basecamp.com");
+      await user.keyboard("{Enter}");
+      expect(onSend).toHaveBeenCalledExactlyOnceWith("<p>https://basecamp.com</p>", false);
+      view.unmount();
+      expect(addPreview).not.toHaveBeenCalled();
+
+      await answer();
+      expect(addPreview).toHaveBeenCalledExactlyOnceWith(basecamp);
+      expect(fetch).toHaveBeenCalledOnce();
+      expect(fetch.mock.calls[0]![1].signal!.aborted).toBe(false);
+      expect(shownPreviews(view)).toHaveLength(0);
+    });
+
+    it("asks for the preview of the first link to a web page typed in the message as it goes, as Slack does", async () => {
+      const fetch = previews(() => Response.json(basecamp));
+      const { addPreview, input, user } = await showComposer({ threadId: "m1" });
+      await user.type(input, "Mail ada@example.com, or see www.basecamp.com and https://example.com{Enter}");
+      await vi.waitFor(() => expect(addPreview).toHaveBeenCalledExactlyOnceWith(basecamp));
+      expect(fetch).toHaveBeenCalledExactlyOnceWith("/api/unfurl", expect.objectContaining({ body: JSON.stringify({ url: "http://www.basecamp.com" }) }));
+    });
+
+    it("adds none to a message that took a preview as it was written, even one taken out of it", async () => {
+      const fetch = previews(() => Response.json(basecamp));
+      const { onSend, addPreview, input, user, view } = await showComposer();
+      await user.paste("https://basecamp.com");
+      await screen.findByRole("link", { name: "Basecamp" });
+      await user.keyboard("{Enter}");
+      expect(onSend.mock.calls[0]![0]).toContain(OPENGRAPH_EMBED_CONTENT_TYPE);
+
+      await user.paste("https://basecamp.com");
+      await screen.findByRole("link", { name: "Basecamp" });
+      await user.click(screen.getByRole("button", { name: "Remove" }));
+      expect(shownPreviews(view)).toHaveLength(0);
+      await user.type(input, " is calm{Enter}");
+      expect(onSend).toHaveBeenLastCalledWith("<p>https://basecamp.com is calm</p>", false);
+
+      await act(async () => {});
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(addPreview).not.toHaveBeenCalled();
+    });
+
+    it("asks once for a pasted link's page that has none, then for a link typed after it, and forgets a preview whose link has gone", async () => {
+      const answers: Record<string, Response> = { "https://example.com/none": new Response(null, { status: 204 }), "https://example.com/some": Response.json(basecamp) };
+      const fetch = previews((url) => answers[url]!);
+      const { addPreview, input, user } = await showComposer();
+      await user.paste("https://example.com/none");
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+      await user.type(input, " has none{Enter}");
+      await act(async () => {});
+      expect(fetch).toHaveBeenCalledOnce();
+
+      await user.paste("https://example.com/none");
+      await user.type(input, " has none, but https://example.com/some does{Enter}");
+      await vi.waitFor(() => expect(addPreview).toHaveBeenCalledExactlyOnceWith(basecamp));
+      expect(fetch.mock.calls.map(([, init]) => JSON.parse(init.body as string).url)).toEqual(["https://example.com/none", "https://example.com/none", "https://example.com/some"]);
+
+      addPreview.mockClear();
+      const { answer } = slowPreviews(basecamp);
+      await user.paste("https://basecamp.com");
+      await user.clear(input);
+      await user.type(input, "Never mind{Enter}");
+      await answer();
+      expect(addPreview).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe("Typing indicator", () => {
@@ -1081,7 +1167,7 @@ describe("Typing indicator", () => {
           userId="u1"
           typing={[typist("Linus", 1), typist("Grace", 2)]}
           disabled={false}
-          onSend={vi.fn(() => true)}
+          onSend={vi.fn(() => went)}
           onSendFiles={vi.fn()}
           onTyping={vi.fn()}
         />

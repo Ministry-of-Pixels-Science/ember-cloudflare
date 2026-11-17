@@ -1586,6 +1586,14 @@ export type ClientFrame =
   | { type: "message.create"; clientMessageId: string; body: string; parentId?: string; alsoSend?: boolean }
   /** A message's new body, as for `message.create`. */
   | { type: "message.update"; messageId: string; body: string }
+  /**
+   * The preview of a link in a message the tab sent as `clientMessageId`, which came after the message
+   * went, as one does for a link pasted just before Send, or typed. The room adds it below the message's
+   * text, as the composer adds one that comes in time, without marking it edited, as Slack adds a link's
+   * preview a moment after its message, if the message is still as it was sent, without a preview, and
+   * was sent within `LATE_PREVIEW_MS`. Otherwise it takes nothing, without a word.
+   */
+  | { type: "message.preview"; clientMessageId: string; preview: LinkPreview }
   | { type: "message.delete"; messageId: string }
   | { type: "boost.create"; messageId: string; content: string }
   | { type: "boost.delete"; boostId: string }
@@ -1858,6 +1866,11 @@ export const MAX_MESSAGE_HTML_LENGTH = 100_000;
 /** As long as Campfire's `boosts.content` column can be (`limit: 16`, db/schema.rb). */
 export const MAX_BOOST_LENGTH = 16;
 /**
+ * How long after a message is posted the room still adds the preview of its link that its sender's tab
+ * sends (`message.preview`): well past the most an unfurl takes.
+ */
+export const LATE_PREVIEW_MS = 60_000;
+/**
  * Campfire's page of messages (`Message::PAGE_SIZE`): the newest a room opens on, what each page of
  * history adds before or after the timeline, and how many a permalink shows on either side of its
  * message.
@@ -1953,6 +1966,18 @@ const userIds = (v: unknown): v is UserId[] => Array.isArray(v) && v.length <= M
 /** Markup no longer than `MAX_MESSAGE_HTML_LENGTH`, or null. Whether it holds a message is the room's to read. */
 const markup = (v: unknown): string | null => (typeof v === "string" && v.length <= MAX_MESSAGE_HTML_LENGTH ? v : null);
 
+/**
+ * A link's preview, as `POST /api/unfurl` answers one, with a title and an address that aren't blank, and
+ * none of it longer than a message's markup, or null. What the room can keep of it is the room's to read.
+ */
+function linkPreview(v: unknown): LinkPreview | null {
+  if (typeof v !== "object" || v === null) return null;
+  const { title, url, image, description } = v as Record<string, unknown>;
+  const field = (value: unknown): value is string => typeof value === "string" && value.length <= MAX_MESSAGE_HTML_LENGTH;
+  if (!field(title) || !field(url) || !field(description) || !(image === null || field(image))) return null;
+  return title.trim() !== "" && url.trim() !== "" ? { title, url, image, description } : null;
+}
+
 /** Trimmed, non-empty text no longer than `max`, or null. */
 const text = (v: unknown, max: number): string | null => {
   if (typeof v !== "string") return null;
@@ -1985,6 +2010,10 @@ export function parseClientFrame(raw: string): ClientFrame | null {
     case "message.update": {
       const body = markup(f.body);
       return id(f.messageId) && body !== null ? { type: f.type, messageId: f.messageId, body } : null;
+    }
+    case "message.preview": {
+      const preview = linkPreview(f.preview);
+      return id(f.clientMessageId) && preview ? { type: f.type, clientMessageId: f.clientMessageId, preview } : null;
     }
     case "message.delete":
       return id(f.messageId) ? { type: f.type, messageId: f.messageId } : null;

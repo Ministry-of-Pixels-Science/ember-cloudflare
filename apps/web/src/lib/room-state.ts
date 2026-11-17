@@ -459,9 +459,10 @@ function applyFrame(state: RoomState, frame: ServerFrame, now: number): RoomStat
       // A message the room refused shows as not sent, as do the ones it couldn't check. An error about no
       // message keeps the same list: the timeline takes a new one for a change, and would ask again for a
       // page that just failed. One about a thread, or about messages the timeline isn't sending, as
-      // replies in a thread, is the thread's to show.
+      // replies in a thread, is the thread's to show, and one about a link's preview, which the tab sent
+      // of its own accord, isn't shown.
       const notSent = frame.clientMessageIds ?? (frame.clientMessageId === undefined ? [] : [frame.clientMessageId]);
-      if (frame.failed === "thread.open" || frame.failed === "thread.before") return state;
+      if (frame.failed === "thread.open" || frame.failed === "thread.before" || frame.failed === "message.preview") return state;
       if (notSent.length > 0 && !state.messages.some((m) => isPending(m) && notSent.includes(m.clientMessageId))) return state;
       const messages = notSent.length
         ? state.messages.map((m) => (isPending(m) && notSent.includes(m.clientMessageId) ? { ...m, failed: true } : m))
