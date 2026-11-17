@@ -17,6 +17,8 @@ const EMBER: Pick<User, "id"> = { id: ASSISTANT_ID };
 
 /** What Ada and Grace say in their DM, and in their private room. */
 const [SAID_IN_DM, SAID_IN_PRIVATE] = ["The launch code is tangerine.", "The budget for the launch is forty thousand."];
+/** What Grace says in a room that was open to everyone, once it's private. */
+const SAID_ONCE_CLOSED = "The venue is the old observatory.";
 
 /** An agent as New agent sends it: Recap, in every open room, on Claude. */
 const RECAP: NewAgent = { name: "Recap", description: "Sums up long threads", instructions: "Sum up the thread.", model: CLAUDE, thinking: "off", length: "short", webSearch: false, rooms: null };
@@ -27,8 +29,8 @@ interface Asked {
   logsKeep: string | null;
 }
 
-/** What the model does in a turn of an answer with Ember's tools: searches the room for `words`, or answers. */
-type Turn = { search: string } | { text: string };
+/** What the model does in a turn of an answer with Ember's tools: searches the room for `words`, or answers, once what it waits for `first`, if anything, has happened. */
+type Turn = ({ search: string } | { text: string }) & { first?: () => Promise<void> };
 
 let asked: Asked[];
 let script: Turn[];
@@ -49,13 +51,34 @@ beforeEach(async () => {
     asked.push({ body, logsKeep: request.headers.get("cf-aig-collect-log-payload") });
     // Turning Ember AI on, and making an agent, ask a test question, which gives the model no tools.
     if ((JSON.parse(body) as { tools?: unknown[] }).tools === undefined) return turnIn({ text: "Hello!" }, asked.length);
-    return turnIn(script.shift() ?? { text: "Hello, team!" }, asked.length);
+    const turn = script.shift() ?? { text: "Hello, team!" };
+    await turn.first?.();
+    return turnIn(turn, asked.length);
   });
 });
 afterEach(() => vi.restoreAllMocks());
 
 const as = (session: Session) => ({ Cookie: session.cookie });
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Waits until `done` says so, looking every few milliseconds. */
+async function until(done: () => boolean): Promise<void> {
+  while (!done()) await sleep(5);
+}
+
+/**
+ * A turn's `first`, which holds the model there until the test lets it `go` on, and what waits until it's
+ * `reached` there. The turn is asked in the room's own context, which can't use the test's sockets, and
+ * neither goes on from the other's promises without taking its context, so each waits by looking.
+ */
+function held(): { first: () => Promise<void>; reached: () => Promise<void>; go: () => void } {
+  let [there, gone] = [false, false];
+  return {
+    first: () => ((there = true), until(() => gone)),
+    reached: () => until(() => there),
+    go: () => void (gone = true),
+  };
+}
 
 /** Someone called `name` joins with the join link, as a member, signed in. */
 async function join(name: string): Promise<Session> {
@@ -175,5 +198,34 @@ describe("A question asked in a DM or a private room", () => {
     expect(asked.map(({ logsKeep }) => logsKeep)).toEqual([null, "false", "false"]);
     // What was said there went to the model all the same, which answers from it.
     expect(asked[1]!.body).toContain("forty thousand");
+  });
+
+  it("is what an answer begun in the open becomes once it searches its room after the room is made private, to its end", async () => {
+    const { ada, grace } = await setUp();
+    const plans = (await createRoom("Plans", { as: ada })).id;
+    const [inPlans, graceInPlans] = [await connect(plans, ada), await connect(plans, grace)];
+    const made = async (kind: "open" | "closed") => {
+      const body = kind === "closed" ? { kind, memberIds: [ada.user.id, grace.user.id, ASSISTANT_ID] } : { kind };
+      const changed = await api(`/api/rooms/${plans}`, { method: "PATCH", headers: as(ada), body: JSON.stringify(body) });
+      expect(changed.status, await changed.clone().text()).toBe(200);
+    };
+    const [closing, opening] = [held(), held()];
+    script = [{ search: "venue", first: closing.first }, { search: "venue", first: opening.first }, { text: "It's at the old observatory." }];
+
+    await post(inPlans, `<p>${mention(EMBER)} where's the venue?</p>`);
+    // The room is made private while the model works on its first turn, and Grace says something there before it searches.
+    await closing.reached();
+    await made("closed");
+    await post(graceInPlans, `<p>${SAID_ONCE_CLOSED}</p>`);
+    await caughtUp(plans);
+    closing.go();
+    // It's open to everyone again before the model searches once more.
+    await opening.reached();
+    await made("open");
+    opening.go();
+    expect((await nextFrom(inPlans, EMBER)).plainText).toBe("It's at the old observatory.");
+    expect(asked[1]!.body).toContain(SAID_ONCE_CLOSED);
+    // The first was asked in the open, and the rest after the search read the private room, though it was open again by the last.
+    expect(asked.map(({ logsKeep }) => logsKeep)).toEqual([null, "false", "false"]);
   });
 });

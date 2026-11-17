@@ -4959,6 +4959,14 @@ export class Workspace extends DurableObject<Env> {
   }
 
   /**
+   * Whether room `roomId` is private by now, a DM or a private room, or gone, as an answer asks once it
+   * has searched the room, which may have been made private since the answer began (`roomSearch`).
+   */
+  async isPrivateRoom(roomId: RoomId): Promise<boolean> {
+    return isPrivate(await this.store.roomKind(roomId));
+  }
+
+  /**
    * @ember in room `roomId`, with when this checked, how it asks AI Gateway, or null while its API token
    * doesn't open (`assistantGateway`), with the model whoever asked, `askerId`, picked, while people can
    * pick it, the instructions administrators added and what Ember adds around them, the community's
