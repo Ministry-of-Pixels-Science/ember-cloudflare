@@ -176,6 +176,13 @@ describe("Threads", () => {
       expect(parse({ type: "thread.before", parentId: "m1", before: bad }), String(bad)).toBeNull();
     }
   });
+
+  it("says on a room socket's address that it shows a thread apart from the room's timeline, which nothing but a 1 says", () => {
+    expect(roomSocketQuery({ visible: true, apart: true })).toBe(`?visible=1&protocol=${ROOM_PROTOCOL}&apart=1`);
+    expect(read({ visible: "1", apart: "1" })).toMatchObject({ visible: true, apart: true });
+    for (const apart of ["0", "", "true", "yes"]) expect(read({ apart }).apart, apart).toBeUndefined();
+    expect(read({}).apart).toBeUndefined();
+  });
 });
 
 describe("Custom reactions", () => {

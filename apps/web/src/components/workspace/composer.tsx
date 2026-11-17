@@ -66,13 +66,38 @@ function readDraft(key: string): string | undefined {
   }
 }
 
-function keepDraft(key: string, body: string | null) {
+/** Keeps `body` as the draft under `key`, or none once it's null, and answers whether it could. */
+function keepDraft(key: string, body: string | null): boolean {
   try {
     if (body === null) localStorage.removeItem(key);
     else localStorage.setItem(key, body);
+    return true;
   } catch {
     // Not kept, then.
+    return false;
   }
+}
+
+/**
+ * The composers showing each draft, by its key, as what has each look again at what's kept of it. A
+ * thread's draft shows twice where its room's huddle is opened over the thread: beside the room, and in
+ * the huddle, which alone can be written in while it covers the other.
+ */
+const showing = new Map<string, Set<() => void>>();
+
+/**
+ * Counts a composer among those showing the draft kept under `key`, until what this answers is called,
+ * as the composer goes. The others then look again at what's kept, which the one that went may have
+ * left other than they have it.
+ */
+function showDraft(key: string, lookAgain: () => void): () => void {
+  const composers = showing.get(key) ?? new Set();
+  showing.set(key, composers.add(lookAgain));
+  return () => {
+    composers.delete(lookAgain);
+    if (composers.size === 0) showing.delete(key);
+    for (const other of composers) other();
+  };
 }
 
 /**
@@ -141,12 +166,13 @@ function useEditorShown(deferred: boolean): boolean {
 
 /**
  * A link pasted in the composer gets the preview of the page it goes to below its paragraph, when the
- * page has one, unless another link is pasted first, or the composer goes. Previews that can't be had
- * are left out without a word.
+ * page has one, unless another link is pasted first, or the editor it was pasted in goes: with the
+ * composer, or as the editor opens again, which `opening` counts. Previews that can't be had are left
+ * out without a word.
  */
-function useLinkPreviews(): (link: PastedLink) => Promise<void> {
+function useLinkPreviews(opening: number): (link: PastedLink) => Promise<void> {
   const pending = useRef<AbortController>(null);
-  useEffect(() => () => pending.current?.abort(), []);
+  useEffect(() => () => pending.current?.abort(), [opening]);
   return async ({ url, insertBelowLink }) => {
     pending.current?.abort();
     const request = (pending.current = new AbortController());
@@ -278,6 +304,8 @@ interface Props {
   onEditLastMessage?: () => void;
   /** Whether the editor takes focus as it shows, except on touch screens, as it does unless something else is to have it. */
   autoFocus?: boolean;
+  /** Whether the people @ lists show above the text with a mouse too, as on touch screens: for a composer with something under it that would cut the list off. */
+  mentionsAbove?: boolean;
   ref?: Ref<ComposerHandle>;
 }
 
@@ -297,7 +325,7 @@ export interface ComposerHandle {
  * next message. What's written is kept as a draft until it's sent. A thread's has Also send to the room
  * before Send.
  */
-export function Composer({ roomId, roomName, direct = false, userId, typing, disabled, deferEditor = false, threadId, onSend, onSendFiles, onTyping, onEditLastMessage, autoFocus = true, ref }: Props) {
+export function Composer({ roomId, roomName, direct = false, userId, typing, disabled, deferEditor = false, threadId, onSend, onSendFiles, onTyping, onEditLastMessage, autoFocus = true, mentionsAbove = false, ref }: Props) {
   const editor = useRef<RichTextEditorHandle>(null);
   const form = useRef<HTMLFormElement>(null);
   const formatting = useFormatting(editor);
@@ -305,13 +333,17 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
   const [alsoSend, setAlsoSend] = useState(false);
   const key = draftKey(userId, roomId, threadId);
   const [draft, setDraft] = useState(() => readDraft(key));
+  // What's kept of the draft as far as this composer knows: what it read as it opened, or has kept since.
+  const kept = useRef(draft ?? null);
+  // How many times the editor has opened again, with what another composer of its draft left of it.
+  const [reopened, setReopened] = useState(0);
   // Touch screens bring up their keyboard on focus, so there it waits for a tap.
   const [focusOnOpen] = useState(() => !hasTouchKeyboard());
   // Where focus was as the room opened. The editor can be ready a moment later, by when you may have put
   // focus elsewhere, where it's left.
   const [focusAtOpen] = useState(() => document.activeElement);
   const editorShown = useEditorShown(deferEditor);
-  const previewLink = useLinkPreviews();
+  const previewLink = useLinkPreviews(reopened);
   const picked = usePickedFiles();
   // Whether nothing's written, which, with no files picked, leaves Send grey, as Slack's is.
   const [blank, setBlank] = useState(!draft);
@@ -326,14 +358,33 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
   const replied = useRef(false);
   const placeholder = threadId !== undefined ? "Reply…" : `Message ${direct ? "" : "#"}${roomName}`;
 
+  const keep = (body: string | null) => {
+    if (keepDraft(key, body)) kept.current = body;
+  };
+
   // What's written changed, to `body`, or to nothing: the room hears whether you're typing, and it's kept.
   const wrote = (body: string | null) => {
     if (body !== null) onTyping(true);
     else if (!wasBlank.current) onTyping(false);
     wasBlank.current = body === null;
     setBlank(body === null);
-    keepDraft(key, body);
+    keep(body);
   };
+
+  // Another composer of this draft has gone, as a thread's in its huddle goes from over the thread's own,
+  // beside its room. Where it left the draft other than this one has it, what it left is what's written
+  // here: the editor opens again with it, as it opened with the draft it found.
+  const lookAgain = useEffectEvent(() => {
+    const left = readDraft(key) ?? null;
+    if (left === kept.current) return;
+    kept.current = left;
+    wasBlank.current = left === null;
+    setBlank(left === null);
+    setDraft(left ?? undefined);
+    setEditorReady(false);
+    setReopened((times) => times + 1);
+  });
+  useEffect(() => showDraft(key, () => lookAgain()), [key]);
 
   useImperativeHandle(ref, () => ({
     focus: () => editor.current?.focus(),
@@ -385,7 +436,7 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
       // Everyone else stops showing you as typing when your message arrives.
       wasBlank.current = true;
       written.clear();
-      keepDraft(key, null);
+      keep(null);
       setAlsoSend(false);
     }
     written.focus();
@@ -461,6 +512,7 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
             <Suspense fallback={<LoadingEditor placeholder={placeholder} belowFormatting={formattingShown} />}>
               {editorShown ? (
                 <RichTextEditor
+                  key={reopened}
                   ref={editor}
                   label={threadId !== undefined ? "Write a reply" : "Write a message"}
                   placeholder={placeholder}
@@ -468,8 +520,9 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
                   initialValue={draft}
                   mentionsFrom={mentionPromptSrc(roomId)}
                   // Under the text on touch screens are the keyboard and the home indicator.
-                  mentionsAbove={hasTouchKeyboard()}
-                  autoFocus={() => replied.current || (autoFocus && focusOnOpen && focusStayedOn(focusAtOpen))}
+                  mentionsAbove={mentionsAbove || hasTouchKeyboard()}
+                  // Opened again, it leaves focus where it is, with whatever is in front of it now.
+                  autoFocus={() => reopened === 0 && (replied.current || (autoFocus && focusOnOpen && focusStayedOn(focusAtOpen)))}
                   onChange={changed}
                   onFormatChange={formatting.setFormat}
                   onKeyDown={keyDown}
@@ -481,7 +534,7 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
               )}
             </Suspense>
           </div>
-          <div className="flex flex-none items-center gap-0.5 touch:@max-[28rem]:flex-wrap">
+          <div className="flex flex-none items-center gap-0.5 @max-[20rem]:flex-wrap touch:@max-[28rem]:flex-wrap">
             {/* Upload from your computer's, and Cmd or Ctrl+O's, file picker. */}
             <input
               ref={fileField}
@@ -538,11 +591,12 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
                 <AtSign className="size-[18px] opacity-70" />
               </button>
             </ShortcutTooltip>
-            {/* For fingers, the box sits far enough into its label for a fingertip on it to land on the label, and
-                where their bigger buttons would leave the label too little room, as on a phone held upright, it
-                takes a line of its own above them. */}
+            {/* For fingers, the box sits far enough into its label for a fingertip on it to land on the label. Where
+                the buttons would leave the label too little room, it takes a line of its own above them: for
+                fingers' bigger buttons that's as on a phone held upright, and otherwise as in a huddle's thread,
+                which is narrower than a room's. There the box sits over the middle of +. */}
             {threadId !== undefined && (
-              <label className="mr-2 ml-2.5 flex min-w-0 cursor-pointer items-center gap-[7px] text-[13px] leading-[18px] text-message-muted touch:ml-0 touch:min-h-11 touch:pl-3.5 touch:text-sm touch:@max-[28rem]:order-first touch:@max-[28rem]:mr-0 touch:@max-[28rem]:basis-full">
+              <label className="mr-2 ml-2.5 flex min-w-0 cursor-pointer items-center gap-[7px] text-[13px] leading-[18px] text-message-muted @max-[20rem]:order-first @max-[20rem]:mr-0 @max-[20rem]:ml-2 @max-[20rem]:min-h-7 @max-[20rem]:basis-full touch:ml-0 touch:min-h-11 touch:pl-3.5 touch:text-sm touch:@max-[28rem]:order-first touch:@max-[28rem]:mr-0 touch:@max-[28rem]:basis-full">
                 <input
                   type="checkbox"
                   checked={alsoSend}

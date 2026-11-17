@@ -28,6 +28,7 @@ const huddle = (changes: Partial<JoinedHuddle> = {}): JoinedHuddle => ({
   screen: null,
   screens: new Map(),
   open: false,
+  thread: true,
   ...changes,
 });
 /** A camera that's on, as much of one as the bar reads, and a screen that's shared. */
@@ -36,7 +37,7 @@ const SCREEN = {} as MediaStream;
 
 /** The bar of the huddle this tab is in, with what the huddle's controls were asked. */
 function renderBar(joined: JoinedHuddle = huddle(), room: Room | null = general) {
-  const controls = { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setDevice: vi.fn(), setSmall: vi.fn(), switchCamera: vi.fn(), invite: vi.fn() };
+  const controls = { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setThread: vi.fn(), setDevice: vi.fn(), setSmall: vi.fn(), switchCamera: vi.fn(), invite: vi.fn() };
   act(() => showHuddle(joined, controls));
   const user = userEvent.setup();
   const view = render(<HuddleBar huddle={joined} room={room} meId="ada" />);

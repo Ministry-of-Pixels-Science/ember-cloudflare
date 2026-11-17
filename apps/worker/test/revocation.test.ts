@@ -114,6 +114,20 @@ describe("Connection sign-in and revocation", () => {
     expect(linus.log.filter((frame) => frame.type === "presence.left")).toHaveLength(1);
   });
 
+  it("closes a socket that shows a thread apart from the room's timeline as any other, and nobody leaves, since its person wasn't in the room for it", async () => {
+    const room = await freshRoom("lobby");
+    const grace = await connect(room, "Grace");
+    const ada = await signIn("Ada");
+    const apart = await connect(room, ada, { visible: true, apart: true });
+    const close = closeOf(apart.ws);
+
+    await roomStub(room).revoke(room, [{ tag: ada.user.id, code: CloseCode.Revoked }], Date.now());
+    expect(await close).toMatchObject({ code: CloseCode.Revoked, reason: "Revoked" });
+    expect((await post(grace, "Still here")).body).toBe("Still here");
+    await settle(grace);
+    expect(grace.log.filter((frame) => frame.type.startsWith("presence."))).toEqual([]);
+  });
+
   it("ignores what a socket sent before it heard it was closed", async () => {
     const room = await freshRoom("lobby");
     const grace = await connect(room, "Grace");

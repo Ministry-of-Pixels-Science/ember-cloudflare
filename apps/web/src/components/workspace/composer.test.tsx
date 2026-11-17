@@ -21,7 +21,7 @@ vi.mock("./emoji-panel", () => ({
   ),
 }));
 
-async function showComposer({ typing = [] as User[], disabled = false, roomId = "r1", threadId = undefined as string | undefined, direct = false, autoFocus = true } = {}) {
+async function showComposer({ typing = [] as User[], disabled = false, roomId = "r1", threadId = undefined as string | undefined, direct = false, autoFocus = true, mentionsAbove = false } = {}) {
   const onSend = vi.fn((_body: string, _alsoSend: boolean) => true);
   const onSendFiles = vi.fn((_files: File[], _alsoSend: boolean) => {});
   const onTyping = vi.fn();
@@ -40,10 +40,11 @@ async function showComposer({ typing = [] as User[], disabled = false, roomId = 
       onSendFiles={onSendFiles}
       onTyping={onTyping}
       autoFocus={autoFocus}
+      mentionsAbove={mentionsAbove}
     />,
   );
   // The editor loads as the first composer shows.
-  const input = await screen.findByRole("textbox", { name: threadId === undefined ? "Write a message" : "Write a reply" });
+  const input = await within(view.container).findByRole("textbox", { name: threadId === undefined ? "Write a message" : "Write a reply" });
   return { onSend, onSendFiles, onTyping, composer, view, user: userEvent.setup(), input };
 }
 
@@ -83,6 +84,18 @@ describe("Composer", () => {
     touchScreen();
     const { input } = await showComposer();
     expect(input).not.toHaveFocus();
+  });
+
+  it("lists the people @ finds above the text on touch screens, whose keyboard is under it", async () => {
+    touchScreen();
+    expect((await showComposer()).input).toHaveAttribute("data-mentions-above");
+  });
+
+  it("lists them above the text with a mouse only where it's asked to, as where something under the composer would cut the list off", async () => {
+    const { input, view } = await showComposer();
+    expect(input).not.toHaveAttribute("data-mentions-above");
+    view.unmount();
+    expect((await showComposer({ mentionsAbove: true })).input).toHaveAttribute("data-mentions-above");
   });
 
   const room = { roomId: "r1", roomName: "general", userId: "u1", typing: [], disabled: false, onSend: () => true, onSendFiles: () => {}, onTyping: () => {} };
@@ -780,6 +793,119 @@ describe("Reply in a thread", () => {
   });
 });
 
+describe("A thread's draft, beside its room and in the room's huddle over it", () => {
+  const draft = () => localStorage.getItem("composer-draft-u1-r1/threads/m1");
+
+  /** The thread's composer beside its room, with its text box as it is now: another, once the editor has opened again. */
+  async function showBeside() {
+    const shown = await showComposer({ threadId: "m1" });
+    const own = within(shown.view.container);
+    return { ...shown, box: () => own.getByRole("textbox", { name: "Write a reply" }), send: () => own.getByRole("button", { name: "Send Message" }) };
+  }
+
+  /** The same thread's composer in its room's huddle, which opens over the one beside the room and leaves focus where it is. */
+  const showInHuddle = () => showComposer({ threadId: "m1", autoFocus: false });
+
+  it("opens the huddle's with what was begun beside the room, which shows what the huddle's left of it once that's gone, leaving focus where it is", async () => {
+    const beside = await showBeside();
+    await beside.user.upload(fileField(), new File(["hi"], "notes.txt", { type: "text/plain" }));
+    await beside.user.click(screen.getByRole("checkbox", { name: "Also send to #general" }));
+    await beside.user.type(beside.input, "Shipping on");
+    const huddle = await showInHuddle();
+    expect(huddle.input).toHaveValue("Shipping on");
+
+    // Only the one in front can be written in, so the other has it once it's in front again.
+    await huddle.user.type(huddle.input, " Friday");
+    expect(beside.box()).toBe(beside.input);
+    expect(beside.box()).toHaveValue("Shipping on");
+    beside.onTyping.mockClear();
+    huddle.view.unmount();
+    expect(beside.box()).toHaveValue("Shipping on Friday");
+    expect(beside.box()).not.toHaveFocus();
+    expect(draft()).toBe("<p>Shipping on Friday</p>");
+    // It wasn't typed here, so the room hears of no typing, and what waits to go with the reply still does.
+    expect(beside.onTyping).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Remove notes.txt" })).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Also send to #general" })).toBeChecked();
+
+    // A huddle's that leaves it as it found it leaves the editor as it is.
+    const reopened = beside.box();
+    (await showInHuddle()).view.unmount();
+    expect(beside.box()).toBe(reopened);
+    await beside.user.type(beside.box(), "{Enter}");
+    expect(beside.onSend).toHaveBeenCalledExactlyOnceWith("<p>Shipping on Friday</p>", true);
+  });
+
+  it("has nothing left written beside the room once the reply's been sent from the huddle, so it can't be sent twice", async () => {
+    const beside = await showBeside();
+    await beside.user.type(beside.input, "Shipping on Friday");
+    const huddle = await showInHuddle();
+    await huddle.user.type(huddle.input, "{Enter}");
+    expect(huddle.onSend).toHaveBeenCalledExactlyOnceWith("<p>Shipping on Friday</p>", false);
+    huddle.view.unmount();
+
+    expect(beside.box()).toHaveValue("");
+    expect(beside.send()).toHaveAttribute("data-empty");
+    await beside.user.type(beside.box(), "{Enter}");
+    expect(beside.onSend).not.toHaveBeenCalled();
+  });
+
+  it("takes up what was begun in the huddle as a draft it opens with: Send lights, and emptying it tells the room its writer has stopped", async () => {
+    const beside = await showBeside();
+    const huddle = await showInHuddle();
+    await huddle.user.type(huddle.input, "Hello");
+    huddle.view.unmount();
+
+    expect(beside.box()).toHaveValue("Hello");
+    expect(beside.send()).not.toHaveAttribute("data-empty");
+    expect(beside.onTyping).not.toHaveBeenCalled();
+    await beside.user.clear(beside.box());
+    expect(beside.onTyping).toHaveBeenCalledExactlyOnceWith(false);
+    expect(draft()).toBeNull();
+  });
+
+  it("leaves what's written, and focus, as they are where the huddle's left the draft as it found it", async () => {
+    const beside = await showBeside();
+    await beside.user.type(beside.input, "Hello");
+    (await showInHuddle()).view.unmount();
+    expect(beside.box()).toBe(beside.input);
+    expect(beside.input).toHaveValue("Hello");
+    expect(beside.input).toHaveFocus();
+  });
+
+  it("leaves the huddle's as it is when the one under it goes, which was written in before it, whether the huddle's has been written in or not", async () => {
+    const huddlesBox = () => within(huddle.view.container).getByRole("textbox", { name: "Write a reply" });
+    const beside = await showBeside();
+    await beside.user.type(beside.input, "Hello");
+    const huddle = await showInHuddle();
+    beside.view.unmount();
+    expect(huddlesBox()).toBe(huddle.input);
+    expect(huddle.input).toHaveValue("Hello");
+
+    const besideAgain = await showBeside();
+    await huddle.user.type(huddle.input, " there");
+    besideAgain.view.unmount();
+    expect(huddlesBox()).toBe(huddle.input);
+    expect(huddle.input).toHaveValue("Hello there");
+    expect(huddle.input).toHaveFocus();
+  });
+
+  it("leaves each with what's written in it where this browser keeps no drafts, so neither has the other's to show", async () => {
+    const refuse = () => {
+      throw new DOMException("The operation is insecure.", "SecurityError");
+    };
+    vi.stubGlobal("localStorage", { getItem: refuse, setItem: refuse, removeItem: refuse });
+    const beside = await showBeside();
+    await beside.user.type(beside.input, "Hello");
+    const huddle = await showInHuddle();
+    expect(huddle.input).toHaveValue("");
+    await huddle.user.type(huddle.input, "Hi{Enter}");
+    huddle.view.unmount();
+    expect(beside.box()).toBe(beside.input);
+    expect(beside.input).toHaveValue("Hello");
+  });
+});
+
 describe("Reply with a quote", () => {
   it("writes a reply in place of what's written, with the cursor at its end, keeping it as the draft", async () => {
     const composer = createRef<ComposerHandle>();
@@ -895,6 +1021,17 @@ describe("Link previews while writing", () => {
     await user.paste("https://example.com/third");
     view.unmount();
     expect(fetch.mock.calls[2]![1].signal!.aborted).toBe(true);
+  });
+
+  it("forgets it too once the editor it was pasted in opens again, with what another composer left of its draft", async () => {
+    const fetch = previews(() => new Promise<Response>(() => {}));
+    const { user } = await showComposer({ threadId: "m1" });
+    await user.paste("https://example.com/slow");
+    const over = await showComposer({ threadId: "m1", autoFocus: false });
+    await over.user.type(over.input, " is slow");
+    expect(fetch.mock.calls[0]![1].signal!.aborted).toBe(false);
+    over.view.unmount();
+    expect(fetch.mock.calls[0]![1].signal!.aborted).toBe(true);
   });
 });
 

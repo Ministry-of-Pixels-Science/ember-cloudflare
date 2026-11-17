@@ -22,7 +22,23 @@ import { ANSWER_TIMEOUT_MS, CAMERA_BITRATE, joinHuddle, LISTEN_AGAIN_MS, PUBLISH
 import { CAMERA_WENT_OFF, NO_CAMERA, NO_OTHER_CAMERA, NO_OTHER_MICROPHONE, NO_OTHER_SPEAKER, NO_SCREEN, STILL_NO_MICROPHONE } from "./huddle-devices";
 import { MUSIC_AFTER_MS } from "./huddle-sounds";
 import { MEASURED_EVERY_MS, SPEAKING_LEVEL } from "./huddle-speaking";
-import { chooseHuddleDevice, hearHuddle, inviteToHuddle, isSpeaking, joinedHuddle, leaveHuddle, muteHuddle, openHuddle, shareHuddleScreen, showHuddleCamera, switchHuddleCamera, takeCamerasSmall, watchHuddle, watchSpeaking } from "./huddle-store";
+import {
+  chooseHuddleDevice,
+  hearHuddle,
+  inviteToHuddle,
+  isSpeaking,
+  joinedHuddle,
+  leaveHuddle,
+  muteHuddle,
+  openHuddle,
+  shareHuddleScreen,
+  showHuddleCamera,
+  showHuddleThread,
+  switchHuddleCamera,
+  takeCamerasSmall,
+  watchHuddle,
+  watchSpeaking,
+} from "./huddle-store";
 
 /** Stands in for the browser's WebSocket; tests play the room and the network. */
 class FakeSocket {
@@ -436,7 +452,7 @@ describe("Joining a huddle", () => {
     joinHuddle({ roomId: "general", muted: false, microphone: microphone as unknown as MediaStream, camera: null, speakerId: "" });
 
     expect(socket().url).toBe("ws://localhost:3000/api/rooms/general/huddle");
-    const joining = { roomId: "general", connected: false, you: null, people: [], muted: false, microphone: true, microphoneId: "built-in", speakerId: "", camera: null, watched: new Map(), screen: null, screens: new Map(), open: true };
+    const joining = { roomId: "general", connected: false, you: null, people: [], muted: false, microphone: true, microphoneId: "built-in", speakerId: "", camera: null, watched: new Map(), screen: null, screens: new Map(), open: true, thread: true };
     expect(joinedHuddle()).toEqual(joining);
     expect(shown).toHaveBeenCalledTimes(1);
     // Nothing is asked of the room before it has said who the tab is.
@@ -448,6 +464,59 @@ describe("Joining a huddle", () => {
     await welcomed([person(grace)]);
     expect(joinedHuddle()).toEqual({ ...joining, connected: true, you: ada, people: [person(grace), person(ada, { audio: false })] });
     stop();
+  });
+
+  it("has the message the room names as it lets the tab in as the huddle's, and again each time it lets it back in", async () => {
+    const room = await joined();
+    // A huddle of sockets from before huddles named their messages names none.
+    expect(joinedHuddle()!.messageId).toBeUndefined();
+
+    const letIn = async (messageId: string) => {
+      socket().receive({ type: "huddle.welcome", you: ada, people: [person(ada, { audio: false })], startedAt: STARTED_AT, messageId });
+      await settled();
+    };
+    room.drop();
+    await wait(500);
+    socket().open();
+    await letIn("m1");
+    expect(joinedHuddle()).toMatchObject({ connected: true, messageId: "m1" });
+
+    // Back after the huddle it was in was over, the tab is in another, whose message is another.
+    socket().drop();
+    expect(joinedHuddle()).toMatchObject({ connected: false, messageId: "m1" });
+    await wait(500);
+    socket().open();
+    await letIn("m2");
+    expect(joinedHuddle()).toMatchObject({ connected: true, messageId: "m2" });
+  });
+
+  it("shows its thread until its person closes it, and again once they show it, telling whoever shows the huddle of each change", async () => {
+    await joined();
+    expect(joinedHuddle()).toMatchObject({ thread: true });
+    const shown = vi.fn();
+    const stop = watchHuddle(shown);
+
+    showHuddleThread(false);
+    expect(joinedHuddle()).toMatchObject({ thread: false });
+    expect(shown).toHaveBeenCalledTimes(1);
+    // Closed already, there's nothing to tell.
+    showHuddleThread(false);
+    expect(shown).toHaveBeenCalledTimes(1);
+
+    // Minimizing the huddle and opening it again leaves the thread as it was.
+    openHuddle(false);
+    openHuddle(true);
+    expect(joinedHuddle()).toMatchObject({ open: true, thread: false });
+
+    showHuddleThread(true);
+    expect(joinedHuddle()).toMatchObject({ thread: true });
+    stop();
+
+    // The next huddle the tab joins shows its thread, whatever the last did.
+    showHuddleThread(false);
+    leaveHuddle();
+    await joined();
+    expect(joinedHuddle()).toMatchObject({ thread: true });
   });
 
   it("says in the address that the tab joins muted, and keeps its microphone off", async () => {

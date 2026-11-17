@@ -1,4 +1,4 @@
-import type { DirectoryUser, DirectRoom, Room, User } from "@ember/protocol";
+import type { DirectoryUser, DirectRoom, Me, Room, ServerFrame, User } from "@ember/protocol";
 import type { HuddlePerson } from "@ember/protocol/huddles";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -11,6 +11,8 @@ import { showHuddle, showSpeaking, type JoinedHuddle } from "@/lib/huddle-store"
 import { HuddleView } from "./huddle-view";
 
 const ada: User = { id: "ada", name: "Ada Lovelace" };
+/** Ada as the app has her once she's signed in. */
+const me: Me = { ...ada, administrator: false };
 const sam: User = { id: "sam", name: "Sam Rivera" };
 const priya: User = { id: "priya", name: "Priya Patel" };
 const general: Room = { id: "general", name: "general", kind: "open", icon: null };
@@ -31,6 +33,7 @@ const huddle = (changes: Partial<JoinedHuddle> = {}): JoinedHuddle => ({
   screen: null,
   screens: new Map(),
   open: true,
+  thread: true,
   ...changes,
 });
 /** A camera's stream, as much of one as a tile reads, which is the way it faces, where the browser says: jsdom has none. */
@@ -43,10 +46,10 @@ const failed = vi.fn();
 
 /** The huddle this tab is in, opened, with what the huddle's controls were asked. */
 function renderView(joined: JoinedHuddle = huddle(), room: Room | null = general) {
-  const controls = { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setDevice: vi.fn(), setSmall: vi.fn(), switchCamera: vi.fn(), invite: vi.fn(() => true) };
+  const controls = { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setThread: vi.fn(), setDevice: vi.fn(), setSmall: vi.fn(), switchCamera: vi.fn(), invite: vi.fn(() => true) };
   act(() => showHuddle(joined, controls));
   const user = userEvent.setup();
-  const view = render(<HuddleView huddle={joined} room={room} meId="ada" onFailed={failed} />, { wrapper: FlashProvider });
+  const view = render(<HuddleView huddle={joined} room={room} me={me} onFailed={failed} />, { wrapper: FlashProvider });
   return { ...controls, user, ...view };
 }
 
@@ -102,9 +105,70 @@ const tiles = () => within(list()).getAllByRole("listitem");
 const stage = () => screen.queryByRole("figure");
 const shape = () => parseFloat((stage()!.querySelector("figcaption")!.nextElementSibling as HTMLElement).style.aspectRatio);
 const count = () => opened().querySelector("header [aria-live]");
-/** The buttons along its base, first to last. */
-const tools = () => within(opened().querySelector("footer")!).getAllByRole("button");
+/** The buttons along its base, first to last: its own base's, and not those under what's written in its thread. */
+const tools = () => within(opened().querySelector(":scope > footer")!).getAllByRole("button");
 const inviteDialog = () => screen.findByRole("dialog", { name: "Invite people" });
+
+/** Stands in for the browser's WebSocket: the socket the huddle's thread has to its room, which the test plays the room on. */
+class FakeSocket {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSED = 3;
+  static all: FakeSocket[] = [];
+
+  readyState = FakeSocket.CONNECTING;
+  sent: Array<Record<string, unknown>> = [];
+  onopen: ((event: Event) => void) | null = null;
+  onmessage: ((event: { data: string }) => void) | null = null;
+  onclose: ((event: { code: number }) => void) | null = null;
+
+  constructor(readonly url: string) {
+    FakeSocket.all.push(this);
+  }
+
+  send(data: string) {
+    this.sent.push(JSON.parse(data));
+  }
+
+  close() {
+    this.readyState = FakeSocket.CLOSED;
+  }
+
+  /** The room lets the socket in, as Ada. */
+  letIn() {
+    const welcome: ServerFrame = { type: "welcome", you: ada, messages: [], present: [ada], hasMore: false, hasNewer: false, around: null, seq: 0 };
+    act(() => {
+      this.readyState = FakeSocket.OPEN;
+      this.onopen?.(new Event("open"));
+      this.onmessage?.(new MessageEvent("message", { data: JSON.stringify(welcome) }));
+    });
+  }
+}
+
+/**
+ * Has the window be narrower than the huddle shows its thread beside its people in, or as wide. Answers
+ * what makes it so from then on, telling the page that it changed.
+ */
+function windowNarrow(narrow: boolean) {
+  let matches = narrow;
+  const listeners = new Set<() => void>();
+  vi.stubGlobal("matchMedia", (media: string) => ({
+    media,
+    get matches() {
+      return media === "(width < 73.75rem)" && matches;
+    },
+    addEventListener: (_: string, listener: () => void) => listeners.add(listener),
+    removeEventListener: (_: string, listener: () => void) => listeners.delete(listener),
+  }));
+  return (now: boolean) =>
+    act(() => {
+      matches = now;
+      listeners.forEach((listener) => listener());
+    });
+}
+
+const thread = () => screen.queryByRole("complementary", { name: "Huddle thread" });
+const threadTool = () => screen.queryByRole("button", { name: "Thread" });
 
 /** The page is hidden, as when its person goes to another app on a phone, or shows again. */
 const pageShows = (state: DocumentVisibilityState) => {
@@ -134,14 +198,14 @@ describe("The huddle opened", () => {
     expect(opened()).toHaveAccessibleName("Huddle in general");
     expect(screen.getByRole("heading", { level: 2 })).toHaveTextContent("Huddle in general");
     expect(count()).toHaveTextContent("2 people");
-    rerender(<HuddleView huddle={huddle({ people: [inHuddle(ada)] })} room={general} meId="ada" onFailed={failed} />);
+    rerender(<HuddleView huddle={huddle({ people: [inHuddle(ada)] })} room={general} me={me} onFailed={failed} />);
     expect(count()).toHaveTextContent("1 person");
   });
 
   it("says that it's connecting until the room lets the tab in, and reconnecting while its connection is down", () => {
     const { rerender } = renderView(huddle({ connected: false, you: null, people: [] }));
     expect(count()).toHaveTextContent("Connecting…");
-    rerender(<HuddleView huddle={huddle({ connected: false })} room={general} meId="ada" onFailed={failed} />);
+    rerender(<HuddleView huddle={huddle({ connected: false })} room={general} me={me} onFailed={failed} />);
     expect(count()).toHaveTextContent("Reconnecting…");
     expect(count()).toHaveAttribute("aria-live", "polite");
   });
@@ -186,7 +250,7 @@ describe("The tiles of a huddle", () => {
     const renamed: DirectoryUser = { id: "sam", name: "Samuel Rivera", bio: null, role: "member", status: "active", avatarUrl: "/users/sam/avatar" };
     render(
       <PeopleContext value={new Map([[renamed.id, renamed]])}>
-        <HuddleView huddle={huddle()} room={general} meId="ada" onFailed={failed} />
+        <HuddleView huddle={huddle()} room={general} me={me} onFailed={failed} />
       </PeopleContext>,
     );
     expect(tiles()[0]).toHaveTextContent("Samuel Rivera");
@@ -262,10 +326,10 @@ describe("The tiles of a huddle", () => {
   it("shows you a camera that faces away from you, as a phone's back camera does, as it is, and one that faces you as a mirror would", () => {
     const { rerender } = renderView(huddle({ camera: camera("environment") }));
     expect(screen.getByLabelText("Your camera")).not.toHaveClass("-scale-x-100");
-    rerender(<HuddleView huddle={huddle({ camera: camera("user") })} room={general} meId="ada" onFailed={failed} />);
+    rerender(<HuddleView huddle={huddle({ camera: camera("user") })} room={general} me={me} onFailed={failed} />);
     expect(screen.getByLabelText("Your camera")).toHaveClass("-scale-x-100");
     // Someone else's is as it is whichever way it faces.
-    rerender(<HuddleView huddle={huddle({ watched: new Map([["sam", camera("user")]]) })} room={general} meId="ada" onFailed={failed} />);
+    rerender(<HuddleView huddle={huddle({ watched: new Map([["sam", camera("user")]]) })} room={general} me={me} onFailed={failed} />);
     expect(screen.getByLabelText("Sam Rivera's camera")).not.toHaveClass("-scale-x-100");
   });
 
@@ -277,7 +341,7 @@ describe("The tiles of a huddle", () => {
     expect(play.mock.contexts).toEqual([picture]);
     await user.keyboard("a");
     expect(play.mock.contexts).toEqual([picture, picture]);
-    rerender(<HuddleView huddle={huddle()} room={general} meId="ada" onFailed={failed} />);
+    rerender(<HuddleView huddle={huddle()} room={general} me={me} onFailed={failed} />);
     expect(picture.srcObject).toBeNull();
     await user.click(screen.getByRole("heading", { level: 2 }));
     expect(play).toHaveBeenCalledTimes(2);
@@ -292,7 +356,7 @@ describe("The tiles of a huddle", () => {
     pageShows("visible");
     expect(play.mock.contexts).toEqual([sams]);
 
-    rerender(<HuddleView huddle={huddle()} room={general} meId="ada" onFailed={failed} />);
+    rerender(<HuddleView huddle={huddle()} room={general} me={me} onFailed={failed} />);
     pageShows("visible");
     expect(play).toHaveBeenCalledTimes(1);
   });
@@ -320,7 +384,7 @@ describe("The tiles of a huddle", () => {
     expect(setSmall.mock.calls).toEqual([[false]]);
 
     // Twenty: five to a row, 221px wide and 165px tall, which the smaller size fills.
-    rerender(<HuddleView huddle={huddle({ people: [...crowd(19), inHuddle(ada)] })} room={general} meId="ada" onFailed={failed} />);
+    rerender(<HuddleView huddle={huddle({ people: [...crowd(19), inHuddle(ada)] })} room={general} me={me} onFailed={failed} />);
     expect(list()).toHaveStyle({ gridTemplateColumns: "repeat(5, 221px)" });
     expect(setSmall.mock.calls).toEqual([[false], [true]]);
 
@@ -337,9 +401,9 @@ describe("The tiles of a huddle", () => {
     unmount();
 
     measuring({ width: 1200, height: 700 });
-    const { rerender } = render(<HuddleView huddle={huddle()} room={general} meId="ada" onFailed={failed} />);
+    const { rerender } = render(<HuddleView huddle={huddle()} room={general} me={me} onFailed={failed} />);
     expect(setSmall.mock.calls).toEqual([[false]]);
-    rerender(<HuddleView huddle={huddle({ roomId: "random" })} room={general} meId="ada" onFailed={failed} />);
+    rerender(<HuddleView huddle={huddle({ roomId: "random" })} room={general} me={me} onFailed={failed} />);
     expect(setSmall.mock.calls).toEqual([[false], [false]]);
   });
 
@@ -347,7 +411,7 @@ describe("The tiles of a huddle", () => {
     measuring({ width: 1200, height: 700 });
     const { setSmall, rerender } = renderView(huddle({ connected: false, you: null, people: [] }));
     expect(setSmall).not.toHaveBeenCalled();
-    rerender(<HuddleView huddle={huddle()} room={general} meId="ada" onFailed={failed} />);
+    rerender(<HuddleView huddle={huddle()} room={general} me={me} onFailed={failed} />);
     expect(setSmall.mock.calls).toEqual([[false]]);
   });
 });
@@ -458,11 +522,11 @@ describe("A screen shared in a huddle", () => {
     expect(within(tiles()[0]!).getByRole("button", { name: "Show Sam Rivera's screen larger" })).toBeInTheDocument();
 
     // Once hers is no longer shared, his shows large again, and the tiles are people only.
-    rerender(<HuddleView huddle={sharing({ screens: new Map([["sam", sams]]) })} room={general} meId="ada" onFailed={failed} />);
+    rerender(<HuddleView huddle={sharing({ screens: new Map([["sam", sams]]) })} room={general} me={me} onFailed={failed} />);
     expect(within(stage()!).getByLabelText<HTMLVideoElement>("Sam Rivera's screen").srcObject).toBe(sams);
     expect(tiles()).toHaveLength(3);
     // And with none shared, it's the tiles as they were, as large as shows them all.
-    rerender(<HuddleView huddle={sharing()} room={general} meId="ada" onFailed={failed} />);
+    rerender(<HuddleView huddle={sharing()} room={general} me={me} onFailed={failed} />);
     expect(stage()).not.toBeInTheDocument();
     expect(list()).toHaveClass("m-auto");
     expect(list().parentElement).toHaveClass("overflow-auto");
@@ -474,7 +538,7 @@ describe("A screen shared in a huddle", () => {
     const [yours, sams] = [shared(), shared()];
     const { rerender } = renderView();
     expect(list()).toHaveStyle({ gridTemplateColumns: "repeat(2, 420px)" });
-    rerender(<HuddleView huddle={huddle({ screen: yours })} room={general} meId="ada" onFailed={failed} />);
+    rerender(<HuddleView huddle={huddle({ screen: yours })} room={general} me={me} onFailed={failed} />);
     expect(stage()).not.toBeInTheDocument();
     expect(tiles().map((tile) => tile.textContent)).toEqual(["Your screen", "Sam Rivera", "Ada Lovelace (you)"]);
     const picture = within(tiles()[0]!).getByLabelText<HTMLVideoElement>("Your screen");
@@ -486,7 +550,7 @@ describe("A screen shared in a huddle", () => {
     expect(list()).toHaveStyle({ gridTemplateColumns: "repeat(2, 325px)" });
 
     // Beside someone else's, which shows large, it's first in the strip, which is as wide as shows the three.
-    rerender(<HuddleView huddle={huddle({ screen: yours, people: [inHuddle(sam, { screen: true }), inHuddle(ada)], screens: new Map([["sam", sams]]) })} room={general} meId="ada" onFailed={failed} />);
+    rerender(<HuddleView huddle={huddle({ screen: yours, people: [inHuddle(sam, { screen: true }), inHuddle(ada)], screens: new Map([["sam", sams]]) })} room={general} me={me} onFailed={failed} />);
     expect(within(stage()!).getByLabelText<HTMLVideoElement>("Sam Rivera's screen").srcObject).toBe(sams);
     expect(tiles().map((tile) => tile.textContent)).toEqual(["Your screen", "Sam Rivera", "Ada Lovelace (you)"]);
     expect(list()).toHaveStyle({ gridTemplateColumns: "repeat(1, minmax(0, 211px))" });
@@ -497,7 +561,7 @@ describe("The buttons along the base of a huddle", () => {
   it("mutes the microphone and unmutes it, as the bar's does", async () => {
     const { setMuted, user, rerender } = renderView();
     await user.click(screen.getByRole("button", { name: "Mute microphone" }));
-    rerender(<HuddleView huddle={huddle({ muted: true })} room={general} meId="ada" onFailed={failed} />);
+    rerender(<HuddleView huddle={huddle({ muted: true })} room={general} me={me} onFailed={failed} />);
     await user.click(screen.getByRole("button", { name: "Unmute microphone" }));
     expect(setMuted.mock.calls).toEqual([[true], [false]]);
   });
@@ -507,7 +571,7 @@ describe("The buttons along the base of a huddle", () => {
     const off = screen.getByRole("button", { name: "Turn on camera" });
     expect(off).not.toHaveClass("max-md:hidden");
     await user.click(off);
-    rerender(<HuddleView huddle={huddle({ camera: camera() })} room={general} meId="ada" onFailed={failed} />);
+    rerender(<HuddleView huddle={huddle({ camera: camera() })} room={general} me={me} onFailed={failed} />);
     const on = screen.getByRole("button", { name: "Turn off camera" });
     expect(on).toHaveClass("bg-foreground", "text-background");
     await user.click(on);
@@ -518,14 +582,14 @@ describe("The buttons along the base of a huddle", () => {
     const { setCamera, user, rerender } = renderView();
     rerender(
       <CamerasOff>
-        <HuddleView huddle={huddle()} room={general} meId="ada" onFailed={failed} />
+        <HuddleView huddle={huddle()} room={general} me={me} onFailed={failed} />
       </CamerasOff>,
     );
     expect(screen.queryByRole("button", { name: /camera/ })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Mute microphone" })).toBeInTheDocument();
     rerender(
       <CamerasOff>
-        <HuddleView huddle={huddle({ camera: camera() })} room={general} meId="ada" onFailed={failed} />
+        <HuddleView huddle={huddle({ camera: camera() })} room={general} me={me} onFailed={failed} />
       </CamerasOff>,
     );
     await user.click(screen.getByRole("button", { name: "Turn off camera" }));
@@ -553,7 +617,7 @@ describe("The buttons along the base of a huddle", () => {
     const { rerender } = renderView();
     rerender(
       <CamerasOff>
-        <HuddleView huddle={huddle({ camera: camera() })} room={general} meId="ada" onFailed={failed} />
+        <HuddleView huddle={huddle({ camera: camera() })} room={general} me={me} onFailed={failed} />
       </CamerasOff>,
     );
     expect(screen.getByRole("button", { name: "Turn off camera" })).not.toHaveClass("md:rounded-r-none");
@@ -575,7 +639,7 @@ describe("The buttons along the base of a huddle", () => {
     await user.click(button);
     expect(switchCamera).toHaveBeenCalledExactlyOnceWith();
     // Off, there's none to switch from.
-    rerender(<HuddleView huddle={huddle()} room={general} meId="ada" onFailed={failed} />);
+    rerender(<HuddleView huddle={huddle()} room={general} me={me} onFailed={failed} />);
     expect(screen.queryByRole("button", { name: "Switch camera" })).not.toBeInTheDocument();
   });
 
@@ -596,10 +660,10 @@ describe("The buttons along the base of a huddle", () => {
     const { rerender } = renderView();
     await lists(2);
     expect(enumerateDevices).not.toHaveBeenCalled();
-    rerender(<HuddleView huddle={huddle({ camera: camera() })} room={general} meId="ada" onFailed={failed} />);
+    rerender(<HuddleView huddle={huddle({ camera: camera() })} room={general} me={me} onFailed={failed} />);
     expect(await screen.findByRole("button", { name: "Switch camera" })).toBeInTheDocument();
     expect(enumerateDevices).toHaveBeenCalledTimes(1);
-    rerender(<HuddleView huddle={huddle()} room={general} meId="ada" onFailed={failed} />);
+    rerender(<HuddleView huddle={huddle()} room={general} me={me} onFailed={failed} />);
     await lists(2);
     expect(enumerateDevices).toHaveBeenCalledTimes(1);
   });
@@ -609,7 +673,7 @@ describe("The buttons along the base of a huddle", () => {
     const { rerender } = renderView();
     rerender(
       <CamerasOff>
-        <HuddleView huddle={huddle({ camera: camera() })} room={general} meId="ada" onFailed={failed} />
+        <HuddleView huddle={huddle({ camera: camera() })} room={general} me={me} onFailed={failed} />
       </CamerasOff>,
     );
     await act(async () => {});
@@ -624,7 +688,7 @@ describe("The buttons along the base of a huddle", () => {
     const { rerender } = renderView();
     rerender(
       <Unsaid>
-        <HuddleView huddle={huddle()} room={general} meId="ada" onFailed={failed} />
+        <HuddleView huddle={huddle()} room={general} me={me} onFailed={failed} />
       </Unsaid>,
     );
     expect(screen.getByRole("button", { name: "Turn on camera" })).toBeInTheDocument();
@@ -634,7 +698,7 @@ describe("The buttons along the base of a huddle", () => {
     browserSharesScreens();
     const { setScreen, user, rerender } = renderView();
     await user.click(screen.getByRole("button", { name: "Share screen" }));
-    rerender(<HuddleView huddle={huddle({ screen: shared() })} room={general} meId="ada" onFailed={failed} />);
+    rerender(<HuddleView huddle={huddle({ screen: shared() })} room={general} me={me} onFailed={failed} />);
     const stop = screen.getByRole("button", { name: "Stop sharing screen" });
     expect(stop).toHaveClass("bg-foreground", "text-background");
     await user.click(stop);
@@ -647,14 +711,14 @@ describe("The buttons along the base of a huddle", () => {
     browserSharesScreens();
     rerender(
       <ScreensOff>
-        <HuddleView huddle={huddle()} room={general} meId="ada" onFailed={failed} />
+        <HuddleView huddle={huddle()} room={general} me={me} onFailed={failed} />
       </ScreensOff>,
     );
     expect(screen.queryByRole("button", { name: /screen/ })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Turn on camera" })).toBeInTheDocument();
     rerender(
       <ScreensOff>
-        <HuddleView huddle={huddle({ screen: shared() })} room={general} meId="ada" onFailed={failed} />
+        <HuddleView huddle={huddle({ screen: shared() })} room={general} me={me} onFailed={failed} />
       </ScreensOff>,
     );
     await user.click(screen.getByRole("button", { name: "Stop sharing screen" }));
@@ -669,7 +733,7 @@ describe("The buttons along the base of a huddle", () => {
     const { rerender } = renderView();
     rerender(
       <Unsaid>
-        <HuddleView huddle={huddle()} room={general} meId="ada" onFailed={failed} />
+        <HuddleView huddle={huddle()} room={general} me={me} onFailed={failed} />
       </Unsaid>,
     );
     expect(screen.getByRole("button", { name: "Share screen" })).toBeInTheDocument();
@@ -780,5 +844,123 @@ describe("The buttons along the base of a huddle", () => {
     expect(buttons.at(-1)).toHaveAccessibleName("Leave");
     await user.click(buttons.at(-1)!);
     expect(leave).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("The thread of a huddle", () => {
+  beforeEach(() => {
+    FakeSocket.all = [];
+    vi.stubGlobal("WebSocket", FakeSocket);
+  });
+
+  it("shows beside the people in the huddle, once the room has said which message is the huddle's, over a socket of its own to the huddle's room", () => {
+    renderView(huddle({ roomId: "direct-1", messageId: "h1" }), direct);
+    // In a row with the tiles, between the huddle's header and its buttons.
+    expect(thread()!.parentElement).toBe(list().parentElement!.parentElement);
+    expect(thread()!.parentElement).toHaveClass("flex");
+    expect(thread()!.previousElementSibling).toBe(list().parentElement);
+    expect(thread()!.parentElement!.previousElementSibling).toBe(opened().querySelector(":scope > header"));
+    expect(thread()!.parentElement!.nextElementSibling).toBe(opened().querySelector(":scope > footer"));
+
+    expect(FakeSocket.all.map(({ url }) => url)).toEqual(["ws://localhost:3000/api/rooms/direct-1/socket?visible=1&protocol=4&apart=1"]);
+    FakeSocket.all[0]!.letIn();
+    expect(FakeSocket.all[0]!.sent).toEqual([{ type: "thread.open", parentId: "h1" }]);
+  });
+
+  it("has Thread among its buttons, after the screen's and before More, lit while the thread shows", () => {
+    browserSharesScreens();
+    renderView(huddle({ messageId: "h1" }));
+    expect(tools().map((tool) => tool.getAttribute("aria-label") ?? tool.textContent)).toEqual([
+      "Invite people",
+      "Mute microphone",
+      "Microphone and speaker",
+      "Turn on camera",
+      "Camera",
+      "Share screen",
+      "Thread",
+      "More",
+      "Leave",
+    ]);
+    expect(threadTool()).toHaveAttribute("title", "Thread");
+    expect(threadTool()).toHaveAttribute("aria-pressed", "true");
+    expect(threadTool()).toHaveClass("bg-foreground", "text-background");
+  });
+
+  it("closes from Close thread, which leaves the focus on Thread, and from Thread, which shows it again", async () => {
+    const { setThread, user, rerender } = renderView(huddle({ messageId: "h1" }));
+    await user.click(within(thread()!).getByRole("button", { name: "Close thread" }));
+    expect(setThread).toHaveBeenCalledExactlyOnceWith(false);
+    expect(threadTool()).toHaveFocus();
+    await user.click(threadTool()!);
+    expect(setThread).toHaveBeenCalledTimes(2);
+    expect(setThread).toHaveBeenLastCalledWith(false);
+
+    // Closed, it's gone with its socket, and Thread is as the huddle's other buttons that are off.
+    rerender(<HuddleView huddle={huddle({ messageId: "h1", thread: false })} room={general} me={me} onFailed={failed} />);
+    expect(thread()).not.toBeInTheDocument();
+    expect(FakeSocket.all.map(({ readyState }) => readyState)).toEqual([FakeSocket.CLOSED]);
+    expect(threadTool()).toHaveAttribute("aria-pressed", "false");
+    expect(threadTool()).toHaveClass("bg-hover", "text-foreground");
+    await user.click(threadTool()!);
+    expect(setThread).toHaveBeenLastCalledWith(true);
+
+    rerender(<HuddleView huddle={huddle({ messageId: "h1" })} room={general} me={me} onFailed={failed} />);
+    expect(thread()).toBeInTheDocument();
+    expect(FakeSocket.all).toHaveLength(2);
+  });
+
+  it("leaves the focus on the huddle, which took it as it opened, where the thread shows with it, and puts it in the thread's composer where its person asks for the thread", async () => {
+    // The room says which message is the huddle's a moment after the huddle has opened.
+    const { user, rerender } = renderView(huddle());
+    expect(opened()).toHaveFocus();
+    rerender(<HuddleView huddle={huddle({ messageId: "h1" })} room={general} me={me} onFailed={failed} />);
+    await within(thread()!).findByRole("textbox", { name: "Write a reply" });
+    expect(opened()).toHaveFocus();
+
+    // Closed, and shown again from Thread, it's there to write in.
+    rerender(<HuddleView huddle={huddle({ messageId: "h1", thread: false })} room={general} me={me} onFailed={failed} />);
+    await user.click(threadTool()!);
+    rerender(<HuddleView huddle={huddle({ messageId: "h1" })} room={general} me={me} onFailed={failed} />);
+    expect(await within(thread()!).findByRole("textbox", { name: "Write a reply" })).toHaveFocus();
+  });
+
+  it("has neither the thread nor Thread until the room has said which message is the huddle's, nor once the huddle's room isn't among this person's", () => {
+    const { unmount } = renderView(huddle());
+    expect(thread()).not.toBeInTheDocument();
+    expect(threadTool()).not.toBeInTheDocument();
+    unmount();
+
+    renderView(huddle({ messageId: "h1" }), null);
+    expect(thread()).not.toBeInTheDocument();
+    expect(threadTool()).not.toBeInTheDocument();
+    expect(FakeSocket.all).toEqual([]);
+  });
+
+  it("has neither in a window narrower than 1180px, which has no room for the thread beside the people, until it's that wide", () => {
+    const narrow = windowNarrow(true);
+    renderView(huddle({ messageId: "h1" }));
+    expect(thread()).not.toBeInTheDocument();
+    expect(threadTool()).not.toBeInTheDocument();
+    expect(FakeSocket.all).toEqual([]);
+
+    narrow(false);
+    expect(thread()).toBeInTheDocument();
+    expect(threadTool()).toBeInTheDocument();
+    expect(FakeSocket.all).toHaveLength(1);
+
+    narrow(true);
+    expect(thread()).not.toBeInTheDocument();
+    expect(threadTool()).not.toBeInTheDocument();
+    expect(FakeSocket.all.map(({ readyState }) => readyState)).toEqual([FakeSocket.CLOSED]);
+  });
+
+  it("shows another huddle's thread once the room says that another message is the huddle's, as the tab comes back to another huddle than it left", () => {
+    const { rerender } = renderView(huddle({ messageId: "h1" }));
+    FakeSocket.all[0]!.letIn();
+    rerender(<HuddleView huddle={huddle({ messageId: "h2" })} room={general} me={me} onFailed={failed} />);
+    expect(FakeSocket.all.map(({ readyState }) => readyState)).toEqual([FakeSocket.CLOSED, FakeSocket.CONNECTING]);
+    FakeSocket.all[1]!.letIn();
+    expect(FakeSocket.all[1]!.sent).toEqual([{ type: "thread.open", parentId: "h2" }]);
+    expect(screen.getAllByRole("complementary", { name: "Huddle thread" })).toHaveLength(1);
   });
 });

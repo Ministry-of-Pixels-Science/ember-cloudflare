@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type Ref } from "react";
 import type { Room, UserId } from "@ember/protocol";
-import { Microphone, MicrophoneMute, ModernTv, MoreVert, RotateCameraRight, UserPlus, VideoCamera, VideoCameraOff } from "@/components/icons/iconoir";
+import { MessageText, Microphone, MicrophoneMute, ModernTv, MoreVert, RotateCameraRight, UserPlus, VideoCamera, VideoCameraOff } from "@/components/icons/iconoir";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { useCamerasAllowed, useScreensAllowed } from "@/hooks/use-account";
 import { useNameOf } from "@/hooks/use-directory";
@@ -141,6 +141,19 @@ export function ScreenTool({ huddle, className }: { huddle: JoinedHuddle; classN
   return (
     <button type="button" title={label} aria-label={label} onClick={() => shareHuddleScreen(!shared)} className={cn(TOOL, shared ? TOOL_ON : TOOL_OFF, className)}>
       <ModernTv />
+    </button>
+  );
+}
+
+/**
+ * Shows the huddle's thread beside the people in it, or closes it, and is filled in ink while it shows:
+ * after the screen and before More, where Slack's is. The huddle opened has it where it has room for
+ * the thread.
+ */
+export function ThreadTool({ shown, onShow, ref }: { shown: boolean; onShow: (shown: boolean) => void; ref?: Ref<HTMLButtonElement> }) {
+  return (
+    <button ref={ref} type="button" title="Thread" aria-label="Thread" aria-pressed={shown} onClick={() => onShow(!shown)} className={cn(TOOL, shown ? TOOL_ON : TOOL_OFF)}>
+      <MessageText />
     </button>
   );
 }

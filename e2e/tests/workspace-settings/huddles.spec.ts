@@ -705,6 +705,147 @@ test.describe("A huddle", () => {
     await context.close();
   });
 
+  test("a huddle shows its thread beside the people in it, where they write to one another whatever page is under the huddle, which reads nothing of the room, and the room keeps the thread under the huddle's message", async ({ page, browser, baseURL, request }) => {
+    const saved = await request.put("/api/account/huddles", { data: SFU_APP, headers: await asAdministrator(request) });
+    expect(saved.status(), await saved.text()).toBe(200);
+    const [room, other] = [await roomOfItsOwn(request), await roomOfItsOwn(request)];
+    const threadOf = (huddle: Locator) => huddle.getByRole("complementary", { name: "Huddle thread" });
+    const threadTool = (huddle: Locator) => huddle.getByRole("button", { name: "Thread", exact: true });
+    const replyBox = (huddle: Locator) => editorField(threadOf(huddle), "Write a reply");
+    const replies = (huddle: Locator) => threadOf(huddle).getByRole("article");
+    const reply = async (huddle: Locator, text: string) => {
+      await replyBox(huddle).fill(text);
+      await replyBox(huddle).press("Enter");
+    };
+    /** A room's row in `of`'s sidebar, which says when the room is unread. */
+    const rowOf = (of: Page, { name }: TestRoom) => of.getByRole("region", { name: "Rooms" }).getByRole("link", { name, exact: true });
+
+    // Ada starts the room's huddle, which shows its thread beside her tile, saying what it's for where a
+    // thread has its message, with Thread lit among the huddle's buttons.
+    await useOwnAddress(page);
+    await page.goto(`/rooms/${room.id}`);
+    await signInAsAdministrator(page);
+    await page.getByRole("button", { name: "Start huddle", exact: true }).click();
+    await page.getByRole("dialog", { name: `Start a huddle in ${room.name}` }).getByRole("button", { name: "Start Huddle" }).click();
+    const adasHuddle = huddleOpened(page, room);
+    await expect(threadOf(adasHuddle).getByRole("heading", { name: "Thread" })).toBeVisible();
+    await expect(threadOf(adasHuddle)).toContainText("Every huddle has a thread");
+    await expect(threadOf(adasHuddle)).toContainText(`stay as a thread in ${room.name} once it ends.`);
+    await expect(threadTool(adasHuddle)).toHaveAttribute("aria-pressed", "true");
+    const [people, beside] = [(await tileList(adasHuddle).boundingBox())!, (await threadOf(adasHuddle).boundingBox())!];
+    expect(beside.width).toBe(340);
+    expect(beside.x).toBeGreaterThanOrEqual(people.x + people.width);
+    // Its composer is there to write in, and has left the focus on the huddle, which took it as it opened.
+    await expect(replyBox(adasHuddle)).toBeVisible();
+    await expect(adasHuddle).toBeFocused();
+    // The panel is narrower than a room's thread, so Also send to the room has a line of its own over the composer's buttons, and isn't cut short.
+    const alsoSend = threadOf(adasHuddle).getByRole("checkbox", { name: `Also send to #${room.name}` });
+    expect(await alsoSend.evaluate((box) => box.nextElementSibling!.scrollWidth <= box.nextElementSibling!.clientWidth)).toBe(true);
+
+    // Grace joins by the huddle's link, and has its thread too. What Ada writes there she reads, and Ada what she answers.
+    const { user: her, context } = await newcomer(browser, baseURL, request, "Grace");
+    const grace = await context.newPage();
+    const gracesHuddle = await joinByLink(grace, room);
+    await expect(gracesHuddle).toContainText("2 people");
+    await reply(adasHuddle, "Here's the checklist");
+    await expect(replies(gracesHuddle)).toHaveText([/Here's the checklist/]);
+    await reply(gracesHuddle, "Docs are ready");
+    for (const huddle of [adasHuddle, gracesHuddle]) await expect(replies(huddle)).toHaveText([/Here's the checklist/, /Docs are ready/]);
+    // Both have the room open, under their huddles.
+    const hereNow = page.getByText(/^\d+ here now$/);
+    await expect(hereNow).toHaveText("2 here now");
+
+    // Close thread takes it away, and leaves the focus on Thread, which is lit no longer, and shows it again, to write in.
+    await threadOf(adasHuddle).getByRole("button", { name: "Close thread" }).click();
+    await expect(threadOf(adasHuddle)).toHaveCount(0);
+    await expect(threadTool(adasHuddle)).toBeFocused();
+    await expect(threadTool(adasHuddle)).toHaveAttribute("aria-pressed", "false");
+    await threadTool(adasHuddle).click();
+    await expect(replies(adasHuddle)).toHaveText([/Here's the checklist/, /Docs are ready/]);
+    await expect(replyBox(adasHuddle)).toBeFocused();
+    await expect(threadTool(adasHuddle)).toHaveAttribute("aria-pressed", "true");
+
+    // The people @ lists show above the line being written: under it the panel ends, over the huddle's own buttons, where they'd be cut off.
+    await replyBox(adasHuddle).pressSequentially(`@${her.name.split(" ")[1]}`);
+    const listed = threadOf(adasHuddle).getByRole("listbox");
+    await expect(listed.getByRole("option")).toHaveText([her.name]);
+    const [line, list] = [(await replyBox(adasHuddle).locator("p").first().boundingBox())!, (await listed.boundingBox())!];
+    expect(list.y + list.height).toBeLessThan(line.y + line.height);
+    await replyBox(adasHuddle).fill("");
+    await expect(listed).toBeHidden();
+
+    // A window narrower than 1180px has no room for the thread beside the people, so its huddle has neither it nor Thread.
+    await page.setViewportSize({ width: 1179, height: 720 });
+    await expect(threadOf(adasHuddle)).toHaveCount(0);
+    await expect(threadTool(adasHuddle)).toHaveCount(0);
+    await page.setViewportSize({ width: 1180, height: 720 });
+    await expect(replies(adasHuddle)).toHaveCount(2);
+    await expect(threadTool(adasHuddle)).toBeVisible();
+
+    // In a window too short for the thread, it keeps to its place over the huddle's own buttons, which stay clear to press, and scrolls there, as far as its composer's buttons.
+    await page.setViewportSize({ width: 1280, height: 330 });
+    await adasHuddle.getByRole("button", { name: "Leave", exact: true }).click({ trial: true });
+    const send = threadOf(adasHuddle).getByRole("button", { name: "Send Message" });
+    await expect(send).not.toBeInViewport();
+    await threadOf(adasHuddle).hover();
+    await page.mouse.wheel(0, 330);
+    await expect(send).toBeInViewport({ ratio: 1 });
+    await page.setViewportSize({ width: 1280, height: 720 });
+
+    // Grace minimizes her huddle, goes to another room, and opens the huddle over it, where its thread is still the huddle's.
+    await gracesHuddle.getByRole("button", { name: "Minimize huddle" }).filter({ visible: true }).click();
+    await rowOf(grace, other).click();
+    await expect(grace.getByRole("heading", { level: 1 })).toHaveText(other.name);
+    await huddleBar(grace, room).getByRole("button", { name: "Open huddle", exact: true }).click();
+    await expect(replies(gracesHuddle)).toHaveText([/Here's the checklist/, /Docs are ready/]);
+    await expect(rowOf(grace, room)).not.toHaveAccessibleDescription(/\bUnread\b/);
+    // Having the thread before her isn't being in its room, where Ada is alone now.
+    await expect(hereNow).toHaveText("1 here now");
+
+    // What Ada says in the room is the room's, and not its thread's. Grace has the thread before her and
+    // not the room, which she finds unread. Behind Ada's huddle, the room's message of it counts the replies.
+    await adasHuddle.getByRole("button", { name: "Minimize huddle" }).filter({ visible: true }).click();
+    await editorField(page, "Write a message").fill("Lunch after this?");
+    await editorField(page, "Write a message").press("Enter");
+    await expect(rowOf(grace, room)).toHaveAccessibleDescription(/\bUnread\b/);
+    await expect(replies(gracesHuddle)).toHaveCount(2);
+    const message = page.getByRole("log", { name: `Messages in ${room.name}` }).getByRole("article").filter({ has: page.getByRole("heading", { name: /^A huddle / }) });
+    await expect(message.getByRole("link", { name: /^2 replies\b/ })).toBeVisible();
+
+    // Ada opens the thread beside the room, and begins a reply there. Her huddle, opened again over it, has
+    // the thread as she left it, with what she began, which she goes on with there.
+    await message.getByRole("link", { name: /^2 replies\b/ }).click();
+    const roomsThread = page.getByRole("complementary", { name: "Thread", exact: true });
+    const roomsReplyBox = editorField(roomsThread, "Write a reply");
+    await roomsReplyBox.fill("Shipping on");
+    const openHuddle = huddleBar(page, room).getByRole("button", { name: "Open huddle", exact: true });
+    await openHuddle.click();
+    await expect(replies(adasHuddle)).toHaveCount(2);
+    await expect(replyBox(adasHuddle)).toHaveText("Shipping on");
+    await replyBox(adasHuddle).fill("Shipping on Friday");
+    // It's one reply that she's writing, so the thread beside the room has it as she left it in the huddle.
+    await adasHuddle.getByRole("button", { name: "Minimize huddle" }).filter({ visible: true }).click();
+    await expect(roomsReplyBox).toHaveText("Shipping on Friday");
+    // She sends it from the huddle, which Grace reads over the other room.
+    await openHuddle.click();
+    await replyBox(adasHuddle).press("Enter");
+    await expect(replies(gracesHuddle)).toHaveText([/Here's the checklist/, /Docs are ready/, /Shipping on Friday/]);
+
+    // They leave, which ends the huddle. The room keeps its thread, under the message that says a huddle
+    // happened. Beside the room, nothing of the reply that's sent is left to send, and the next is written as ever.
+    for (const huddle of [gracesHuddle, adasHuddle]) await huddle.getByRole("button", { name: "Leave", exact: true }).click();
+    await expect(adasHuddle).toHaveCount(0);
+    await expect(message.getByRole("heading")).toContainText("A huddle happened");
+    await expect(message.getByRole("link", { name: /^3 replies\b/ })).toBeVisible();
+    await expect(roomsThread.getByRole("article")).toHaveText([/A huddle happened/, /Here's the checklist/, /Docs are ready/, /Shipping on Friday/]);
+    await expect(roomsReplyBox).toHaveText("");
+    await roomsReplyBox.fill("Thanks, both");
+    await roomsReplyBox.press("Enter");
+    await expect(roomsThread.getByRole("article")).toHaveText([/A huddle happened/, /Here's the checklist/, /Docs are ready/, /Shipping on Friday/, /Thanks, both/]);
+    await expect(roomsReplyBox).toHaveText("");
+    await context.close();
+  });
+
   test("people share their screens in a huddle, two at once, which the others see large beside everyone in it, until an administrator turns screen sharing off", async ({ page, browser, baseURL, request }) => {
     // Three browsers, two of which send a screen to the other two.
     test.slow();
@@ -722,6 +863,8 @@ test.describe("A huddle", () => {
     await page.getByRole("dialog", { name: `Start a huddle in ${room.name}` }).getByRole("button", { name: "Start Huddle" }).click();
     const adasHuddle = huddleOpened(page, room);
     await expect(adasHuddle).toContainText("1 person");
+    // She closes its thread, which leaves her huddle the room to show a screen with its tiles beside it.
+    await adasHuddle.getByRole("button", { name: "Close thread" }).click();
     const [her, him] = [await newcomer(browser, baseURL, request, "Grace"), await newcomer(browser, baseURL, request, "Linus")];
     const [grace, linus] = [await her.context.newPage(), await him.context.newPage()];
     const gracesHuddle = await joinByLink(grace, room);
@@ -758,6 +901,9 @@ test.describe("A huddle", () => {
     // And all three tiles show beside it, clear of one another, each one's avatar over its name.
     for (const tile of await tiles(adasHuddle).all()) await expect(tile).toBeInViewport({ ratio: 1 });
     expect(await huddleTilesKeepClear(tileList(adasHuddle))).toBe(true);
+    // Linus's huddle still shows its thread, which leaves the screen less room across: his tiles are under it.
+    const [linusLarge, linusSmall] = [(await stage(linusHuddle).boundingBox())!, (await tiles(linusHuddle).first().boundingBox())!];
+    expect(linusSmall.y).toBeGreaterThanOrEqual(linusLarge.y + linusLarge.height);
 
     // Minimized, Ada's huddle says who's sharing on its bar, and opened again it shows her the screen again.
     await adasHuddle.getByRole("button", { name: "Minimize huddle" }).filter({ visible: true }).click();
@@ -1235,7 +1381,7 @@ test.describe("A huddle", () => {
     const adasHuddle = huddleOpened(page, room);
     await expect(adasHuddle).toContainText("1 person");
     const invite = adasHuddle.getByRole("button", { name: "Invite people", exact: true });
-    await expect(adasHuddle.locator("footer").getByRole("button").first()).toHaveAccessibleName("Invite people");
+    await expect(adasHuddle.locator(":scope > footer").getByRole("button").first()).toHaveAccessibleName("Invite people");
     await expect(adasHuddle.getByRole("button", { name: "More", exact: true })).toBeHidden();
 
     // It lists the room's other two by name, neither ticked, and sends no invitation until one is.
