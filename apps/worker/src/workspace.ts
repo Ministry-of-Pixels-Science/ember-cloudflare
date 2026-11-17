@@ -1064,12 +1064,12 @@ export class Workspace extends DurableObject<Env> {
    */
   private lastResetCode: Promise<unknown> = Promise.resolve();
   /**
-   * The last link to join with emailed to each address, by the address as storage compares it
-   * (`asStored`), which the next one for that address waits for, so that an address's links are emailed,
-   * and kept, in the order the Workspace was asked for them, while another address's never wait for them
-   * (see `emailJoinLink`). An address is forgotten once its last link has gone.
+   * The links to join with on their way to each address, by the address as storage compares it
+   * (`asStored`): how many, and the last of them, which the next one for that address waits for, so that
+   * an address's links are emailed, and kept, in the order the Workspace was asked for them, while another
+   * address's never wait for them (see `emailJoinLink`). An address is forgotten once its last link has gone.
    */
-  private readonly emailingLinks = new Map<string, Promise<unknown>>();
+  private readonly emailingLinks = new Map<string, { asked: number; last: Promise<unknown> }>();
   /** How many changes have queued revocations, which `afterQueuing` compares to see whether its change did. */
   private queuedRevocations = 0;
   /**
@@ -2499,18 +2499,23 @@ export class Workspace extends DurableObject<Env> {
    * the Worker has answered already (`askForEmailLink`), or, if someone has an account with it already,
    * whatever its case, an email saying so, with a link to sign in (`sendJoinLink`). It goes in turn with
    * the others asked for the same address, and without waiting for another address's, as none did when
-   * each ask waited for its own, and whatever comes of it is only logged.
+   * each ask waited for its own, and whatever comes of it is only logged. No more are on their way to an
+   * address at once than it's emailed in an hour, since no more of them could be sent: an ask past that
+   * is dropped, so that asks for an address the provider is slow with, or refuses, can't pile up.
    */
   emailJoinLink(emailAddress: string, domain: string, link: NewEmailLink, origin: string): void {
     const address = asStored(emailAddress);
-    const emailing: Promise<unknown> = (this.emailingLinks.get(address) ?? Promise.resolve())
+    const line = this.emailingLinks.get(address) ?? { asked: 0, last: Promise.resolve() };
+    if (line.asked >= EMAILS_PER_ADDRESS) return;
+    line.asked++;
+    line.last = line.last
       .then(() => this.sendJoinLink(emailAddress, domain, link, origin))
       .catch((error: unknown) => console.error("Could not email a link to join", error))
       .finally(() => {
-        if (this.emailingLinks.get(address) === emailing) this.emailingLinks.delete(address);
+        if (--line.asked === 0) this.emailingLinks.delete(address);
       });
-    this.emailingLinks.set(address, emailing);
-    this.ctx.waitUntil(emailing);
+    this.emailingLinks.set(address, line);
+    this.ctx.waitUntil(line.last);
   }
 
   /**

@@ -22,12 +22,12 @@ import {
   type ProfileChanges,
 } from "@ember/protocol";
 import { runInDurableObject } from "cloudflare:test";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { Env } from "../src/env";
 import { verifyPassword } from "../src/passwords";
 import { RECOVERY_PATH } from "../src/recovery";
 import type { Workspace } from "../src/workspace";
-import { api, apiWith, builtPages, cookieOf, freshDeploy, shown, withWorkspaceEnv, workspaceSql, workspaceStub, type Session } from "./support";
+import { api, apiWith, builtPages, cookieOf, countAddressesToEmail, freshDeploy, shown, withWorkspaceEnv, workspaceSql, workspaceStub, type Session } from "./support";
 
 const ada = { name: "Ada Lovelace", emailAddress: "ada@example.com", password: "analytical engine" };
 const grace = { name: "Grace Hopper", emailAddress: "grace@example.com", password: "compiler design" };
@@ -117,8 +117,8 @@ function fakeBinding(refusal: () => unknown = () => undefined, held?: Promise<vo
 /** Waits for the codes, and the links to join with, that the Workspace is emailing, which it emails once it has answered. */
 const emailed = () =>
   runInDurableObject(workspaceStub(), async (instance: Workspace) => {
-    const { lastResetCode, emailingLinks } = instance as unknown as { lastResetCode: Promise<unknown>; emailingLinks: Map<string, Promise<unknown>> };
-    await Promise.all([lastResetCode, ...emailingLinks.values()]);
+    const { lastResetCode, emailingLinks } = instance as unknown as { lastResetCode: Promise<unknown>; emailingLinks: Map<string, { last: Promise<unknown> }> };
+    await Promise.all([lastResetCode, ...Array.from(emailingLinks.values(), ({ last }) => last)]);
   });
 
 /** Runs `run` with the Workspace sending email through a fake binding, answering what it was asked to send once it has sent it. */
@@ -334,9 +334,13 @@ describe("Reset a forgotten password with an emailed code", () => {
       const administrator = await setUp();
       // Asking to join with Ada's address at the email domains emails her where to sign in.
       await change(administrator, { emailDomains: ["example.com"], settings: { emailDomainSignUp: true } });
+      const workspace = await countAddressesToEmail();
+      onTestFinished(workspace.stop);
       const joining = await emailing(async () => {
         const response = await api("/api/email_links", { method: "POST", headers: { "CF-Connecting-IP": nextAddress() }, body: JSON.stringify({ emailAddress: "ada@example.com" }) });
         expect(response.status).toBe(202);
+        // The Worker tells the Workspace the address once it has answered, without waiting for it.
+        await workspace.told(1);
       });
       expect(joining).toMatchObject([{ subject: "You already have an account at Ember" }]);
 

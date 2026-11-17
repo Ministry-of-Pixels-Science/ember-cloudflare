@@ -227,6 +227,37 @@ export async function withWorkspaceEnv(changes: Partial<Env>, run: () => Promise
   }
 }
 
+/**
+ * Has the Workspace count the addresses it's told to email a link to join with, which the Worker tells
+ * it once it has answered the ask, without waiting for it, so an answer doesn't say the Workspace has
+ * been told. `told` waits until it has been told `n` of them, each on its way by then, `holdUntil`
+ * keeps it from taking any until a promise ends, as if the Worker's word were still on its way, and
+ * `stop` has it take them as it did.
+ */
+export async function countAddressesToEmail(): Promise<{ told: (n: number) => Promise<void>; holdUntil: (held: Promise<void>) => void; stop: () => void }> {
+  let count = 0;
+  let held: Promise<void> | undefined;
+  let stop!: () => void;
+  await runInDurableObject(workspaceStub(), (instance: Workspace) => {
+    const prototype = Object.getPrototypeOf(instance) as Pick<Workspace, "emailJoinLink">;
+    const emailJoinLink = prototype.emailJoinLink;
+    prototype.emailJoinLink = async function (this: Workspace, ...asked) {
+      const waits = held;
+      if (waits) count++;
+      await waits;
+      emailJoinLink.apply(this, asked);
+      if (!waits) count++;
+    };
+    stop = () => void (prototype.emailJoinLink = emailJoinLink);
+  });
+  return {
+    // Looked at again and again, since workerd can't wake a test from inside the Workspace.
+    told: (n) => vi.waitFor(() => expect(count).toBeGreaterThanOrEqual(n), { interval: 2, timeout: 5000 }),
+    holdUntil: (until) => void (held = until),
+    stop,
+  };
+}
+
 /** The search index's Durable Object. */
 export const searchIndexStub = () => searchIndex(env as unknown as Env);
 
