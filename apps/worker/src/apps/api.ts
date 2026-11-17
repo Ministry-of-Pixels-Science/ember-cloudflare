@@ -1,5 +1,6 @@
 import {
   APP_CHANGED,
+  APP_IS_EMBER,
   APP_SIGN_IN_ENDED,
   APP_SIGNED_IN,
   APPS_FORBIDDEN,
@@ -7,6 +8,7 @@ import {
   TOOL_GONE,
   YOUR_APP_GONE,
   YOUR_APPS_FORBIDDEN,
+  isAtHost,
   parseAppChanges,
   parseAppClient,
   parseAppSignInReturn,
@@ -85,13 +87,15 @@ export async function showApp(request: Request, env: Env, appId: AppId): Promise
  * read its tools there, with the token, if one's given, answering 201 with the app as its page shows
  * it. Someone who isn't an administrator hears so before anything they sent is read, and Ember AI being
  * off, or as many apps as there can be, is refused before the server is asked. A field that can't be
- * what it's for, or that the server refuses, is refused on that field.
+ * what it's for, or that the server refuses, is refused on that field, as is Ember's own address.
  */
 export async function connectApp(request: Request, env: Env): Promise<Response> {
   const credentials = await administratorOf(request, env, APPS_FORBIDDEN);
   if (credentials instanceof Response) return credentials;
   const app = parseNewApp(await jsonBodyOf(request));
   if ("error" in app) return formAnswer(app, 422);
+  const own = await ownAddressRefusal(request, env, app.url);
+  if (own) return formAnswer(own, 422);
   const ember = workspace(env);
   const slot = await ember.appSlot(credentials);
   if (slot !== true) return refused(slot);
@@ -115,6 +119,8 @@ export async function beginNewAppSignIn(request: Request, env: Env): Promise<Res
   if ("error" in app) return formAnswer(app, 422);
   const client = parseAppClient(body);
   if ("error" in client) return formAnswer(client, 422);
+  const own = await ownAddressRefusal(request, env, app.url);
+  if (own) return formAnswer(own, 422);
   const slot = await workspace(env).appSlot(credentials);
   if (slot !== true) return refused(slot);
   return begunSignIn(request, env, credentials, { appId: null, name: app.name, url: app.url }, clientGiven(client, null), null, false);
@@ -250,6 +256,8 @@ export async function changeApp(request: Request, env: Env, appId: AppId): Promi
   if (typeof access === "string") return refused(access);
   const changes = parseAppChanges(await jsonBodyOf(request));
   if ("error" in changes) return formAnswer(changes, 422);
+  const own = changes.url === undefined ? null : await ownAddressRefusal(request, env, changes.url);
+  if (own) return formAnswer(own, 422);
   const url = changes.url ?? access.url;
   if (access.signedIn) {
     if (url !== access.url || changes.token !== undefined) return formAnswer(signedInRefusal(url !== access.url), 422);
@@ -315,6 +323,16 @@ export async function pickAgentTools(request: Request, env: Env, agentId: UserId
 
 function agentToolsAnswer(apps: OfferedApp[] | Refusal): Response {
   return Array.isArray(apps) ? Response.json({ apps } satisfies AgentTools, { headers: PRIVATE }) : refused(apps);
+}
+
+/**
+ * Why an app at `url` can't be connected, said on its address: it's this Ember's own, the address
+ * `request` came to or another that Ember knows reaches it, whose MCP server would have the agents read
+ * DMs and private rooms, as the administrator's sign-in to it can, for whoever asks them.
+ */
+async function ownAddressRefusal(request: Request, env: Env, url: string): Promise<AppRefused | null> {
+  const hosts = [urlOf(request).host, ...(await workspace(env).ownAddresses())];
+  return isAtHost(url, hosts) ? { error: APP_IS_EMBER, field: "url" } : null;
 }
 
 /** Why a request about apps isn't done: there's no such app, agent or tool, or the person asking can't, or not now. */

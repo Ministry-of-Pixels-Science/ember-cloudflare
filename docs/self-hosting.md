@@ -617,10 +617,14 @@ API, which has all the model's features, and Grok and Workers AI's through Cloud
 [REST API](https://developers.cloudflare.com/ai-gateway/usage/rest-api/), in Chat Completions, as AI
 Gateway's credits don't pay for Grok at the gateway's
 [xAI endpoint](https://developers.cloudflare.com/ai-gateway/usage/providers/grok/), where xAI answers
-"No credentials presented". Every model and every search goes through the gateway. Ember
-tells OpenAI and xAI not to keep the conversations, as each otherwise does for 30 days. AI Gateway Run
-lets the token send requests through every gateway on the account, with any provider keys stored on
-them, so keep it as safe as those keys.
+"No credentials presented". Every model and every search goes through the gateway. Its logs keep
+what each request asked and was answered, but for a question asked in a DM or a private room, which
+they keep only the model, tokens, cost and time of, with `cf-aig-collect-log-payload: false`, so that
+nobody reading them reads what only that conversation's people do;
+[Logpush](https://developers.cloudflare.com/ai-gateway/observability/logging/logpush/), if you turn it
+on, still exports everything. Ember tells OpenAI and xAI not to keep the conversations, as each
+otherwise does for 30 days. AI Gateway Run lets the token send requests through every gateway on the
+account, with any provider keys stored on them, so keep it as safe as those keys.
 
 The model menu lists the models Ember offers, by their makers, then Workers AI's, each with what a
 million tokens read and a million written cost, as [What it costs](#what-it-costs) says. Claude, GPT
@@ -862,6 +866,17 @@ logs and spend limits tell the agents apart by `agent_id`, as [Ember AI](#ember-
 AI off takes every agent out of its rooms, as it does @ember, and keeps them, to come back as they were
 when it's on again, in the open rooms there are then.
 
+What an agent, or @ember, reads stays in the conversation it's asked in, by Ember's code rather than
+its instructions. It's asked only in a room or DM it's in, and reads that one alone: the conversation
+it's given, and what the room's search finds, which searches no other room. So nothing said in a DM or
+a private room reaches another room through it, or anyone who isn't there, even someone who is in both
+asking elsewhere. Agents join the rooms open to everyone; a private room or a DM has one only when its
+people add it, and a DM's people never change, so nobody can put an agent in someone else's. An agent
+keeps nothing from one question to the next but what the room keeps. In a DM or a private room, every
+call of an app's tool asks first, even [one always allowed](#apps), and AI Gateway's logs keep nothing
+of what's said. The model's provider still reads what it's asked, and a chat bot in the same room reads
+it all by its key, as anyone in the room can.
+
 The Agent badge follows an agent's name wherever it shows, so nobody takes it for a person: on its
 messages, deleted agents' too, on a DM with it alone in the sidebar and the room's header, in the
 mention prompt and New direct message, and on its profile. The profile shows everyone what the agent
@@ -924,12 +939,16 @@ with more than 4 MB. A server that asks for a sign-in is connected by [signing i
 
 An administrator picks the tools each agent may use, and an agent calls one only once someone allows
 that call, on a card in the room, unless the administrator has that agent's calls of the tool always
-allowed.
+allowed, which counts in open rooms alone: in a DM or a private room every call asks first, so that
+nothing said there goes to an app unless someone in it allows it.
 
 - **The address** is an `https` one, or `http` on `localhost`, for a server you're developing, with no
   name and password in it. Ember asks only that address: it follows no redirect, and it looks the name
   up first and refuses one that resolves to a private address, as [link previews](#security-notes) do,
-  so a server can't send Ember, or the token, anywhere else.
+  so a server can't send Ember, or the token, anywhere else. Ember's own address is refused too, the
+  one you're using and any other it knows reaches it, at any port: its MCP server, for
+  [outside AI](#outside-ai), would have the agents read what your sign-in to it reads, DMs and private
+  rooms too, for whoever asks them. An app connected at one before isn't called.
 - **The token** goes to the server with every request, as `Authorization: Bearer`. Ember keeps it
   encrypted, as it keeps Ember AI's API token, and never shows it again: the app's page says only that
   it has one. Type another to replace it, or check **Send no token** to stop sending one. Either has
@@ -994,11 +1013,13 @@ allowed.
   cut short. One click is answered at a time on a card. Agents' own answers still get no buttons
   that act.
 - **Always allow** is an administrator's, for one agent and one tool: a box under each picked tool in
-  the agent's Tools card. That agent's calls of that tool are then made at once, with nobody asked,
-  for anyone who can ask the agent, so keep it for tools that only read, or whose every use you'd
-  allow. The room still sees each call: Ember posts a card saying which agent used which app, the
-  tool, and what it was called with, before it makes the call, and makes none it can't show, whether
-  the room wouldn't take the card or there are more than 3,000 characters to show. A call that then
+  the agent's Tools card. That agent's calls of that tool in rooms open to everyone are then made at
+  once, with nobody asked, for anyone who can ask the agent, so keep it for tools that only read, or
+  whose every use you'd allow. In a DM or a private room each call asks first all the same, and one
+  the agent was about to make when its room was made private isn't made. The room still sees each
+  call: Ember posts a card saying which agent used which app, the tool, and what it was called with,
+  before it makes the call, and makes none it can't show, whether the room wouldn't take the card or
+  there are more than 3,000 characters to show. A call that then
   isn't made after all, as Ember finds its server has changed the tool or can't get through to it, has its card changed to say so. Uncheck the box
   and the tool asks first again, from the next call. It ends by itself when the tool is taken from
   the agent, or when Ember finds its server has changed it: from then on the tool asks first, even

@@ -3943,6 +3943,12 @@ export class WorkspaceStore {
     return (await this.db.all(MEMBERSHIP, roomId, userId)).length > 0;
   }
 
+  /** The kind of room `roomId`, a DM's too, or null when there's no such room. */
+  async roomKind(roomId: RoomId): Promise<RoomKind | null> {
+    const [row] = await this.db.all<{ kind: RoomKind }>(`SELECT kind FROM rooms WHERE id = ?`, roomId);
+    return row?.kind ?? null;
+  }
+
   /** Whether room `roomId` is a direct conversation between `userId` and `otherId` alone, each an active member of it. */
   async isBetween(roomId: RoomId, userId: UserId, otherId: UserId): Promise<boolean> {
     return (await this.db.all(BETWEEN, roomId, userId, otherId)).length > 0;

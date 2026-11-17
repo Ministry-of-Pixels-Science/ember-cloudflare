@@ -11,7 +11,8 @@ import { appConnector } from "./connector";
 // (Workspace.pickAgentTools), the room gives them to the model beside Ember's own (tool-calls.ts), and
 // every call asks first, on a card in the room, which whoever asked, or an administrator, allows or not,
 // unless the administrator has that agent's calls of the tool always allowed: those are made at once,
-// each shown on a card in the room as it is. A tool that answers with a card of its own, in Slack's
+// each shown on a card in the room as it is, in a room open to everyone, but never in a DM or a private
+// room, where nothing said goes to an app unless someone there allows it. A tool that answers with a card of its own, in Slack's
 // Block Kit, has the room shown it, and a click on a button of that card calls the tool it names, for
 // whoever clicked (cards.ts). In someone's direct conversation with an agent, a call of a tool of an
 // app they've signed in to themselves goes as them, with their sign-in, and always asks them first.

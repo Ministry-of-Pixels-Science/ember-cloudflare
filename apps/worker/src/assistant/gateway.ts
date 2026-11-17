@@ -132,9 +132,9 @@ export interface Turn {
  * What to ask a model: how it should answer, the conversation, oldest first, ending with what it's asked,
  * the most tokens its answer may take, its thinking among them, how much to think first, if it's told,
  * who asked, if someone did, and who answers, @ember or an agent, if either does, whom AI Gateway's logs
- * and spend limits then know each request by (custom metadata's `user_id` and `agent_id`), what it
- * may do on the web, of what its format has tools for: nothing, unless it's told, and the tools Ember
- * runs for it, if it has any.
+ * and spend limits then know each request by (custom metadata's `user_id` and `agent_id`), whether
+ * those logs keep what's asked and answered, what it may do on the web, of what its format has tools
+ * for: nothing, unless it's told, and the tools Ember runs for it, if it has any.
  */
 export interface Question {
   instructions: string;
@@ -147,6 +147,8 @@ export interface Question {
   thinking?: ThinkingLevel;
   askerId?: string;
   agentId?: string;
+  /** Whether AI Gateway's logs keep none of what's asked or answered, only what each request was and cost, as for a question asked in a DM or a private room. */
+  unlogged?: true;
   webTools?: readonly WebTool[];
   tools?: readonly EmberTool[];
 }
@@ -705,7 +707,7 @@ async function searchedFor(env: Env, { accountId, apiToken }: Gateway, question:
   try {
     response = await fetch(`${cloudflareApiOf(env)}/accounts/${accountId}/ai/websearch/`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${apiToken}`, "Content-Type": "application/json", ...metadataOf(question) },
+      headers: { Authorization: `Bearer ${apiToken}`, "Content-Type": "application/json", ...loggedAs(question) },
       body: JSON.stringify({ query, limit: RESULTS_PER_SEARCH, options: { gateway: { id: GATEWAY_ID } } }),
       signal,
     });
@@ -754,7 +756,7 @@ async function send(env: Env, gateway: Gateway, question: Question, request: Rec
         ...(provider ? { "cf-aig-authorization": `Bearer ${gateway.apiToken}` } : { Authorization: `Bearer ${gateway.apiToken}`, "cf-aig-gateway-id": GATEWAY_ID }),
         ...(provider === "anthropic" && { "anthropic-version": ANTHROPIC_VERSION }),
         "Content-Type": "application/json",
-        ...metadataOf(question),
+        ...loggedAs(question),
       },
       body: JSON.stringify(request),
       signal,
@@ -773,10 +775,18 @@ function addressOf(env: Env, { accountId, format }: Gateway): string {
   return isProviderFormat(format) ? `${providerEndpointsOf(env)}/${accountId}/${GATEWAY_ID}/${PATHS[format]}` : `${cloudflareApiOf(env)}/accounts/${accountId}/ai/v1/${PATHS[format]}`;
 }
 
-/** The custom metadata AI Gateway keeps of a request asking `question`: who asked and who answers, of those it names, if it names either. */
-function metadataOf({ askerId, agentId }: Question): Record<string, string> {
+/**
+ * The headers that have AI Gateway log a request asking `question` as it should: with the custom metadata
+ * of who asked and who answers, of those it names, if it names either, and without what's asked or
+ * answered, the request's body and the response's, when the question is `unlogged`. The log keeps its
+ * model, tokens, cost and how long it took.
+ */
+function loggedAs({ askerId, agentId, unlogged }: Question): Record<string, string> {
   const metadata = { ...(askerId !== undefined && { user_id: askerId }), ...(agentId !== undefined && { agent_id: agentId }) };
-  return Object.keys(metadata).length > 0 ? { "cf-aig-metadata": JSON.stringify(metadata) } : {};
+  return {
+    ...(Object.keys(metadata).length > 0 && { "cf-aig-metadata": JSON.stringify(metadata) }),
+    ...(unlogged && { "cf-aig-collect-log-payload": "false" }),
+  };
 }
 
 /** The answer `body` gives in `format`, or why it's none: the model said nothing, or took every token it could first. */

@@ -62,6 +62,7 @@ import {
   type Room,
   type RoomChanges,
   type RoomId,
+  type RoomKind,
   type RoomSettings,
   type Search,
   type SentTestEmail,
@@ -97,6 +98,7 @@ import {
 } from "@ember/protocol/assistant";
 import { EMBER_DOES, MAX_AGENTS, type Agent, type AgentChanges, type AgentProfile, type AgentRoom, type AgentSettings, type AvailableAgent, type NewAgent } from "@ember/protocol/agents";
 import {
+  isAtHost,
   MAX_APP_SCOPE_LENGTH,
   MAX_APPS,
   type App,
@@ -452,6 +454,9 @@ function movedIn(assistant: SavedAssistant, moves: readonly MovedModel[]): Saved
 const addressesOf = (account: Pick<JoinableAccount, "customDomain" | "deployedAddress" | "otherAddresses">): string[] =>
   [account.customDomain, account.deployedAddress, ...account.otherAddresses].filter((address) => address !== null);
 
+/** Whether a room of `kind` is private, a DM or a private room, whose people alone read what's said there. */
+const isPrivate = (kind: RoomKind | null) => kind !== "open";
+
 /** The levels someone who `picked` them has of @ember's dials, where each starts for one they haven't picked, no higher than `most`. */
 const levelsOf = (picked: AssistantPicks | null, most: AnswerLevels): AnswerLevels =>
   withinMost({ thinking: picked?.thinking ?? DEFAULT_LEVELS.thinking, length: picked?.length ?? DEFAULT_LEVELS.length }, most);
@@ -627,7 +632,7 @@ export interface BotAccess {
  * @ember or an AI agent as a room asks Ember AI to answer a question there (`Workspace.answererIn`): how
  * Ember AI asks AI Gateway with its model, or null while its API token doesn't open, its instructions,
  * the community's name, which it's told, how much it thinks and how long it answers, what it may do on
- * the web, and Ember's own addresses, whose pages its answers don't preview.
+ * the web, Ember's own addresses, whose pages its answers don't preview, and whether it's asked in private.
  */
 export interface AssistantAccess extends BotAccess {
   gateway: Gateway | null;
@@ -645,7 +650,12 @@ export interface AssistantAccess extends BotAccess {
   webSearchOn: boolean;
   /** The hosts Ember knows reach it, as `location.host` writes them: its custom domain, where a deploy puts it, and the domains it moved away from. */
   addresses: string[];
-  /** The connected apps' tools picked for it, each as its server described it when it was picked. */
+  /**
+   * Whether it's asked in private: in a DM or a private room, whose people alone read what's said there,
+   * so that AI Gateway's logs keep none of it, and nothing of it goes to an app unless someone there allows it.
+   */
+  inPrivate: boolean;
+  /** The connected apps' tools picked for it, each as its server described it when it was picked, and as it calls them in the room. */
   appTools: PickedTool[];
 }
 
@@ -1224,6 +1234,12 @@ export class Workspace extends DurableObject<Env> {
   /** Where a deploy puts Ember, as the latest page opened there told it, or null until one has. */
   async deployedAddress(): Promise<string | null> {
     return (await this.joinableAccount())?.deployedAddress ?? null;
+  }
+
+  /** The hosts Ember knows reach it (`addressesOf`), none until it's set up. */
+  async ownAddresses(): Promise<string[]> {
+    const account = await this.joinableAccount();
+    return account ? addressesOf(account) : [];
   }
 
   /** Forgets `address` as a custom domain Ember moved away from, a check having found it no longer reaches Ember. */
@@ -4132,23 +4148,27 @@ export class Workspace extends DurableObject<Env> {
   }
 
   /**
-   * The connected apps' tools `agentId` may use (`pickedTools`) answering `askerId` in room `roomId`:
-   * in their direct conversation, the two of them alone, a tool of an app `askerId` has signed in to
-   * themselves is theirs, `own`, as a call of it there goes as them, and each one asks first, whatever
-   * is always allowed, which was said of calls with Ember's sign-in. One whose sign-in has ended stays
-   * theirs until they sign out, so that nothing goes with Ember's that was to go with their own.
+   * The connected apps' tools `agentId` may use (`pickedTools`) answering `askerId` in room `roomId`.
+   * In a DM or a private room, `inPrivate`, every call asks first, whatever is always allowed, as what's
+   * said there goes to an app only when someone there allows it. In their direct conversation, the two
+   * of them alone, a tool of an app `askerId` has signed in to themselves is theirs, `own`, as a call of
+   * it there goes as them. One whose sign-in has ended stays theirs until they sign out, so that nothing
+   * goes with Ember's that was to go with their own.
    */
-  private async toolsFor(agentId: UserId, roomId: RoomId, askerId: UserId): Promise<PickedTool[]> {
+  private async toolsFor(agentId: UserId, roomId: RoomId, askerId: UserId, inPrivate: boolean): Promise<PickedTool[]> {
     const picked = await this.pickedTools(agentId);
-    if (picked.length === 0 || !(await this.store.isBetween(roomId, askerId, agentId))) return picked;
+    if (picked.length === 0 || !inPrivate) return picked;
+    const asked = picked.map((tool) => ({ ...tool, alwaysAllowed: false }));
+    if (!(await this.store.isBetween(roomId, askerId, agentId))) return asked;
     const own = new Set((await this.store.ownAppSignIns(askerId)).flatMap(({ appId, signedIn }) => (signedIn ? [appId] : [])));
-    return picked.map((tool) => (own.has(tool.appId) ? { ...tool, alwaysAllowed: false, own: true } : tool));
+    return asked.map((tool) => (own.has(tool.appId) ? { ...tool, own: true } : tool));
   }
 
   /**
    * Where a call of `tool`, a connected app's, goes for `agentId`, @ember or an agent, as the call finds
    * it when it's made: null once Ember AI is off, the app is gone, or the tool isn't picked for the
-   * agent as it was, by its fingerprint, so that what an administrator takes away stops what's waiting.
+   * agent as it was, by its fingerprint, so that what an administrator takes away stops what's waiting,
+   * and for an app at one of Ember's own addresses, which can't be connected now (apps/api.ts).
    * A call nobody was asked about, `unasked`, goes nowhere either unless the agent's calls of the tool
    * are always allowed by then. Getting a sign-in's next access token asks its authorization server,
    * which can take a while, so the tool is looked up again after that: one taken away meanwhile isn't
@@ -4189,7 +4209,7 @@ export class Workspace extends DurableObject<Env> {
     const [account, picked, app] = await Promise.all([this.joinableAccount(), this.pickedTools(agentId), this.store.app(tool.appId)]);
     const pick = picked.find(({ appId, name, fingerprint }) => appId === tool.appId && name === tool.name && fingerprint === tool.fingerprint);
     const mayRun = pick !== undefined && (!unasked || pick.alwaysAllowed);
-    return account?.assistant && app && mayRun ? app : null;
+    return account?.assistant && app && mayRun && !isAtHost(app.url, addressesOf(account)) ? app : null;
   }
 
   /**
@@ -4943,13 +4963,13 @@ export class Workspace extends DurableObject<Env> {
    * doesn't open (`assistantGateway`), with the model whoever asked, `askerId`, picked, while people can
    * pick it, the instructions administrators added and what Ember adds around them, the community's
    * name, what @ember may do on the web, with whichever model answers, of what its format has tools for,
-   * and Ember's addresses: null once Ember AI is off or @ember isn't in the room, so that turning Ember
-   * AI off, or taking @ember out of a room, stops what's on its way there.
+   * Ember's addresses, and whether the room is private: null once Ember AI is off or @ember isn't in the
+   * room, so that turning Ember AI off, or taking @ember out of a room, stops what's on its way there.
    */
   private async assistantIn(roomId: RoomId, askerId: UserId): Promise<AssistantAccess | null> {
     // Before anything is read, as `roomAccess` takes it.
     const authorizedAt = Date.now();
-    const [account, member, picks] = await Promise.all([this.joinableAccount(), this.store.isMember(roomId, ASSISTANT_ID), this.store.assistantPicks(askerId)]);
+    const [account, member, picks, kind] = await Promise.all([this.joinableAccount(), this.store.isMember(roomId, ASSISTANT_ID), this.store.assistantPicks(askerId), this.store.roomKind(roomId)]);
     if (!account?.assistant || !member) return null;
     const [opened, offered] = await Promise.all([this.openedAssistant(account), this.offeredForAnswers(account.assistant.accountId)]);
     if (opened) this.moveToProviderEndpoints(account.assistant, opened);
@@ -4963,8 +4983,9 @@ export class Workspace extends DurableObject<Env> {
     const webSearchOn = account.assistant.webTools.includes("search");
     const bot = { id: ASSISTANT_ID, name: ASSISTANT_NAME };
     const { assistantInstructions: instructions, assistantPromptTemplate: promptTemplate } = account;
-    const appTools = gateway ? await this.toolsFor(ASSISTANT_ID, roomId, askerId) : [];
-    return { bot, authorizedAt, gateway, picked: picked !== null, instructions, promptTemplate, community: account.name, levels, webTools, webSearchOn, addresses: addressesOf(account), appTools };
+    const inPrivate = isPrivate(kind);
+    const appTools = gateway ? await this.toolsFor(ASSISTANT_ID, roomId, askerId, inPrivate) : [];
+    return { bot, authorizedAt, gateway, picked: picked !== null, instructions, promptTemplate, community: account.name, levels, webTools, webSearchOn, addresses: addressesOf(account), inPrivate, appTools };
   }
 
   /**
@@ -4976,7 +4997,7 @@ export class Workspace extends DurableObject<Env> {
    */
   private async agentIn(roomId: RoomId, agentId: UserId, askerId: UserId): Promise<AssistantAccess | null> {
     const authorizedAt = Date.now();
-    const [account, agent] = await Promise.all([this.joinableAccount(), this.store.answeringAgent(roomId, agentId, askerId)]);
+    const [account, agent, kind] = await Promise.all([this.joinableAccount(), this.store.answeringAgent(roomId, agentId, askerId), this.store.roomKind(roomId)]);
     if (!account?.assistant || !agent) return null;
     const [opened, offered] = await Promise.all([this.openedAssistant(account), this.offeredForAnswers(account.assistant.accountId)]);
     if (opened) this.moveToProviderEndpoints(account.assistant, opened);
@@ -4985,8 +5006,9 @@ export class Workspace extends DurableObject<Env> {
     const webTools = agent.webTools.filter((tool) => webToolsOf(agent.model, format, offered.file).includes(tool));
     const bot = { id: agentId, name: agent.name };
     const { instructions, promptTemplate, levels } = agent;
-    const appTools = gateway ? await this.toolsFor(agentId, roomId, askerId) : [];
-    return { bot, authorizedAt, gateway, picked: false, instructions, promptTemplate, community: account.name, levels, webTools, webSearchOn: webTools.includes("search"), addresses: addressesOf(account), appTools };
+    const inPrivate = isPrivate(kind);
+    const appTools = gateway ? await this.toolsFor(agentId, roomId, askerId, inPrivate) : [];
+    return { bot, authorizedAt, gateway, picked: false, instructions, promptTemplate, community: account.name, levels, webTools, webSearchOn: webTools.includes("search"), addresses: addressesOf(account), inPrivate, appTools };
   }
 
   /**
