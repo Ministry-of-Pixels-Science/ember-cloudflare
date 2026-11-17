@@ -285,6 +285,23 @@ test.describe("Text files' text", () => {
     await expect(ada.message("server.log").locator("pre")).toHaveCount(0);
   });
 
+  test("keeps the timeline at its end as a long snippet sent there shows its text", async ({ members, participant }) => {
+    // Enough before it that the timeline scrolls.
+    await (await participant("Grace")).sayAll(Array.from({ length: 20 }, (_, n) => `Earlier ${n + 1}`));
+    const ada = await members.signIn("Ada");
+    await expect(ada.message("Earlier 20")).toBeVisible();
+    await ada.page.locator("form.composer").getByRole("button", { name: "Attach", exact: true }).click();
+    await ada.page.getByRole("menuitem", { name: /^Text snippet/ }).click();
+    const dialog = ada.page.getByRole("dialog", { name: "Create a text snippet" });
+    await dialog.getByLabel("Title (optional)").fill("steps.sh");
+    await dialog.getByLabel("Content").fill(Array.from({ length: 12 }, (_, line) => `echo "step ${line + 1}"`).join("\n"));
+    await dialog.getByRole("button", { name: "Create snippet" }).click();
+    await ada.page.getByRole("button", { name: "Send Message" }).click();
+
+    await expect(ada.message("steps.sh").getByRole("button", { name: "Show more" })).toBeVisible();
+    await expect.poll(() => ada.outOfView(downloadLink(ada, "steps.sh"))).toBe(0);
+  });
+
   test("shows an HTML file's markup as its text, where nothing in it runs or loads", async ({ members, request, rooms }) => {
     const ada = await members.signIn("Ada");
     const requested: string[] = [];
