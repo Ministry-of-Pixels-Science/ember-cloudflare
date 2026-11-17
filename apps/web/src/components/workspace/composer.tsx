@@ -278,6 +278,8 @@ interface Props {
   onEditLastMessage?: () => void;
   /** Whether the editor takes focus as it shows, except on touch screens, as it does unless something else is to have it. */
   autoFocus?: boolean;
+  /** Whether the people @ lists show above the text with a mouse too, as on touch screens: for a composer with something under it that would cut the list off. */
+  mentionsAbove?: boolean;
   ref?: Ref<ComposerHandle>;
 }
 
@@ -297,7 +299,7 @@ export interface ComposerHandle {
  * next message. What's written is kept as a draft until it's sent. A thread's has Also send to the room
  * before Send.
  */
-export function Composer({ roomId, roomName, direct = false, userId, typing, disabled, deferEditor = false, threadId, onSend, onSendFiles, onTyping, onEditLastMessage, autoFocus = true, ref }: Props) {
+export function Composer({ roomId, roomName, direct = false, userId, typing, disabled, deferEditor = false, threadId, onSend, onSendFiles, onTyping, onEditLastMessage, autoFocus = true, mentionsAbove = false, ref }: Props) {
   const editor = useRef<RichTextEditorHandle>(null);
   const form = useRef<HTMLFormElement>(null);
   const formatting = useFormatting(editor);
@@ -468,7 +470,7 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
                   initialValue={draft}
                   mentionsFrom={mentionPromptSrc(roomId)}
                   // Under the text on touch screens are the keyboard and the home indicator.
-                  mentionsAbove={hasTouchKeyboard()}
+                  mentionsAbove={mentionsAbove || hasTouchKeyboard()}
                   autoFocus={() => replied.current || (autoFocus && focusOnOpen && focusStayedOn(focusAtOpen))}
                   onChange={changed}
                   onFormatChange={formatting.setFormat}
@@ -481,7 +483,7 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
               )}
             </Suspense>
           </div>
-          <div className="flex flex-none items-center gap-0.5 touch:@max-[28rem]:flex-wrap">
+          <div className="flex flex-none items-center gap-0.5 @max-[20rem]:flex-wrap touch:@max-[28rem]:flex-wrap">
             {/* Upload from your computer's, and Cmd or Ctrl+O's, file picker. */}
             <input
               ref={fileField}
@@ -538,11 +540,12 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
                 <AtSign className="size-[18px] opacity-70" />
               </button>
             </ShortcutTooltip>
-            {/* For fingers, the box sits far enough into its label for a fingertip on it to land on the label, and
-                where their bigger buttons would leave the label too little room, as on a phone held upright, it
-                takes a line of its own above them. */}
+            {/* For fingers, the box sits far enough into its label for a fingertip on it to land on the label. Where
+                the buttons would leave the label too little room, it takes a line of its own above them: for
+                fingers' bigger buttons that's as on a phone held upright, and otherwise as in a huddle's thread,
+                which is narrower than a room's. There the box sits over the middle of +. */}
             {threadId !== undefined && (
-              <label className="mr-2 ml-2.5 flex min-w-0 cursor-pointer items-center gap-[7px] text-[13px] leading-[18px] text-message-muted touch:ml-0 touch:min-h-11 touch:pl-3.5 touch:text-sm touch:@max-[28rem]:order-first touch:@max-[28rem]:mr-0 touch:@max-[28rem]:basis-full">
+              <label className="mr-2 ml-2.5 flex min-w-0 cursor-pointer items-center gap-[7px] text-[13px] leading-[18px] text-message-muted @max-[20rem]:order-first @max-[20rem]:mr-0 @max-[20rem]:ml-2 @max-[20rem]:min-h-7 @max-[20rem]:basis-full touch:ml-0 touch:min-h-11 touch:pl-3.5 touch:text-sm touch:@max-[28rem]:order-first touch:@max-[28rem]:mr-0 touch:@max-[28rem]:basis-full">
                 <input
                   type="checkbox"
                   checked={alsoSend}

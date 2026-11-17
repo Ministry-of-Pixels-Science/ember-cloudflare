@@ -21,7 +21,7 @@ vi.mock("./emoji-panel", () => ({
   ),
 }));
 
-async function showComposer({ typing = [] as User[], disabled = false, roomId = "r1", threadId = undefined as string | undefined, direct = false, autoFocus = true } = {}) {
+async function showComposer({ typing = [] as User[], disabled = false, roomId = "r1", threadId = undefined as string | undefined, direct = false, autoFocus = true, mentionsAbove = false } = {}) {
   const onSend = vi.fn((_body: string, _alsoSend: boolean) => true);
   const onSendFiles = vi.fn((_files: File[], _alsoSend: boolean) => {});
   const onTyping = vi.fn();
@@ -40,6 +40,7 @@ async function showComposer({ typing = [] as User[], disabled = false, roomId = 
       onSendFiles={onSendFiles}
       onTyping={onTyping}
       autoFocus={autoFocus}
+      mentionsAbove={mentionsAbove}
     />,
   );
   // The editor loads as the first composer shows.
@@ -83,6 +84,18 @@ describe("Composer", () => {
     touchScreen();
     const { input } = await showComposer();
     expect(input).not.toHaveFocus();
+  });
+
+  it("lists the people @ finds above the text on touch screens, whose keyboard is under it", async () => {
+    touchScreen();
+    expect((await showComposer()).input).toHaveAttribute("data-mentions-above");
+  });
+
+  it("lists them above the text with a mouse only where it's asked to, as where something under the composer would cut the list off", async () => {
+    const { input, view } = await showComposer();
+    expect(input).not.toHaveAttribute("data-mentions-above");
+    view.unmount();
+    expect((await showComposer({ mentionsAbove: true })).input).toHaveAttribute("data-mentions-above");
   });
 
   const room = { roomId: "r1", roomName: "general", userId: "u1", typing: [], disabled: false, onSend: () => true, onSendFiles: () => {}, onTyping: () => {} };

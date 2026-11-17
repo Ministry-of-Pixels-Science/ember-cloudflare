@@ -279,11 +279,13 @@ export type HuddleClientFrame =
 export type HuddleServerFrame =
   /**
    * The huddle as the tab joins it: everyone in it, the tab's person included, and when it started.
-   * While huddles have a relay, `iceServers` are the servers the tab's connections go by, the relay's
-   * among them, which take what the tab is given to use them with for `RELAY_TTL_S` from now. A tab
-   * that's given none goes by Cloudflare's STUN server alone.
+   * `messageId` names the room's message of the huddle, whose thread is the huddle's: the room may have
+   * yet to write it, and it may have been deleted since. While huddles have a relay, `iceServers` are
+   * the servers the tab's connections go by, the relay's among them, which take what the tab is given
+   * to use them with for `RELAY_TTL_S` from now. A tab that's given none goes by Cloudflare's STUN
+   * server alone.
    */
-  | { type: "huddle.welcome"; you: User; people: HuddlePerson[]; startedAt: string; iceServers?: HuddleIceServer[] }
+  | { type: "huddle.welcome"; you: User; people: HuddlePerson[]; startedAt: string; messageId?: string; iceServers?: HuddleIceServer[] }
   | { type: "huddle.joined"; person: HuddlePerson }
   /**
    * Someone muted or unmuted, can be listened to or watched now, or can't be: they've turned their camera

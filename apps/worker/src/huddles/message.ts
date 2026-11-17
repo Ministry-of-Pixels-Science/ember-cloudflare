@@ -12,7 +12,8 @@ import type { MessageStore, StoredBody } from "../store";
 //
 // The room's object keeps the message's id in its own storage from before it writes the message, so
 // that a write whose answer it never had isn't made twice, and with it everyone who has been in the
-// huddle, since the huddle's sockets only say who's in it now.
+// huddle, since the huddle's sockets only say who's in it now. The id is the huddle's to give, as it
+// starts, so that everyone who joins it is told which message's thread is the huddle's.
 
 /** What a huddle's message has for text, which a search finds it by, and which a bot or a tab from before huddles had messages reads. */
 export const HUDDLE_STARTED = "A huddle started";
@@ -34,7 +35,12 @@ export interface HuddleNow {
   roomId: RoomId;
   startedAt: string;
   people: User[];
+  /** The id its message has, or is to have. A huddle whose sockets are from before huddles named their messages has none. */
+  messageId?: string;
 }
+
+/** The huddle a message is of, for whoever joins to go on with: when it started, and the message's id. */
+export type ResumedHuddle = Required<Pick<HuddleNow, "startedAt" | "messageId">>;
 
 interface Kept {
   roomId: RoomId;
@@ -70,17 +76,16 @@ export class HuddleMessage {
   }
 
   /**
-   * When the huddle that `userId` joins now started, with nobody else in one, where it's the huddle the
-   * latest message is of going on: one the room hasn't found over, as when its object has come back
-   * since, or one they were in that it found over no longer than `HUDDLE_RESUMED_MS` ago. Undefined for
-   * a huddle that starts now.
+   * The huddle that `userId` joins now, with nobody else in one, where it's the huddle the latest
+   * message is of going on: one the room hasn't found over, as when its object has come back since, or
+   * one they were in that it found over no longer than `HUDDLE_RESUMED_MS` ago. Undefined for a huddle
+   * that starts now.
    */
-  async resumed(userId: UserId, now = Date.now()): Promise<string | undefined> {
+  async resumed(userId: UserId, now = Date.now()): Promise<ResumedHuddle | undefined> {
     const kept = await this.read();
     if (!kept) return undefined;
-    if (kept.endedAt === undefined) return kept.startedAt;
-    const back = now - Date.parse(kept.endedAt) <= HUDDLE_RESUMED_MS && kept.people.some(({ id }) => id === userId);
-    return back ? kept.startedAt : undefined;
+    const back = kept.endedAt === undefined || (now - Date.parse(kept.endedAt) <= HUDDLE_RESUMED_MS && kept.people.some(({ id }) => id === userId));
+    return back ? { startedAt: kept.startedAt, messageId: kept.messageId } : undefined;
   }
 
   /**
@@ -114,8 +119,8 @@ export class HuddleMessage {
     this.kept = Promise.resolve(undefined);
   }
 
-  private async start(store: MessageStore, { roomId, startedAt, people }: HuddleNow): Promise<HuddleMessageFrame[]> {
-    return this.post(store, await this.keep({ roomId, messageId: sortableId(), startedAt, people, posted: false }));
+  private async start(store: MessageStore, { roomId, startedAt, people, messageId = sortableId() }: HuddleNow): Promise<HuddleMessageFrame[]> {
+    return this.post(store, await this.keep({ roomId, messageId, startedAt, people, posted: false }));
   }
 
   /** Writes the message `kept` names, of a huddle that's going on, and answers it for everyone to be told of. */

@@ -43,9 +43,10 @@ const attachmentMarkup = ({ contentType, html }: Attachment) =>
  * written under jsdom: a text box whose lines are one paragraph of Lexxy's markup, which tells of
  * changes and keys as the editor does, and of addresses pasted in it, below which it shows what's
  * added. Formatting changes only the formatting it tells of, and a link only the text, which it
- * marks `data-linked` with the address. The browser tests in e2e/ write in Lexxy itself.
+ * marks `data-linked` with the address. It lists nobody for an @, and is marked `data-mentions-above`
+ * where the list is to show above the text. The browser tests in e2e/ write in Lexxy itself.
  */
-export default function RichTextEditor({ label, placeholder, rows, initialValue, autoFocus, onChange, onFormatChange, onKeyDown, onLinkPasted, onReady, ref }: ComponentProps<typeof Editor>) {
+export default function RichTextEditor({ label, placeholder, rows, initialValue, mentionsAbove, autoFocus, onChange, onFormatChange, onKeyDown, onLinkPasted, onReady, ref }: ComponentProps<typeof Editor>) {
   const box = useRef<HTMLTextAreaElement>(null);
   // Read as soon as they change, as Lexxy's are, and shown once React renders them.
   const attachments = useRef<Attachment[]>([]);
@@ -146,6 +147,7 @@ export default function RichTextEditor({ label, placeholder, rows, initialValue,
         aria-label={label}
         placeholder={placeholder}
         rows={rows}
+        data-mentions-above={mentionsAbove || undefined}
         defaultValue={initialValue && writtenBody(initialValue).plainText}
         onChange={() => onChange?.()}
         onPaste={(event) => pasted(event.clipboardData.getData("text/plain"))}

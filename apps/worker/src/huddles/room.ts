@@ -24,10 +24,11 @@ import {
   type HuddleTrackKind,
 } from "@ember/protocol/huddles";
 import type { Env } from "../env";
+import { sortableId } from "../ids";
 import { CLOSE_REASONS, closedAtOnce, closeTooLarge, isTooLarge, MAX_ROOM_FRAME_SIZE } from "../sockets";
 import { workspace } from "../workspace";
 import type { InvitationPush } from "../workspace-store";
-import type { HuddleNow } from "./message";
+import type { HuddleNow, ResumedHuddle } from "./message";
 import { relayServers } from "./relay";
 import { acceptAnswer, closeTracks, publishTracks, pullTracks, resizeTracks, SfuError, startSession, TRACKS_PER_REQUEST, type HuddleApp, type Pulled, type SfuApp } from "./sfu";
 
@@ -66,7 +67,9 @@ import { acceptAnswer, closeTracks, publishTracks, pullTracks, resizeTracks, Sfu
 // pushed the invitation, which the room sends, as it sends its messages' pushes.
 //
 // The room keeps a message of each huddle among its own (./message.ts), which it brings in step as
-// people join and leave: the huddle tells it that they have, and what it is now.
+// people join and leave: the huddle tells it that they have, and what it is now. The huddle gives the
+// message its id as it starts, and tells it to everyone it welcomes, whose tabs show the message's
+// thread as the huddle's.
 
 /**
  * The tag on a huddle's sockets, besides the tags a room's own sockets carry. Nobody's id has a colon in
@@ -214,6 +217,8 @@ export interface HuddleAttachment {
   openedAt: number;
   /** When the huddle started. */
   startedAt: string;
+  /** The id of the room's message of the huddle. A socket from before huddles named their messages has none, nor does one that joined a huddle of such sockets. */
+  messageId?: string;
   muted: boolean;
   /** The SFU app the tab's connections are with: a huddle runs through one. */
   appId: string;
@@ -380,7 +385,9 @@ export class Huddle {
   now(): HuddleNow | null {
     const members = this.members();
     const first = members[0]?.attachment;
-    return first ? { roomId: first.roomId, startedAt: first.startedAt, people: members.map(({ attachment }) => attachment.user) } : null;
+    if (!first) return null;
+    const { roomId, startedAt, messageId } = first;
+    return { roomId, startedAt, people: members.map(({ attachment }) => attachment.user), ...(messageId !== undefined && { messageId }) };
   }
 
   /**
@@ -390,10 +397,10 @@ export class Huddle {
    * closes, and the others hear that they changed rather than that they left and joined. The room,
    * which lets people in one at a time, sets its alarm to check the huddle once someone's in it. The
    * tab is welcomed with `iceServers`, the servers its connections go by, if the room has any for it.
-   * Whoever joins with nobody in the huddle starts one, unless `resumed` says when the room's last
-   * started, which then goes on (./message.ts).
+   * Whoever joins with nobody in the huddle starts one, whose message gets its id here, unless
+   * `resumed` is the room's last, which then goes on (./message.ts).
    */
-  async join(user: User, roomId: RoomId, tags: string[], muted: boolean, iceServers: HuddleIceServer[] | null, resumed?: string): Promise<Response> {
+  async join(user: User, roomId: RoomId, tags: string[], muted: boolean, iceServers: HuddleIceServer[] | null, resumed?: ResumedHuddle): Promise<Response> {
     const app = await this.appNow();
     if (!app) return closedAtOnce(HuddleCloseCode.Off);
     let members = this.members();
@@ -404,17 +411,18 @@ export class Huddle {
       for (const { socket } of members) this.close(socket, CloseCode.Reconnect, false);
       members = [];
     }
-    const startedAt = members[0]?.attachment.startedAt ?? resumed ?? new Date().toISOString();
+    const { startedAt, messageId } = members[0]?.attachment ?? resumed ?? { startedAt: new Date().toISOString(), messageId: sortableId() };
+    const itsMessage = messageId !== undefined && { messageId };
     const earlier = members.filter(({ attachment }) => attachment.user.id === user.id);
     if (members.length - earlier.length >= MAX_HUDDLE_PEOPLE) return closedAtOnce(HuddleCloseCode.Full);
 
     const { 0: client, 1: server } = new WebSocketPair();
     this.ctx.acceptWebSocket(server, [...tags, HUDDLE_TAG]);
     const now = Date.now();
-    const attachment: HuddleAttachment = { huddle: true, user, roomId, joinedAt: earlier[0]?.attachment.joinedAt ?? now, openedAt: now, startedAt, muted, appId: app.appId };
+    const attachment: HuddleAttachment = { huddle: true, user, roomId, joinedAt: earlier[0]?.attachment.joinedAt ?? now, openedAt: now, startedAt, ...itsMessage, muted, appId: app.appId };
     server.serializeAttachment(attachment);
     for (const { socket } of earlier) this.close(socket, HuddleCloseCode.Moved);
-    send(server, { type: "huddle.welcome", you: user, people: this.people(), startedAt, ...(iceServers && { iceServers }) });
+    send(server, { type: "huddle.welcome", you: user, people: this.people(), startedAt, ...itsMessage, ...(iceServers && { iceServers }) });
     this.broadcast({ type: earlier.length > 0 ? "huddle.changed" : "huddle.joined", person: personOf(attachment) }, server);
     if (earlier.length === 0) this.reportSoon();
     return new Response(null, { status: 101, webSocket: client });
