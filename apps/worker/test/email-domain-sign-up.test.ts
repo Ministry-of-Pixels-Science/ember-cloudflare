@@ -4,7 +4,6 @@ import {
   EMAIL_DOMAIN_NEEDS_EMAIL,
   EMAIL_DOMAINS_REFUSED,
   EMAIL_LINK_GONE,
-  EMAIL_LINK_UNSENT,
   EMAIL_LINKS_LIMITED,
   EMAILS_PER_ADDRESS,
   EMAIL_LINKS_PER_NETWORK,
@@ -21,10 +20,12 @@ import {
   type Sidebar,
   type WorkspaceSettings,
 } from "@ember/protocol";
+import { runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../src/env";
 import { verifyPassword } from "../src/passwords";
-import { api, apiWith, builtPages, cookieOf, createRoom, freshDeploy, origin, shown, signIn, withWorkspaceEnv, workspaceSql, type Session } from "./support";
+import type { Workspace } from "../src/workspace";
+import { api, apiWith, builtPages, cookieOf, createRoom, freshDeploy, origin, shown, signIn, withWorkspaceEnv, workspaceSql, workspaceStub, type Session } from "./support";
 
 const ada = { name: "Ada Lovelace", emailAddress: "ada@example.com", password: "analytical engine" };
 const hal = { name: "Hal", password: "heuristically" };
@@ -91,10 +92,19 @@ function fakeBinding(refusal: () => unknown = () => undefined) {
   return { binding, sent };
 }
 
-/** Runs `run` with the Workspace sending email through a fake binding, answering what it was asked to send. */
+/** The Workspace's last link to join with emailed, which the next waits for. */
+type EmailsLinks = { lastEmailLink: Promise<unknown> };
+
+/** Waits for the links the Workspace is emailing, which it emails once it has answered. */
+const emailed = () => runInDurableObject(workspaceStub(), (instance: Workspace) => (instance as unknown as EmailsLinks).lastEmailLink);
+
+/** Runs `run` with the Workspace sending email through a fake binding, answering what it was asked to send once it has sent it. */
 async function emailing(run: () => Promise<void>, refusal?: () => unknown): Promise<EmailMessageBuilder[]> {
   const { binding, sent } = fakeBinding(refusal);
-  await withWorkspaceEnv({ EMAIL: binding }, run);
+  await withWorkspaceEnv({ EMAIL: binding }, async () => {
+    await run();
+    await emailed();
+  });
   return sent;
 }
 
@@ -343,7 +353,7 @@ describe("Join with an email domain", () => {
       const sent = await linkFor("hal@example.org");
       for (let n = 1; n <= EMAILS_PER_ADDRESS; n++) {
         const refused = await emailing(
-          async () => expect((await ask("hal@example.org")).status).toBe(502),
+          async () => expect((await ask("hal@example.org")).status).toBe(202),
           () => new Error("the provider is down"),
         );
         expect(refused).toHaveLength(1);
@@ -372,7 +382,10 @@ describe("Join with an email domain", () => {
           return { messageId: `<${crypto.randomUUID()}@example.com>` };
         },
       } as unknown as SendEmail;
-      await withWorkspaceEnv({ EMAIL: binding }, async () => expect((await ask("hal@example.org")).status).toBe(202));
+      await withWorkspaceEnv({ EMAIL: binding }, async () => {
+        expect((await ask("hal@example.org")).status).toBe(202);
+        await emailed();
+      });
       expect(joined).toBe(201);
       await expectGone(await lookUp(tokenIn(linkIn(sent[0]!))));
       expect(await count("email_links")).toBe(0);
@@ -413,13 +426,38 @@ describe("Join with an email domain", () => {
       expect(await response.json()).toEqual({ error: JOINING_PROBLEMS.email_off, redirect: "/session/new?joining=email_off" });
     });
 
-    it("says so when Ember can't send email, or the provider doesn't send it", async () => {
+    it("answers before the address is counted or emailed, so how soon it answers says nothing of the address", async () => {
+      await setUpEmailDomain();
+      // Each email waits for the one before, which here doesn't end until the test lets it.
+      let letGo!: () => void;
+      const held = new Promise<void>((resolve) => (letGo = resolve));
+      await runInDurableObject(workspaceStub(), (instance: Workspace) => {
+        (instance as unknown as EmailsLinks).lastEmailLink = held;
+      });
+      const { binding, sent } = fakeBinding();
+      await withWorkspaceEnv({ EMAIL: binding }, async () => {
+        const response = await ask("hal@example.org");
+        expect(response.status).toBe(202);
+        expect(await response.json()).toEqual({});
+        expect(sent).toHaveLength(0);
+        expect(await count("email_link_requests")).toBe(0);
+        expect(await count("email_links")).toBe(0);
+
+        letGo();
+        await emailed();
+      });
+      expect(sent).toHaveLength(1);
+      expect(await workspaceSql("SELECT email_address, count FROM email_link_requests")).toEqual([{ email_address: "hal@example.org", count: 1 }]);
+      expect(await count("email_links")).toBe(1);
+    });
+
+    it("says so when Ember can't send email, and answers as asked when the provider doesn't send it, which is only logged", async () => {
       const administrator = await setUpEmailDomain();
       const refused = await emailing(
         async () => {
           const response = await ask("hal@example.org");
-          expect(response.status).toBe(502);
-          expect(await response.json()).toEqual({ error: EMAIL_LINK_UNSENT });
+          expect(response.status).toBe(202);
+          expect(await response.json()).toEqual({});
         },
         () => new Error("destination address is not a verified address"),
       );

@@ -737,10 +737,10 @@ export type AccountRefusal = "conflict" | "no email domains" | "no email";
 
 /**
  * What asking for a link to join with an address at the email domains came to: "asked", whatever Ember
- * emailed, if anything, "off" while Email domain doesn't let the address's domain in, "limited" past the
- * network's limit, "unsendable" while Ember can't send email, and "unsent" when the provider refused to.
+ * goes on to email, if anything, "off" while Email domain doesn't let the address's domain in, "limited"
+ * past the network's limit, and "unsendable" while Ember can't send email.
  */
-export type EmailLinkAsk = "asked" | "off" | "limited" | "unsendable" | "unsent";
+export type EmailLinkAsk = "asked" | "off" | "limited" | "unsendable";
 
 /**
  * What asking for a code to reset a password came to: "asked", whatever Ember goes on to email, if
@@ -1053,6 +1053,11 @@ export class Workspace extends DurableObject<Env> {
    * and kept, in the order they were asked for (see `askForPasswordReset`).
    */
   private lastResetCode: Promise<unknown> = Promise.resolve();
+  /**
+   * The last link to join with emailed, which the next one waits for, so that links are emailed, and
+   * kept, in the order they were asked for (see `askForEmailLink`).
+   */
+  private lastEmailLink: Promise<unknown> = Promise.resolve();
   /** How many changes have queued revocations, which `afterQueuing` compares to see whether its change did. */
   private queuedRevocations = 0;
   /**
@@ -2463,13 +2468,13 @@ export class Workspace extends DurableObject<Env> {
 
   /**
    * Emails `emailAddress` a link to join with it, the one `link`'s secret makes, at `origin`, while Email
-   * domain lets in `domain`, its domain, which takes the place of any it was sent before once the
-   * provider has the email, unless they've joined since, or, if someone has an account with it already,
-   * whatever its case, an email saying so, with a link to sign in. Asks from `ip` count against its limit
-   * while they're `limited`, as they are while Ember lacks Turnstile's keys. Once the address has been
-   * emailed as often as it is in an hour, an ask sends nothing, though it answers "asked", as it does for
-   * an address with an account, so that the answer never says who has one, and the link sent last still
-   * works. An email the provider refuses reaches nobody, so it isn't counted, and changes no link.
+   * domain lets in `domain`, its domain, or, if someone has an account with it already, whatever its
+   * case, an email saying so, with a link to sign in. Asks from `ip` count against its limit while
+   * they're `limited`, as they are while Ember lacks Turnstile's keys. It answers "asked" before anything
+   * is counted or emailed, as asking for a password reset does, and whatever comes of it, so that neither
+   * the answer nor how soon it comes says whether the address has an account, or has been emailed as
+   * often as it is in an hour, which a password reset for an account's address counts towards: the email
+   * goes afterwards, one at a time with the others asked for (`emailJoinLink`).
    */
   async askForEmailLink(ip: string, emailAddress: string, domain: string, link: NewEmailLink, origin: string, limited: boolean): Promise<EmailLinkAsk> {
     const account = await this.joinableAccount();
@@ -2477,11 +2482,28 @@ export class Workspace extends DurableObject<Env> {
     const sending = await this.emailSender(account);
     if (sending === null) return "unsendable";
     if (limited && !this.emailLinkAsks.attempt(ip)) return "limited";
+    const emailing = this.lastEmailLink
+      .then(() => this.emailJoinLink(emailAddress, domain, link, origin, sending))
+      .catch((error: unknown) => console.error("Could not email a link to join", error));
+    this.lastEmailLink = emailing;
+    this.ctx.waitUntil(emailing);
+    return "asked";
+  }
+
+  /**
+   * Emails `emailAddress` the link to join that `link`'s secret makes, at `origin`, with `sending`, while
+   * Email domain still lets in `domain`, which takes the place of any it was sent before once the
+   * provider has the email, unless they've joined since, or, if someone has an account with it already,
+   * the email saying so. Once the address has been emailed as often as it is in an hour, whoever asked,
+   * it sends nothing, and the link sent last still works. An email the provider refuses reaches nobody,
+   * so it isn't counted, and changes no link.
+   */
+  private async emailJoinLink(emailAddress: string, domain: string, link: NewEmailLink, origin: string, sending: { sender: Sender; from: Mailbox }): Promise<void> {
     const now = Date.now();
     // Counted one at a time, as people join, but sent afterwards, so that sending never holds up a join.
     const asked = await this.oneAtATime(async () => {
-      const current = (await this.joinableAccount())!;
-      if (!letsInEmailDomain(current, domain)) return "off";
+      const current = await this.joinableAccount();
+      if (current === null || !letsInEmailDomain(current, domain)) return "off";
       const { count, countedSince } = await this.store.countEmailRequest(emailAddress, new Date(now).toISOString(), new Date(now - EMAIL_ASK_WINDOW_MS).toISOString());
       if (count > EMAILS_PER_ADDRESS) {
         // The count is of the emails sent, or being sent, so that one the provider refuses frees a place.
@@ -2490,22 +2512,17 @@ export class Workspace extends DurableObject<Env> {
       }
       return { name: current.name, member: (await this.store.takenEmailAddresses([emailAddress])).size > 0, countedSince };
     });
-    if (asked === "off") return "off";
-    if (asked === "enough") return "asked";
+    if (asked === "off" || asked === "enough") return;
     const email = asked.member
       ? alreadyAMemberEmail(emailAddress, asked.name, `${origin}/session/new?${new URLSearchParams({ email_address: emailAddress })}`)
       : emailDomainLinkEmail(emailAddress, asked.name, `${origin}${emailSignUpLink(link.token)}`);
-    if ((await sendEmail(sending.sender, sending.from, email)) !== null) {
-      await this.store.uncountEmailRequest(emailAddress, asked.countedSince);
-      return "unsent";
-    }
-    if (asked.member) return "asked";
+    if ((await sendEmail(sending.sender, sending.from, email)) !== null) return this.store.uncountEmailRequest(emailAddress, asked.countedSince);
+    if (asked.member) return;
     // Saved one at a time, as people join, so that someone who joined as it was sent gets no link to join with again.
     await this.oneAtATime(async () => {
       if ((await this.store.takenEmailAddresses([emailAddress])).size > 0) return;
       await this.store.saveEmailDomainLink(sortableId(), emailAddress, link.digest, new Date(now).toISOString(), new Date(now + EMAIL_DOMAIN_LINK_MS).toISOString());
     });
-    return "asked";
   }
 
   /**

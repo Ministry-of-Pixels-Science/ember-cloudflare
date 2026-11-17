@@ -1145,9 +1145,6 @@ export const EMAIL_LINKS_LIMITED = "Too many links asked for from your network. 
 /** Why `/join/email` sends no link while Ember can't send email. */
 export const CANT_EMAIL_LINKS = "Ember can't email links right now. Try again later, or ask an administrator to invite you.";
 
-/** Why `/join/email` sent no link when the email provider refused to send it. */
-export const EMAIL_LINK_UNSENT = "Ember couldn't email you just now. Try again later.";
-
 /**
  * Whose password to reset, and to what, as `POST /api/recovery/reset-password` takes it from
  * apps/worker/scripts/reset-password.ts.

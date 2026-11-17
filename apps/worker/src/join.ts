@@ -1,7 +1,6 @@
 import {
   CANT_EMAIL_LINKS,
   EMAIL_LINK_GONE,
-  EMAIL_LINK_UNSENT,
   EMAIL_LINKS_LIMITED,
   INVITATION_GONE,
   isPasswordTooLong,
@@ -236,8 +235,8 @@ export async function joinWithEmailLink(request: Request, env: Env, kind: EmailL
  * which it's emailed about instead, so that the answer never says who has one. While Email domain is off
  * it answers 403 before the body is read, sending them to sign in, and an address at another domain is
  * refused on its field. Turnstile's check comes next, while Ember has a widget's keys, and else the
- * network's limit, which stands in for it. It answers 503 while Ember can't send email, and 502 when the
- * provider refuses the email.
+ * network's limit, which stands in for it. It answers 503 while Ember can't send email, and otherwise
+ * before the email is sent, so one the provider then refuses is only logged.
  */
 export async function askForEmailLink(request: Request, env: Env): Promise<Response> {
   const [session, account] = await Promise.all([authenticate(request, env), workspace(env).account()]);
@@ -258,7 +257,6 @@ export async function askForEmailLink(request: Request, env: Env): Promise<Respo
   if (outcome === "off") return formAnswer(signInInsteadOf("email_off"), 403);
   if (outcome === "limited") return formAnswer({ error: EMAIL_LINKS_LIMITED }, 429);
   if (outcome === "unsendable") return formAnswer({ error: CANT_EMAIL_LINKS }, 503);
-  if (outcome === "unsent") return formAnswer({ error: EMAIL_LINK_UNSENT }, 502);
   return formAnswer({}, 202);
 }
 
