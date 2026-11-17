@@ -22,8 +22,8 @@ const CODE_SPAN = /(`+)[\s\S]*?[^`]\1(?!`)/;
 /** A link written in place, its text and where it goes, with the brackets and parentheses they hold, as in [the docs [2]](…/(a)[1]). */
 const INLINE_LINK = /\[(?:[^[\]\n]|\[[^[\]\n]*\])*\]\((?:[^\s()]|\([^\s()]*\))*(?:[^\S\n]+(?:"[^"\n]*"|'[^'\n]*'))?\)/;
 
-/** A web address, up to what ends one, as a closing bracket does, with the parentheses it opens. */
-const ADDRESS = /[a-z][a-z\d+.-]*:\/\/(?:[^\s<>()\]"'`]|\([^\s<>()"'`]*\))*/;
+/** A web address, up to what ends one, as a closing bracket does, with the brackets and parentheses it opens, as in ?ids=[1]&pages=[2]. */
+const ADDRESS = /[a-z][a-z\d+.-]*:\/\/(?:[^\s<>()[\]"'`]|\([^\s<>()"'`]*\)|\[[^\s<>()[\]"'`]*\])*/;
 
 /** Where brackets in a block's text are never a citation, so that their own stay. */
 const KEPT = new RegExp([CODE_SPAN, INLINE_LINK, ADDRESS].map(({ source }) => source).join("|"), "gi");

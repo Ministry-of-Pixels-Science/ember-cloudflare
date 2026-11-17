@@ -48,6 +48,11 @@ describe("What an answer cites of the pages Ember's searches found", () => {
     expect(citedIn("Write `list[1]` [2].", PAGES)).toEqual({ text: "Write `list[1]`.", cited: [BLOG] });
     expect(citedIn("See [the report](https://example.com/report?ids=[1]) [2].", PAGES)).toEqual({ text: "See [the report](https://example.com/report?ids=[1]).", cited: [BLOG] });
     expect(citedIn("See [the report](https://example.com/(item[1])) [2].", PAGES)).toEqual({ text: "See [the report](https://example.com/(item[1])).", cited: [BLOG] });
+    for (const address of ["https://example.com/report?ids=[1]&pages=[2]", "<https://example.com/report?ids=[1]&pages=[2]>"]) {
+      expect(citedIn(`See ${address} [3].`, PAGES)).toEqual({ text: `See ${address}.`, cited: [NEWS] });
+    }
+    // A bracket an address doesn't open still ends it.
+    expect(citedIn("[See https://example.com/report] [2].", PAGES)).toEqual({ text: "[See https://example.com/report].", cited: [BLOG] });
   });
 
   it("takes citations out of a list's or a quote's text around the code it holds, but not out of the code", () => {
