@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useReducer, useRef, useState } from "react";
-import { CloseCode, parseServerFrame, type Account, type DirectoryUser, type Me, type RoomId, type User, type UserId, type WorkspaceServerFrame } from "@ember/protocol";
+import { CloseCode, parseServerFrame, type Account, type DirectoryUser, type Me, type RoomId, type User, type UserId, type WorkspaceClientFrame, type WorkspaceServerFrame } from "@ember/protocol";
 import { fetchMe, fetchSidebar, isSignedOut, workspaceSocketUrl, type SidebarCopy } from "@/lib/api";
 import type { InvitationsChange } from "@/lib/huddle-invitations";
 import { reconnectingSocket } from "@/lib/reconnecting-socket";
@@ -173,6 +173,18 @@ export function useSidebar(
     // try starts afresh, after a close or a socket that stopped answering alike.
     let toldOf = { you: false, account: false };
     const onConnecting = () => void (toldOf = { you: false, account: false });
+
+    // Tells the Workspace whether the tab is shown, unless its socket's address or an earlier frame said
+    // so already, since an invitation into a huddle is pushed to whoever has Ember in view nowhere. It's
+    // told as that changes, where a room hears once the change has lasted: a phone can stop a tab soon
+    // after hiding it. Until the Workspace lets the socket in, the welcome tells it.
+    const shown = () => document.visibilityState === "visible";
+    let told: boolean;
+    const tellVisibility = () => {
+      const visible = shown();
+      if (visible !== told && workspace.send({ type: "presence.visible", visible })) told = visible;
+    };
+
     const heardOf = (roomId: RoomId) => roomFrames.current.lastOf.set(roomId, ++roomFrames.current.count);
     const onMessage = (data: string) => {
       const frame = parseServerFrame<WorkspaceServerFrame>(data);
@@ -184,6 +196,7 @@ export function useSidebar(
             return sessionChanged(frame.you);
           }
           workspace.connected();
+          tellVisibility();
           if (!toldOf.you) signsIn(frame.you);
           if (!toldOf.account) accountChanged(frame.account);
           return reload();
@@ -261,13 +274,21 @@ export function useSidebar(
     };
 
     reload();
-    const workspace = reconnectingSocket({ url: workspaceSocketUrl, onMessage, onConnecting, onClose, deploySpreadMs: DEPLOY_SPREAD_MS });
+    const workspace = reconnectingSocket<WorkspaceClientFrame>({
+      url: () => workspaceSocketUrl({ visible: (told = shown()) }),
+      onMessage,
+      onConnecting,
+      onClose,
+      deploySpreadMs: DEPLOY_SPREAD_MS,
+    });
     document.addEventListener("visibilitychange", visibilityChanged);
+    document.addEventListener("visibilitychange", tellVisibility);
     return () => {
       closed = true;
       clearTimeout(waiting);
       workspace.close();
       document.removeEventListener("visibilitychange", visibilityChanged);
+      document.removeEventListener("visibilitychange", tellVisibility);
     };
   }, [refresh]);
 

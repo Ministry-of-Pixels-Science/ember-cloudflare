@@ -82,7 +82,7 @@ describe("Unread rooms", () => {
     const grace = await connect(room, "Grace", { visible: true });
     const lin = await connect(room, "Lin", { visible: false });
     const hopper = await signIn("Hopper");
-    const tabs = await Promise.all([ada.session, grace.session, lin.session, hopper].map(openWorkspaceSocket));
+    const tabs = await Promise.all([ada.session, grace.session, lin.session, hopper].map((session) => openWorkspaceSocket(session)));
     await settle(ada, grace, lin);
 
     const message = await post(ada, "Anyone around?");
@@ -312,7 +312,7 @@ describe("Unread rooms", () => {
     const ada = await connect(room, "Ada", { visible: true });
     const grace = await connect(room, "Grace", { visible: true });
     const hopper = await signIn("Hopper");
-    const [gracesTab, hoppersTab] = await Promise.all([grace.session, hopper].map(openWorkspaceSocket));
+    const [gracesTab, hoppersTab] = await Promise.all([grace.session, hopper].map((session) => openWorkspaceSocket(session)));
     await settle(ada, grace);
     await delivered(room);
 

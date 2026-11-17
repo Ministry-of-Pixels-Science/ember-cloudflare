@@ -85,6 +85,7 @@ import {
   parseSignUp,
   parseTurnstileKeysChange,
   parseWorkspaceClientFrame,
+  parseWorkspaceSocketParams,
   PASSWORD_RESET_CODE_NEEDED,
   PASSWORD_RESET_PATH,
   passwordResetCodeOf,
@@ -107,6 +108,7 @@ import {
   EMAIL_ADDRESS_TOO_LONG,
   withEmailAddress,
   withNavigationIcons,
+  workspaceSocketQuery,
   type WorkspaceServerFrame,
 } from "./index";
 
@@ -286,12 +288,27 @@ describe("Presence", () => {
 });
 
 describe("One live connection per tab outside the open room", () => {
-  it("takes only pings on the workspace socket", () => {
+  it("takes pings on the workspace socket, and whether its tab is shown, as a boolean, and nothing else", () => {
     expect(parseWorkspaceClientFrame('{"type":"ping"}')).toEqual({ type: "ping" });
     expect(parseWorkspaceClientFrame('{"type":"ping","nonce":"n1"}')).toEqual({ type: "ping" });
+    expect(parseWorkspaceClientFrame('{"type":"presence.visible","visible":false}')).toEqual({ type: "presence.visible", visible: false });
+    expect(parseWorkspaceClientFrame('{"type":"presence.visible","visible":true,"extra":1}')).toEqual({ type: "presence.visible", visible: true });
+    for (const visible of [undefined, null, 1, "true", "visible"]) {
+      expect(parseWorkspaceClientFrame(JSON.stringify({ type: "presence.visible", visible })), String(visible)).toBeNull();
+    }
     for (const raw of ['{"type":"typing.start"}', '{"type":"message.create","clientMessageId":"c1","body":"hi"}', "[]", "null", "{"]) {
       expect(parseWorkspaceClientFrame(raw), raw).toBeNull();
     }
+  });
+
+  it("carries whether a tab is shown on its workspace socket's address, which counts it as shown when it doesn't say", () => {
+    expect(workspaceSocketQuery({ visible: true })).toBe("?visible=1");
+    expect(workspaceSocketQuery({ visible: false })).toBe("?visible=0");
+    const read = (params: Record<string, string>) => parseWorkspaceSocketParams({ get: (name) => params[name] ?? null });
+    expect(read({ visible: "1" })).toEqual({ visible: true });
+    expect(read({ visible: "0" })).toEqual({ visible: false });
+    expect(read({})).toEqual({ visible: true });
+    expect(read({ visible: "yes" })).toEqual({ visible: true });
   });
 
   it("reads the workspace socket's frames as the server sends them", () => {

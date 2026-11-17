@@ -23,6 +23,7 @@ class FakeSocket {
   static all: FakeSocket[] = [];
 
   readyState = FakeSocket.CONNECTING;
+  sent: Array<Record<string, unknown>> = [];
   closedWith: number | undefined;
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
@@ -32,7 +33,14 @@ class FakeSocket {
     FakeSocket.all.push(this);
   }
 
-  send() {}
+  send(data: string) {
+    this.sent.push(JSON.parse(data));
+  }
+
+  /** What the tab has said of whether it's shown, in order. */
+  get shown() {
+    return this.sent.filter((frame) => frame.type === "presence.visible").map((frame) => frame.visible);
+  }
 
   close(code?: number) {
     this.closedWith = code;
@@ -142,7 +150,7 @@ describe("Live sidebar updates", () => {
   it("loads, and loads again each time the workspace socket connects, the first time included", async () => {
     const { result } = await showSidebar();
     expect(result.current.list).toEqual(unstarred([design]));
-    expect(socket().url).toBe("ws://localhost:3000/api/socket");
+    expect(socket().url).toBe("ws://localhost:3000/api/socket?visible=1");
 
     server.change(unstarred([design, general]));
     socket().connect();
@@ -444,6 +452,61 @@ describe("Huddles in your rooms", () => {
     socket().receive({ type: "room.gone", roomId: "direct-1" });
     expect(onInvitation).toHaveBeenLastCalledWith({ type: "over", roomId: "direct-1" });
     expect(onInvitation).toHaveBeenCalledTimes(2);
+  });
+
+  // The Workspace pushes an invitation to whoever has Ember in view nowhere, which it knows from their tabs.
+  it("tells the Workspace whether the tab is shown as it connects", async () => {
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+    await showSidebar();
+    expect(socket().url).toBe("ws://localhost:3000/api/socket?visible=0");
+    socket().connect();
+    expect(socket().shown).toEqual([]);
+  });
+
+  it("tells the Workspace as soon as the tab is hidden, and as soon as it's shown again, once each", async () => {
+    await showSidebar();
+    socket().connect();
+    expect(socket().shown).toEqual([]);
+    await visibility("hidden");
+    expect(socket().shown).toEqual([false]);
+    await visibility("hidden");
+    expect(socket().shown).toEqual([false]);
+
+    await visibility("visible");
+    expect(socket().shown).toEqual([false, true]);
+    await visibility("visible");
+    expect(socket().shown).toEqual([false, true]);
+  });
+
+  it("tells a Workspace it was connecting to once it lets the socket in, unless the socket's address said so", async () => {
+    await showSidebar();
+    socket().connect();
+    socket().drop();
+    await wait(1_000);
+    expect(FakeSocket.all).toHaveLength(2);
+    expect(socket().url).toMatch(/visible=1$/);
+    // The tab is hidden while it connects again.
+    await visibility("hidden");
+    socket().open();
+    expect(socket().shown).toEqual([]);
+    socket().receive({ type: "welcome", you: ada, account: ember });
+    expect(socket().shown).toEqual([false]);
+
+    socket().drop();
+    await wait(1_000);
+    expect(socket().url).toMatch(/visible=0$/);
+    socket().connect();
+    expect(socket().shown).toEqual([]);
+  });
+
+  it("stops following the tab once it's gone", async () => {
+    const [added, removed] = [vi.spyOn(document, "addEventListener"), vi.spyOn(document, "removeEventListener")];
+    const following = (calls: unknown[][]) => calls.filter(([type]) => type === "visibilitychange").length;
+    const { unmount } = await showSidebar();
+    socket().connect();
+    expect(following(added.mock.calls)).toBeGreaterThan(0);
+    unmount();
+    expect(following(removed.mock.calls)).toBe(following(added.mock.calls));
   });
 });
 

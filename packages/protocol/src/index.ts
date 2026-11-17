@@ -1689,10 +1689,11 @@ export type ServerFrame =
   | { type: "pong" };
 
 /**
- * What a tab sends on its workspace socket (`/api/socket`): only pings, which the runtime answers
- * without waking the Workspace.
+ * What a tab sends on its workspace socket (`/api/socket`): pings, which the runtime answers without
+ * waking the Workspace, and whether the tab is shown, as that changes, so that the Workspace knows
+ * whether its person has Ember in view anywhere.
  */
-export type WorkspaceClientFrame = { type: "ping" };
+export type WorkspaceClientFrame = { type: "ping" } | { type: "presence.visible"; visible: boolean };
 
 /** What the Workspace sends on a tab's workspace socket. */
 export type WorkspaceServerFrame =
@@ -1813,6 +1814,21 @@ export const parseRoomSocketParams = (query: SearchParams): RoomSocketParams & {
   around: messageIdOf(query.get("around")),
   protocol: Number(query.get("protocol")) || 1,
 });
+
+/** What a workspace socket's address tells the Workspace about the tab opening it. */
+export interface WorkspaceSocketParams {
+  /** Whether the tab is shown, which `presence.visible` frames update. */
+  visible: boolean;
+}
+
+/** The query that carries `params` on a workspace socket's address. */
+export const workspaceSocketQuery = ({ visible }: WorkspaceSocketParams) => `?visible=${visible ? 1 : 0}`;
+
+/**
+ * What a workspace socket's address says about its tab, as `workspaceSocketQuery` wrote it. A tab that
+ * doesn't say counts as shown: an open tab runs the app it loaded, which once said nothing here.
+ */
+export const parseWorkspaceSocketParams = (query: SearchParams): WorkspaceSocketParams => ({ visible: query.get("visible") !== "0" });
 
 /** The most characters a message's plain text can have. */
 export const MAX_MESSAGE_LENGTH = 10_000;
@@ -1998,7 +2014,9 @@ export function parseClientFrame(raw: string): ClientFrame | null {
 
 /** Parses an untrusted frame from a workspace socket. Returns null for anything malformed. */
 export function parseWorkspaceClientFrame(raw: string): WorkspaceClientFrame | null {
-  return parseObject(raw)?.type === "ping" ? { type: "ping" } : null;
+  const f = parseObject(raw);
+  if (f?.type === "ping") return { type: "ping" };
+  return f?.type === "presence.visible" && typeof f.visible === "boolean" ? { type: "presence.visible", visible: f.visible } : null;
 }
 
 /**

@@ -434,7 +434,12 @@ Objects, D1 or speed call for something else.
   deleted since has none, and isn't pushed. The Workspace finds a message's recipients and badges in
   one query, in the batch that applies the room's events, just after the message's unread marks,
   through the memberships' key, the subscriptions' index led by the person and, for the badge,
-  `index_memberships_on_user_id_and_room_id`. So pushes add no round trip to either object.
+  `index_memberships_on_user_id_and_room_id`. So pushes add no round trip to either object. An
+  invitation into a huddle is pushed by one more statement of that shape, in the call by which its
+  room has the Workspace invite people: it reads the memberships of the people invited by their key,
+  however many the room has, and their subscriptions and badges as a message's does. Nothing is
+  stored of who has Ember in view, which decides who is pushed one: each workspace socket keeps
+  whether its tab is shown in its attachment, as a room's socket does.
 - **A bot is found by its id, so its token needs no index.** Campfire keeps a bot's token in
   `users.bot_token` under a unique index, and finds the bot a key names by its id and token together
   (`User.authenticate_bot`). Ours keeps the token in the same column (workspace migration 0027)
