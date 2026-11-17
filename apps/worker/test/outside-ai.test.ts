@@ -323,6 +323,10 @@ describe("Outside AI", () => {
     for (let n = 0; n < 10; n++) expect((await register({ redirect_uris: [BACK] }, "198.51.100.7")).status).toBe(201);
     expect((await register({ redirect_uris: [BACK] }, "198.51.100.7")).status).toBe(429);
     expect((await register({ redirect_uris: [BACK] }, "198.51.100.8")).status).toBe(201);
+    // An IPv6 address counts as its /64, whichever of its addresses registers.
+    for (let n = 1; n <= 10; n++) expect((await register({ redirect_uris: [BACK] }, `2001:db8:1:2::${n.toString(16)}`)).status).toBe(201);
+    expect((await register({ redirect_uris: [BACK] }, "2001:db8:1:2:ffff::1")).status).toBe(429);
+    expect((await register({ redirect_uris: [BACK] }, "2001:db8:1:3::1")).status).toBe(201);
   });
 
   it(`keeps at most ${MAX_OUTSIDE_CLIENTS} apps that registered, forgetting first the old ones nobody is connected through`, async () => {

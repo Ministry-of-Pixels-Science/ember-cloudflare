@@ -390,6 +390,10 @@ describe("Reset a forgotten password with an emailed code", () => {
         expect(limited.status).toBe(429);
         expect(await limited.json()).toEqual({ error: PASSWORD_RESETS_LIMITED });
         expect((await ask("ada@example.com", { ip: "203.0.113.51" })).status).toBe(202);
+        // An IPv6 network is a /64, whichever of its addresses asks.
+        for (let n = 1; n <= PASSWORD_RESETS_PER_NETWORK; n++) expect((await ask(`someone${n}@example.com`, { ip: `2001:db8:1:2::${n.toString(16)}` })).status).toBe(202);
+        expect((await ask("someone@example.com", { ip: "2001:db8:1:2:ffff::1" })).status).toBe(429);
+        expect((await ask("someone@example.com", { ip: "2001:db8:1:3::1" })).status).toBe(202);
 
         const checks = fakeSiteverify();
         const unchecked = await ask("ada@example.com", { ip: "203.0.113.50", changes: TURNSTILE_KEYS });

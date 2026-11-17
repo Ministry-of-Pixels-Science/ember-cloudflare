@@ -227,13 +227,13 @@ const SETUP_TRY_WINDOW = "setupTryWindow";
 const KEPT_MODELS_FILE = "keptModelsFile";
 const KEPT_WORKERS_AI_MODELS = "keptWorkersAiModels";
 /**
- * Open sign-up's limits' hour: the sign-ups from an IP address are counted in a fixed one, before the
+ * Open sign-up's limits' hour: the sign-ups from a network are counted in a fixed one, before the
  * password is hashed, which takes more CPU than the rest of a request, and the new people in the
  * workspace in the last one, counted from the people kept, whatever the Workspace's memory forgets.
  */
 const SIGN_UP_WINDOW_MS = 60 * 60 * 1000;
 
-/** How many times an hour one IP address can register an AI app, which nothing signs in to do. */
+/** How many times an hour one network can register an AI app, which nothing signs in to do. */
 const OUTSIDE_REGISTRATIONS_PER_ADDRESS = 10;
 const OUTSIDE_REGISTRATION_WINDOW_MS = 60 * 60 * 1000;
 /** The most AI apps Ember keeps that registered themselves, and how long one nobody has connected is kept once there are that many. */
@@ -288,7 +288,7 @@ const shownConnection = ({ id, clientName, redirectUri, scope, createdAt, usedAt
 });
 /**
  * The hour of the limits on asking Ember to email someone, a link to join at the email domains or a code
- * to reset a password: the asks from an IP address are counted in a fixed one, and the times an address
+ * to reset a password: the asks from a network are counted in a fixed one, and the times an address
  * is emailed in one that starts as it's first asked for, which the Workspace keeps.
  */
 const EMAIL_ASK_WINDOW_MS = 60 * 60 * 1000;

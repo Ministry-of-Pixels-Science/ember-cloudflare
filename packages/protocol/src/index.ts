@@ -1431,7 +1431,7 @@ export const signInSaying = (problem: JoiningProblem) => `/session/new?${JOINING
 
 /**
  * Open sign-up's limits, which stand in for Turnstile's check while Ember lacks its keys: how many
- * people may sign up from an IP address in an hour, and how many new people in the workspace in the last
+ * people may sign up from a network in an hour, and how many new people in the workspace in the last
  * hour, however they joined, stop it, so that a flood can't use up the rows a Workers Free account
  * writes in a day.
  */

@@ -1178,7 +1178,7 @@ with Ember as the authorization server:
   gives `write` unless it's cleared and `private` only if it's ticked. An app that asks for `private`
   alone is asked to read with it.
 - An app names itself by the address of a Client ID Metadata Document, which Ember reads from a
-  public address only, or registers itself at `/oauth/register`, 10 times an hour from one address at
+  public address only, or registers itself at `/oauth/register`, 10 times an hour from one network at
   most. Either way it's a public client, with no secret, and proves itself with PKCE (S256).
 - The browser goes back only to an `https` address the app gave, or to `http` on the person's own
   computer, at any port, for an app that runs there. An app that's opened by a scheme of its own,

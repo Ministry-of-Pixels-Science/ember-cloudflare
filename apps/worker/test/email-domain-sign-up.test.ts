@@ -477,6 +477,10 @@ describe("Join with an email domain", () => {
       expect(limited.status).toBe(429);
       expect(await limited.json()).toEqual({ error: EMAIL_LINKS_LIMITED });
       await asked("one.more@example.org", { ip: "203.0.113.51" });
+      // An IPv6 network is a /64, whichever of its addresses asks.
+      for (let n = 1; n <= EMAIL_LINKS_PER_NETWORK; n++) await asked(`someone${n}@example.org`, { ip: `2001:db8:1:2::${n.toString(16)}` });
+      expect((await ask("someone.more@example.org", { ip: "2001:db8:1:2:ffff::1" })).status).toBe(429);
+      await asked("someone.more@example.org", { ip: "2001:db8:1:3::1" });
 
       const checks = fakeSiteverify();
       const unchecked = await ask("another@example.org", { ip: "203.0.113.50", changes: TURNSTILE_KEYS });
