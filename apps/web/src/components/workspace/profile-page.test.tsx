@@ -442,6 +442,21 @@ describe("Delete my account", () => {
     await user.click(deleteButton()!);
     expect(onDeleteAccount).toHaveBeenCalledExactlyOnceWith({ name: "Ada Lovelace" });
   });
+
+  it("asks for the name you saved last, as the server has it, before the workspace's socket brings it", async () => {
+    const without = { ...profile, password: false };
+    serve({
+      loaded: () => Response.json({ profile: without, transferId: LOADED_LINK } satisfies ProfileAnswer),
+      saved: () => Response.json({ profile: { ...without, name: "Ada King" }, transferId: SAVED_LINK } satisfies ProfileAnswer),
+    });
+    const { user } = showPage();
+    await loaded();
+    await user.clear(screen.getByLabelText("Name"));
+    await user.type(screen.getByLabelText("Name"), "Ada King");
+    await user.click(saveButton());
+    await user.click(await screen.findByRole("button", { name: "Delete my account" }));
+    expect(await screen.findByLabelText("Type your name, Ada King, to delete your account")).toBeInTheDocument();
+  });
 });
 
 describe("Levels on your profile", () => {

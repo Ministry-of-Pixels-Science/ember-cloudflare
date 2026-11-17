@@ -21,7 +21,7 @@ import { credentialsOf } from "../src/auth";
 import type { Env } from "../src/env";
 import { objectKey } from "../src/files/blobs";
 import { BOOSTS_BY, RENAME_AUTHOR } from "../src/store";
-import type { Workspace } from "../src/workspace";
+import type { OutsideSender, Workspace } from "../src/workspace";
 import {
   api,
   closeOf,
@@ -383,6 +383,20 @@ describe("What deleting your account deletes", () => {
         expect.objectContaining({ type: "boost.deleted", messageId: adas.id }),
       ]),
     );
+  });
+
+  it("turns away what an AI app connected as you was let send before your account went, however late it reaches the room", async () => {
+    await setUp();
+    const member = await join(grace);
+    const lobby = await freshRoom("lobby");
+    // Checked just before Grace deletes her account, and slow to reach the room.
+    const sender = (await workspaceStub().outsideSender({ userId: member.user.id, scopes: ["read", "write"] }, lobby)) as OutsideSender;
+    expect(sender.user.name).toBe(grace.name);
+
+    await deleteGraces(member);
+    await purged();
+    expect(await roomStub(lobby).createOutsideMessage(lobby, sender, "<p>Still here</p>")).toBeNull();
+    expect(await written(lobby, member.user.id)).toEqual([]);
   });
 
   it("keeps a message of yours that has replies for them, without its text, as Deleted person's", async () => {

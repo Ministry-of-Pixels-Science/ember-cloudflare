@@ -129,6 +129,12 @@ export function ProfilePage({ me, rooms, askForRoom, onSignOut, onDeleteAccount,
   /** Whether you have a password, which the form then asks for to change your email address or password. */
   const [hasPassword, setHasPassword] = useState(false);
   /**
+   * Your name as the profile last loaded or saved it, which Delete my account asks someone without a
+   * password to type, as the server has it: a name saved while the workspace socket is down reaches
+   * `me` only once it's back.
+   */
+  const [savedName, setSavedName] = useState(me.name);
+  /**
    * Whether you have an email address saved, which signing in with your password takes, so disconnecting
    * Memberful needs it: from loading and saving the profile alone, which change it, so a photo's answer
    * arriving late doesn't take it away.
@@ -192,6 +198,7 @@ export function ProfilePage({ me, rooms, askForRoom, onSignOut, onDeleteAccount,
     setPicture((shown) => (shown && avatarVersionOf(shown.avatarUrl) > avatarVersionOf(answered.avatarUrl) ? shown : answered));
     // Nothing takes a password away, so an answer arriving late doesn't hide the field.
     setHasPassword((had) => had || profile.password);
+    setSavedName(profile.name);
     // Nothing connects a Memberful account without a reload, so once it's disconnected here, an answer
     // arriving late doesn't show it connected again, and shows what the Worker does for one disconnected.
     const { memberful } = profile;
@@ -396,7 +403,7 @@ export function ProfilePage({ me, rooms, askForRoom, onSignOut, onDeleteAccount,
         {outsideAi && <YourOutsideAi connections={outsideAi} onChanged={setOutsideAi} onFailed={onFailed} />}
         {rooms && <ConversationNotifications me={me} rooms={rooms} askForRoom={askForRoom} onFailed={onFailed} />}
         {transferId && <SignInLink transferId={transferId} mine />}
-        {fields && <DeleteAccount name={me.name} hasPassword={hasPassword} onDelete={onDeleteAccount} onFailed={onFailed} />}
+        {fields && <DeleteAccount name={savedName} hasPassword={hasPassword} onDelete={onDeleteAccount} onFailed={onFailed} />}
       </Panel>
     </SettingsPage>
   );

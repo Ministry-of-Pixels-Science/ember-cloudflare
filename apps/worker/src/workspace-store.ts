@@ -1705,6 +1705,15 @@ const QUEUE_PERSON_SESSION_REVOCATIONS = `INSERT INTO pending_revocations (room_
   SELECT memberships.room_id, ? || sessions.id, ?, ? FROM sessions JOIN memberships ON memberships.user_id = sessions.user_id
   WHERE sessions.user_id = ? RETURNING id`;
 
+/**
+ * Queues revoking someone's sockets in every room they're in by their person tag, answering a row for
+ * each room, which also turns away what the Workspace let through as them before, such as an AI app's
+ * message on its way. Only for an account that's gone for good: a delivery tried again after its person
+ * signed in afresh would close the new session's sockets too.
+ */
+const QUEUE_PERSON_REVOCATIONS = `INSERT INTO pending_revocations (room_id, tag, code, due_at)
+  SELECT room_id, user_id, ?, ? FROM memberships WHERE user_id = ? RETURNING id`;
+
 /** The same, for every session of theirs but the one the last value names, which stays signed in. */
 const QUEUE_OTHER_SESSION_REVOCATIONS = `INSERT INTO pending_revocations (room_id, tag, code, due_at)
   SELECT memberships.room_id, ? || sessions.id, ?, ? FROM sessions JOIN memberships ON memberships.user_id = sessions.user_id
@@ -3484,19 +3493,19 @@ export class WorkspaceStore {
   }
 
   /**
-   * Deletes someone's account, in one transaction: queues closing each of their sessions' sockets with
-   * `code` in every room they're in, DMs included, and deleting their messages and boosts in every room
-   * they can have written in, all due at `dueAt`, then forgets everything of theirs that removing them
-   * does, and the rooms they starred, the accounts elsewhere they connected, the sign-ins they were
-   * making to apps and any code they were emailed to reset their password, and queues R2 deleting their
-   * avatar, `avatar`, if they have one, due then too. Their row stays, as `DELETE_ACCOUNT` leaves it,
-   * recording when, `now`, and so do their DMs, which name them. Answers whether it queued any
-   * revocations or purges.
+   * Deletes someone's account, in one transaction: queues closing their sockets with `code` in every
+   * room they're in, DMs included, turning away whatever was let through as them before, and deleting
+   * their messages and boosts in every room they can have written in, all due at `dueAt`, then forgets
+   * everything of theirs that removing them does, and the rooms they starred, the accounts elsewhere they
+   * connected, the sign-ins they were making to apps and any code they were emailed to reset their
+   * password, and queues R2 deleting their avatar, `avatar`, if they have one, due then too. Their row
+   * stays, as `DELETE_ACCOUNT` leaves it, recording when, `now`, and so do their DMs, which name them.
+   * Answers whether it queued any revocations or purges.
    */
   async deleteAccount(userId: UserId, avatar: string | null, code: CloseCode, dueAt: number, now: string): Promise<boolean> {
     const [revocations, purges] = (await this.db.batch([
       // Before they leave the rooms, which it finds their sockets in.
-      statement(QUEUE_PERSON_SESSION_REVOCATIONS, SESSION_TAG_PREFIX, code, dueAt, userId),
+      statement(QUEUE_PERSON_REVOCATIONS, code, dueAt, userId),
       statement(QUEUE_PURGES, userId, dueAt),
       statement(LEAVE_SHARED_ROOMS, userId),
       statement(`DELETE FROM sessions WHERE user_id = ?`, userId),
