@@ -107,13 +107,14 @@ function serve({
 /** The profile, with Ada's rooms as the sidebar's list has them, or none while it loads, on `platform`. */
 function showPage(shown = account, rooms: SidebarRoom[] | null = null, platform: Platform = CHROME_MAC) {
   const [onSignOut, onFailed, answered] = [vi.fn(), vi.fn(), vi.fn()];
+  const onDeleteAccount = vi.fn(async () => {});
   const page = (listed: SidebarRoom[] | null, people: People = new Map()) => (
     <AccountContext value={shown}>
       <PeopleContext value={people}>
         <PushContext value={{ ...PUSH_ON, platform }}>
           <FlashProvider workspace>
             <Sheet>
-              <ProfilePage me={ada} rooms={listed} askForRoom={() => answered} onSignOut={onSignOut} onFailed={onFailed} />
+              <ProfilePage me={ada} rooms={listed} askForRoom={() => answered} onSignOut={onSignOut} onDeleteAccount={onDeleteAccount} onFailed={onFailed} />
             </Sheet>
           </FlashProvider>
         </PushContext>
@@ -123,6 +124,7 @@ function showPage(shown = account, rooms: SidebarRoom[] | null = null, platform:
   const { rerender } = render(page(rooms));
   return {
     onSignOut,
+    onDeleteAccount,
     onFailed,
     answered,
     user: userEvent.setup(),
@@ -408,6 +410,37 @@ describe("Private sign-in link", () => {
     await user.type(field("Bio"), "!");
     await user.click(saveButton());
     await waitFor(() => expect(signInLink()).toHaveValue(`http://localhost:3000/session/transfers#token=${SAVED_LINK}`));
+  });
+});
+
+describe("Delete my account", () => {
+  const deleteButton = () => screen.queryByRole("button", { name: "Delete my account" });
+
+  it("ends with Delete my account once your profile loads, after your sign-in link", async () => {
+    showPage();
+    expect(deleteButton()).toBeNull();
+    await loaded();
+    const link = screen.getByRole("textbox", { name: "Use this link to login automatically on another device" });
+    expect(link.compareDocumentPosition(deleteButton()!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+
+  it("asks for your password while you have one, and deletes your account with it", async () => {
+    const { onDeleteAccount, user } = showPage();
+    await loaded();
+    await user.click(deleteButton()!);
+    await user.type(screen.getByLabelText("Your password"), "analytical engine");
+    await user.click(deleteButton()!);
+    expect(onDeleteAccount).toHaveBeenCalledExactlyOnceWith({ currentPassword: "analytical engine" });
+  });
+
+  it("asks someone without one to type their name", async () => {
+    serve({ loaded: () => Response.json({ profile: { ...profile, password: false }, transferId: LOADED_LINK } satisfies ProfileAnswer) });
+    const { onDeleteAccount, user } = showPage();
+    await loaded();
+    await user.click(deleteButton()!);
+    await user.type(screen.getByLabelText("Type your name, Ada Lovelace, to delete your account"), "Ada Lovelace");
+    await user.click(deleteButton()!);
+    expect(onDeleteAccount).toHaveBeenCalledExactlyOnceWith({ name: "Ada Lovelace" });
   });
 });
 

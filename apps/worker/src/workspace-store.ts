@@ -1,6 +1,7 @@
 import {
   ASSISTANT_ID,
   ASSISTANT_NAME,
+  DELETED_PERSON_NAME,
   MAX_FAVORITES,
   MAX_OTHER_ADDRESSES,
   MAX_PUSH_SUBSCRIPTIONS,
@@ -686,13 +687,20 @@ export interface PendingRevocation extends Revocation {
   roomId: RoomId;
 }
 
-/** A room the outbox has yet to ask to delete a banned person's messages. */
+/** A room the outbox has yet to ask to delete the messages of someone banned, or who deleted their account. */
 export interface PendingPurge {
   id: number;
   roomId: RoomId;
   userId: UserId;
   /** When their ban was lifted, if it has been, after which what they write stays. */
   liftedAt: string | null;
+  /** Whether they deleted their account, which takes their boosts too, and whatever they wrote whenever they wrote it. */
+  deletedAccount: boolean;
+}
+
+/** A purge as `DUE_PURGES` reads it. */
+interface PendingPurgeRow extends Omit<PendingPurge, "deletedAccount"> {
+  deletedAccount: number;
 }
 
 interface SessionRow {
@@ -1745,9 +1753,13 @@ const QUEUE_UNBANNED_ADDRESS_REVOCATIONS = `INSERT INTO pending_revocations (roo
  */
 const PURGEABLE = `room_id NOT IN (SELECT room_id FROM pending_revocations)`;
 
-/** Purges due by a time that their rooms can take, those due longest first, up to a number of them. */
-export const DUE_PURGES = `SELECT id, room_id AS roomId, user_id AS userId, lifted_at AS liftedAt FROM pending_purges
-  WHERE due_at <= ? AND ${PURGEABLE} ORDER BY due_at, id LIMIT ?`;
+/**
+ * Purges due by a time that their rooms can take, those due longest first, up to a number of them, each
+ * with whether its person deleted their account, which their row says.
+ */
+export const DUE_PURGES = `SELECT id, room_id AS roomId, user_id AS userId, lifted_at AS liftedAt,
+    EXISTS (SELECT 1 FROM users WHERE users.id = pending_purges.user_id AND users.deleted_at IS NOT NULL) AS deletedAccount
+  FROM pending_purges WHERE due_at <= ? AND ${PURGEABLE} ORDER BY due_at, id LIMIT ?`;
 
 /** When the next purge a room can take is due. One waiting on its room's revocations is due once they've gone. */
 export const NEXT_PURGE_DUE = `SELECT due_at FROM pending_purges WHERE ${PURGEABLE} ORDER BY due_at LIMIT 1`;
@@ -2441,8 +2453,20 @@ const LEAVE_SHARED_ROOMS = `DELETE FROM memberships WHERE user_id = ?
  */
 const DEACTIVATE = `UPDATE users SET status = ${DEACTIVATED}, email_address = replace(email_address, '@', ?), updated_at = ? WHERE id = ?`;
 
+/**
+ * Deletes someone's account, ?3's, recording when, ?2: their row stays, deactivated, as a removed
+ * person's does, so the rooms and DMs they were in still name somebody, but called ?1, with no email
+ * address, password, bio, avatar or picks of theirs, and no longer an administrator.
+ */
+const DELETE_ACCOUNT = `UPDATE users SET name = ?1, status = ${DEACTIVATED}, role = ${MEMBER}, email_address = NULL, password_digest = NULL, bio = NULL,
+  avatar_key = NULL, avatar_variant = NULL, assistant_thinking = NULL, assistant_answer_length = NULL, assistant_model = NULL,
+  invitation_dismissed_at = NULL, deleted_at = ?2, updated_at = ?2 WHERE id = ?3`;
+
 /** Someone as the directory lists them, whatever their status. */
 const PERSON = `SELECT ${DIRECTORY_COLUMNS} FROM users WHERE id = ?`;
+
+/** The same, unless they deleted their account, which no ban, nor lifting one, brings back. */
+const BANNABLE_PERSON = `SELECT ${DIRECTORY_COLUMNS} FROM users WHERE id = ? AND deleted_at IS NULL`;
 
 /** The same, with the avatar they've uploaded, or a bot was given. */
 const PERSON_WITH_AVATAR = `SELECT ${DIRECTORY_COLUMNS}, avatar_key, avatar_variant FROM users WHERE id = ?`;
@@ -3460,6 +3484,39 @@ export class WorkspaceStore {
   }
 
   /**
+   * Deletes someone's account, in one transaction: queues closing each of their sessions' sockets with
+   * `code` in every room they're in, DMs included, and deleting their messages and boosts in every room
+   * they can have written in, all due at `dueAt`, then forgets everything of theirs that removing them
+   * does, and the rooms they starred, the accounts elsewhere they connected, the sign-ins they were
+   * making to apps and any code they were emailed to reset their password, and queues R2 deleting their
+   * avatar, `avatar`, if they have one, due then too. Their row stays, as `DELETE_ACCOUNT` leaves it,
+   * recording when, `now`, and so do their DMs, which name them. Answers whether it queued any
+   * revocations or purges.
+   */
+  async deleteAccount(userId: UserId, avatar: string | null, code: CloseCode, dueAt: number, now: string): Promise<boolean> {
+    const [revocations, purges] = (await this.db.batch([
+      // Before they leave the rooms, which it finds their sockets in.
+      statement(QUEUE_PERSON_SESSION_REVOCATIONS, SESSION_TAG_PREFIX, code, dueAt, userId),
+      statement(QUEUE_PURGES, userId, dueAt),
+      statement(LEAVE_SHARED_ROOMS, userId),
+      statement(`DELETE FROM sessions WHERE user_id = ?`, userId),
+      ...forgettingSearches(userId),
+      statement(`DELETE FROM push_subscriptions WHERE user_id = ?`, userId),
+      statement(`DELETE FROM favorites WHERE user_id = ?`, userId),
+      statement(`DELETE FROM identities WHERE user_id = ?`, userId),
+      statement(`DELETE FROM pending_identities WHERE user_id = ?`, userId),
+      statement(`DELETE FROM password_resets WHERE user_id = ?`, userId),
+      statement(`DELETE FROM app_sign_ins WHERE user_id = ?`, userId),
+      statement(`DELETE FROM own_app_sign_ins WHERE user_id = ?`, userId),
+      statement(`DELETE FROM outside_spent_tokens WHERE connection_id IN (SELECT id FROM outside_connections WHERE user_id = ?)`, userId),
+      statement(`DELETE FROM outside_connections WHERE user_id = ?`, userId),
+      ...(avatar ? [statement(QUEUE_PICTURE_DELETION, avatar, dueAt)] : []),
+      statement(DELETE_ACCOUNT, DELETED_PERSON_NAME, now, userId),
+    ])) as unknown[][];
+    return revocations!.length > 0 || purges!.length > 0;
+  }
+
+  /**
    * Bans someone, in one transaction: queues closing each of their sessions' sockets with `code` in
    * every room they're in, due at `dueAt`, blocks each of `ipAddresses`, ends their sessions, marks them
    * banned, recording when, unless they were already, and queues deleting their messages in every room
@@ -3556,7 +3613,7 @@ export class WorkspaceStore {
 
   /** Up to `limit` of the purges due by `now` whose rooms have no sockets left to close, those due longest first. */
   async duePurges(now: number, limit: number): Promise<PendingPurge[]> {
-    return this.db.all<PendingPurge>(DUE_PURGES, now, limit);
+    return (await this.db.all<PendingPurgeRow>(DUE_PURGES, now, limit)).map((row) => ({ ...row, deletedAccount: row.deletedAccount === 1 }));
   }
 
   /**
@@ -4045,6 +4102,12 @@ export class WorkspaceStore {
   /** Someone as the people directory lists them, whatever their status, or null if nobody has id `userId`. */
   async person(userId: UserId): Promise<DirectoryEntry | null> {
     const [row] = await this.db.all<DirectoryRow>(PERSON, userId);
+    return row ? directoryEntry(row) : null;
+  }
+
+  /** Someone a ban, or lifting one, can find: anyone with the id, as `person` reads them, unless they deleted their account. */
+  async bannablePerson(userId: UserId): Promise<DirectoryEntry | null> {
+    const [row] = await this.db.all<DirectoryRow>(BANNABLE_PERSON, userId);
     return row ? directoryEntry(row) : null;
   }
 

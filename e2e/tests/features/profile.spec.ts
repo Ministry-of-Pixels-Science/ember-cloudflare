@@ -1,3 +1,4 @@
+import { CURRENT_PASSWORD_WRONG, DELETION_NAME_NEEDED, SIGN_IN_REJECTED } from "@ember/protocol";
 import type { Page } from "@playwright/test";
 import { ADMINISTRATOR, drawnPicture, nextSecond, shownPicture, useOwnAddress } from "../../fixtures";
 import { expect, test } from "./fixtures";
@@ -164,5 +165,72 @@ test.describe("Upload an avatar", () => {
     expect(shown).toMatchObject({ width: 36, height: 36 });
     expect(await gracesView.locator("..").boundingBox()).toEqual(shown);
     await expect(gracesView).toHaveCSS("object-fit", "cover");
+  });
+});
+
+test.describe("Delete my account", () => {
+  /** What the sign-in page says once your account is deleted. */
+  const deleted = "Your account is deleted. It can take a few minutes for your messages to leave every room.";
+
+  test("deletes your account once you type your name, taking your messages from everyone's open pages, and signs you out", async ({ members }) => {
+    const ada = await members.signIn(unique("Ada"));
+    const grace = await members.signIn(unique("Grace"));
+    await ada.send("Goodbye from Ada");
+    await expect(grace.message("Goodbye from Ada")).toContainText(ada.name);
+
+    const { page } = ada;
+    await openYourProfile(page);
+    const section = page.getByRole("region", { name: "Delete my account" });
+    await expect(section).toContainText("It can't be undone");
+    const deleteButton = section.getByRole("button", { name: "Delete my account" });
+    await deleteButton.click();
+    // Someone who joined with just a name has no password to give, so they type their name.
+    const name = section.getByLabel(`Type your name, ${ada.name}, to delete your account`);
+    await expect(name).toBeFocused();
+    await name.fill(unique("Ada"));
+    await deleteButton.click();
+    await expect(page.getByRole("alert")).toHaveText(DELETION_NAME_NEEDED);
+    await expect(name).toHaveValue("");
+
+    await name.fill(ada.name);
+    await deleteButton.click();
+    await expect(page).toHaveURL(/\/session\/new$/);
+    await expect(page.getByRole("alert")).toHaveText(deleted);
+    // As the Workspace gets to each room Ada was in, which every test's open rooms make many.
+    await expect(grace.message("Goodbye from Ada")).toHaveCount(0, { timeout: 30_000 });
+
+    // Ada's sessions went with the account.
+    await page.goto("/");
+    await expect(page).toHaveURL(/\/session\/new$/);
+  });
+
+  test("asks for your password once you have one, which then signs nobody in", async ({ members }) => {
+    const { page } = await members.signIn(unique("Ada"));
+    // Checking a password counts against sign-in's limit for the address it comes from.
+    await useOwnAddress(page);
+    await openYourProfile(page);
+    const emailAddress = `ada-${crypto.randomUUID()}@example.com`;
+    await page.getByLabel("Email address").fill(emailAddress);
+    await page.getByLabel("New password").fill("difference engine");
+    await page.getByRole("button", { name: "Save changes" }).click();
+    await expect(page.getByRole("alert")).toHaveText("Changes saved");
+
+    const section = page.getByRole("region", { name: "Delete my account" });
+    await section.getByRole("button", { name: "Delete my account" }).click();
+    const password = section.getByLabel("Your password");
+    await expect(password).toBeFocused();
+    await password.fill("analytical engine");
+    await password.press("Enter");
+    await expect(page.getByRole("alert")).toHaveText(CURRENT_PASSWORD_WRONG);
+    await expect(password).toHaveValue("");
+    await password.fill("difference engine");
+    await password.press("Enter");
+    await expect(page).toHaveURL(/\/session\/new$/);
+    await expect(page.getByRole("alert")).toHaveText(deleted);
+
+    await page.getByLabel("Email address").fill(emailAddress);
+    await page.getByLabel("Password").fill("difference engine");
+    await page.getByRole("button", { name: "Sign in" }).click();
+    await expect(page.locator("form").getByRole("alert")).toHaveText(SIGN_IN_REJECTED);
   });
 });
