@@ -1,6 +1,6 @@
 import { PASSWORD_TOO_SHORT, SIGN_IN_REJECTED } from "@ember/protocol";
 import type { Page } from "@playwright/test";
-import { ADMINISTRATOR, administratorOn, drawnPicture, editorField, invitation, logOut, shownPicture, signInAsAdministrator, useOwnAddress } from "../../fixtures";
+import { ADMINISTRATOR, administratorOn, drawnPicture, editorField, invitation, logOut, shownPicture, signInAsAdministrator, useOwnAddress, variantType } from "../../fixtures";
 import { expect, test, unique } from "./fixtures";
 
 const signInHeading = (page: Page) => page.getByRole("heading", { level: 1, name: "Sign in to Ember" });
@@ -87,7 +87,7 @@ test.describe("Sign up with the join link", () => {
 
     // The variant their browser made of it, within 512×512, which needs no scaling down.
     const avatar = page.getByRole("link", { name: "Your profile" }).locator("img");
-    expect(await shownPicture(avatar)).toEqual({ type: "image/webp", width: 256, height: 512 });
+    expect(await shownPicture(avatar)).toEqual({ type: await variantType(page), width: 256, height: 512 });
   });
 
   test("takes a password as long as first run's, saying why one is refused", async ({ page, request, session }) => {

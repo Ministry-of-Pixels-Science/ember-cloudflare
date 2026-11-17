@@ -370,6 +370,24 @@ export async function drawnPicture(page: Page, name: string, width: number, heig
   return { name, mimeType: "image/png", buffer: Buffer.from(bytes) };
 }
 
+/**
+ * The type of the variants `page`'s browser makes of a PNG, such as an avatar or a picture's preview, as
+ * apps/web/src/lib/previews.ts makes them: a WebP, or where the browser can't encode WebP, as Safari
+ * can't, a PNG, which may be see-through as the picture may. A video's poster, which can't be, is a JPEG
+ * there instead.
+ */
+export async function variantType(page: Page, { seeThrough = true } = {}): Promise<string> {
+  const webp = await page.evaluate(
+    () =>
+      new Promise<string | undefined>((resolve) => {
+        const canvas = Object.assign(document.createElement("canvas"), { width: 1, height: 1 });
+        canvas.toBlob((blob) => resolve(blob?.type), "image/webp");
+      }),
+  );
+  if (webp === "image/webp") return webp;
+  return seeThrough ? "image/png" : "image/jpeg";
+}
+
 /** The size of the picture `image` shows, once it has loaded, and its type, as the server answers it. */
 export async function shownPicture(image: Locator): Promise<{ type: string | null; width: number; height: number }> {
   await expect.poll(() => image.evaluate((element: HTMLImageElement) => element.complete)).toBe(true);

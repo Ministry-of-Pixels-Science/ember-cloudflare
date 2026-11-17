@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { uploadPartPath, uploadsPath, type Message, type Upload } from "@ember/protocol";
 import type { APIRequestContext, FileChooser, Locator, Page } from "@playwright/test";
-import { allowClipboard, cookieHeader, drawnPicture } from "../../fixtures";
+import { allowClipboard, cookieHeader, drawnPicture, variantType } from "../../fixtures";
 import { expect, test, type Member } from "./fixtures";
 
 /**
@@ -159,7 +159,7 @@ test.describe("Image, video and file previews", () => {
       await expect(member.page.getByRole("link", { name: "Download mural.png" })).toHaveCount(0);
     }
     const preview = await ada.page.request.get((await ada.page.getByRole("img", { name: "mural.png" }).getAttribute("src"))!);
-    expect(preview.headers()["content-type"]).toBe("image/webp");
+    expect(preview.headers()["content-type"]).toBe(await variantType(ada.page));
   });
 
   test("plays a video in place, in a box half its size, behind the poster its uploader's browser makes, loading nothing until it's played", async ({ members, request }) => {
@@ -179,7 +179,7 @@ test.describe("Image, video and file previews", () => {
       expect(await video.evaluate((element: HTMLVideoElement) => element.readyState)).toBe(0);
     }
     const poster = await request.get((await ada.page.locator("video").getAttribute("poster"))!);
-    expect(poster.headers()["content-type"]).toBe("image/webp");
+    expect(poster.headers()["content-type"]).toBe(await variantType(ada.page, { seeThrough: false }));
   });
 
   test("shows a picture without a thumbnail, as a bot's, as itself, and a file the browser couldn't make one of as its card", async ({ members, request, rooms }) => {
