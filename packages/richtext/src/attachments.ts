@@ -3,7 +3,7 @@
 
 import { BODY, type HtmlParser } from "./markup";
 import { htmlEscape, isBlank, presence, strip, truncate } from "./ruby";
-import { ancestors, descendants, getAttr, isElement, textContent, type Element } from "./tree";
+import { descendants, getAttr, isElement, textContent, type Element, type Parent } from "./tree";
 import { InvalidComponentError, isHttp, parseUri } from "./uri";
 
 export const ATTACHMENT_TAG = "action-text-attachment";
@@ -100,9 +100,7 @@ function opengraphEmbedFromContent(parse: HtmlParser, content: string, host: str
   const elements = descendants(parse(content, BODY)).filter((node): node is Element => isElement(node));
   const title = elements.find((element) => hasClass(element, "og-embed__title"));
   const link = title && descendants(title).find((node): node is Element => isElement(node, "a"));
-  const image = elements.find(
-    (element) => element.name === "img" && ancestors(element).some((ancestor) => isElement(ancestor) && hasClass(ancestor, "og-embed__image")),
-  );
+  const image = firstImageWithin(elements, "og-embed__image");
   const description = elements.find((element) => hasClass(element, "og-embed__description"));
   const named = link ?? title;
   return {
@@ -111,6 +109,21 @@ function opengraphEmbedFromContent(parse: HtmlParser, content: string, host: str
     filename: named && strip(textContent(named)),
     description: description && strip(textContent(description)),
   };
+}
+
+/**
+ * CSS's `.name img`, as Nokogiri finds its first: the first image, of `elements` in document order,
+ * inside an element of the class. Each element's class is read once: reading the classes of every
+ * image's ancestors took time quadratic in the content's size.
+ */
+function firstImageWithin(elements: Element[], name: string): Element | undefined {
+  const within = new Set<Parent>();
+  for (const element of elements) {
+    const inside = element.parent !== null && within.has(element.parent);
+    if (inside && element.name === "img") return element;
+    if (inside || hasClass(element, name)) within.add(element);
+  }
+  return undefined;
 }
 
 /** Whether CSS's `.name` picks the element, as Nokogiri tests it: `name` is one of its class's words. */

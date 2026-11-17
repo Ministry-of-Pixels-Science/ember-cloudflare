@@ -47,5 +47,11 @@ const backend = (name: "do-sqlite" | "d1") => ({
 export default defineConfig({
   test: {
     projects: [backend("do-sqlite"), backend("d1"), { test: { name: "scripts", include: ["scripts/**/*.test.ts"], environment: "node" } }],
+    // The Worker goes on working once it has answered, as a room does sending the search index what was
+    // just posted, and no test waits for that. When a test file ends while such work calls a Durable
+    // Object, vitest refuses what the call still asks of it and counts that as an error
+    // (EnvironmentTeardownError), which fails a run whose every test passed. It says nothing of what the
+    // tests checked, so it isn't counted; any other error nothing caught still is.
+    onUnhandledError: (error) => error.name !== "EnvironmentTeardownError",
   },
 });

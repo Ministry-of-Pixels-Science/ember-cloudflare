@@ -89,6 +89,7 @@ import {
   parseSignUp,
   parseTurnstileKeysChange,
   parseWorkspaceClientFrame,
+  parseWorkspaceSocketParams,
   PASSWORD_RESET_CODE_NEEDED,
   PASSWORD_RESET_PATH,
   passwordResetCodeOf,
@@ -111,6 +112,7 @@ import {
   EMAIL_ADDRESS_TOO_LONG,
   withEmailAddress,
   withNavigationIcons,
+  workspaceSocketQuery,
   type WorkspaceServerFrame,
 } from "./index";
 
@@ -177,6 +179,13 @@ describe("Threads", () => {
       expect(parse({ type: "thread.before", parentId: bad, before: "r1" }), String(bad)).toBeNull();
       expect(parse({ type: "thread.before", parentId: "m1", before: bad }), String(bad)).toBeNull();
     }
+  });
+
+  it("says on a room socket's address that it shows a thread apart from the room's timeline, which nothing but a 1 says", () => {
+    expect(roomSocketQuery({ visible: true, apart: true })).toBe(`?visible=1&protocol=${ROOM_PROTOCOL}&apart=1`);
+    expect(read({ visible: "1", apart: "1" })).toMatchObject({ visible: true, apart: true });
+    for (const apart of ["0", "", "true", "yes"]) expect(read({ apart }).apart, apart).toBeUndefined();
+    expect(read({}).apart).toBeUndefined();
   });
 });
 
@@ -290,12 +299,27 @@ describe("Presence", () => {
 });
 
 describe("One live connection per tab outside the open room", () => {
-  it("takes only pings on the workspace socket", () => {
+  it("takes pings on the workspace socket, and whether its tab is shown, as a boolean, and nothing else", () => {
     expect(parseWorkspaceClientFrame('{"type":"ping"}')).toEqual({ type: "ping" });
     expect(parseWorkspaceClientFrame('{"type":"ping","nonce":"n1"}')).toEqual({ type: "ping" });
+    expect(parseWorkspaceClientFrame('{"type":"presence.visible","visible":false}')).toEqual({ type: "presence.visible", visible: false });
+    expect(parseWorkspaceClientFrame('{"type":"presence.visible","visible":true,"extra":1}')).toEqual({ type: "presence.visible", visible: true });
+    for (const visible of [undefined, null, 1, "true", "visible"]) {
+      expect(parseWorkspaceClientFrame(JSON.stringify({ type: "presence.visible", visible })), String(visible)).toBeNull();
+    }
     for (const raw of ['{"type":"typing.start"}', '{"type":"message.create","clientMessageId":"c1","body":"hi"}', "[]", "null", "{"]) {
       expect(parseWorkspaceClientFrame(raw), raw).toBeNull();
     }
+  });
+
+  it("carries whether a tab is shown on its workspace socket's address, which doesn't count it as shown when it doesn't say", () => {
+    expect(workspaceSocketQuery({ visible: true })).toBe("?visible=1");
+    expect(workspaceSocketQuery({ visible: false })).toBe("?visible=0");
+    const read = (params: Record<string, string>) => parseWorkspaceSocketParams({ get: (name) => params[name] ?? null });
+    expect(read({ visible: "1" })).toEqual({ visible: true });
+    expect(read({ visible: "0" })).toEqual({ visible: false });
+    expect(read({})).toEqual({ visible: false });
+    expect(read({ visible: "yes" })).toEqual({ visible: false });
   });
 
   it("reads the workspace socket's frames as the server sends them", () => {
@@ -627,6 +651,14 @@ describe("Sending email", () => {
     ["a name longer than a person's", `${"a".repeat(MAX_USER_NAME_LENGTH + 1)} <ember@example.com>`],
   ])("refuses %s", (_, text) => {
     expect(mailboxOf(text)).toBeNull();
+  });
+
+  it("reads a From address with a long run of spaces in the time it takes to read it once", () => {
+    const spaces = " ".repeat(1_000_000);
+    // Minutes, were each place the name could end tried against the spaces after it.
+    expect(mailboxOf(`a${spaces}a`)).toBeNull();
+    expect(parseAccountChanges({ emailFrom: `a${spaces}a` })).toBe(EMAIL_FROM_REFUSED);
+    expect(mailboxOf(`Ember${spaces}<${spaces}ember@example.com${spaces}>`)).toEqual({ name: "Ember", address: "ember@example.com" });
   });
 
   it("writes a From address with its name in quotes where a From line needs them", () => {

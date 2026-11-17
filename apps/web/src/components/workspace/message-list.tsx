@@ -156,6 +156,8 @@ export function MessageList({ roomName, direct = false, invitation, onDismissInv
   const open = useRef(0);
   const viewHeight = useRef(0);
   const viewWidth = useRef(0);
+  // The timeline's scroll height when it last settled, which differs while a resize waits for the resize observer.
+  const settledHeight = useRef(0);
   const focused = useRef<Focus | null>(null);
   const arrivals = useRef(state.arrivals);
   // Whether new messages have come that the reader isn't at the end to see.
@@ -183,6 +185,7 @@ export function MessageList({ roomName, direct = false, invitation, onDismissInv
     atEnd.current = nearEnd(el);
     if (atEnd.current) setBehind(false);
     place.current = placeIn(el);
+    settledHeight.current = el.scrollHeight;
   });
 
   // Goes to a message, centred and outlined, as a permalink opens it, or, for none, to the end, as
@@ -200,6 +203,7 @@ export function MessageList({ roomName, direct = false, invitation, onDismissInv
     }
     atEnd.current = nearEnd(el);
     place.current = placeIn(el);
+    settledHeight.current = el.scrollHeight;
     setBehind(false);
   });
 
@@ -281,9 +285,13 @@ export function MessageList({ roomName, direct = false, invitation, onDismissInv
     const el = scroller.current!;
     // A resize scrolls the timeline to keep its end in view for a reader at it, and that scroll can arrive once
     // the timeline has resized again, before the resize observer has caught up, leaving them at the end of the
-    // view as it was. They didn't move, so they're still at the end. Any other scroll is the reader's, even one
-    // that comes as the timeline resizes, as it does while the composer's editor loads.
-    const stillAtEnd = atEnd.current && !state.hasNewer && el.scrollHeight - el.scrollTop - viewHeight.current <= 1;
+    // view as it was. What it shows can resize before the resize observer has caught up, too, as a message does
+    // when its file's text loads, and the browser scroll it on its own then, as Chrome's scroll anchoring does to
+    // put back what was in view before the end moved up. Either way they didn't move, so they're still at the
+    // end. Any other scroll is the reader's, even one that comes as the timeline resizes, as it does while the
+    // composer's editor loads.
+    const resizing = el.scrollHeight !== settledHeight.current;
+    const stillAtEnd = atEnd.current && !state.hasNewer && (resizing || el.scrollHeight - el.scrollTop - viewHeight.current <= 1);
     atEnd.current = nearEnd(el) || stillAtEnd;
     if (atEnd.current) setBehind(false);
     place.current = placeIn(el);

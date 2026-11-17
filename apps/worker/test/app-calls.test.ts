@@ -1,7 +1,8 @@
 import { ASSISTANT_ID, type Card, type Me, type Message, type NewWorkspace, type RoomId, type User } from "@ember/protocol";
+import type { AgentAnswer, NewAgent } from "@ember/protocol/agents";
 import { CALL_ACTIONS, type AgentTools, type App, type AppAnswer, type CallDecision, type ToolPick } from "@ember/protocol/apps";
 import { MENTION_CONTENT_TYPE, mentionSgid } from "@ember/richtext";
-import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+import { env, evictDurableObject, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fromApp, toolCallOf, toolCard, toolCards } from "../src/apps/cards";
 import { MAX_RESULT_LENGTH } from "../src/apps/mcp";
@@ -10,7 +11,7 @@ import { CALL_WAITS_MS } from "../src/apps/waiting-calls";
 import { CALL_DECLINED } from "../src/assistant/tool-calls";
 import type { Env } from "../src/env";
 import { seal } from "../src/sealed";
-import { api, connect, cookieOf, freshDeploy, post, roomSql, roomStub, shown, startDirect, workspaceSql, type Client, type Session } from "./support";
+import { api, connect, cookieOf, createRoom, freshDeploy, post, roomSql, roomStub, shown, startDirect, workspaceSql, workspaceStub, type Client, type Session } from "./support";
 
 // Calls of connected apps' tools: @ember or an agent calls one picked for it, the room asks first on a
 // card, and the call runs, and the answer goes on, once whoever asked or an administrator allows it,
@@ -26,6 +27,8 @@ const MCP_TOKEN = "tracker-secret-token";
 
 const CREATE_ISSUE = { name: "create_issue", title: "Create issue", description: "Opens an issue.", inputSchema: { type: "object", properties: { title: { type: "string" } }, required: ["title"] } };
 const SEARCH_ISSUES = { name: "search_issues", description: "Finds issues.", inputSchema: { type: "object" } };
+/** An agent as New agent sends it, in every open room, on the model @ember answers with. */
+const RECAP: NewAgent = { name: "Recap", description: "Sums up long threads", instructions: "Sum up the thread.", model: CLAUDE, thinking: "off", length: "short", webSearch: false, rooms: null };
 
 /** A JSON-RPC message the fake MCP server was sent, with the token it came with. */
 interface Rpc {
@@ -43,6 +46,8 @@ type Turn = { calls: Array<{ name: string; input: unknown }> } | { text: string 
 
 let rpcs: Rpc[];
 let asked: Asked[];
+/** What each of those requests told AI Gateway's logs of keeping what it carried, `cf-aig-collect-log-payload`, if anything. */
+let logsKeep: Array<string | null>;
 let script: Turn[];
 /** What happens while the model works on its next turn, once, if anything. */
 let meanwhile: (() => Promise<unknown>) | undefined;
@@ -69,6 +74,7 @@ beforeEach(async () => {
   await freshDeploy();
   rpcs = [];
   asked = [];
+  logsKeep = [];
   script = [];
   meanwhile = undefined;
   server = { tools: [CREATE_ISSUE, SEARCH_ISSUES], token: MCP_TOKEN, result: () => ({ content: [{ type: "text", text: "Opened #12." }] }) };
@@ -78,6 +84,7 @@ beforeEach(async () => {
       const body = (await request.json()) as Asked;
       if (!body.tools) return turnIn({ text: "Hello!" }, 0);
       asked.push(body);
+      logsKeep.push(request.headers.get("cf-aig-collect-log-payload"));
       const happens = meanwhile;
       meanwhile = undefined;
       await happens?.();
@@ -95,15 +102,15 @@ afterEach(() => vi.restoreAllMocks());
 const as = (session: Session) => ({ Cookie: session.cookie });
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** What @ember's page offers of the connected apps' tools now. */
-const offered = async (administrator: Session) => ((await (await api(`/api/account/agents/${ASSISTANT_ID}/tools`, { headers: as(administrator) })).json()) as AgentTools).apps;
+/** What the page of `agentId`, @ember unless it's an agent, offers of the connected apps' tools now. */
+const offered = async (administrator: Session, agentId: string = ASSISTANT_ID) => ((await (await api(`/api/account/agents/${agentId}/tools`, { headers: as(administrator) })).json()) as AgentTools).apps;
 
-/** Has the tools `names` name, as @ember's page offers them now, be the ones picked for it, those `always` names always allowed. */
-async function pick(administrator: Session, names: string[], { always = [] }: { always?: string[] } = {}): Promise<void> {
-  const tools = (await offered(administrator)).flatMap(({ id, tools }) =>
+/** Has the tools `names` name, as the page of `agent`, @ember unless it's another, offers them now, be the ones picked for it, those `always` names always allowed. */
+async function pick(administrator: Session, names: string[], { always = [], agent = ASSISTANT_ID }: { always?: string[]; agent?: string } = {}): Promise<void> {
+  const tools = (await offered(administrator, agent)).flatMap(({ id, tools }) =>
     tools.filter(({ name }) => names.includes(name)).map(({ name, fingerprint }): ToolPick => ({ appId: id, name, fingerprint, ...(always.includes(name) && { alwaysAllowed: true }) })),
   );
-  const saved = await api(`/api/account/agents/${ASSISTANT_ID}/tools`, { method: "PUT", headers: as(administrator), body: JSON.stringify({ tools }) });
+  const saved = await api(`/api/account/agents/${agent}/tools`, { method: "PUT", headers: as(administrator), body: JSON.stringify({ tools }) });
   expect(saved.status, await saved.clone().text()).toBe(200);
 }
 
@@ -711,6 +718,91 @@ describe("A call of a tool an administrator always allows an agent", () => {
     // Its model is given none of them from then on.
     expect((await ask(inGeneral)).plainText).toBe("Hello, team!");
     expect(asked.at(-1)!.tools.map(({ name }) => name)).toEqual(["search_messages"]);
+  });
+
+  it("asks first all the same in a DM or a private room, from which nothing goes to an app unless someone there allows it", async () => {
+    const { ada, general, inGeneral } = await setUp();
+    await pick(ada, ["create_issue"], { always: ["create_issue"] });
+    const grace = await join("Grace Hopper");
+    const leads = await createRoom("Leads", { closedTo: [ada.user.id, grace.user.id, ASSISTANT_ID], as: ada });
+    const { room: dm } = (await (await startDirect(ada, [ASSISTANT_ID])).json()) as { room: { id: RoomId } };
+    const inLeads = await connect(leads.id, grace);
+    const inDm = await connect(dm.id, ada);
+
+    // In the private room it's mentioned, and in the DM it answers whatever is written.
+    const asks = [() => ask(inLeads), async () => (await post(inDm, "<p>open an issue for the login bug</p>"), fromEmber(inDm))];
+    for (const [client, room, asking] of [[inLeads, leads.id, asks[0]!], [inDm, dm.id, asks[1]!]] as const) {
+      script = [CALL, { text: "I opened #12 for it." }];
+      const card = await asking();
+      expect(buttonsOf(card.cards).map(({ text }) => text)).toEqual(["Allow once", "Deny"]);
+      expect(asked.at(-1)!.tools[1]!.description).toMatch(/^A tool of Tracker, an app this workspace's administrators connected\. Each call waits until the person you're answering allows it/);
+      expect(calls()).toEqual([]);
+      expect(await waiting(room)).toEqual([{ message_id: card.id }]);
+      click(client, card, "allow");
+      expect((await fromEmber(client)).plainText).toBe("I opened #12 for it.");
+      expect(calls()).toHaveLength(1);
+      rpcs.length = 0;
+    }
+    // Neither conversation was kept in AI Gateway's logs, going on from the call too.
+    expect(logsKeep).toEqual(["false", "false", "false", "false"]);
+
+    // In the open room, the same call is made at once, and the question logged as before.
+    script = [CALL, { text: "I opened #12 for it." }];
+    expect((await ask(inGeneral)).plainText).toBe(USED);
+    expect((await fromEmber(inGeneral)).plainText).toBe("I opened #12 for it.");
+    expect(calls()).toHaveLength(1);
+    expect(logsKeep.slice(4)).toEqual([null, null]);
+    expect(await waiting(general)).toEqual([]);
+  });
+
+  it("asks first for an agent too, in a DM with it and in a private room it's in", async () => {
+    const { ada, general } = await setUp();
+    const made = await api("/api/account/agents", { method: "POST", headers: as(ada), body: JSON.stringify(RECAP) });
+    expect(made.status, await made.clone().text()).toBe(201);
+    const { agent: recap } = (await made.json()) as AgentAnswer;
+    await pick(ada, ["create_issue"], { always: ["create_issue"], agent: recap.id });
+    const leads = await createRoom("Leads", { closedTo: [ada.user.id, recap.id], as: ada });
+    const { room: dm } = (await (await startDirect(ada, [recap.id])).json()) as { room: { id: RoomId } };
+
+    const toolsIn = async (room: RoomId) => {
+      const access = (await workspaceStub().answererIn(room, recap.id, ada.user.id))!;
+      return [access.inPrivate, access.appTools.map(({ name, alwaysAllowed }) => [name, alwaysAllowed])];
+    };
+    expect(await toolsIn(general)).toEqual([false, [["create_issue", true]]]);
+    expect(await toolsIn(leads.id)).toEqual([true, [["create_issue", false]]]);
+    expect(await toolsIn(dm.id)).toEqual([true, [["create_issue", false]]]);
+  });
+
+  it("isn't made, as the model is told, once the room it was asked in turns private while the model works", async () => {
+    const { ada } = await setUp();
+    await pick(ada, ["create_issue"], { always: ["create_issue"] });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const design = await createRoom("Design", { as: ada });
+    const inDesign = await connect(design.id, ada);
+    script = [CALL, { text: "I couldn't." }];
+    meanwhile = async () => {
+      const closed = await api(`/api/rooms/${design.id}`, { method: "PATCH", headers: as(ada), body: JSON.stringify({ name: "Design", kind: "closed", memberIds: [ada.user.id, ASSISTANT_ID] }) });
+      expect(closed.status, await closed.clone().text()).toBe(200);
+    };
+
+    expect((await ask(inDesign)).plainText).toBe("I couldn't.");
+    expect(told()).toEqual([[CALL_NOT_SHOWN, true]]);
+    expect(rpcs).toEqual([]);
+  });
+});
+
+describe("A call of a tool of an app at one of Ember's own addresses", () => {
+  it("isn't made, as for an app connected before Ember refused them, whoever allows it", async () => {
+    const { inGeneral } = await setUp();
+    // The fake server's address is where Ember says it is now.
+    await workspaceSql("UPDATE accounts SET settings = json_set(COALESCE(settings, '{}'), '$.custom_domain', ?)", "localhost:3845");
+    await evictDurableObject(workspaceStub());
+    script = [CALL, { text: "I couldn't." }];
+
+    click(inGeneral, await ask(inGeneral), "allow");
+    expect((await fromEmber(inGeneral)).plainText).toBe("I couldn't.");
+    expect(told()).toEqual([["Not run: Tracker__create_issue isn't one of your tools any more.", true]]);
+    expect(calls()).toEqual([]);
   });
 });
 

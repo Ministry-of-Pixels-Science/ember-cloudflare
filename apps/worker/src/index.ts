@@ -147,7 +147,7 @@ import { CSP_REPORT_PATH, cspReport } from "./csp";
 import { addressRefusal, answerProbe, deployedAddressOf, lookUpDns, originFor, probeOf, reachOf } from "./custom-domain";
 import { redirectToHttps, requiresHttps, withHeaders } from "./headers";
 import { health, isUpPath, up } from "./health";
-import { forgetHuddles, saveHuddles } from "./huddles/settings";
+import { forgetHuddleRelay, forgetHuddles, saveHuddleRelay, saveHuddles } from "./huddles/settings";
 import { invite, lookUpEmailLink, resendInvitation, revokeInvitation } from "./invitations";
 import { askForEmailLink, emailSignUpPage, invitationPage, join, joinCodeOf, joinPage, joinWithEmailLink, signUp, signUpPage } from "./join";
 import { checkResendApiKey } from "./mail";
@@ -630,7 +630,7 @@ async function unbanPerson(request: Request, env: Env, userId: UserId): Promise<
  * the link.
  */
 async function profileAnswer({ transfer, profile, memberful }: YourProfile, env: Env, site: string | null): Promise<Response> {
-  const transferId = await newTransferId(transfer, env.SESSION_SECRET, Date.now());
+  const transferId = await newTransferId(transfer, env.SESSION_SECRET);
   const answer = { ...profile, memberful: memberfulStatusOf(memberful, site) };
   return json({ profile: answer, transferId } satisfies ProfileAnswer, { headers: { "Cache-Control": "no-store" } });
 }
@@ -827,6 +827,17 @@ async function dismissInvitation(request: Request, env: Env): Promise<Response> 
 }
 
 /**
+ * Stops an invitation into room `roomId`'s huddle ringing in every tab of the signed-in person's, as
+ * joining from it or declining it in one of them does, answering 204. Nothing is kept of an invitation,
+ * so it answers the same for a room with none.
+ */
+async function answerHuddleInvitation(request: Request, env: Env, roomId: RoomId): Promise<Response> {
+  const credentials = await credentialsOf(request, env);
+  const answered = credentials !== null && (await workspace(env).answerHuddleInvitation(credentials, roomId));
+  return answered ? new Response(null, { status: 204 }) : problem(401, "Not signed in");
+}
+
+/**
  * Everyone in the workspace, deactivated and banned people too, with their avatars' addresses, for
  * the app to show people by, but the AI agents only administrators' direct messages reach, which only
  * an administrator is listed. No cache keeps it, as none keeps the sidebar, so the app keeps its own copy.
@@ -858,7 +869,7 @@ async function showPerson(request: Request, env: Env, userId: UserId): Promise<R
   if (!found) return problem(401, "Not signed in");
   if (found === "not found") return problem(404, "Not found");
   const [shown] = await directoryOf([found.person], env.SESSION_SECRET);
-  const transferId = found.transfer ? await newTransferId(found.transfer, env.SESSION_SECRET, Date.now()) : undefined;
+  const transferId = found.transfer ? await newTransferId(found.transfer, env.SESSION_SECRET) : undefined;
   return json({ person: shown!, transferId, ...(found.agent && { agent: found.agent }) } satisfies PersonAnswer, { headers: { "Cache-Control": "no-store" } });
 }
 
@@ -1160,6 +1171,8 @@ function apiAction(request: Request, env: Env, pathname: string): (() => Respons
   if (pathname === "/api/account/outside_ai" && request.method === "PUT") return () => changeOutsideAi(request, env);
   if (pathname === "/api/account/huddles" && request.method === "PUT") return () => saveHuddles(request, env);
   if (pathname === "/api/account/huddles" && request.method === "DELETE") return () => forgetHuddles(request, env);
+  if (pathname === "/api/account/huddles/relay" && request.method === "PUT") return () => saveHuddleRelay(request, env);
+  if (pathname === "/api/account/huddles/relay" && request.method === "DELETE") return () => forgetHuddleRelay(request, env);
   if (pathname === "/api/account/custom_domain_checks" && request.method === "POST") return () => checkCustomDomain(request, env);
   if (pathname === "/api/account/custom_domain_lookups" && request.method === "POST") return () => lookUpCustomDomain(request, env);
   if (pathname === LOGO_PATH && request.method === "PUT") return () => changeLogo(request, env);
@@ -1245,6 +1258,9 @@ function apiAction(request: Request, env: Env, pathname: string): (() => Respons
   }
   const huddle = pathname.match(/^\/api\/rooms\/([^/]+)\/huddle$/);
   if (huddle) return () => (isRoomId(huddle[1]!) ? connectToRoom(request, env, huddle[1]!, true) : problem(404, ROOM_NOT_FOUND));
+  const huddleInvitation = pathname.match(/^\/api\/rooms\/([^/]+)\/huddle\/invitation$/);
+  if (huddleInvitation && request.method === "DELETE")
+    return () => (isRoomId(huddleInvitation[1]!) ? answerHuddleInvitation(request, env, huddleInvitation[1]!) : problem(404, ROOM_NOT_FOUND));
   const settings = pathname.match(/^\/api\/rooms\/([^/]+)\/settings$/);
   if (settings && request.method === "GET") return () => (isRoomId(settings[1]!) ? roomSettings(request, env, settings[1]!) : problem(404, ROOM_NOT_FOUND));
   const favorite = pathname.match(/^\/api\/rooms\/([^/]+)\/favorite$/);

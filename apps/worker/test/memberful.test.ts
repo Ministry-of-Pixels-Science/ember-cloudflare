@@ -2103,6 +2103,8 @@ describe("A new password", () => {
 });
 
 describe("Disconnect Memberful", () => {
+  afterEach(() => vi.useRealTimers());
+
   it("disconnects your account once your password checks out, ending your other sessions but this browser's", async () => {
     const { member } = await setUpWithGrace();
     await connectGrace(member);
@@ -2135,6 +2137,28 @@ describe("Disconnect Memberful", () => {
     await connectGrace(member);
     expect((await profileOf(member)).memberful).toEqual({ membersOnly: true, connected: GRACES });
     yourWorkspace.ws.close(1000);
+  });
+
+  it("ends the sign-in links your session showed before, as a new password does, though those it shows from then on work", async () => {
+    const { member } = await setUpWithGrace();
+    await connectGrace(member);
+    const linkIn = async (answer: Response) => ((await answer.json()) as ProfileAnswer).transferId;
+    const yourLink = async () => linkIn(await withKeys("/api/users/me/profile", { headers: as(member) }));
+    const signsInWith = async (transferId: string) => (await api("/api/session/transfers", { method: "POST", body: JSON.stringify({ transferId }) })).status === 201;
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() });
+    const before = await yourLink();
+
+    // A millisecond later. One that's refused, as when the password it checked isn't hers anymore, ends none.
+    vi.setSystemTime(Date.now() + 1);
+    const credentials = await credentialsFor(member.cookie.split("=")[1]!, new Request(origin), env as unknown as Env);
+    expect(await runInDurableObject(workspaceStub(), (workspace: Workspace) => workspace.disconnectMemberful(credentials!, SITE, "a digest from before", null))).toBe("refused");
+    expect(await signsInWith(before)).toBe(true);
+
+    const disconnected = await disconnect(member, { currentPassword: grace.password });
+    expect(disconnected.status, await disconnected.clone().text()).toBe(200);
+    expect(await signsInWith(before)).toBe(false);
+    expect(await signsInWith(await linkIn(disconnected))).toBe(true);
+    expect(await signsInWith(await yourLink())).toBe(true);
   });
 
   it("asks for your password, counting it against the sign-in limit", async () => {

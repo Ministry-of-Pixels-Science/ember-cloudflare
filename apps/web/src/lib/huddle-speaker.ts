@@ -1,4 +1,5 @@
 import { listsSpeaker, watchDevices } from "./huddle-devices";
+import { whenShownAgain } from "./visibility";
 
 /** What a browser takes for the person's touch, and lets a sound or a video play from. A tap is one at its click, and not as the finger lands. */
 export const TOUCHES = ["click", "keydown"] as const;
@@ -34,7 +35,9 @@ export interface HuddleSpeaker {
  * The speaker a huddle plays through: `speakerId`'s until its person chooses another, or the system's
  * when that's empty, and for as long as the one chosen is unplugged, when it would play nothing. What
  * plays until it's stopped is kept in the page, and a browser that won't play it until the person has
- * touched the page plays it at their next click or key.
+ * touched the page plays it at their next click or key. A phone's browser can stop what a page plays
+ * while the page is hidden, so what it had stopped plays again as the page shows again, or at their
+ * next click or key where the browser won't play it before.
  */
 export function huddleSpeaker(speakerId: string): HuddleSpeaker {
   const playing = new Set<HTMLAudioElement>();
@@ -76,13 +79,15 @@ export function huddleSpeaker(speakerId: string): HuddleSpeaker {
   const through = (audio: HTMLAudioElement) => {
     if ((audio.sinkId ?? "") !== speaker) void playThrough(audio, speaker);
   };
-  const playRefused = () => {
-    for (const audio of playing) if (audio.paused) void audio.play().catch(() => {});
+  /** Plays what the browser refused to, or has stopped, and what it refuses now at the person's next touch. */
+  const playPaused = () => {
+    for (const audio of playing) if (audio.paused) void audio.play().catch(playOnceTouched);
   };
   // In the capture phase, which hears a click that whatever it lands on keeps to itself.
   const playOnceTouched = () => {
-    for (const touch of TOUCHES) document.addEventListener(touch, playRefused, true);
+    for (const touch of TOUCHES) document.addEventListener(touch, playPaused, true);
   };
+  const stopWatchingPage = whenShownAgain(playPaused);
   const stop = (audio: HTMLAudioElement) => {
     audio.pause();
     audio.remove();
@@ -115,7 +120,8 @@ export function huddleSpeaker(speakerId: string): HuddleSpeaker {
     },
     stopAll() {
       for (const audio of [...playing]) stop(audio);
-      for (const touch of TOUCHES) document.removeEventListener(touch, playRefused, true);
+      for (const touch of TOUCHES) document.removeEventListener(touch, playPaused, true);
+      stopWatchingPage();
       stopWatching();
       box.remove();
     },

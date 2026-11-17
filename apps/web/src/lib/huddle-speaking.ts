@@ -1,4 +1,5 @@
 import { TOUCHES } from "./huddle-speaker";
+import { whenShownAgain } from "./visibility";
 
 // Who's speaking in a huddle, by how loud each voice is: the others', as the tab plays them, and its
 // own, from its microphone. The browser's audio engine measures them (Web Audio), since what a
@@ -94,6 +95,8 @@ export function whoSpeaks(changed: (speaking: ReadonlySet<string>) => void): Hud
   };
   // In the capture phase, which hears a click that whatever it lands on keeps to itself.
   if (engine) for (const touch of TOUCHES) document.addEventListener(touch, run, true);
+  // A phone's browser stops the engine while the page is hidden, and leaves it stopped as the page shows again.
+  const stopWatchingPage = engine ? whenShownAgain(run) : null;
   const forget = (whose: string) => {
     voices.get(whose)?.source.disconnect();
     voices.delete(whose);
@@ -117,6 +120,7 @@ export function whoSpeaks(changed: (speaking: ReadonlySet<string>) => void): Hud
     stop() {
       if (measuring !== null) clearInterval(measuring);
       for (const touch of TOUCHES) document.removeEventListener(touch, run, true);
+      stopWatchingPage?.();
       for (const whose of [...voices.keys()]) forget(whose);
       void engine?.close().catch(() => {});
       engine = null;

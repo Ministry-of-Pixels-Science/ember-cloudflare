@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { stageLayout, tilesLayout } from "./huddle-tiles";
+import { showsCamerasSmall, stageLayout, tilesLayout } from "./huddle-tiles";
 
 /** How tall `count` tiles come to, laid out as `layout` has them. */
 function heightOf(count: number, { columns, width, square }: ReturnType<typeof tilesLayout>): number {
@@ -127,5 +127,21 @@ describe("A huddle's tiles beside a shared screen, or under it", () => {
 
   it("shows no screen before there's any space to measure", () => {
     expect(stageLayout(3, WIDE, 0, 0)).toEqual({ beside: false, screen: 0, tiles: { columns: 1, width: 132, square: true } });
+  });
+});
+
+describe("The size a huddle's tiles show a camera in", () => {
+  it("is the smaller of the two it's sent in once a tile is no taller than that one, 4 by 3 or square", () => {
+    // 4 by 3, a tile 240px wide is 180px tall.
+    expect(showsCamerasSmall({ width: 240, square: false })).toBe(true);
+    expect(showsCamerasSmall({ width: 241, square: false })).toBe(false);
+    expect(showsCamerasSmall({ width: 180, square: true })).toBe(true);
+    expect(showsCamerasSmall({ width: 181, square: true })).toBe(false);
+  });
+
+  it("is the smaller in the strip beside a shared screen, whose tiles get no taller", () => {
+    expect(showsCamerasSmall(stageLayout(2, 16 / 9, 1400, 800).tiles)).toBe(true);
+    // And the larger for two people by themselves in the same window.
+    expect(showsCamerasSmall(tilesLayout(2, 1400, 800))).toBe(false);
   });
 });

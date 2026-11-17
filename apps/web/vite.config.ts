@@ -1,4 +1,5 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
@@ -43,6 +44,34 @@ function roomIcons(): Plugin {
 }
 
 /**
+ * Serves Emojibase's English emoji data, which the emoji picker reads (emoji-panel.tsx), at
+ * /emojibase/en/, from the emojibase-data package: from Ember itself, since the page's Content-Security-Policy
+ * keeps it from asking a CDN, and a CDN would hear from everyone who opens the picker.
+ */
+function emojiData(): Plugin {
+  const FILES = ["en/data.json", "en/messages.json"];
+  const read = (file: string) => readFileSync(createRequire(import.meta.url).resolve(`emojibase-data/${file}`));
+  return {
+    name: "ember-emoji-data",
+    configureServer(server) {
+      server.middlewares.use((request, response, next) => {
+        const file = FILES.find((name) => request.url?.split("?")[0] === `/emojibase/${name}`);
+        if (!file) return next();
+        response.setHeader("Content-Type", "application/json");
+        response.end(read(file));
+      });
+    },
+    writeBundle({ dir }) {
+      for (const file of FILES) {
+        const to = path.join(dir!, "emojibase", file);
+        mkdirSync(path.dirname(to), { recursive: true });
+        writeFileSync(to, read(file));
+      }
+    },
+  };
+}
+
+/**
  * Fails the build when the app's script imports another besides Rolldown's runtime: one more for the page to
  * load before the app can run. Rolldown leaves what the main chunk shares with the pages few visits need and
  * the editor in a chunk of its own when the main chunk imports a module it doesn't use that those pages do, as
@@ -81,7 +110,7 @@ function appVersion(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [react(), tailwindcss(), roomIcons(), oneAppScript(), appVersion()],
+  plugins: [react(), tailwindcss(), roomIcons(), emojiData(), oneAppScript(), appVersion()],
   resolve: {
     alias: {
       "@": path.resolve(import.meta.dirname, "src"),

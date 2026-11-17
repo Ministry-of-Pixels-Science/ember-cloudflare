@@ -1,6 +1,6 @@
 import { eachAtMost, PUSHES_AT_ONCE } from "../at-once";
 import type { Env } from "../env";
-import type { MessagePush, PushDelivery } from "../workspace-store";
+import type { InvitationPush, MessagePush, PushDelivery } from "../workspace-store";
 import { endpointErrors } from "./endpoints";
 import { webPush, type VapidKeys } from "./keys";
 import { encodedPush, type PushPayload } from "./payload";
@@ -14,7 +14,7 @@ import { encryptPush, InvalidPushKeyError, PushArgumentError, vapidAuthorization
 /** Whom push services may contact about this deployment's pushes when VAPID_SUBJECT doesn't say: the project. */
 export const DEFAULT_VAPID_SUBJECT = "https://github.com/NYLLON-SOFTWARE/ember-cloudflare";
 
-/** How long a push service keeps a push for a browser that's away: four weeks, as the gem's `ttl` has it. */
+/** How long a push service keeps a message's push for a browser that's away: four weeks, as the gem's `ttl` has it. */
 const TTL_SECONDS = 4 * 7 * 24 * 60 * 60;
 
 /** How long a push may take in all, however slowly its push service answers. */
@@ -27,17 +27,21 @@ const encoder = new TextEncoder();
  * service said they're gone (404 or 410), and those whose keys no push can be encrypted for. Any other
  * failure is logged. An endpoint that's no longer at a permitted push service is skipped, and so is a
  * subscription `pushable` says may no longer have pushes, or can't say about, asked just before each is
- * sent: a push can wait its turn while its person is banned. `send` stands in for `fetch` in tests.
+ * sent: a push can wait its turn while its person is banned. A push service keeps an invitation's push
+ * as long as the invitation says, and a message's for weeks. `send` stands in for `fetch` in tests.
  */
-export async function sendPushes(env: Env, pushes: MessagePush[], pushable: Pushable, send: typeof fetch = fetch): Promise<number[]> {
+export async function sendPushes(env: Env, pushes: Array<MessagePush | InvitationPush>, pushable: Pushable, send: typeof fetch = fetch): Promise<number[]> {
   const push = await webPush(env);
   if (!push.on) return [];
-  const deliveries = pushes.flatMap(({ payload, deliveries }) => deliveries.map((delivery) => ({ message: encodedPush(payload, delivery.badge), delivery })));
+  const deliveries = pushes.flatMap((pushed) => {
+    const ttl = "ttl" in pushed ? pushed.ttl : TTL_SECONDS;
+    return pushed.deliveries.map((delivery) => ({ message: encodedPush(pushed.payload, delivery.badge), delivery, ttl }));
+  });
   const gone: number[] = [];
-  await eachAtMost(deliveries, PUSHES_AT_ONCE, async ({ message, delivery }) => {
+  await eachAtMost(deliveries, PUSHES_AT_ONCE, async ({ message, delivery, ttl }) => {
     if (!(await mayPush(pushable, delivery.subscriptionId))) return;
     try {
-      await deliver(message, delivery, push.keys, subjectOf(env), send);
+      await deliver(message, delivery, ttl, push.keys, subjectOf(env), send);
     } catch (error) {
       if (!(error instanceof PushFailure)) throw error;
       if (error.gone) gone.push(delivery.subscriptionId);
@@ -55,7 +59,7 @@ export async function sendPushes(env: Env, pushes: MessagePush[], pushable: Push
 export async function sendTestPush(env: Env, payload: PushPayload, delivery: PushDelivery, send: typeof fetch = fetch): Promise<void> {
   const push = await webPush(env);
   if (!push.on) throw new Error("Web Push is off (no valid VAPID keys)");
-  await deliver(encodedPush(payload, delivery.badge), delivery, push.keys, subjectOf(env), send);
+  await deliver(encodedPush(payload, delivery.badge), delivery, TTL_SECONDS, push.keys, subjectOf(env), send);
 }
 
 const subjectOf = (env: Env) => env.VAPID_SUBJECT?.trim() || DEFAULT_VAPID_SUBJECT;
@@ -87,10 +91,11 @@ class PushFailure extends Error {
 }
 
 /**
- * Sends `message` to a subscription, as the gem's `payload_send` does, throwing a `PushFailure` if it
- * fails. An endpoint that's no longer at a permitted push service is skipped.
+ * Sends `message` to a subscription, as the gem's `payload_send` does, for its push service to keep
+ * `ttl` seconds for a browser that's away, throwing a `PushFailure` if it fails. An endpoint that's no
+ * longer at a permitted push service is skipped.
  */
-async function deliver(message: string, { endpoint, p256dhKey, authKey }: PushDelivery, keys: VapidKeys, subject: string, send: typeof fetch): Promise<void> {
+async function deliver(message: string, { endpoint, p256dhKey, authKey }: PushDelivery, ttl: number, keys: VapidKeys, subject: string, send: typeof fetch): Promise<void> {
   if (endpointErrors(endpoint).length > 0) return;
   const { origin, hostname } = new URL(endpoint);
   let response: Response;
@@ -100,7 +105,7 @@ async function deliver(message: string, { endpoint, p256dhKey, authKey }: PushDe
       method: "POST",
       headers: {
         "Content-Type": "application/octet-stream",
-        TTL: String(TTL_SECONDS),
+        TTL: String(ttl),
         Urgency: "high",
         "Content-Encoding": "aes128gcm",
         Authorization: await vapidAuthorization(origin, Math.floor(Date.now() / 1000), keys, subject),

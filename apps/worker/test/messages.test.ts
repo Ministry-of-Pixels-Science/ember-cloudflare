@@ -94,7 +94,9 @@ describe("Send a message", () => {
 
   it("refuses a message it couldn't show, saying which", async () => {
     const ada = await connect(await freshRoom("unreadable"), "Ada");
-    for (const body of ["<b>".repeat(401) + "deep", "<action-text-attachment></action-text-attachment>"]) {
+    // A frame's worth that would parse into 95 MB: a title copied with the <b> each of 1,000 paragraphs reopens
+    const copied = `<p><b title="${"x".repeat(95_000)}">a${"<p>b".repeat(1_000)}`;
+    for (const body of ["<b>".repeat(401) + "deep", "<action-text-attachment></action-text-attachment>", copied]) {
       ada.send({ type: "message.create", clientMessageId: "c1", body });
       expect(await ada.next("error")).toEqual({ type: "error", message: "That message couldn't be saved.", clientMessageId: "c1", failed: "message.create" });
     }

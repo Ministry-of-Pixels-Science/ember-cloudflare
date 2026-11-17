@@ -217,7 +217,7 @@ test.describe("Agents", () => {
     await tryIt.getByRole("textbox", { name: "Question" }).fill("What did we decide?");
     await tryIt.getByRole("button", { name: "Ask" }).click();
     await expect(tryIt).toContainText(HELLO);
-    expect(gateway.asked.at(-1)!.body.system).toMatch(/^You are Scout, the scout of [^\n]+\.\n\nSum up the conversation so far as decisions and to-dos\.\n\nAnswer Ada Lovelace in a direct message\.$/);
+    expect(gateway.asked.at(-1)!.body.system).toMatch(/^You are Scout, the scout of [^\n]+\.\n\nSum up the conversation so far as decisions and to-dos\.\n\nAnswer "Ada Lovelace" in a direct message\.$/);
 
     await page.getByRole("button", { name: "Save changes" }).click();
     await expect(rowOf(card, "Scout")).toBeVisible();

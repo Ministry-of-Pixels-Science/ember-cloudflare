@@ -36,7 +36,7 @@ export const avatarVersionOf = (avatarUrl: string) => Number(new URL(avatarUrl, 
  * the directory lists anyone. A bot's avatar is a circle wherever it shows, so bots stand apart from the
  * people around them.
  */
-const isBot = (user: User, listed: DirectoryUser | undefined) => listed?.role === "bot" || isAgent(listed ?? user);
+export const isBot = (user: User, listed: DirectoryUser | undefined) => listed?.role === "bot" || isAgent(listed ?? user);
 
 interface Props {
   /** Someone, with their avatar's address where it's known, as the directory lists it. */

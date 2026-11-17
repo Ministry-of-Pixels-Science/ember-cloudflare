@@ -67,12 +67,6 @@ export interface SearchPage {
   next: number | null;
 }
 
-/**
- * How many of the newest matches a search reads, in rooms the searcher is in or not, before it asks for
- * only the ones in theirs.
- */
-export const SEARCH_PROBE_LIMIT = 1_000;
-
 /** How many messages of a millisecond the index can number apart (search-migrations/0001_search_index.sql). */
 const PER_MILLISECOND = 1024;
 
@@ -96,9 +90,9 @@ const INCLUDES = `(EXISTS (SELECT 1 FROM search_mentions WHERE search_mentions.i
     OR search_messages.room_id IN (SELECT value FROM json_each(?))
     OR EXISTS (SELECT 1 FROM search_messages AS theirs WHERE theirs.thread_id = search_messages.thread_id AND theirs.creator_id = ?))`;
 
-/** What a search's rooms and filters say a message it finds is like: each condition, one a filter, so no statement has to skip one it doesn't have. */
-function conditionsOf({ roomIds, creatorId, includes, hasLink, hasFile, inThread }: IndexSearch): Condition[] {
-  const conditions: Condition[] = [["search_messages.room_id IN (SELECT value FROM json_each(?))", JSON.stringify(roomIds)]];
+/** What a search's filters say a message it finds is like: each condition, one a filter, so no statement has to skip one it doesn't have. */
+function filtersOf({ creatorId, includes, hasLink, hasFile, inThread }: IndexSearch): Condition[] {
+  const conditions: Condition[] = [];
   if (creatorId !== undefined) conditions.push(["search_messages.creator_id = ?", creatorId]);
   if (includes !== undefined) conditions.push([INCLUDES, includes.userId, JSON.stringify(includes.directIds), includes.userId]);
   if (hasLink) conditions.push(["search_messages.has_link = 1"]);
@@ -107,54 +101,89 @@ function conditionsOf({ roomIds, creatorId, includes, hasLink, hasFile, inThread
   return conditions;
 }
 
-const ORDERS = { newest: { direction: "DESC", past: "<" }, oldest: { direction: "ASC", past: ">" } } as const;
+/** `conditions` as one, which a message meets when it meets them all, with the values they bind, in order. */
+const allOf = (conditions: Condition[]) => ({ met: conditions.map(([sql]) => sql).join(" AND "), values: conditions.flatMap(([, ...values]) => values) });
 
 /**
- * The statements a search runs to find a page of messages, newest or oldest first, past the number it
- * starts after, if any. The probe reads the first `SEARCH_PROBE_LIMIT` messages with its words, or the
- * first messages at all for a search of filters alone, wherever they are, each saying whether it's in one
- * of its rooms and meets its filters, `reachable`. It walks the index in order, with nothing to sort, so it
- * reads only as many as are read from it. The rest are for when the probe fills up with messages it can't
- * find: the first `SEARCH_LIMIT` and one more that it can, by whichever plan SQLite finds, such as looking
- * at just its rooms' messages, or someone's.
+ * The index a search of filters alone reads a room's messages by, in the order of their numbers, and the
+ * filter whose messages are all it holds, if it has one: someone's messages in the room, or the room's
+ * with files, with links or in threads (search migration 0004), for the first of those filters the search
+ * has, or else all the room's (0001). Each starts with the room, so reading one room's messages by it
+ * reads none of another's, as an index of someone's messages in every room would.
  */
-export function searchStatements(search: IndexSearch): { probe: SearchStatement; rest: SearchStatement } {
-  const conditions = conditionsOf(search);
-  const met = conditions.map(([sql]) => sql).join(" AND ");
-  const values = conditions.flatMap(([, ...values]) => values);
+function walkOf({ creatorId, hasLink, hasFile, inThread }: IndexSearch): { index: string; holds: Condition[] } {
+  if (creatorId !== undefined) return { index: "index_search_messages_on_room_id_and_creator_id_and_id", holds: [["search_messages.creator_id = ?", creatorId]] };
+  if (hasFile) return { index: "index_search_messages_with_files_on_room_id_and_id", holds: [["search_messages.has_file = 1"]] };
+  if (hasLink) return { index: "index_search_messages_with_links_on_room_id_and_id", holds: [["search_messages.has_link = 1"]] };
+  if (inThread) return { index: "index_search_messages_in_threads_on_room_id_and_id", holds: [["search_messages.thread_id IS NOT NULL"]] };
+  return { index: "index_search_messages_on_room_id_and_id", holds: [] };
+}
+
+const ORDERS = { newest: { direction: "DESC", past: "<" }, oldest: { direction: "ASC", past: ">" } } as const;
+
+/** A message a search finds, before what results show of it is read. */
+const FOUND = `search_messages.id AS number, search_messages.message_id AS messageId, search_messages.room_id AS roomId`;
+
+/**
+ * The statement a search runs to find a page of messages and one more, which says there's another page,
+ * newest or oldest first, past the number it starts after, if any. It's the one statement whatever the
+ * rooms it doesn't look in hold: were another to run when their messages left the page short, the time
+ * a search took would tell the searcher what's written in rooms they can't read.
+ */
+export function searchStatement(search: IndexSearch): SearchStatement {
+  return search.terms === "" ? filtersStatement(search) : wordsStatement(search);
+}
+
+/**
+ * A search with words walks the messages that have them in order, with nothing to sort, and keeps the
+ * ones in its rooms that meet its filters. The index of words doesn't tell rooms apart, so it passes over
+ * the matches in other rooms on its way, each a row's read.
+ */
+function wordsStatement(search: IndexSearch): SearchStatement {
+  const { met, values } = allOf([["search_messages.room_id IN (SELECT value FROM json_each(?))", JSON.stringify(search.roomIds)], ...filtersOf(search)]);
   const { direction, past } = ORDERS[search.sort];
-  const words = search.terms !== "";
-  const after = search.after === null ? [] : [search.after];
-  const columns = `search_messages.id AS number, search_messages.message_id AS messageId, search_messages.room_id AS roomId`;
-  if (words) {
-    const startingAfter = search.after === null ? "" : ` AND search_index.rowid ${past} ?`;
-    return {
-      probe: {
-        sql: `SELECT ${columns}, ${met} AS reachable
-          FROM search_index JOIN search_messages ON search_messages.id = search_index.rowid
-          WHERE search_index MATCH ?${startingAfter} ORDER BY search_index.rowid ${direction} LIMIT ${SEARCH_PROBE_LIMIT}`,
-        values: [...values, search.terms, ...after],
-      },
-      rest: {
-        sql: `SELECT ${columns} FROM search_messages JOIN search_index ON search_index.rowid = search_messages.id
-          WHERE ${met} AND search_index MATCH ?${startingAfter.replace("search_index.rowid", "search_messages.id")}
-          ORDER BY search_messages.id ${direction} LIMIT ${SEARCH_LIMIT + 1}`,
-        values: [...values, search.terms, ...after],
-      },
-    };
-  }
-  const startingAfter = search.after === null ? "" : ` search_messages.id ${past} ?`;
+  const startingAfter = search.after === null ? "" : ` AND search_index.rowid ${past} ?`;
   return {
-    probe: {
-      sql: `SELECT ${columns}, ${met} AS reachable FROM search_messages${startingAfter && ` WHERE${startingAfter}`}
-        ORDER BY search_messages.id ${direction} LIMIT ${SEARCH_PROBE_LIMIT}`,
-      values: [...values, ...after],
-    },
-    rest: {
-      sql: `SELECT ${columns} FROM search_messages WHERE ${met}${startingAfter && ` AND${startingAfter}`}
-        ORDER BY search_messages.id ${direction} LIMIT ${SEARCH_LIMIT + 1}`,
-      values: [...values, ...after],
-    },
+    // A CROSS JOIN is read in the order written, so SQLite can't start from someone's messages instead, which it would have to sort.
+    sql: `SELECT ${FOUND} FROM search_index CROSS JOIN search_messages ON search_messages.id = search_index.rowid
+      WHERE ${met} AND search_index MATCH ?${startingAfter} ORDER BY search_index.rowid ${direction} LIMIT ${SEARCH_LIMIT + 1}`,
+    values: [...values, search.terms, ...(search.after === null ? [] : [search.after])],
+  };
+}
+
+/**
+ * A search of filters alone reads its rooms' messages in order and keeps the ones that meet its filters,
+ * each room's through an index that starts with the room (`walkOf`). So it reads no message of a room it
+ * doesn't look in, none of which has a say in how long it takes, and its own rooms' only as far as its
+ * page goes, with nothing to sort. A recursive query puts the rooms' messages in one order: its queue,
+ * ordered by number, starts with each room's first message, and whichever it takes, the next of that room
+ * takes its place. Each is looked up on its own, since reading on through a room's messages would end on
+ * the one after its last, another room's.
+ */
+function filtersStatement(search: IndexSearch): SearchStatement {
+  const { direction, past } = ORDERS[search.sort];
+  const { index, holds } = walkOf(search);
+  /** The number of the first message the index holds that meets `conditions`, which say which room's and past which. */
+  const firstOf = (...conditions: Condition[]) => {
+    const { met, values } = allOf([...conditions, ...holds]);
+    return { sql: `(SELECT search_messages.id FROM search_messages INDEXED BY ${index} WHERE ${met} ORDER BY search_messages.id ${direction} LIMIT 1)`, values };
+  };
+  const startingAfter: Condition[] = search.after === null ? [] : [[`search_messages.id ${past} ?`, search.after]];
+  const first = firstOf(["search_messages.room_id = rooms.value"], ...startingAfter);
+  const next = firstOf(["search_messages.room_id = walked.room_id"], [`search_messages.id ${past} walked.id`]);
+  const filters = allOf(filtersOf(search));
+  return {
+    // A room with no message left has no number, which ends its walk. The CROSS JOIN keeps the walk's order.
+    sql: `WITH RECURSIVE walked AS (
+        SELECT ${first.sql} AS id, rooms.value AS room_id FROM json_each(?) AS rooms
+        UNION ALL
+        SELECT ${next.sql}, walked.room_id FROM walked WHERE walked.id IS NOT NULL
+        ORDER BY id ${direction}
+      )
+      SELECT ${FOUND} FROM walked CROSS JOIN search_messages ON search_messages.id = walked.id${filters.met && ` WHERE ${filters.met}`}
+      LIMIT ${SEARCH_LIMIT + 1}`,
+    // Each room once, or its messages would be found as often as it's listed.
+    values: [...first.values, JSON.stringify([...new Set(search.roomIds)]), ...next.values, ...filters.values],
   };
 }
 
@@ -172,12 +201,31 @@ const PAGE = `SELECT id AS number, message, NULL AS marked FROM search_messages 
 /** The most words a hit says it matched. */
 const MOST_WORDS = 20;
 
+/** The marks `MARKED_PAGE` has each matching word between. */
+const OPENING_MARK = "\u0001";
+const CLOSING_MARK = "\u0002";
+
+/**
+ * What `marked` has between each opening mark and the first closing mark after it, where that's anything,
+ * in order. A message's own text can have the marks too, as many as it likes, so each is looked for from
+ * where the last was found, and an opening mark that nothing closes ends the walk: a regular expression
+ * would read on to the end of the text from every opening mark after it as well.
+ */
+function* betweenMarks(marked: string): Generator<string> {
+  let closing = -1;
+  for (let opening = marked.indexOf(OPENING_MARK); opening !== -1; opening = marked.indexOf(OPENING_MARK, closing + 1)) {
+    closing = marked.indexOf(CLOSING_MARK, opening + 1);
+    if (closing === -1) return;
+    if (closing > opening + 1) yield marked.slice(opening + 1, closing);
+  }
+}
+
 /** The words `marked` has between marks, as its text has them, once each however they're cased. */
 function wordsMarked(marked: string | null): string[] {
   const words = new Map<string, string>();
-  for (const [, word] of (marked ?? "").matchAll(/\u0001([^\u0002]+)\u0002/gu)) {
+  for (const word of betweenMarks(marked ?? "")) {
     if (words.size === MOST_WORDS) break;
-    if (!words.has(word!.toLowerCase())) words.set(word!.toLowerCase(), word!);
+    if (!words.has(word.toLowerCase())) words.set(word.toLowerCase(), word);
   }
   return [...words.values()];
 }
@@ -289,20 +337,12 @@ export class SearchIndex extends DurableObject<Env> {
 
   /**
    * A page of the messages `search` finds, up to `SEARCH_LIMIT`, newest or oldest first, each with what
-   * results show of it and the words it matched: from the probe, read a match at a time until the page is
-   * full, unless it holds that many matches the search can't find that the page may not be, when the rest
-   * of the statements look.
+   * results show of it and the words it matched: what its statement finds, which is one more than the
+   * page holds when there's another.
    */
   search(search: IndexSearch): SearchPage {
-    const { probe, rest } = searchStatements(search);
-    const found: Array<Pick<SearchHit, "number" | "messageId" | "roomId">> = [];
-    let examined = 0;
-    for (const { reachable, ...hit } of this.sql.exec<{ number: number; messageId: string; roomId: RoomId; reachable: number }>(probe.sql, ...probe.values)) {
-      examined++;
-      if (reachable === 1 && found.push(hit) > SEARCH_LIMIT) break;
-    }
-    // Reading every match also shows that a short page is all there is.
-    const hits = found.length > SEARCH_LIMIT || examined < SEARCH_PROBE_LIMIT ? found : this.sql.exec<Pick<SearchHit, "number" | "messageId" | "roomId">>(rest.sql, ...rest.values).toArray();
+    const { sql, values } = searchStatement(search);
+    const hits = this.sql.exec<Pick<SearchHit, "number" | "messageId" | "roomId">>(sql, ...values).toArray();
     const page = hits.slice(0, SEARCH_LIMIT);
     const numbers = JSON.stringify(page.map(({ number }) => number));
     const shown = search.terms === "" ? this.sql.exec<PageRow>(PAGE, numbers) : this.sql.exec<PageRow>(MARKED_PAGE, search.terms, numbers);

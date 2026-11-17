@@ -5,6 +5,7 @@ import {
   roomSocketQuery,
   searchQuery,
   WORKSPACE_PRELOADS,
+  workspaceSocketQuery,
   type Account,
   type AccountChanges,
   type AssistantChanged,
@@ -33,6 +34,7 @@ import {
   type EmailLinkSignUp,
   type EmailSettings,
   type Favorites,
+  type HuddleRelaySetup,
   type HuddlesForgotten,
   type HuddlesSaved,
   type HuddlesSettings,
@@ -89,6 +91,7 @@ import {
   type UserId,
   type WebSearchChanged,
   type WorkspaceSettings,
+  type WorkspaceSocketParams,
   type YourAssistantChanged,
   type YourAssistantChanges,
 } from "@ember/protocol";
@@ -590,6 +593,24 @@ export async function forgetHuddles(): Promise<null> {
 }
 
 /**
+ * Gives Ember a TURN key's ID and API token for huddles' relay to go by, answering huddles as they are
+ * then. Fails with a 422 ApiError on the field Ember or Cloudflare refuses, a 502 one when Ember couldn't
+ * ask Cloudflare, a 409 one while huddles are off, and a 403 one for anyone but an administrator.
+ */
+export async function saveHuddleRelay(setup: HuddleRelaySetup): Promise<HuddlesSettings> {
+  return (await request<HuddlesSaved>("/api/account/huddles/relay", { method: "PUT", body: JSON.stringify(setup) })).huddles;
+}
+
+/**
+ * Takes huddles' relay away, forgetting the TURN key Ember was given, answering huddles as they are
+ * then, which is null where they've been turned off since. Fails with a 403 ApiError for anyone but an
+ * administrator.
+ */
+export async function forgetHuddleRelay(): Promise<HuddlesSettings | null> {
+  return (await request<HuddlesSaved | HuddlesForgotten>("/api/account/huddles/relay", { method: "DELETE" })).huddles;
+}
+
+/**
  * The models Ember offers, as Set up Ember AI, Add a model and the agents' pages list them: those the
  * models file lists, then Workers AI's, as Cloudflare's model search lists them for the account `keys`
  * names, with its API token, as Set up Ember AI has them typed, or else Ember AI's, or why they aren't
@@ -781,9 +802,14 @@ export function describeOutsideAsk(ask: OutsideAsk): Promise<OutsideAsked> {
   return request<OutsideAsked>("/api/outside/asks", { method: "POST", body: JSON.stringify(ask) });
 }
 
-/** Answers `ask`, whether to connect its app as you, leaving out `without` of what it asks, answering where to send the browser: back to the app. Fails as `describeOutsideAsk` does, and with a 409 when you have as many connected as one may. */
-export async function answerOutsideAsk(ask: OutsideAsk, allow: boolean, without: OutsideScope[] = []): Promise<string> {
-  return (await request<OutsideAnswered>("/api/outside/answers", { method: "POST", body: JSON.stringify({ ask, allow, without } satisfies OutsideAnswer) })).redirectTo;
+/**
+ * Answers `ask`, whether to connect its app as you, leaving out `without` of what it asks, and with
+ * `ticked` of it, which Ember gives where the page leaves its box unticked only when it's ticked,
+ * answering where to send the browser: back to the app. Fails as `describeOutsideAsk` does, and with a
+ * 409 when you have as many connected as one may.
+ */
+export async function answerOutsideAsk(ask: OutsideAsk, allow: boolean, without: OutsideScope[] = [], ticked: OutsideScope[] = []): Promise<string> {
+  return (await request<OutsideAnswered>("/api/outside/answers", { method: "POST", body: JSON.stringify({ ask, allow, without, with: ticked } satisfies OutsideAnswer) })).redirectTo;
 }
 
 /** Ends the connection `id` of yours, answering the ones you have left. Fails with a 401 ApiError once the session has ended, a 409 while outside AI is off, and a 404 once the connection has ended. */
@@ -919,6 +945,11 @@ export async function dismissInvitation(): Promise<void> {
   await request("/api/sidebar/invitation", { method: "DELETE" });
 }
 
+/** Stops an invitation into room `roomId`'s huddle ringing in every tab this person has open, as joining from it or declining it does. */
+export async function answerHuddleInvitation(roomId: RoomId): Promise<void> {
+  await request(`/api/rooms/${encodeURIComponent(roomId)}/huddle/invitation`, { method: "DELETE" });
+}
+
 /** A copy of the people directory, and the ETag the server sent it with. */
 export interface DirectoryCopy {
   directory: Directory;
@@ -1044,8 +1075,8 @@ export function socketUrl(path: string): string {
 /** The address of a room's socket, which tells the room what `params` says about the tab. */
 export const roomSocketUrl = (roomId: string, params: RoomSocketParams) => socketUrl(`/api/rooms/${encodeURIComponent(roomId)}/socket${roomSocketQuery(params)}`);
 
-/** The address of a tab's workspace socket, which carries what changes outside the room it shows. */
-export const workspaceSocketUrl = () => socketUrl("/api/socket");
+/** The address of a tab's workspace socket, which carries what changes outside the room it shows, and tells the Workspace what `params` says about the tab. */
+export const workspaceSocketUrl = (params: WorkspaceSocketParams) => socketUrl(`/api/socket${workspaceSocketQuery(params)}`);
 
 /** Forgets the session earlier versions of the app kept in localStorage, which nothing reads now. */
 export function forgetStoredSession(): void {

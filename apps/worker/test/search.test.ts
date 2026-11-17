@@ -1,4 +1,5 @@
 import {
+  MAX_MESSAGE_LENGTH,
   MAX_SEARCH_LENGTH,
   SEARCH_LIMIT,
   SEARCH_TOO_LONG,
@@ -20,7 +21,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatRoom } from "../src/chat-room";
 import type { Env } from "../src/env";
 import { MIGRATIONS } from "../src/migrations";
-import { searchStatements, type IndexedMessage, type IndexSearch, type SearchFacts } from "../src/search-index";
+import { searchStatement, type IndexedMessage, type IndexSearch, type SearchFacts, type SearchIndex } from "../src/search-index";
 import type { Workspace } from "../src/workspace";
 import {
   api,
@@ -212,6 +213,21 @@ describe("Search messages", () => {
     expect((await resultsFor(ada.session, "deploy")).matches).toEqual([{ message: expect.objectContaining({ id: message.id }), words: ["Deploying", "deploys", "DEPLOYED", "deploy"] }]);
   });
 
+  it("answers the words each match matched when its text has the index's marks itself, however many", async () => {
+    const index = searchIndexStub();
+    const at = (second: number, text: string): IndexedMessage => indexed({ id: `message-${second}`, createdAt: new Date(Date.UTC(2026, 9, 16, 10, 0, second)).toISOString(), text, message: "{}" });
+    const wordsOf = async (terms: string) => (await index.search(indexSearch(terms, ["room-a"]))).hits.map(({ words }) => words);
+    // U+0001 and U+0002 are the marks the index has FTS5 put around each matching word.
+    await index.apply("room-a", 1, [at(0, "\u0002 Pear \u0002"), at(1, "\u0001\u0002 PEAR")], []);
+    expect(await wordsOf('"pear"')).toEqual([["PEAR"], ["Pear"]]);
+
+    // A page of the longest messages a room takes, each all opening marks that nothing closes after its
+    // word: read on to its end from every one of them, they'd keep the index long past the test's time.
+    const unclosed = "plum 日 ".padEnd(MAX_MESSAGE_LENGTH, "\u0001");
+    await index.apply("room-a", 2, Array.from({ length: SEARCH_LIMIT }, (_, second) => at(2 + second, unclosed)), []);
+    expect(await wordsOf('"plum"')).toEqual(Array.from({ length: SEARCH_LIMIT }, () => ["plum"]));
+  });
+
   it("finds a message by its plain text, not its markup", async () => {
     const room = await freshRoom("markup");
     const ada = await connect(room, "Ada");
@@ -316,14 +332,32 @@ describe("Search messages", () => {
     ];
     for (const terms of ['"aardvark"', ""]) {
       for (const filter of filters) {
-        const { probe } = searchStatements(indexSearch(terms, ["room"], filter));
-        const plan = (await searchSql(`EXPLAIN QUERY PLAN ${probe.sql}`, ...(probe.values as Array<string | number>))).map((row) => (row as { detail: string }).detail).join("; ");
+        const { sql, values } = searchStatement(indexSearch(terms, ["room"], filter));
+        const plan = (await searchSql(`EXPLAIN QUERY PLAN ${sql}`, ...(values as Array<string | number>))).map((row) => (row as { detail: string }).detail).join("; ");
         expect(plan, `${terms} ${JSON.stringify(filter)}`).not.toContain("TEMP B-TREE");
       }
     }
   });
 
-  it("looks in the searcher's rooms alone when newer matches elsewhere fill what it reads first", async () => {
+  it("has nothing to sort in one room or several, whichever filters a search has and wherever it starts, and walks one with words from the index of words", async () => {
+    await searchIndexStub().search(indexSearch('"aardvark"', []));
+    const each: Array<Partial<IndexSearch>> = [{ creatorId: "ada" }, { includes: { userId: "ada", directIds: ["dm"] } }, { hasLink: true }, { hasFile: true }, { inThread: true }];
+    const filters = Array.from({ length: 2 ** each.length }, (_, chosen): Partial<IndexSearch> => Object.assign({}, ...each.filter((_, at) => chosen & (1 << at))));
+    const starts = (["newest", "oldest"] as const).flatMap((sort) => [null, 5].map((after) => ({ sort, after })));
+    for (const terms of ['"aardvark"', ""]) {
+      for (const roomIds of [["room"], ["room", "dm"]]) {
+        for (const search of filters.flatMap((filter) => starts.map((start) => indexSearch(terms, roomIds, { ...filter, ...start })))) {
+          const { sql, values } = searchStatement(search);
+          const plan = (await searchSql(`EXPLAIN QUERY PLAN ${sql}`, ...(values as Array<string | number>))).map((row) => (row as { detail: string }).detail).join("; ");
+          expect(plan, JSON.stringify(search)).not.toContain("TEMP B-TREE");
+          // Never from someone's messages, say, which it would read in every room, and sort.
+          if (terms !== "") expect(plan, JSON.stringify(search)).toMatch(/^SCAN search_index /);
+        }
+      }
+    }
+  });
+
+  it("finds the searcher's matches past any number of newer ones in rooms they're not in", async () => {
     const room = await freshRoom("sparse");
     const ada = await connect(room, "Ada");
     const message = await post(ada, "sparsekeyword");
@@ -339,6 +373,73 @@ describe("Search messages", () => {
     expect(await searchIndexStub().search(indexSearch('"sparsekeyword"', []))).toEqual({ hits: [], next: null });
     // As a search of filters alone does, when the newest messages are elsewhere.
     expect(await found(ada.session, { q: "", in: room })).toEqual([message.id]);
+  });
+
+  it("runs the same statements whatever is in rooms a search isn't in, and reads none of their messages for a search of filters alone", async () => {
+    const first = Date.UTC(2026, 9, 16) * 1024;
+    /**
+     * Puts `count` messages in room `room` of the index, numbered from `first`, a millisecond apart: each has
+     * the word quokka, Ada and Grace write them by turns, and some are in a thread of the room's, have a
+     * link or a file, or mention Ada.
+     */
+    const fill = async (room: RoomId, count: number, first: number) => {
+      await searchSql(
+        `WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < ?1 - 1)
+         INSERT INTO search_messages (id, message_id, room_id, message, creator_id, thread_id, has_link, has_file)
+         SELECT ?2 + i * 1024, ?3 || '-' || (?2 + i * 1024), ?3, '{}', iif(i % 2, 'grace', 'ada'), iif(i % 4, NULL, ?3 || '-thread'), i % 3 = 0, i % 5 = 0 FROM n`,
+        count,
+        first,
+        room,
+      );
+      const added = [room, first, first + count * 1024] as const;
+      await searchSql("INSERT INTO search_index (rowid, body) SELECT id, 'quokka' FROM search_messages WHERE room_id = ?1 AND id >= ?2 AND id < ?3", ...added);
+      await searchSql("INSERT INTO search_mentions (id, user_id) SELECT id, 'ada' FROM search_messages WHERE room_id = ?1 AND id >= ?2 AND id < ?3 AND id % 7 = 0", ...added);
+    };
+    /** What the index finds for each of `searches`, with the statements it runs and the rows each reads. */
+    const searched = (searches: IndexSearch[]) =>
+      runInDurableObject(searchIndexStub(), (index: SearchIndex) => {
+        const object = index as unknown as { sql: SqlStorage };
+        const sql = object.sql;
+        try {
+          return searches.map((search) => {
+            const run: Array<{ statement: string; cursor: { rowsRead: number } }> = [];
+            const counted = (statement: string, ...values: unknown[]) => {
+              const cursor = sql.exec(statement, ...values);
+              run.push({ statement, cursor });
+              return cursor;
+            };
+            object.sql = { exec: counted } as unknown as SqlStorage;
+            return { found: index.search(search), statements: run.map(({ statement }) => statement), rowsRead: run.map(({ cursor }) => cursor.rowsRead) };
+          });
+        } finally {
+          object.sql = sql;
+        }
+      });
+    const ada = { userId: "ada", directIds: [] };
+    const filters: Array<Partial<IndexSearch>> = [{}, { creatorId: "ada" }, { includes: ada }, { hasLink: true }, { hasFile: true }, { inThread: true }, { creatorId: "ada", includes: ada, hasLink: true, inThread: true }];
+    const starts = (["newest", "oldest"] as const).flatMap((sort) => [null, first + 150 * 1024].map((after) => ({ sort, after })));
+    // In her room alone, in it and one with no messages, and in none, as a search in a room she isn't in is.
+    const alone = [["hers"], ["hers", "nowhere"], []].flatMap((roomIds) => filters.flatMap((filter) => starts.map((start) => indexSearch("", roomIds, { ...filter, ...start }))));
+    const words = [indexSearch('"quokka"', ["hers"]), indexSearch('"quokka"', ["hers"], { creatorId: "ada", sort: "oldest", after: first + 150 * 1024 })];
+
+    await fill("hers", 300, first);
+    const [before, beforeWords] = [await searched(alone), await searched(words)];
+    expect(before.map(({ found }) => found.hits.length > 0)).toEqual(alone.map(({ roomIds }) => roomIds.length > 0));
+
+    // Elsewhere, more than a search once read before it looked in its own rooms alone: older than hers, among them
+    // and newer, in rooms the index has before hers, between the two she searches, and after them.
+    for (const [room, from] of [["elsewhere", first - 2_000 * 1024], ["lobby", first + 512], ["other", first + 2_000 * 1024]] as const) await fill(room, 1_100, from);
+    expect(await searched(alone)).toEqual(before);
+    // A search with words still passes over the matches elsewhere, a row's read each, but runs nothing more for them.
+    const withWords = await searched(words);
+    expect(withWords.map(({ found, statements }) => ({ found, statements }))).toEqual(beforeWords.map(({ found, statements }) => ({ found, statements })));
+
+    // Nor does a full page read further into its own rooms than it goes.
+    await fill("hers", 1_100, first - 5_000 * 1024);
+    const deeper = await searched(alone);
+    const newestFull = alone.flatMap(({ sort }, at) => (sort === "newest" && before[at]!.found.next !== null ? [at] : []));
+    expect(newestFull.length).toBeGreaterThan(0);
+    expect(newestFull.map((at) => deeper[at])).toEqual(newestFull.map((at) => before[at]));
   });
 
   it("leaves out a match whose message its room no longer has", async () => {

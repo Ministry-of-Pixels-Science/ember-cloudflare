@@ -10,6 +10,7 @@ import { useTitle } from "@/hooks/use-title";
 import type { Room } from "@/lib/api";
 import { roomName } from "@/lib/directs";
 import { rememberLastRoom } from "@/lib/last-room";
+import { newestWrittenBy } from "@/lib/messages";
 import type { RoomAnswer } from "@/lib/room-list";
 import { isPending } from "@/lib/room-state";
 import { Composer, RoomDeleted, type ComposerHandle } from "./composer";
@@ -97,11 +98,11 @@ export function RoomView({ room, messageId, threadId, replyId, invitation, onDis
   // A thread that covers the room leaves nothing of it to reach until it's closed.
   const covered = useMediaQuery(THREAD_COVERS_ROOM) && threadId !== undefined;
 
-  // Up Arrow edits your newest message, unless it's still on its way, or the timeline is reading older
-  // history and may not hold it.
+  // Up Arrow edits the newest message you wrote, unless it's still on its way, or the timeline is reading
+  // older history and may not hold it.
   const editLastMessage = () => {
     if (state.hasNewer) return;
-    const newest = state.messages.findLast((message) => message.creator.id === me.id);
+    const newest = newestWrittenBy(state.messages, me.id);
     if (newest && !isPending(newest)) editors.open(newest.id);
   };
 
@@ -112,6 +113,7 @@ export function RoomView({ room, messageId, threadId, replyId, invitation, onDis
         <RoomHeader
           room={room}
           name={name}
+          meId={me.id}
           present={state.present}
           status={state.status}
           offline={state.offline}

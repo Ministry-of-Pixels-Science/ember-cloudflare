@@ -8,6 +8,7 @@ import { mentionPromptSrc } from "@/lib/api";
 import { pressedAlone, savesEdit } from "@/lib/keyboard";
 import { cn } from "@/lib/utils";
 import { RichTextEditor, type RichTextEditorHandle } from "./editor";
+import { FormattingToolbar, LinkDialog, useFormatting } from "./formatting-toolbar";
 import { avatarUrlOf } from "./user-avatar";
 
 /**
@@ -33,14 +34,16 @@ export interface MessageEditorHandle {
 
 /**
  * The edit form (Campfire's composer.css and messages.css), in the message's place: a card holding the
- * text in Lexxy, with its formatting toolbar above the text on wide screens with a mouse
- * (rich-text-editor.css), and round Save changes and Delete message buttons under it, beside a button
- * that closes it. Ctrl or Cmd+Enter saves, Escape closes it, and Enter starts a new paragraph. @ offers
- * the room's people, as the composer's does. It takes no files and tells no one you're typing.
+ * text in Lexxy, with the composer's formatting row above the text on wide screens with a mouse, ruled
+ * off from it across the field, and round Save changes and Delete message buttons under it, beside a
+ * button that closes it. Ctrl or Cmd+Enter saves, Escape closes it, and Enter starts a new paragraph.
+ * The formatting keys format, as they do in the composer, and @ offers the room's people, as its @ does.
+ * It takes no files and tells no one you're typing.
  */
 export function MessageEditor({ message, onSave, onDelete, onClose, ref }: Props) {
   const editor = useRef<RichTextEditorHandle>(null);
   const container = useRef<HTMLDivElement>(null);
+  const formatting = useFormatting(editor);
   const people = useContext(PeopleContext);
   // The editable body: its mentions as the editor draws them, of the people as they are now, and its link previews
   // as the message shows them here. It drops a mention of no one, and a message from before messages named the
@@ -78,9 +81,7 @@ export function MessageEditor({ message, onSave, onDelete, onClose, ref }: Props
     // message's edge.
     <div ref={container} className="col-start-2 flex min-w-0 gap-x-[0.5ch] py-1 pr-[0.5ch] text-sm">
       <div className="message-edit min-w-0 flex-1 rounded-[10px] border bg-surface p-3">
-        {/* Not validated, as the composer isn't, so the toolbar's hidden Link field can't stop Save. */}
         <form
-          noValidate
           onSubmit={(event) => {
             event.preventDefault();
             save();
@@ -99,6 +100,10 @@ export function MessageEditor({ message, onSave, onDelete, onClose, ref }: Props
           }}
         >
           <div className="rounded-[9px] border bg-background px-[0.8em] py-[0.5em] text-base transition-shadow duration-150 focus-within:ring-2 focus-within:ring-selected-dark">
+            <FormattingToolbar
+              formatting={formatting}
+              className="-mx-[0.8em] mb-2 hidden border-b px-[0.3em] pb-[0.5em] [@media(min-width:100ch)_and_(any-hover:hover)_and_(pointer:fine)]:flex"
+            />
             {/* The composer has loaded the editor by the time a message can be edited. */}
             <Suspense fallback={loading}>
               {editable === null ? (
@@ -111,6 +116,8 @@ export function MessageEditor({ message, onSave, onDelete, onClose, ref }: Props
                   initialValue={editable}
                   mentionsFrom={mentionPromptSrc(message.roomId)}
                   autoFocus
+                  onFormatChange={formatting.setFormat}
+                  onKeyDown={formatting.keyDown}
                 />
               )}
             </Suspense>
@@ -123,6 +130,8 @@ export function MessageEditor({ message, onSave, onDelete, onClose, ref }: Props
             <DeleteButton onDelete={onDelete} />
           </div>
         </form>
+        {/* Outside the form, whose Escape would close the editor, and whose Ctrl or Cmd+Enter would save it. */}
+        <LinkDialog formatting={formatting} />
       </div>
       <CloseButton onClose={onClose} />
     </div>

@@ -155,11 +155,12 @@ const RESPONSES_SEARCHED = {
 
 /**
  * A model in Chat Completions given Ember's own tool for searching the web, which calls it for "Cloudflare
- * AI Gateway", then says what it found, as Cloudflare's Web Search API finds the docs and the blog.
+ * AI Gateway", then says what it found, as Cloudflare's Web Search API finds the docs and the blog, citing
+ * the blog by the number Ember gave it, or citing nothing when `citing` is false.
  */
-function searchingInChat({ url, body }: Asked): Response {
+function searchingInChat({ url, body }: Asked, citing = true): Response {
   if (url === WEB_SEARCH) return Response.json({ success: true, result: { items: [DOCS, BLOG].map((page) => ({ ...page, description: "About AI Gateway." })) } });
-  if (body.messages?.at(-1)?.role === "tool") return unsearched(url, FOUND);
+  if (body.messages?.at(-1)?.role === "tool") return unsearched(url, citing ? `${FOUND} [2]` : FOUND);
   const call = { id: "call_0", type: "function", function: { name: "web_search", arguments: JSON.stringify({ query: "Cloudflare AI Gateway" }) } };
   return Response.json({ choices: [{ message: { role: "assistant", content: null, tool_calls: [call] }, finish_reason: "tool_calls" }], usage: { completion_tokens: 20 } });
 }
@@ -359,7 +360,7 @@ describe("Search the web", () => {
     await pickModel(ada, GROK);
     const asked = fakeGateway(searching);
     await post(client, askEmber("what's AI Gateway?"));
-    expect((await nextAnswer(client)).plainText).toBe(`${FOUND}\n\nSources: ${DOCS.title}, ${BLOG.title}`);
+    expect((await nextAnswer(client)).plainText).toBe(`${FOUND}\n\nSources: ${BLOG.title}`);
     client.close();
     // Claude, kept from before, moves to Anthropic's endpoint meanwhile.
     const grok = asked.filter(({ url }) => !toProvider(url));
@@ -751,7 +752,7 @@ describe("@ember on the web", () => {
     client.close();
   });
 
-  it("searches with Grok with Ember's own tool through Cloudflare's REST API, listing the pages its searches found", async () => {
+  it("searches with Grok with Ember's own tool through Cloudflare's REST API, listing the pages it cites of those its searches found, by the numbers Ember gave them", async () => {
     const ada = await setUp(GROK);
     fakeGateway(searching);
     await turnedWebSearch(ada, true);
@@ -767,7 +768,25 @@ describe("@ember on the web", () => {
     );
     expect(requests[0]!.body).toMatchObject({ model: GROK, tools: [EMBERS_SEARCH] });
     expect(requests[0]!.body.messages![0]!.content).toContain("You can search the web when a question needs what's current");
-    expect(answer.plainText).toBe(`${FOUND}\n\nSources: ${DOCS.title}, ${BLOG.title}`);
+    expect(requests[2]!.body.messages!.at(-1)!.content).toBe(
+      `[1] ${DOCS.title}\n${DOCS.url}\nAbout AI Gateway.\n\n[2] ${BLOG.title}\n${BLOG.url}\nAbout AI Gateway.\n\nCite a page you use by its number in brackets, such as [1], after what you take from it.`,
+    );
+    // The number it cites the blog by is Ember's, so it's taken out, and the docs, which it didn't cite, aren't named.
+    expect(answer.plainText).toBe(`${FOUND}\n\nSources: ${BLOG.title}`);
+    expect(answer.body).toBe(`<p>${FOUND}</p><p>Sources: <a href="${BLOG.url}">${BLOG.title}</a></p>`);
+  });
+
+  it("names no pages under an answer of Grok's that cites none of those its searches found, though it did search, as Search the web's try says", async () => {
+    const ada = await setUp(GROK);
+    fakeGateway((asked) => searchingInChat(asked, false));
+    expect((await turnedWebSearch(ada, true)).assistant.webTools).toEqual(["search"]);
+    vi.restoreAllMocks();
+    fakeGateway((asked) => searchingInChat(asked, false));
+    const client = await connect(await generalRoom(), ada);
+
+    await post(client, askEmber("what's AI Gateway?"));
+    expect((await nextAnswer(client)).plainText).toBe(FOUND);
+    client.close();
   });
 
   it("asks again without the web when AI Gateway no longer takes its tools", async () => {
@@ -846,7 +865,7 @@ describe("@ember on the web", () => {
     expect(said).toBe("I can't search the web.");
     expect(unsearchable.map(({ url, body }) => [url.split("/ai/v1/")[1], body.tools])).toEqual([["chat/completions", undefined]]);
     const instructions = unsearchable[0]!.body.messages![0]!.content;
-    expect(instructions).toContain("You can't search the web or open links with the model Ada Lovelace picked for your answers to them.");
+    expect(instructions).toContain(`You can't search the web or open links with the model "Ada Lovelace" picked for your answers to them.`);
     expect(instructions).toContain("they can pick one that can under Ember AI on their profile.");
     expect(instructions).not.toContain("an administrator can turn on Search the web");
 
@@ -899,7 +918,7 @@ describe("What @ember is told of the web", () => {
 
   it("says, while Search the web is on, that the model the asker picked can't search, and that they can pick one that can", () => {
     const told = questionFor({ ...EMBER, instructions: "", promptTemplate: null }, [QUESTION], ADA, IN_GENERAL, { thinking: "low", length: "medium" }, new Date(), [], true).instructions;
-    expect(told).toContain("You can't search the web or open links with the model Ada Lovelace picked for your answers to them.");
+    expect(told).toContain(`You can't search the web or open links with the model "Ada Lovelace" picked for your answers to them.`);
     expect(told).toContain("When they ask you to, say so, and that they can pick one that can under Ember AI on their profile.");
     expect(told).not.toContain("an administrator");
   });

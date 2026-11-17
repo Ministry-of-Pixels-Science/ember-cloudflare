@@ -1,23 +1,48 @@
 import { CloseCode, parseServerFrame, type RoomId, type UserId } from "@ember/protocol";
 import {
+  CAMERA_SIZES,
   HUDDLE_TRACK_KINDS,
   HuddleCloseCode,
   huddleSocketQuery,
   MAX_HUDDLE_CAMERAS,
   MAX_HUDDLE_PEOPLE,
   MAX_HUDDLE_SCREENS,
+  RELAY_TTL_S,
   SCREENS_FULL,
   type HuddleClientFrame,
+  type HuddleIceServer,
+  type HuddlePerson,
   type HuddleServerFrame,
   type HuddleTrackKind,
   type OfferedHuddleTrack,
 } from "@ember/protocol/huddles";
 import { socketUrl } from "./api";
-import { cameraOf, closeDevice, microphoneOf, NO_CAMERA, NO_OTHER_CAMERA, NO_OTHER_MICROPHONE, NO_OTHER_SPEAKER, NO_SCREEN, openCamera, openMicrophone, openScreen, rememberDevice, rememberedDevice, STILL_NO_MICROPHONE } from "./huddle-devices";
+import { keepScreenAwake } from "./huddle-awake";
+import {
+  CAMERA_WENT_OFF,
+  cameraOf,
+  closeDevice,
+  facingOf,
+  microphoneOf,
+  NO_CAMERA,
+  NO_OTHER_CAMERA,
+  NO_OTHER_MICROPHONE,
+  NO_OTHER_SPEAKER,
+  NO_SCREEN,
+  openCamera,
+  openMicrophone,
+  openOtherCamera,
+  openScreen,
+  rememberDevice,
+  rememberedDevice,
+  STILL_NO_MICROPHONE,
+  type CameraFacing,
+} from "./huddle-devices";
+import { reactionsShown } from "./huddle-reactions";
 import { huddleSounds } from "./huddle-sounds";
 import { huddleSpeaker, type HuddleSpeaker } from "./huddle-speaker";
 import { whoSpeaks, type HuddleSpeaking } from "./huddle-speaking";
-import { endHuddle, leaveHuddle, showHuddle, showSpeaking, tellOfHuddle, type HuddleControls, type JoinedHuddle } from "./huddle-store";
+import { endHuddle, leaveHuddle, showHuddle, showReactions, showSpeaking, tellOfHuddle, type HuddleControls, type JoinedHuddle } from "./huddle-store";
 import { reconnectingSocket } from "./reconnecting-socket";
 
 // A tab's side of a huddle. Its socket to the room (`/api/rooms/:id/huddle`) says who's in the huddle and
@@ -30,8 +55,25 @@ import { reconnectingSocket } from "./reconnecting-socket";
 // again starts each afresh. The tab plays the huddle's own sounds as well (huddle-sounds.ts), through
 // the speaker the voices use.
 //
+// A huddle in a direct message rings the others in it: the tab that starts one asks the room to invite
+// them, and their tabs show the invitation and ring (huddle-invitations.ts). Anyone in a huddle asks
+// the same for whoever they pick of the room's people, from Invite people.
+//
+// A camera goes out in two sizes at once (simulcast) from a browser known to send them, and each tab
+// that watches is sent the one it says it shows: the small one for small tiles, so that a huddle of
+// many costs each of them, and Cloudflare's bill, a small picture apiece.
+//
+// Where an administrator has given huddles a relay, the room's welcome has the servers the connections
+// go by, Cloudflare's TURN service among them, which carries them on a network that blocks the way to
+// the SFU. What the tab is given to use the relay with lasts a day, so a connection that fails after
+// that joins again, on a new socket, for the room to give it anew.
+//
 // The room's answers say which of those pairs they're about, and not which frame they're to, so the tab
 // asks one thing at a time of each connection, and waits for the answer before it asks the next.
+//
+// A phone's browser stops a page once its screen locks, so a huddle keeps a phone's screen awake
+// (huddle-awake.ts). And a phone opens one of its cameras at a time, so the camera that's on is let go
+// of before another is opened in its place.
 
 /** How a tab joins a huddle, as the preview before it leaves things. */
 export interface HuddleJoin {
@@ -47,10 +89,42 @@ export interface HuddleJoin {
   camera: MediaStream | Promise<MediaStream | null> | null;
   /** The speaker the others play through, by its device's id, or empty for the browser's own. */
   speakerId: string;
+  /**
+   * Who the tab invites into the huddle if joining it starts it, the room letting it in with nobody else
+   * there: the others in a direct message, whose huddle rings them, and nobody in a shared room.
+   */
+  invite?: UserId[];
 }
 
-/** Cloudflare's STUN server, by which the browser learns the address the SFU reaches it at. */
+/** Cloudflare's STUN server, by which the browser learns the address the SFU reaches it at, which is all a connection goes by without a relay. */
 const CONNECTION: RTCConfiguration = { iceServers: [{ urls: "stun:stun.cloudflare.com:3478" }], bundlePolicy: "max-bundle" };
+
+/** How a tab's connections reach the SFU, as the room's welcome had it, and when the relay's servers came, if they did. */
+interface Reach {
+  configuration: RTCConfiguration;
+  relayedAt: number | null;
+}
+
+/** How they reach it by `servers`, the relay's among them, as the room gives them now, or by Cloudflare's STUN server alone where it gives none. */
+const reachBy = (servers: HuddleIceServer[] | undefined): Reach =>
+  servers?.length ? { configuration: { ...CONNECTION, iceServers: servers }, relayedAt: Date.now() } : { configuration: CONNECTION, relayedAt: null };
+
+/** Whether what the tab was given to use the relay with has run out, so that a connection made now would go without it. */
+const hasRunOut = ({ relayedAt }: Reach) => relayedAt !== null && Date.now() - relayedAt >= RELAY_TTL_S * 1000;
+
+/**
+ * A connection that reaches the SFU as `configuration` says. A browser refuses one any of whose servers
+ * it can't make sense of, and then the connection goes by Cloudflare's STUN server alone, as it would
+ * without a relay.
+ */
+function connectionBy(configuration: RTCConfiguration): RTCPeerConnection {
+  try {
+    return new RTCPeerConnection(configuration);
+  } catch {
+    return new RTCPeerConnection(CONNECTION);
+  }
+}
+
 /**
  * How long the room has to answer what a connection asked of it: longer than it gives the SFU to answer
  * all that a round of listening can have it ask. A room that hasn't by then isn't going to, and the tab
@@ -63,6 +137,10 @@ export const LISTEN_AGAIN_MS = [500, 8_000] as const;
 export const PUBLISH_AGAIN_MS = [1_000, 15_000] as const;
 /** The most a camera's connection sends, in bits a second: enough for a tile, which is as large as a huddle shows anyone. */
 export const CAMERA_BITRATE = 500_000;
+/** The most it sends of the camera's smaller size, half as wide and half as tall, which is all a small tile shows. */
+export const SMALL_CAMERA_BITRATE = 150_000;
+/** The fewest pixels a picture has for Chromium to send it in two sizes. */
+const LEAST_IN_TWO_SIZES = 480 * 270;
 /** The most a shared screen's connection sends, in bits a second: enough to keep the text of one as large as a huddle asks for sharp, at the few pictures a second it takes. */
 export const SCREEN_BITRATE = 1_500_000;
 
@@ -71,12 +149,35 @@ const SHOWN_KINDS = ["video", "screen"] as const;
 type ShownKind = (typeof SHOWN_KINDS)[number];
 
 /**
+ * Whether the browser is one known to send a camera in two sizes at once as the SFU takes them:
+ * Chromium's family, by what it says of itself. Any other sends one size until it has been tried.
+ */
+const sendsTwoSizes = () => /Chrom(e|ium)\//.test(navigator.userAgent);
+
+/**
+ * The sizes a camera's connection sends `track` in. From a browser known to send two at once, that's
+ * the picture as it is and, before it, one of half its width and height, for the SFU to send whoever
+ * shows it small. Chromium sends the first alone of a picture too small for two, and while it hasn't
+ * the bandwidth for both, so the small one is first. From any other browser, and of a picture too
+ * small, it's the one size.
+ */
+function cameraSizes(track: MediaStreamTrack): RTCRtpEncodingParameters[] {
+  const { width = 0, height = 0 } = track.getSettings();
+  if (!sendsTwoSizes() || width * height < LEAST_IN_TWO_SIZES) return [{ maxBitrate: CAMERA_BITRATE }];
+  return [
+    { rid: CAMERA_SIZES.small, maxBitrate: SMALL_CAMERA_BITRATE, scaleResolutionDownBy: 2 },
+    { rid: CAMERA_SIZES.large, maxBitrate: CAMERA_BITRATE },
+  ];
+}
+
+/**
  * What a tab shows the others by each of those kinds, its camera and its screen: where its huddle keeps
- * its own and the others', how many of the others' a huddle shows, and the most its connection sends.
+ * its own and the others', how many of the others' a huddle shows, and the sizes its connection sends
+ * a track in, with the most each sends.
  */
 const SHOWN = {
-  video: { own: "camera", theirs: "watched", most: MAX_HUDDLE_CAMERAS, bitrate: CAMERA_BITRATE },
-  screen: { own: "screen", theirs: "screens", most: MAX_HUDDLE_SCREENS, bitrate: SCREEN_BITRATE },
+  video: { own: "camera", theirs: "watched", most: MAX_HUDDLE_CAMERAS, sizes: cameraSizes },
+  screen: { own: "screen", theirs: "screens", most: MAX_HUDDLE_SCREENS, sizes: (): RTCRtpEncodingParameters[] => [{ maxBitrate: SCREEN_BITRATE }] },
 } as const;
 
 /**
@@ -145,6 +246,13 @@ function voicesThrough(speaker: HuddleSpeaker, speaking: HuddleSpeaking) {
 /** Whether the tab's person is the only one in its huddle, as far as the room has said. */
 const isAlone = ({ connected, you, people }: JoinedHuddle) => connected && people.every(({ user }) => user.id === you?.id);
 
+/** The tab's own `person` as the tab has them, whatever the room last said: as muted as it is, and showing the sticker it shows. */
+function asTheTabHas(person: HuddlePerson, { muted, sticker }: JoinedHuddle): HuddlePerson {
+  if (person.muted === muted && (person.sticker ?? null) === sticker) return person;
+  const { sticker: _, ...rest } = person;
+  return { ...rest, muted, ...(sticker && { sticker }) };
+}
+
 /** What each of a tab's connections to the SFU has of the huddle it's part of. */
 interface Huddled {
   /** Sends the room a frame, and says whether it went, which it doesn't while the socket is down. */
@@ -153,6 +261,10 @@ interface Huddled {
   rejoin(): void;
   /** Whether the tab has left the huddle. */
   isOver(): boolean;
+  /** Makes a connection that reaches the SFU as the room's welcome had it. */
+  connect(): RTCPeerConnection;
+  /** Whether what the tab was given to use the relay with has run out: a connection that fails then is made again only once the tab has joined again. */
+  relayRunOut(): boolean;
 }
 
 /** What one of a tab's connections carries. */
@@ -170,7 +282,8 @@ interface Carried {
 interface Sent extends Carried {
   /** The track to publish now, or null while there's none, as with a camera that's off. */
   track(): MediaStreamTrack | null;
-  sends: RTCRtpTransceiverInit;
+  /** How a connection sends `track`: in one size, or in several at once, the largest last. */
+  sends(track: MediaStreamTrack): RTCRtpTransceiverInit;
 }
 
 /** Whose tracks a receiving connection receives, and what becomes of each. */
@@ -181,19 +294,32 @@ interface Received extends Carried {
   wanted(): UserId[];
   /** Whether the room is asked for them by name, as it is for cameras and screens, and so stops sending whoever isn't named. */
   byName: boolean;
+  /** Whether the tab shows them small, which it tells the room of cameras, for the smaller of the sizes one is sent in. */
+  small?(): boolean;
   /** Plays someone's track, from when the tab is offered it until it's stopped. */
   play(userId: UserId, track: MediaStreamTrack): void;
   stop(userId: UserId): void;
 }
 
 /** One of a tab's sending connections, which publishes a track: its microphone, its camera while that's on, or its screen while that's shared. */
-function sendingConnection({ kind, vital, track, sends }: Sent, { send, rejoin, isOver }: Huddled) {
+function sendingConnection({ kind, vital, track, sends }: Sent, { send, rejoin, isOver, connect, relayRunOut }: Huddled) {
   let connection: RTCPeerConnection | null = null;
   /** The connection whose offer the room has yet to answer, which the tab may have given up since. */
   let unanswered: RTCPeerConnection | null = null;
   /** Runs out on the room's answer to that offer, or brings the next time the tab publishes. */
   let timer: ReturnType<typeof setTimeout> | undefined;
+  /** The sizes the connection was made to send its track in, the largest last. */
+  let sizes: RTCRtpEncodingParameters[] = [];
+  /** Whether the SFU has failed to take the track, which may be for the sizes it was offered in: it goes out in one from then on. */
+  let inOneSize = false;
   const wait = growingWait(PUBLISH_AGAIN_MS);
+
+  /** How a connection sends `sending`: as the tab would, or once the SFU has failed to take that, whole, in the largest of those sizes alone. */
+  function sentAs(sending: MediaStreamTrack): RTCRtpTransceiverInit {
+    const sent = sends(sending);
+    const largest = sent.sendEncodings?.at(-1);
+    return inOneSize && largest ? { ...sent, sendEncodings: [{ maxBitrate: largest.maxBitrate }] } : sent;
+  }
 
   /**
    * Publishes the track from a new connection, with the offer the connection makes for it, in place of
@@ -204,11 +330,13 @@ function sendingConnection({ kind, vital, track, sends }: Sent, { send, rejoin, 
     close();
     const publishing = track();
     if (!publishing || publishing.readyState === "ended" || unanswered) return;
-    const made = (connection = new RTCPeerConnection(CONNECTION));
-    const transceiver = made.addTransceiver(publishing, sends);
+    const made = (connection = connect());
+    const sent = sentAs(publishing);
+    sizes = sent.sendEncodings ?? [];
+    const transceiver = made.addTransceiver(publishing, sent);
     made.onconnectionstatechange = () => {
       if (connection !== made) return;
-      if (made.connectionState === "failed") return publishLater();
+      if (made.connectionState === "failed") return relayRunOut() ? rejoin() : publishLater();
       if (made.connectionState !== "connected") return;
       wait.startOver();
       send({ type: "huddle.connected", kind });
@@ -254,19 +382,43 @@ function sendingConnection({ kind, vital, track, sends }: Sent, { send, rejoin, 
       await answered.setRemoteDescription({ type: "answer", sdp });
     } catch {
       if (connection === answered) publishLater();
+      return;
     }
+    if (connection === answered) await sendWhole(answered);
+  }
+
+  /**
+   * Sends the track whole on a connection made to send it in several sizes, of which the SFU's answer
+   * took one. The browser is left sending the first alone, the smallest, which becomes as large as
+   * the largest was to be, at as many bits a second.
+   */
+  async function sendWhole(answered: RTCPeerConnection) {
+    const [sender] = answered.getSenders();
+    const largest = sizes.at(-1);
+    if (!sender || !largest || sizes.length < 2) return;
+    const parameters = sender.getParameters();
+    const [only, ...others] = parameters.encodings;
+    if (!only || others.length > 0) return;
+    only.maxBitrate = largest.maxBitrate;
+    only.scaleResolutionDownBy = largest.scaleResolutionDownBy ?? 1;
+    await sender.setParameters(parameters).catch(() => {});
   }
 
   /**
    * Sends the track there is now in place of the one the connection sent, which the others receive as
-   * the same track still. Without a connection, or with one that can't, it publishes anew.
+   * the same track still. Without a connection, with one that can't, or with one made to send another
+   * number of sizes than this track goes out in, it publishes anew.
    */
   async function swap() {
     const swapping = connection;
-    const swapped = await swapping?.getSenders()[0]?.replaceTrack(track()).then(
-      () => true,
-      () => false,
-    );
+    const next = track();
+    const fits = next !== null && (sentAs(next).sendEncodings ?? []).length === sizes.length;
+    const swapped =
+      fits &&
+      (await swapping?.getSenders()[0]?.replaceTrack(next).then(
+        () => true,
+        () => false,
+      ));
     if (!swapped && connection === swapping) void publish();
   }
 
@@ -282,12 +434,13 @@ function sendingConnection({ kind, vital, track, sends }: Sent, { send, rejoin, 
     published,
     swap,
     close,
-    /** The room couldn't publish what it was asked to: the SFU refused, or couldn't be reached. */
-    failed() {
+    /** The room couldn't publish what it was asked to: the SFU refused, or couldn't be reached, unless the room `refused` it itself. */
+    failed(refused = false) {
       const answered = unanswered;
       if (!answered) return;
       unanswered = null;
       clearTimeout(timer);
+      if (!refused) inOneSize = true;
       if (answered === connection) publishLater();
       else void publish();
     },
@@ -309,10 +462,12 @@ function sendingConnection({ kind, vital, track, sends }: Sent, { send, rejoin, 
  * doesn't yet, a round at a time: the tab asks (`huddle.listen`), answers the offer if one comes, and
  * the room says `huddle.listening`.
  */
-function receivingConnection({ kind, vital, receivable, wanted, byName, play, stop }: Received, { send, rejoin, isOver }: Huddled) {
+function receivingConnection({ kind, vital, receivable, wanted, byName, small, play, stop }: Received, { send, rejoin, isOver, connect, relayRunOut }: Huddled) {
   let connection: RTCPeerConnection | null = null;
   /** Whom the tab has been offered, and so receives. */
   const heard = new Set<UserId>();
+  /** Whether the tab last asked the room for them small. */
+  let askedSmall = false;
   /** The round under way: whether it has brought an offer, and whether the tab has given up the connection it asked on meanwhile. */
   let round: { offered: boolean; givenUp: boolean } | null = null;
   /** Runs out on the room's answer to that round, or brings the next. */
@@ -322,19 +477,24 @@ function receivingConnection({ kind, vital, receivable, wanted, byName, play, st
   const isUnheard = () => wanted().some((userId) => !heard.has(userId));
   /** Whom the tab receives and would no longer, as once it stops showing cameras and screens. The room goes on sending them until it's asked for the others by name. */
   const unwanted = () => (byName ? [...heard].filter((userId) => !wanted().includes(userId)) : []);
-  /** What a round asks of the room: on a fresh connection when the tab has none, and by name, for whom. */
-  const asking = (): HuddleClientFrame => ({ type: "huddle.listen", kind, ...(!connection && { fresh: true as const }), ...(byName && { watch: wanted() }) });
+  const isSmall = () => small?.() === true;
+  /** Whether the tab shows whom it receives in another size than it last told the room, which sends it that size once it's told. */
+  const isResized = () => heard.size > 0 && isSmall() !== askedSmall;
+  /** What a round asks of the room: on a fresh connection when the tab has none, by name, for whom, and small, if that's how the tab shows them. */
+  const asking = (): HuddleClientFrame => ({ type: "huddle.listen", kind, ...(!connection && { fresh: true as const }), ...(byName && { watch: wanted() }), ...(isSmall() && { small: true as const }) });
 
   /**
    * Starts a round, unless one is under way: asks for whoever the tab would receive and doesn't, or with
-   * `anyone`, whoever the room finds it doesn't. Whoever it would no longer receive is forgotten as it asks.
+   * `anyone`, whoever the room finds it doesn't, and for those it receives in the size it shows them
+   * in now. Whoever it would no longer receive is forgotten as it asks.
    */
   function listen(anyone = false) {
     if (isOver() || round) return;
     clearTimeout(timer);
     const dropped = unwanted();
-    if (!anyone && dropped.length === 0 && !isUnheard()) return;
+    if (!anyone && dropped.length === 0 && !isUnheard() && !isResized()) return;
     if (!send(asking())) return;
+    askedSmall = isSmall();
     dropped.forEach(forget);
     round = { offered: false, givenUp: false };
     timer = setTimeout(leftUnanswered, ANSWER_TIMEOUT_MS);
@@ -398,9 +558,11 @@ function receivingConnection({ kind, vital, receivable, wanted, byName, play, st
   }
 
   function open(): RTCPeerConnection {
-    const made = new RTCPeerConnection(CONNECTION);
+    const made = connect();
     made.onconnectionstatechange = () => {
-      if (connection === made && made.connectionState === "failed") listenAfresh();
+      if (connection !== made || made.connectionState !== "failed") return;
+      if (relayRunOut()) rejoin();
+      else listenAfresh();
     };
     return made;
   }
@@ -420,8 +582,9 @@ function receivingConnection({ kind, vital, receivable, wanted, byName, play, st
    * The room has answered what the tab asked, which ends the round. After one that brought an offer the
    * tab asks again at once: for whoever the offer left out, and for anyone who began publishing anew
    * while it was made, whose track in it carries nothing. It asks at once, too, when it would no longer
-   * receive someone it does. After a round that brought no offer it asks in a while, for whoever the SFU
-   * couldn't offer yet, and with nobody to ask for by name, and nobody received, it closes the connection.
+   * receive someone it does, or shows them in another size than it asked for. After a round that
+   * brought no offer it asks in a while, for whoever the SFU couldn't offer yet, and with nobody to
+   * ask for by name, and nobody received, it closes the connection.
    */
   function listening() {
     if (!round) return;
@@ -431,7 +594,7 @@ function receivingConnection({ kind, vital, receivable, wanted, byName, play, st
       wait.startOver();
       return listen(true);
     }
-    if (unwanted().length > 0) return listen();
+    if (unwanted().length > 0 || isResized()) return listen();
     if (givenUp || isUnheard()) return listenLater();
     if (byName && heard.size === 0) close();
   }
@@ -479,7 +642,7 @@ function receivingConnection({ kind, vital, receivable, wanted, byName, play, st
 }
 
 /** Joins room `roomId`'s huddle, which starts it when nobody's in it, leaving any the tab was in. */
-export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: HuddleJoin): void {
+export function joinHuddle({ roomId, muted, microphone, camera, speakerId, invite = [] }: HuddleJoin): void {
   leaveHuddle();
   /** The microphone the tab speaks through, and its track, until its person chooses another. */
   let voice = microphone;
@@ -490,6 +653,7 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
     you: null,
     people: [],
     muted: muted || !track,
+    sticker: null,
     microphone: track !== null,
     microphoneId: microphoneOf(voice),
     speakerId,
@@ -498,6 +662,7 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
     screen: null,
     screens: new Map(),
     open: true,
+    thread: true,
   };
   let over = false;
   if (track) track.enabled = !huddle.muted;
@@ -507,11 +672,15 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
   let openingCamera = false;
   /** Whether the browser is asking the tab's person what to share. */
   let choosingScreen = false;
+  /** Whether the huddle, opened, last showed people in tiles small enough for the smaller of a camera's sizes. */
+  let smallTiles = false;
 
+  const letScreenSleep = keepScreenAwake();
   const speaker = huddleSpeaker(speakerId);
   const speaking = whoSpeaks(showSpeaking);
   const voices = voicesThrough(speaker, speaking);
   const sounds = huddleSounds(speaker);
+  const reactions = reactionsShown(showReactions);
 
   const socket = reconnectingSocket<HuddleClientFrame>({
     url: () => huddleSocketUrl(roomId, huddle.muted),
@@ -533,7 +702,9 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
     },
   });
 
-  const huddled: Huddled = { send: (frame) => socket.send(frame), rejoin, isOver: () => over };
+  // By Cloudflare's STUN server alone, until the room's welcome says otherwise.
+  let reach = reachBy(undefined);
+  const huddled: Huddled = { send: (frame) => socket.send(frame), rejoin, isOver: () => over, connect: () => connectionBy(reach.configuration), relayRunOut: () => hasRunOut(reach) };
   /** Everyone else in the huddle whose track of `kind` can be received. */
   const receivable = (kind: HuddleTrackKind) => huddle.people.filter((person) => person.user.id !== huddle.you?.id && person[kind]).map(({ user }) => user.id);
   /** The track of what the tab shows by `kind`, or null while it shows nothing by it. */
@@ -543,11 +714,23 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
 
   // The connections that carry the voices, which a huddle has throughout, and those for cameras and for
   // screens, each of which it has while it shows its own, and while it's open and someone else shows theirs.
-  const showing = (kind: ShownKind) => sendingConnection({ kind, vital: false, track: () => shownTrack(kind), sends: { direction: "sendonly", sendEncodings: [{ maxBitrate: SHOWN[kind].bitrate }] } }, huddled);
+  const showing = (kind: ShownKind) => sendingConnection({ kind, vital: false, track: () => shownTrack(kind), sends: (track) => ({ direction: "sendonly", sendEncodings: SHOWN[kind].sizes(track) }) }, huddled);
   const watching = (kind: ShownKind) =>
-    receivingConnection({ kind, vital: false, receivable: () => receivable(kind), wanted: () => (huddle.open ? receivable(kind).slice(0, SHOWN[kind].most) : []), byName: true, ...pictures(kind) }, huddled);
+    receivingConnection(
+      {
+        kind,
+        vital: false,
+        receivable: () => receivable(kind),
+        wanted: () => (huddle.open ? receivable(kind).slice(0, SHOWN[kind].most) : []),
+        byName: true,
+        // Only cameras come in sizes.
+        ...(kind === "video" && { small: () => smallTiles }),
+        ...pictures(kind),
+      },
+      huddled,
+    );
   const sending = {
-    audio: sendingConnection({ kind: "audio", vital: true, track: () => track, sends: { direction: "sendonly" } }, huddled),
+    audio: sendingConnection({ kind: "audio", vital: true, track: () => track, sends: () => ({ direction: "sendonly" }) }, huddled),
     video: showing("video"),
     screen: showing("screen"),
   };
@@ -582,18 +765,41 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
       show({ open });
       for (const kind of SHOWN_KINDS) receiving[kind].listen();
     },
+    setThread(shown) {
+      if (shown !== huddle.thread) show({ thread: shown });
+    },
+    // The tab is sent the size of each camera that its tiles show, so it asks again as they come to show another.
+    setSmall(small) {
+      smallTiles = small;
+      receiving.video.listen();
+    },
     setDevice(kind, deviceId) {
       if (kind === "microphone") return void speakThrough(deviceId);
-      if (kind === "camera") return void showThrough(deviceId);
+      if (kind === "camera") return showThrough(deviceId);
       void playThrough(deviceId);
+    },
+    switchCamera() {
+      void showOtherCamera();
+    },
+    invite(userIds) {
+      return socket.send({ type: "huddle.invite", userIds });
+    },
+    setSticker(sticker) {
+      if (sticker === huddle.sticker) return;
+      socket.send({ type: "huddle.sticker", sticker });
+      show({ sticker });
+    },
+    // It shows once the room has told the huddle of it, this tab included, so what its person sees is what everyone does.
+    react(emoji) {
+      socket.send({ type: "huddle.react", emoji });
     },
   };
 
-  /** Shows the huddle with `changes`, the tab's person among its people muted as the tab is. */
+  /** Shows the huddle with `changes`, the tab's person among its people as the tab has them. */
   function show(changes: Partial<JoinedHuddle>) {
     if (over) return;
     const next = { ...huddle, ...changes };
-    const people = next.people.map((person) => (person.user.id === next.you?.id && person.muted !== next.muted ? { ...person, muted: next.muted } : person));
+    const people = next.people.map((person) => (person.user.id === next.you?.id ? asTheTabHas(person, next) : person));
     showHuddle((huddle = { ...next, people }), controls);
     sounds.setAlone(isAlone(huddle));
   }
@@ -650,28 +856,60 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
   }
 
   /**
-   * Shows another camera. One that's off turns on with it. One that's on gives way to it once the
-   * browser has opened it, which the others go on watching as the same camera, and stays on if the
-   * browser won't, which the tab's person is told. One chosen while the browser opens another isn't
-   * taken up.
+   * Shows another camera, which this browser's next huddle starts with. One that's off turns on with
+   * it, and one that's on gives way to it. One chosen while the browser opens another isn't taken up.
    */
-  async function showThrough(deviceId: string) {
+  function showThrough(deviceId: string) {
     if (over || openingCamera) return;
     rememberDevice("camera", deviceId);
-    if (huddle.camera && deviceId === cameraOf(huddle.camera)) return;
     if (!huddle.camera) return void showOnceOpen(openCamera(deviceId));
-    openingCamera = true;
-    const opened = await openCamera(deviceId);
-    openingCamera = false;
+    if (deviceId !== cameraOf(huddle.camera)) void showInstead(() => openCamera(deviceId));
+  }
+
+  /**
+   * Switches from the camera that's on to the one that faces the other way, as a phone's back camera
+   * does from its front one, or to the next the browser lists, which this browser's next huddle starts
+   * with. A camera that's off stays off.
+   */
+  async function showOtherCamera() {
+    const other = await showInstead(openOtherCamera);
+    if (other) rememberDevice("camera", cameraOf(other));
+  }
+
+  /**
+   * Shows the camera `open` opens in place of the one that's on, whose device and which way it faced
+   * `open` is given, and answers it once it shows. The one that's on is let go of first, since a phone
+   * opens one camera at a time, and the others go on watching what takes its place as the same camera.
+   * Where the browser won't open that, the one before comes back on, and the tab's person is told, as
+   * they are of a camera left off because the browser wouldn't open that one again either. Nothing
+   * is asked of the browser while it opens a camera already.
+   */
+  async function showInstead(open: (deviceId: string, facing: CameraFacing | null) => Promise<MediaStream | null>): Promise<MediaStream | null> {
     const shown = huddle.camera;
-    // Left meanwhile, or turned off, when there's none for it to take the place of.
-    if (over || !shown) return closeDevice(opened);
-    if (!opened) return tellOfHuddle(NO_OTHER_CAMERA);
+    if (over || openingCamera || !shown) return null;
+    openingCamera = true;
+    const deviceId = cameraOf(shown);
+    const facing = facingOf(shown);
     shown.getVideoTracks()[0]?.removeEventListener("ended", ended.video);
     closeDevice(shown);
+    const other = await open(deviceId, facing);
+    // Left meanwhile, or turned off, when there's none for it to take the place of.
+    const gone = () => over || huddle.camera !== shown;
+    const opened = other ?? (gone() ? null : await openCamera(deviceId || null));
+    openingCamera = false;
+    if (gone()) {
+      closeDevice(opened);
+      return null;
+    }
+    if (!other) tellOfHuddle(opened ? NO_OTHER_CAMERA : CAMERA_WENT_OFF);
+    if (!opened) {
+      takeDown("video");
+      return null;
+    }
     opened.getVideoTracks()[0]?.addEventListener("ended", ended.video);
     show({ camera: opened });
     if (huddle.connected) void sending.video.swap();
+    return other;
   }
 
   /** Shows the camera the browser is opening, once it has, or tells the tab's person that there's none for it. */
@@ -743,16 +981,18 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
 
   /**
    * Leaves for good: the socket closes, which is how the room hears, and so do the connections, the
-   * microphone, the camera and the screen it shares. A tab the room had let in hears the leaving sound,
-   * however its huddle ended.
+   * microphone, the camera and the screen it shares, and a phone's own screen is left to sleep again.
+   * A tab the room had let in hears the leaving sound, however its huddle ended.
    */
   function stop() {
     over = true;
     socket.close();
     hangUp();
+    letScreenSleep();
     voices.stopAll();
     speaking.stop();
     showSpeaking(new Set());
+    reactions.stop();
     sounds.end(huddle.you !== null);
     speaker.stopAll();
     track?.removeEventListener("ended", microphoneGone);
@@ -769,7 +1009,7 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
     if (huddle.connected) show({ connected: false });
   }
 
-  /** Joins again on a new socket, the room having left something the tab asked unanswered. */
+  /** Joins again on a new socket, the room having left something the tab asked unanswered, or the tab's way through the relay having run out. */
   function rejoin() {
     socket.hold();
     socket.retry();
@@ -790,22 +1030,24 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
   /**
    * The room couldn't do what a frame asked for one of the connections, which starts over. A camera or
    * a screen it refused, the huddle showing as many as it does or an administrator having them off, is
-   * taken down instead, and its person is told.
+   * taken down instead, and its person is told, as they are when nobody they invited was.
    */
   function couldNot({ failed, kind = "audio", refused, message }: Extract<HuddleServerFrame, { type: "error" }>) {
+    if (failed === "huddle.invite") return tellOfHuddle(message);
     if (failed === "huddle.listen" || failed === "huddle.answer") return receiving[kind].failed();
     if (failed !== "huddle.publish") return;
     if (refused && kind !== "audio") {
       takeDown(kind);
       tellOfHuddle(message);
     }
-    sending[kind].failed();
+    sending[kind].failed(refused);
   }
 
   function hear(frame: HuddleServerFrame) {
     switch (frame.type) {
       case "huddle.welcome": {
         socket.connected();
+        reach = reachBy(frame.iceServers);
         for (const kind of HUDDLE_TRACK_KINDS) {
           sending[kind].startOver();
           receiving[kind].startOver();
@@ -813,13 +1055,19 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
         // The address said whether the tab was muted as it asked to join, which it may not be now.
         const mine = frame.people.find(({ user }) => user.id === frame.you.id);
         if (mine && mine.muted !== huddle.muted) socket.send({ type: "huddle.mute", muted: huddle.muted });
+        // And the room knows of no sticker a tab showed before it joined again.
+        if (mine && (mine.sticker ?? null) !== huddle.sticker) socket.send({ type: "huddle.sticker", sticker: huddle.sticker });
         // Let in, and not let back in after the tab's connection to the room dropped.
         if (!huddle.you) {
           sounds.joined();
           // Its own person speaks by the microphone, now that the room has said who they are.
           if (track && huddle.microphone) speaking.hear(frame.you.id, track);
+          // Whoever starts a direct message's huddle invites the others in it, which being let back in doesn't do again.
+          if (invite.length > 0 && frame.people.every(({ user }) => user.id === frame.you.id)) socket.send({ type: "huddle.invite", userIds: invite });
         }
-        show({ connected: true, you: frame.you, people: frame.people });
+        // Whoever left while the tab's connection to the room was down takes what they sent with them, as one who leaves does.
+        for (const { user } of huddle.people) if (!frame.people.some((person) => person.user.id === user.id)) reactions.forget(user.id);
+        show({ connected: true, you: frame.you, people: frame.people, messageId: frame.messageId });
         for (const kind of HUDDLE_TRACK_KINDS) void sending[kind].publish();
         return listen();
       }
@@ -834,8 +1082,12 @@ export function joinHuddle({ roomId, muted, microphone, camera, speakerId }: Hud
       }
       case "huddle.left":
         for (const kind of HUDDLE_TRACK_KINDS) receiving[kind].forget(frame.userId);
+        reactions.forget(frame.userId);
         if (huddle.people.some(({ user }) => user.id === frame.userId)) sounds.left();
         return show({ people: huddle.people.filter(({ user }) => user.id !== frame.userId) });
+      case "huddle.reacted":
+        if (huddle.people.some(({ user }) => user.id === frame.userId)) reactions.show(frame.userId, frame.emoji);
+        return;
       case "huddle.published":
         return void sending[frame.kind].published(frame.sdp);
       case "huddle.unpublished":

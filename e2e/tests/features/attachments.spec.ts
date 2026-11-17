@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { uploadPartPath, uploadsPath, type Message, type Upload } from "@ember/protocol";
-import type { APIRequestContext, Locator, Page } from "@playwright/test";
+import type { APIRequestContext, FileChooser, Locator, Page } from "@playwright/test";
 import { cookieHeader, drawnPicture } from "../../fixtures";
 import { expect, test, type Member } from "./fixtures";
 
@@ -54,8 +54,13 @@ const shared = (member: Member) => member.page.evaluate(() => (window as unknown
 /** The link on a file message's card that downloads its file. */
 const downloadLink = (member: Member, name: string) => member.message(name).getByRole("link", { name: `Download ${name}` });
 
-/** Composer's Attach files, its file field. */
-const attachFiles = (member: Member) => member.page.getByLabel("Attach a file");
+/** Picks `files` with Upload from your computer, in the composer's + menu, as the browser's file picker does. */
+async function attachFiles(member: Member, files: Parameters<FileChooser["setFiles"]>[0]): Promise<void> {
+  const chooser = member.page.waitForEvent("filechooser");
+  await member.page.locator("form.composer").getByRole("button", { name: "Attach", exact: true }).click();
+  await member.page.getByRole("menuitem", { name: /^Upload from your computer/ }).click();
+  await (await chooser).setFiles(files);
+}
 
 /** The files waiting in `member`'s composer, by the chips that take them back out. */
 const chips = (member: Member) => member.page.getByRole("button", { name: /^Remove / });
@@ -98,7 +103,7 @@ test.describe("Attach files", () => {
   test("sends the files picked with Attach files with the text written, each as a message of its own, in order of their names", async ({ members }) => {
     const ada = await members.signIn("Ada");
     const grace = await members.signIn("Grace");
-    await attachFiles(ada).setInputFiles([textFile("b.txt", "Bee"), textFile("a.txt", "Ay")]);
+    await attachFiles(ada, [textFile("b.txt", "Bee"), textFile("a.txt", "Ay")]);
     await expect(chips(ada)).toHaveCount(2);
     await expect(chips(ada).first()).toHaveAccessibleName("Remove a.txt");
     await expect(chips(ada).last()).toHaveAccessibleName("Remove b.txt");
@@ -140,7 +145,7 @@ test.describe("Image, video and file previews", () => {
   test("shows a picture by the thumbnail its uploader's browser makes, to everyone, in a box half its size up to 480px wide", async ({ members }) => {
     const ada = await members.signIn("Ada");
     const grace = await members.signIn("Grace");
-    await attachFiles(ada).setInputFiles(await drawnPicture(ada.page, "mural.png", 2400, 1600));
+    await attachFiles(ada, await drawnPicture(ada.page, "mural.png", 2400, 1600));
     await ada.page.getByRole("button", { name: "Send Message" }).click();
 
     for (const member of [ada, grace]) {
@@ -160,7 +165,7 @@ test.describe("Image, video and file previews", () => {
   test("plays a video in place, in a box half its size, behind the poster its uploader's browser makes, loading nothing until it's played", async ({ members, request }) => {
     const ada = await members.signIn("Ada");
     const grace = await members.signIn("Grace");
-    await attachFiles(ada).setInputFiles(clip);
+    await attachFiles(ada, clip);
     await ada.page.getByRole("button", { name: "Send Message" }).click();
 
     for (const member of [ada, grace]) {
@@ -187,7 +192,7 @@ test.describe("Image, video and file previews", () => {
 
     // Chromium can't decode HEIC, so this one goes without.
     const heic = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from("ftypheic"), Buffer.alloc(12)]);
-    await attachFiles(ada).setInputFiles({ name: "photo.heic", mimeType: "image/heic", buffer: heic });
+    await attachFiles(ada, { name: "photo.heic", mimeType: "image/heic", buffer: heic });
     await ada.page.getByRole("button", { name: "Send Message" }).click();
     await expect(downloadLink(ada, "photo.heic")).toBeVisible();
     await expect(ada.page.getByRole("img", { name: "photo.heic" })).toHaveCount(0);
@@ -207,7 +212,7 @@ test.describe("Safe SVG previews", () => {
       `<script>fetch("/svg/script")</script>`,
       `</svg>`,
     ].join("");
-    await attachFiles(ada).setInputFiles({ name: "badge.svg", mimeType: "image/svg+xml", buffer: Buffer.from(badge) });
+    await attachFiles(ada, { name: "badge.svg", mimeType: "image/svg+xml", buffer: Buffer.from(badge) });
     await ada.page.getByRole("button", { name: "Send Message" }).click();
 
     for (const member of [ada, grace]) {
@@ -225,6 +230,106 @@ test.describe("Safe SVG previews", () => {
   });
 });
 
+test.describe("Text files' text", () => {
+  test("shows a snippet's text above its card, to everyone, highlighted where its name says it's code, and copies it as written", async ({ members }) => {
+    const ada = await members.signIn("Ada");
+    const grace = await members.signIn("Grace");
+    await ada.page.locator("form.composer").getByRole("button", { name: "Attach", exact: true }).click();
+    await ada.page.getByRole("menuitem", { name: /^Text snippet/ }).click();
+    const dialog = ada.page.getByRole("dialog", { name: "Create a text snippet" });
+    await dialog.getByLabel("Title (optional)").fill("deploy.sh");
+    await dialog.getByLabel("Content").fill("#!/bin/sh\necho deployed");
+    await dialog.getByRole("button", { name: "Create snippet" }).click();
+    await ada.page.getByRole("button", { name: "Send Message" }).click();
+
+    for (const member of [ada, grace]) {
+      const text = member.message("deploy.sh").locator("pre");
+      await expect(text.locator(".hljs-built_in")).toHaveText("echo");
+      expect(await text.textContent()).toBe("#!/bin/sh\necho deployed");
+      const [shown, card] = [await text.boundingBox(), await downloadLink(member, "deploy.sh").boundingBox()];
+      expect(shown!.y + shown!.height).toBeLessThanOrEqual(card!.y);
+    }
+
+    await grace.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    const block = grace.message("deploy.sh").locator(".code-block");
+    await block.hover();
+    await block.getByRole("button", { name: "Copy code" }).click();
+    await expect.poll(() => grace.page.evaluate(() => navigator.clipboard.readText())).toBe("#!/bin/sh\necho deployed");
+  });
+
+  test("folds a text file's text past five lines behind Show more, and shows a bigger one's card alone", async ({ members, request, rooms }) => {
+    const ada = await members.signIn("Ada");
+    await upload(request, ada, rooms.general.id, "server.log", "x".repeat(64 * 1024 + 1));
+    await upload(request, ada, rooms.general.id, "notes.txt", Array.from({ length: 12 }, (_, line) => `Line ${line + 1}`).join("\n"));
+    const notes = ada.message("notes.txt");
+    const text = notes.locator("pre");
+    await expect(text).toContainText("Line 12");
+    // How many of its lines show, within its padding.
+    const linesShown = () =>
+      text.evaluate((pre) => {
+        const style = getComputedStyle(pre);
+        return Math.round((pre.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom)) / parseFloat(style.lineHeight));
+      });
+    expect(await linesShown()).toBe(5);
+    // Show more has a line of its own, under the text and over the card.
+    const showMore = notes.getByRole("button", { name: "Show more" });
+    const [shown, button, card] = [await text.boundingBox(), await showMore.boundingBox(), await downloadLink(ada, "notes.txt").boundingBox()];
+    expect(shown!.y + shown!.height).toBeLessThanOrEqual(button!.y);
+    expect(button!.y + button!.height).toBeLessThanOrEqual(card!.y);
+    await showMore.click();
+    expect(await linesShown()).toBe(12);
+    await notes.getByRole("button", { name: "Show less" }).click();
+    expect(await linesShown()).toBe(5);
+
+    // Scrolled to its end while open, a file too long to show whole folds back to its first lines.
+    await upload(request, ada, rooms.general.id, "long.txt", Array.from({ length: 100 }, (_, line) => `Row ${line + 1}`).join("\n"));
+    const long = ada.message("long.txt");
+    const longText = long.locator("pre");
+    await expect(longText).toContainText("Row 100");
+    await long.getByRole("button", { name: "Show more" }).click();
+    const scrolled = await longText.evaluate((pre) => {
+      pre.scrollTop = pre.scrollHeight;
+      return pre.scrollTop;
+    });
+    expect(scrolled).toBeGreaterThan(0);
+    await long.getByRole("button", { name: "Show less" }).click();
+    expect(await longText.evaluate((pre) => pre.scrollTop)).toBe(0);
+
+    await expect(downloadLink(ada, "server.log")).toBeVisible();
+    await expect(ada.message("server.log").locator("pre")).toHaveCount(0);
+  });
+
+  test("keeps the timeline at its end as a long snippet sent there shows its text", async ({ members, participant }) => {
+    // Enough before it that the timeline scrolls.
+    await (await participant("Grace")).sayAll(Array.from({ length: 20 }, (_, n) => `Earlier ${n + 1}`));
+    const ada = await members.signIn("Ada");
+    await expect(ada.message("Earlier 20")).toBeVisible();
+    await ada.page.locator("form.composer").getByRole("button", { name: "Attach", exact: true }).click();
+    await ada.page.getByRole("menuitem", { name: /^Text snippet/ }).click();
+    const dialog = ada.page.getByRole("dialog", { name: "Create a text snippet" });
+    await dialog.getByLabel("Title (optional)").fill("steps.sh");
+    await dialog.getByLabel("Content").fill(Array.from({ length: 12 }, (_, line) => `echo "step ${line + 1}"`).join("\n"));
+    await dialog.getByRole("button", { name: "Create snippet" }).click();
+    await ada.page.getByRole("button", { name: "Send Message" }).click();
+
+    await expect(ada.message("steps.sh").getByRole("button", { name: "Show more" })).toBeVisible();
+    await expect.poll(() => ada.outOfView(downloadLink(ada, "steps.sh"))).toBe(0);
+  });
+
+  test("shows an HTML file's markup as its text, where nothing in it runs or loads", async ({ members, request, rooms }) => {
+    const ada = await members.signIn("Ada");
+    const requested: string[] = [];
+    ada.page.on("request", (sent) => requested.push(new URL(sent.url()).pathname));
+    const markup = `<img src="/text/image.png" onerror="fetch('/text/onerror')"><script>fetch("/text/script")</script>`;
+    await upload(request, ada, rooms.general.id, "page.html", markup, "text/html");
+    const text = ada.message("page.html").locator("pre");
+    await expect(text.locator(".hljs-tag").first()).toBeVisible();
+    expect(await text.textContent()).toBe(markup);
+    await expect(text.locator("img, script")).toHaveCount(0);
+    expect(requested.filter((path) => path.startsWith("/text/"))).toEqual([]);
+  });
+});
+
 test.describe("Upload progress", () => {
   test("shows each upload's card until the room posts its file, and why one failed", async ({ members }) => {
     const ada = await members.signIn("Ada");
@@ -236,7 +341,7 @@ test.describe("Upload progress", () => {
       await held;
       await route.continue();
     });
-    await attachFiles(ada).setInputFiles(textFile("slow.txt", "Slow"));
+    await attachFiles(ada, textFile("slow.txt", "Slow"));
     await ada.page.getByRole("button", { name: "Send Message" }).click();
     const card = ada.page.getByRole("group", { name: "Upload slow.txt" });
     await expect(card).toContainText("slow.txt1 KB");
@@ -250,7 +355,7 @@ test.describe("Upload progress", () => {
     // A part the Worker won't take fails its upload, whose card stays saying why.
     await ada.page.unroute(parts);
     await ada.page.route(parts, (route) => route.fulfill({ status: 500 }));
-    await attachFiles(ada).setInputFiles(textFile("broken.txt", "Broken"));
+    await attachFiles(ada, textFile("broken.txt", "Broken"));
     await ada.page.getByRole("button", { name: "Send Message" }).click();
     const failed = ada.page.getByRole("group", { name: "Upload broken.txt" });
     await expect(failed.getByRole("alert")).toHaveText("Upload failed. Please attach the file and try again.");
@@ -307,7 +412,7 @@ test.describe("Image viewer", () => {
   test("opens a picture's original in the image viewer, which downloads it, and closes it with Escape", async ({ members }) => {
     const ada = await members.signIn("Ada");
     const grace = await members.signIn("Grace");
-    await attachFiles(ada).setInputFiles(await drawnPicture(ada.page, "mural.png", 2400, 1600));
+    await attachFiles(ada, await drawnPicture(ada.page, "mural.png", 2400, 1600));
     await ada.page.getByRole("button", { name: "Send Message" }).click();
 
     const link = grace.page.getByRole("link", { name: "mural.png" });

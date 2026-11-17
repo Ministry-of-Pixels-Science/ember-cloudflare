@@ -13,14 +13,19 @@ import { BUTTON } from "./email-settings";
 
 /** What the section says of connecting an AI app. */
 export const OUTSIDE_AI_EXPLAINED =
-  "Connect an AI app, such as Claude, to Ember by giving it this address as a connector or MCP server. It sends you to a page here that asks you first, and can then see the rooms you're in, read their messages and search them, as you can, and send messages as you if you let it.";
+  "Connect an AI app, such as Claude, to Ember by giving it this address as a connector or MCP server. It sends you to a page here that asks you first, and can then see the open rooms you're in, read their messages and search them, as you can, and send messages as you if you let it. It's kept out of your direct messages and private rooms unless you let it in.";
 
 /** What the section says in place of its list, with nothing connected as you. */
 export const NOTHING_CONNECTED = "No AI app is connected as you.";
 
-/** What a row says of a connection: where its app came back to, when you connected it, whether it may send messages as you, and when it last asked Ember anything, if it has. */
+/**
+ * What a row says of a connection: where its app came back to, when you connected it, whether it may
+ * send messages as you, whether it reaches your direct messages and private rooms, and when it last
+ * asked Ember anything, if it has.
+ */
 export function connectionStatus({ comesBackTo, connectedAt, usedAt, scopes }: OutsideConnection): string {
-  const connected = `From ${comesBackTo}, connected ${dateTimeLabel(new Date(connectedAt))}.${scopes.includes("write") ? " It can send messages as you." : ""}`;
+  const allowed = `${scopes.includes("write") ? " It can send messages as you." : ""}${scopes.includes("private") ? " It can use your direct messages and private rooms too." : ""}`;
+  const connected = `From ${comesBackTo}, connected ${dateTimeLabel(new Date(connectedAt))}.${allowed}`;
   return usedAt === null ? `${connected} It hasn't asked Ember anything yet.` : `${connected} It last asked Ember something ${dateTimeLabel(new Date(usedAt))}.`;
 }
 

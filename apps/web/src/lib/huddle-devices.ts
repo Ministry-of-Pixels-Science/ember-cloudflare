@@ -1,6 +1,7 @@
 // The microphone, the speaker and the camera a huddle uses, which its preview lets someone choose, as
-// the huddle's own menus do once they're in it, and this browser remembers for the next, and the screen
-// someone shares in one, which the browser asks them for each time.
+// the huddle's own menus do once they're in it, or on a phone, its button that switches cameras, and
+// this browser remembers for the next, and the screen someone shares in one, which the browser asks
+// them for each time.
 
 export type HuddleDevice = "microphone" | "speaker" | "camera";
 
@@ -75,11 +76,56 @@ export async function openCamera(deviceId: string | null): Promise<MediaStream |
 export const NO_OTHER_MICROPHONE = "Ember couldn't use that microphone. Nothing has changed.";
 export const NO_OTHER_CAMERA = "Ember couldn't use that camera. Nothing has changed.";
 export const NO_OTHER_SPEAKER = "Ember couldn't use that speaker. Nothing has changed.";
+/** And once it won't open their own camera again either, which the huddle let go of for the other. */
+export const CAMERA_WENT_OFF = "Ember couldn't use that camera, and your camera is off now. Turn it on again to show yours.";
 /** And what someone who only listens in one is told once the browser has no microphone for them still. */
 export const STILL_NO_MICROPHONE = "Ember has no microphone to use. To speak, let this site use your microphone in your browser's settings, then choose it again.";
 
 /** The device a camera's stream is from, by its id, or empty where the browser doesn't say. */
 export const cameraOf = (stream: MediaStream | null) => stream?.getVideoTracks()[0]?.getSettings().deviceId ?? "";
+
+/** Which way a camera faces, as a phone's browser says of each of its cameras: toward its person, as the one over its screen does, or away from them. */
+export type CameraFacing = "user" | "environment";
+
+/** Which way the camera a stream is from faces, or null where the browser doesn't say, as of most computers'. */
+export function facingOf(stream: MediaStream | null): CameraFacing | null {
+  const facing = stream?.getVideoTracks()[0]?.getSettings().facingMode;
+  return facing === "user" || facing === "environment" ? facing : null;
+}
+
+/** Whether a camera's stream is from one that faces away from its person, as a phone's back camera does, whose picture a mirror would show them the wrong way round. */
+export const facesAway = (stream: MediaStream | null) => facingOf(stream) === "environment";
+
+/** Opens the one camera `which` asks for, for a picture the size a huddle asks of one, or null when the browser has none such, or won't open it. */
+async function openCameraBy(which: MediaTrackConstraints): Promise<MediaStream | null> {
+  const media = navigator.mediaDevices as MediaDevices | undefined;
+  if (!media?.getUserMedia) return null;
+  try {
+    return await media.getUserMedia({ video: { ...CAMERA, ...which } });
+  } catch {
+    return null;
+  }
+}
+
+/** The camera the browser lists after `deviceId`'s, which is the first after the last, by its id, or null when it lists no other. */
+async function cameraAfter(deviceId: string): Promise<string | null> {
+  const { cameras } = await listDevices();
+  const next = cameras[(cameras.findIndex((camera) => camera.deviceId === deviceId) + 1) % cameras.length];
+  return next && next.deviceId !== deviceId ? next.deviceId : null;
+}
+
+/**
+ * Opens the camera to switch to from the one that was on, which was `deviceId`'s and faced `facing`:
+ * the one that faces the other way, as a phone's back camera does from its front one. Where the browser
+ * didn't say which way that one faced, as of a computer's, or has none that faces the other, it's the
+ * next the browser lists. Null when it has no other, or won't open it.
+ */
+export async function openOtherCamera(deviceId: string, facing: CameraFacing | null): Promise<MediaStream | null> {
+  const turned = facing && (await openCameraBy({ facingMode: { exact: facing === "user" ? "environment" : "user" } }));
+  if (turned) return turned;
+  const next = await cameraAfter(deviceId);
+  return next === null ? null : openCameraBy({ deviceId: { exact: next } });
+}
 
 /**
  * What a huddle asks of a shared screen: no larger than 1080p, which a larger display is scaled down

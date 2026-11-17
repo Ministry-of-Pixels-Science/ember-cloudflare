@@ -12,7 +12,7 @@ const APP = { appId: "2a95132c15732412d22c1476fa83f27a", appSecret: "66bcf64aa89
 const ACCOUNT_ID = "0123456789abcdef0123456789abcdef";
 
 /** Answers giving Ember the app's keys as the server would, or as `saved` says. */
-function serve(saved: () => Response | Promise<Response> = () => Response.json({ huddles: { appId: APP.appId } })) {
+function serve(saved: () => Response | Promise<Response> = () => Response.json({ huddles: { appId: APP.appId, relayKeyId: null } })) {
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     if (`${init?.method} ${String(input)}` === "PUT /api/account/huddles") return saved();
     throw new Error(`Unexpected request for ${init?.method} ${String(input)}`);
@@ -129,7 +129,7 @@ describe("Set up huddles", () => {
   });
 
   it("saves the app's keys, without the spaces around them, once Cloudflare has started a session with them", async () => {
-    const answer = held(() => Response.json({ huddles: { appId: APP.appId } }));
+    const answer = held(() => Response.json({ huddles: { appId: APP.appId, relayKeyId: null } }));
     serve(answer.answered);
     const { user, onSaved, onClose } = showSetup();
     await giveKeys(user, { appId: ` ${APP.appId} `, appSecret: `${APP.appSecret} ` });
@@ -152,7 +152,7 @@ describe("Set up huddles", () => {
     expect(within(done).getByRole("heading", { name: "Huddles are on" })).toHaveFocus();
     expect(done).toHaveAccessibleDescription(HUDDLES_ON);
     expect(HUDDLES_ON).toContain("Anyone can start one with the headphones at the top of a room.");
-    expect(onSaved).toHaveBeenCalledExactlyOnceWith({ appId: APP.appId });
+    expect(onSaved).toHaveBeenCalledExactlyOnceWith({ appId: APP.appId, relayKeyId: null });
     expect(asked()).toEqual([["PUT /api/account/huddles", APP]]);
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
     await user.click(button("Done"));
@@ -191,7 +191,7 @@ describe("Set up huddles", () => {
   });
 
   it("says under the secret that Cloudflare couldn't be asked, which saving again asks", async () => {
-    const answers = [() => Response.json({ error: HUDDLES_UNCHECKED }, { status: 502 }), () => Response.json({ huddles: { appId: APP.appId } })];
+    const answers = [() => Response.json({ error: HUDDLES_UNCHECKED }, { status: 502 }), () => Response.json({ huddles: { appId: APP.appId, relayKeyId: null } })];
     serve(() => answers.shift()!());
     const { user, onSaved, onFailed } = showSetup();
     await giveKeys(user);
@@ -201,7 +201,7 @@ describe("Set up huddles", () => {
 
     await user.click(button("Save"));
     await dialog("Huddles are on");
-    expect(onSaved).toHaveBeenCalledExactlyOnceWith({ appId: APP.appId });
+    expect(onSaved).toHaveBeenCalledExactlyOnceWith({ appId: APP.appId, relayKeyId: null });
     expect(asked()).toEqual([
       ["PUT /api/account/huddles", APP],
       ["PUT /api/account/huddles", APP],
@@ -224,7 +224,7 @@ describe("Set up huddles", () => {
   it("starts from the app's ID when changing keys, and asks for its secret again", async () => {
     serve();
     const another = { appId: "f".repeat(32), appSecret: "0".repeat(64) };
-    const { user, onSaved } = showSetup({ huddles: { appId: APP.appId } });
+    const { user, onSaved } = showSetup({ huddles: { appId: APP.appId, relayKeyId: null } });
     await dialog("Set up huddles");
     expect(appIdField()).toHaveValue(APP.appId);
     expect(appSecretField()).toHaveValue("");
@@ -233,10 +233,10 @@ describe("Set up huddles", () => {
     expect(screen.queryByText(SECRET_KEPT)).not.toBeInTheDocument();
     expect(button("Save")).toBeDisabled();
 
-    vi.mocked(fetch).mockImplementation(async () => Response.json({ huddles: { appId: another.appId } }));
+    vi.mocked(fetch).mockImplementation(async () => Response.json({ huddles: { appId: another.appId, relayKeyId: null } }));
     await giveKeys(user, another);
     await dialog("Huddles are on");
-    expect(onSaved).toHaveBeenCalledExactlyOnceWith({ appId: another.appId });
+    expect(onSaved).toHaveBeenCalledExactlyOnceWith({ appId: another.appId, relayKeyId: null });
     expect(asked()).toEqual([["PUT /api/account/huddles", another]]);
   });
 });

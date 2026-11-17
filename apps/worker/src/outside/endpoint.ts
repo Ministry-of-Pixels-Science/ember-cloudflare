@@ -8,13 +8,19 @@ import { registerTools } from "./tools";
 // Where an AI app connected to Ember asks it, over the Model Context Protocol, as the person who
 // connected it: a server with the tools its connection allows (`./tools`), and nothing else.
 
-/** What Ember tells an app of itself, which the app's model reads. */
-const INSTRUCTIONS =
-  "Ember is a team's chat: rooms that are open to everyone or private, and direct messages. This server acts as the person who connected it, and sees only what they can see. list_rooms gives the ids of their rooms, read_room reads a room's messages from the newest back, read_thread reads a thread's, and search_messages finds messages by their words across them all. send_message, when it's among the tools, sends a message as them, which everyone in the room sees as theirs, so send only what they ask for.";
+/** What this connection reaches of what its person can see, as an app's model is told: all of it with "private", or only the rooms open to everyone. */
+const reachOf = ({ scopes }: OutsideAccess) =>
+  scopes.includes("private")
+    ? "and sees only what they can see, their direct messages and private rooms too"
+    : "and sees only the rooms open to everyone that they're in: they haven't let it into their direct messages and private rooms, which connecting it again can";
+
+/** What Ember tells an app with `access` of itself, which the app's model reads. */
+const instructionsFor = (access: OutsideAccess) =>
+  `Ember is a team's chat: rooms that are open to everyone or private, and direct messages. This server acts as the person who connected it, ${reachOf(access)}. list_rooms gives the ids of the rooms it reaches, read_room reads a room's messages from the newest back, read_thread reads a thread's, and search_messages finds messages by their words across them all. send_message, when it's among the tools, sends a message as them, which everyone in the room sees as theirs, so send only what they ask for.`;
 
 /** The server an app with `access` talks to, with the tools its connection allows. */
 function serverFor(env: Env, access: OutsideAccess): McpServer {
-  const server = new McpServer({ name: "ember", title: "Ember", version: VERSION }, { instructions: INSTRUCTIONS });
+  const server = new McpServer({ name: "ember", title: "Ember", version: VERSION }, { instructions: instructionsFor(access) });
   registerTools(server, env, access);
   return server;
 }

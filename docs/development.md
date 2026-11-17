@@ -82,7 +82,10 @@ Ember page, as its first visitor would. The `workspace-settings` suites, which c
 workspace, get a second server, over HTTPS, which the same first run sets up. Their browsers have a
 made-up microphone, camera and screen to share, for the huddles spec, whose stand-in for Cloudflare's
 Realtime SFU (`e2e/tests/workspace-settings/fake-sfu.ts`) passes what each browser says and shows on
-to the others through a page of its own, so a huddle there is heard and seen for real.
+to the others through a page of its own, so a huddle there is heard and seen for real, each camera
+in whichever of its two sizes the room asks for. It answers for Cloudflare's TURN service too, with
+servers at an address where nothing listens, so the spec sees which servers each tab's connections
+go by, and nothing is relayed.
 
 The features suite (`e2e/tests/features/`) has a spec per area of the app. Each test gets rooms of
 its own, and `members.signIn` opens a browser per person, so tests can chat, react and watch

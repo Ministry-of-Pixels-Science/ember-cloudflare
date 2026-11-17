@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
-import { huddleSpeaker } from "./huddle-speaker";
+import { huddleSpeaker as speakerFor, type HuddleSpeaker } from "./huddle-speaker";
+
+// Each test's speakers, stopped after it so they stop listening to the page.
+const speakers: HuddleSpeaker[] = [];
+const huddleSpeaker = (speakerId: string) => {
+  const speaker = speakerFor(speakerId);
+  speakers.push(speaker);
+  return speaker;
+};
 
 /** Once what the speaker started has run as far as it goes without the browser. */
 const settled = () => new Promise((resolve) => setTimeout(resolve));
@@ -35,6 +43,12 @@ function lists(...ids: string[]) {
   };
 }
 
+/** The page is hidden, as when its person goes to another app on a phone, or shows again. */
+const shows = (state: DocumentVisibilityState) => {
+  vi.spyOn(document, "visibilityState", "get").mockReturnValue(state);
+  document.dispatchEvent(new Event("visibilitychange"));
+};
+
 let play: MockInstance<HTMLMediaElement["play"]>;
 let pause: MockInstance<HTMLMediaElement["pause"]>;
 
@@ -44,6 +58,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  for (const speaker of speakers.splice(0)) speaker.stopAll();
   delete (HTMLMediaElement.prototype as { setSinkId?: unknown }).setSinkId;
   box()?.remove();
   vi.unstubAllGlobals();
@@ -101,6 +116,47 @@ describe("What a huddle's speaker plays until it's stopped", () => {
     speaker.playOnce(audio());
     expect(setSinkId).not.toHaveBeenCalled();
     speaker.stopAll();
+  });
+
+  it("plays again what the browser stopped while the page was hidden, as the page shows again, until the huddle stops", () => {
+    const speaker = huddleSpeaker("");
+    const [voice, music] = [audio(), audio()];
+    speaker.play(voice);
+    speaker.play(music);
+    // What plays still is left to play.
+    vi.spyOn(music, "paused", "get").mockReturnValue(false);
+    play.mockClear();
+
+    shows("hidden");
+    expect(play).not.toHaveBeenCalled();
+    shows("visible");
+    expect(play.mock.contexts).toEqual([voice]);
+
+    // Stopped, it listens to the page no more.
+    const unheard = vi.spyOn(document, "removeEventListener");
+    speaker.stopAll();
+    expect(unheard).toHaveBeenCalledWith("visibilitychange", expect.any(Function));
+    shows("visible");
+    expect(play).toHaveBeenCalledTimes(1);
+  });
+
+  it("plays at the person's next touch what the browser won't play again as the page shows, though it played it before", async () => {
+    const speaker = huddleSpeaker("");
+    const voice = audio();
+    speaker.play(voice);
+    await settled();
+    // Nothing was refused, so a touch has nothing to play.
+    document.body.click();
+    expect(play.mock.contexts).toEqual([voice]);
+
+    // The browser stopped it with the page hidden, and won't play it again until the page is touched.
+    play.mockRejectedValueOnce(new DOMException("play() failed", "NotAllowedError"));
+    shows("hidden");
+    shows("visible");
+    await settled();
+    expect(play.mock.contexts).toEqual([voice, voice]);
+    document.body.click();
+    expect(play.mock.contexts).toEqual([voice, voice, voice]);
   });
 
   it("stops for good with the huddle, which takes its box out of the page", () => {

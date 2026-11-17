@@ -18,10 +18,21 @@ export const MAX_ATTRIBUTES = 400;
  */
 export const MAX_REOPENED_ELEMENTS = 1_000;
 
+/**
+ * Ember's own limit, which Gumbo doesn't have either, on the attributes one reading of a body copies,
+ * in the UTF-16 units they serialize to. Each formatting element a parse reopens, and each one the
+ * adoption agency clones around a misnested block, is a copy with every attribute of the tag that
+ * opened it, so one long title reopened in each of a thousand paragraphs could otherwise parse into a
+ * thousand times its size. It's as much as a message's markup holds in all (the protocol's
+ * `MAX_MESSAGE_HTML_LENGTH`).
+ */
+export const MAX_COPIED_ATTRIBUTES_LENGTH = 100_000;
+
 const LIMIT_MESSAGES = {
   depth: "Document tree depth limit exceeded",
   attributes: "Attributes per element limit exceeded",
   reopened: "Reopened formatting elements limit exceeded",
+  copied: "Copied attributes limit exceeded",
 };
 
 export class ParseLimitError extends Error {
@@ -43,10 +54,31 @@ export interface Context {
 }
 
 /**
- * Parses markup as a fragment in a context, throwing `ParseLimitError` past Gumbo's limits:
- * `parseHtml` (parse5) on the server, `parseDom` in a browser.
+ * One reading of a body, from its markup to what's made of it: the parses of the body, of its
+ * attachments' content and of what each step serializes, which count what they copy together.
  */
-export type HtmlParser = (markup: string, context?: Context) => Fragment;
+export interface Reading {
+  /** What the attributes copied so far serialize to, in UTF-16 units, up to `MAX_COPIED_ATTRIBUTES_LENGTH`. */
+  copiedAttributesLength: number;
+}
+
+/**
+ * Parses markup as a fragment in a context, throwing `ParseLimitError` past Gumbo's limits:
+ * `parseHtml` (parse5) on the server, `parseDom` in a browser. A parse counts what it copies in
+ * `reading`, or by itself when it's given none.
+ */
+export type HtmlParser = (markup: string, context?: Context, reading?: Reading) => Fragment;
+
+/**
+ * `parse` for one reading of a body, whose parses count what they copy together, so that a body can't
+ * copy `MAX_COPIED_ATTRIBUTES_LENGTH` over again in each attachment's content. Reading a body again,
+ * as storing one reads it for its plain text and then to render it, is another reading, which copies
+ * what the first did: `forOneReading` of a reading's parser counts apart from it.
+ */
+export function forOneReading(parse: HtmlParser): HtmlParser {
+  const own: Reading = { copiedAttributesLength: 0 };
+  return (markup, context, reading = own) => parse(markup, context, reading);
+}
 
 /** `Document#fragment` parses in a `body` context. */
 export const BODY: Context = { name: "body", namespace: HTML_NAMESPACE };
