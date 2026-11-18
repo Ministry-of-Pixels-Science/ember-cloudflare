@@ -1286,6 +1286,31 @@ describe("Checking accounts with their refresh tokens", () => {
     expect(await statusOf(administrator, session.user.id)).toBe("active");
   });
 
+  it("asks again soon, suspending nobody, when the card starts asking about groups while a refresh it didn't need the userinfo endpoint for answers", async () => {
+    const administrator = await setUpWithSso();
+    const session = await ssoSession(katherine);
+    // An ID token without the groups, which the userinfo endpoint alone would give, were it up.
+    provider.idToken = { groups: undefined };
+    provider.userinfoDown = true;
+    let answer!: () => void;
+    provider.refreshing = new Promise((resolve) => (answer = resolve));
+    await due();
+    const checking = runDurableObjectAlarm(workspaceStub());
+    await vi.waitFor(() => expect(tokenRequests().some(({ body }) => new URLSearchParams(body).get("grant_type") === "refresh_token")).toBe(true));
+    expect((await saveSso(administrator, { allowedGroups: "staff" })).status).toBe(200);
+    answer();
+    expect(await checking).toBe(true);
+    expect(await statusOf(administrator, session.user.id)).toBe("active");
+    const [{ refresh_due_at: dueAt }] = (await workspaceSql("SELECT refresh_due_at FROM identities")) as [{ refresh_due_at: number }];
+    expect(dueAt).toBeLessThanOrEqual(Date.now() + 5 * 60 * 1000);
+    // Asked again by the card as it is, with the userinfo endpoint up, she's in a group it lets in.
+    provider.userinfoDown = false;
+    await due();
+    expect(await runDurableObjectAlarm(workspaceStub())).toBe(true);
+    expect(await statusOf(administrator, session.user.id)).toBe("active");
+    expect(await signsIn(session)).toBe(true);
+  });
+
   it("goes by groups only when a refresh without an ID token says them, since the userinfo endpoint may leave them out", async () => {
     const administrator = await setUpWithSso({ allowedGroups: "staff" });
     const session = await ssoSession(katherine);

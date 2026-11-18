@@ -572,7 +572,9 @@ userinfo endpoint keeps its accounts while it takes their refresh tokens, withou
 groups. Ember needs the userinfo endpoint's answer only when there's no ID token, or when Allowed
 groups lists some and the ID token leaves the groups claim out; otherwise, while it's down, the ID
 token's word stands. An answer counts only whole: one whose ID token doesn't check out, or whose
-userinfo endpoint answers for someone else, or doesn't answer when it's needed, is no answer. A
+userinfo endpoint answers for someone else, or doesn't answer when it's needed, is no answer, and
+the answer to a check that began before the card started listing Allowed groups, or changed its
+groups claim, when it may not have needed the userinfo endpoint, is asked again a few minutes later. A
 provider that doesn't answer is asked again every few minutes, for a day, after which the sessions the
 account signed in end. The Workspace keeps one refresh token per account, the latest sign-in's, so
 with a provider that rotates refresh tokens, an answer lost on its way back ends that account's

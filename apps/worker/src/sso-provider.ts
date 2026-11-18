@@ -102,6 +102,15 @@ export async function claimsOf(provider: SsoProvider, discovery: Discovery, toke
 const needsUserinfo = (provider: SsoProvider, fromToken: Claims | null) =>
   fromToken === null || (provider.allowedGroups.length > 0 && fromToken[provider.groupsClaim] === undefined);
 
+/**
+ * Whether the claims `claimsOf` gathered by the card `asked` say as much of someone's groups as the card
+ * `current` needs: it lets everyone in, or `asked` let in only some groups too, by the same claim, so
+ * the userinfo endpoint had to answer for them alike (`needsUserinfo`). Otherwise an ID token without
+ * them may be all that answered.
+ */
+export const toldAlike = (asked: SsoProvider, current: SsoProvider) =>
+  current.allowedGroups.length === 0 || (asked.allowedGroups.length > 0 && asked.groupsClaim === current.groupsClaim);
+
 /** The groups the claim `claim` lists: a list of names, an object keyed by them, as Zitadel's roles are, or a single name. */
 export function groupsOf(claims: Claims, claim: string): string[] {
   const value = claims[claim];
