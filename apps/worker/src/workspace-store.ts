@@ -1090,12 +1090,12 @@ const CONNECTING_PERSON = `SELECT NOT ${NEEDS_NO_MEMBERSHIP} AS membership_neede
   FROM users WHERE id = ?1 AND ${CONNECTABLE}`;
 
 /**
- * Links the account at issuer ?1 with subject ?2, its membership read at ?3, named ?7 with the email
- * address ?8, to person ?5 at ?4, if they can have one connected and their password's digest is still
- * ?6, or "" without one, as it was when they started connecting it.
+ * Links the account at issuer ?1 with subject ?2, its membership read at ?3, lapsed ?9, named ?7 with the
+ * email address ?8, which signs in by ?10, to person ?5 at ?4, if they can have one connected and their
+ * password's digest is still ?6, or "" without one, as it was when they started connecting it.
  */
-const CONNECT_IDENTITY = `INSERT INTO identities (issuer, subject, user_id, checked_at, created_at, updated_at, name, email_address, lapsed)
-  SELECT ?1, ?2, id, ?3, ?4, ?4, ?7, ?8, ?9 FROM users WHERE id = ?5 AND ${CONNECTABLE} AND coalesce(password_digest, '') = ?6
+const CONNECT_IDENTITY = `INSERT INTO identities (issuer, subject, user_id, checked_at, created_at, updated_at, name, email_address, lapsed, via)
+  SELECT ?1, ?2, id, ?3, ?4, ?4, ?7, ?8, ?9, ?10 FROM users WHERE id = ?5 AND ${CONNECTABLE} AND coalesce(password_digest, '') = ?6
   RETURNING user_id`;
 
 /**
@@ -1107,8 +1107,8 @@ const CONNECT_IDENTITY = `INSERT INTO identities (issuer, subject, user_id, chec
  * since, is linked by it, so that nobody can claim a colleague's address ahead of them, and never an
  * administrator, who connects one from their profile, with their password.
  */
-const LINK_VERIFIED_EMAIL = `INSERT INTO identities (issuer, subject, user_id, checked_at, created_at, updated_at, name, email_address)
-  SELECT ?1, ?2, users.id, ?3, ?4, ?4, ?5, ?6 FROM users WHERE lower(users.email_address) = lower(?7) AND ${CONNECTABLE}
+const LINK_VERIFIED_EMAIL = `INSERT INTO identities (issuer, subject, user_id, checked_at, created_at, updated_at, name, email_address, via)
+  SELECT ?1, ?2, users.id, ?3, ?4, ?4, ?5, ?6, 'sso' FROM users WHERE lower(users.email_address) = lower(?7) AND ${CONNECTABLE}
     AND users.email_verified_at IS NOT NULL AND users.role <> ${ADMINISTRATOR}
     AND (SELECT count(*) FROM users AS same WHERE lower(same.email_address) = lower(?7)) = 1
     AND NOT EXISTS (SELECT 1 FROM identities WHERE identities.user_id = users.id AND identities.issuer = ?1)
@@ -3640,15 +3640,16 @@ export class WorkspaceStore {
   }
 
   /**
-   * Adds someone who signed in with `account`, an account elsewhere, as a member with no password, linked
-   * to it, with their session, in every open room, spending the links to their email address and
-   * starting the DMs `welcomes` lists, as `createMember` adds someone who joins. If someone has their
-   * email address already, or the account is linked to someone already, a unique index refuses its
-   * statement, and so the whole batch.
+   * Adds someone who signed in with `account`, an account elsewhere, by `via`, as a member with no
+   * password, linked to it, with their session, in every open room, spending the links to their email
+   * address and starting the DMs `welcomes` lists, as `createMember` adds someone who joins. If someone
+   * has their email address already, or the account is linked to someone already, a unique index refuses
+   * its statement, and so the whole batch.
    */
   async createLinkedMember(
     person: NewLinkedPerson,
     account: LinkedAccount,
+    via: "memberful" | "sso",
     checkedAt: number,
     welcomes: Welcome[],
     sessionId: string,
@@ -3668,7 +3669,7 @@ export class WorkspaceStore {
         now,
       ),
       statement(
-        `INSERT INTO identities (issuer, subject, user_id, checked_at, created_at, updated_at, name, email_address) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO identities (issuer, subject, user_id, checked_at, created_at, updated_at, name, email_address, via) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         account.issuer,
         account.subject,
         person.id,
@@ -3677,6 +3678,7 @@ export class WorkspaceStore {
         now,
         account.name,
         account.emailAddress,
+        via,
       ),
       ...this.keepingRefresh(account, kept),
       statement(INSERT_IDENTITY_SESSION, sessionId, person.id, tokenDigest, client.ip, client.userAgent, now, account.issuer, kept.sid),
@@ -3902,14 +3904,15 @@ export class WorkspaceStore {
   }
 
   /**
-   * Links `account`, an account elsewhere, to the person `connecting` is for, its membership read at
-   * `checkedAt`, unless they've stopped being able to have one connected, or their password has changed
-   * since it checked out. Whether it's linked. A unique index refuses it for an account linked to
-   * anyone already, or a second account of theirs at its issuer.
+   * Links `account`, an account elsewhere that signs in by `via`, to the person `connecting` is for, its
+   * membership read at `checkedAt`, unless they've stopped being able to have one connected, or their
+   * password has changed since it checked out. Whether it's linked. A unique index refuses it for an
+   * account linked to anyone already, or a second account of theirs at its issuer.
    */
   async connectIdentity(
     { userId, passwordDigest }: Connecting,
     account: LinkedAccount,
+    via: "memberful" | "sso",
     checkedAt: number,
     lapsed: boolean,
     now: string,
@@ -3917,7 +3920,7 @@ export class WorkspaceStore {
   ): Promise<boolean> {
     const { issuer, subject, name, emailAddress } = account;
     const [connected] = await this.db.batch([
-      statement(CONNECT_IDENTITY, issuer, subject, checkedAt, now, userId, passwordDigest, name, emailAddress, lapsed ? 1 : 0),
+      statement(CONNECT_IDENTITY, issuer, subject, checkedAt, now, userId, passwordDigest, name, emailAddress, lapsed ? 1 : 0, via),
       ...this.keepingRefresh(account, kept),
     ]);
     return connected!.length > 0;
@@ -3950,9 +3953,12 @@ export class WorkspaceStore {
     return (await this.db.all(`SELECT 1 FROM identities WHERE issuer = ? LIMIT 1`, issuer)).length > 0;
   }
 
-  /** A Memberful site anyone here, whatever their status, has an account at linked to them, the first if there are several, or null while nobody has. */
+  /**
+   * A Memberful site anyone here, whatever their status, has an account at linked to them, the first if
+   * there are several, or null while nobody has. A single sign-on provider's issuer never is one.
+   */
   async linkedSite(): Promise<string | null> {
-    const [linked] = await this.db.all<{ issuer: string }>(`SELECT issuer FROM identities LIMIT 1`);
+    const [linked] = await this.db.all<{ issuer: string }>(`SELECT issuer FROM identities WHERE via = 'memberful' LIMIT 1`);
     return linked?.issuer ?? null;
   }
 

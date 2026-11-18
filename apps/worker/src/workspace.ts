@@ -171,7 +171,7 @@ import type { PickedTool } from "./apps/tools";
 import { seal, unseal } from "./sealed";
 import { isToken } from "./secrets";
 import { SessionCache } from "./session-cache";
-import { claimsOf, isAllowed, sameGroupRules, ssoProviderOf, ssoSettingsOf, toldAlike, type MemberElsewhere, type SsoProvider } from "./sso-provider";
+import { claimsOf, isAllowed, sameSignInRules, ssoProviderOf, ssoSettingsOf, toldAlike, type MemberElsewhere, type SsoProvider } from "./sso-provider";
 import { CLOSE_REASONS, closeTooLarge, isTooLarge, MAX_WORKSPACE_FRAME_SIZE, RESERVED_CLOSE_CODES } from "./sockets";
 import type { Transfer } from "./transfers";
 import type { TurnstileKeys } from "./turnstile";
@@ -1947,9 +1947,9 @@ export class Workspace extends DurableObject<Env> {
   /**
    * The Memberful site Set up Memberful keeps, since people here sign in with their accounts at it, which
    * are linked to them by that site and their member id there, so that another site's members never sign
-   * in as them: the site an administrator gave while anyone is linked at it, or else the site anyone is
-   * linked at, as when the deployment's secrets gave the keys, even after keys for another were given.
-   * Null while nobody is.
+   * in as them: the site an administrator gave while anyone is linked at it, or else the Memberful site
+   * anyone is linked at (`linkedSite`), as when the deployment's secrets gave the keys, even after keys
+   * for another were given, never the single sign-on provider's issuer. Null while nobody is.
    */
   private async memberfulSiteKept(account: Pick<JoinableAccount, "memberfulKeys">): Promise<string | null> {
     const site = account.memberfulKeys?.site;
@@ -1972,13 +1972,14 @@ export class Workspace extends DurableObject<Env> {
    * Whether what `via` signs in with has changed since the Worker signed `member` in at `issuer` with it:
    * another Memberful site's keys (`memberfulSiteReplaced`), or another single sign-on provider, or none,
    * in place of the one it asked, or a card that lets in other people than the one whether `member` is
-   * let in went by. Asked one change at a time with setting either up, so one goes first.
+   * let in went by, as one for another app at the provider does, which the ID token wasn't for. Asked one
+   * change at a time with setting either up, so one goes first.
    */
   private async signInOutdated(via: SignInElsewhere, issuer: string, member: MemberElsewhere): Promise<boolean> {
     if (via === "memberful") return this.memberfulSiteReplaced(issuer);
     const provider = await this.ssoProvider();
     if (provider?.issuer !== issuer) return true;
-    return member.letInBy !== undefined && !sameGroupRules(provider, member.letInBy);
+    return member.letInBy !== undefined && !sameSignInRules(provider, member.letInBy);
   }
 
   /**
@@ -3017,7 +3018,7 @@ export class Workspace extends DurableObject<Env> {
       let welcomed: DirectRoom[];
       try {
         const now = new Date(session.lastActiveAt).toISOString();
-        welcomed = await this.store.createLinkedMember(person, linkedAccountOf(issuer, member), readAt, await this.welcomes(), session.id, tokenDigest, client, now, kept);
+        welcomed = await this.store.createLinkedMember(person, linkedAccountOf(issuer, member), via, readAt, await this.welcomes(), session.id, tokenDigest, client, now, kept);
       } catch (error) {
         if (member.emailAddress !== null && (await this.store.hasEmailAddress(member.emailAddress))) return "taken";
         throw error;
@@ -3172,7 +3173,7 @@ export class Workspace extends DurableObject<Env> {
         if (!person) return "refused";
         if (person.subject !== null) return "another";
         if (person.membershipNeeded && !member.subscribed) return "membership";
-        const connected = await this.store.connectIdentity(connecting, linkedAccountOf(issuer, member), readAt, !member.subscribed, new Date().toISOString(), kept);
+        const connected = await this.store.connectIdentity(connecting, linkedAccountOf(issuer, member), via, readAt, !member.subscribed, new Date().toISOString(), kept);
         if (!connected) return "refused";
         this.linkedSites.add(issuer);
       }
@@ -5899,13 +5900,14 @@ export class Workspace extends DurableObject<Env> {
         }
         // One at a time with sign-ins, as ending the sessions is: one that kept its token since has the
         // provider's word after this one. The groups go by the card as it is by then, and not at all once
-        // the provider has been forgotten or replaced while it answered, which would suspend people by
-        // the word of a provider that no longer signs anyone in, with nothing to ask again that restores them.
+        // the provider, or its app, has been forgotten or replaced while it answered, which would suspend
+        // people by the word of an app that no longer signs anyone in, with nothing to ask again that
+        // restores them.
         // A card that asks about groups otherwise by then may need the userinfo endpoint's word, which
         // the card as it was asked didn't wait for (`toldAlike`): the provider is asked again soon, by it.
         await this.closingSockets(async () => {
           const setUp = await this.ssoProvider();
-          const current = setUp?.issuer === provider.issuer ? setUp : null;
+          const current = setUp?.issuer === provider.issuer && setUp.clientId === provider.clientId ? setUp : null;
           const halfTold = current !== null && !toldAlike(provider, current);
           const dueAt = Date.now() + (halfTold ? SSO_RETRY_MS : SSO_CHECK_MS);
           const settled = await this.store.settleRefresh(provider.issuer, subject, sealedToken, { sealedToken: given, dueAt });

@@ -661,7 +661,9 @@ Objects, D1 or speed call for something else.
   token is still the one it asked with, so a sign-in meanwhile keeps its own. `sessions.identity_issuer`
   and `identity_sid` say which provider and which of its sessions signed a session in, indexed
   together, so a back-channel logout ends just those, or, by subject, the sessions any of that
-  account's sign-ins started, which a password's sessions never are.
+  account's sign-ins started, which a password's sessions never are. `identities.via` says which way
+  each account signs in, `memberful` for those from before, so the Memberful site Set up Memberful
+  keeps, while people are linked at it, is never a provider's issuer.
 - **Memberships are asked about, not taken from webhooks.** Memberful sends its webhooks in no
   particular order, so one only queues a check of a linked member in `membership_checks` (workspace
   migration 0038), keyed by issuer and subject, as `identities` is, which the Workspace's alarm asks

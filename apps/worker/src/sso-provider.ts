@@ -13,8 +13,11 @@ import type { SavedSso } from "./workspace-store";
 /** The provider, with its app's secret opened, and where its issuer and app come from. */
 export interface SsoProvider extends OidcClient, Omit<SsoSettings, "issuer" | "clientId"> {}
 
-/** What the Single sign-on card says of whom it lets in, which `isAllowed` goes by. */
-export type GroupRules = Pick<SsoProvider, "allowedGroups" | "groupsClaim">;
+/**
+ * What the Single sign-on card says of whom it lets in: whoever the provider signs in to its app,
+ * `clientId`, who is in a group it lets in, if it names any, as `isAllowed` goes by.
+ */
+export type SignInRules = Pick<SsoProvider, "clientId" | "allowedGroups" | "groupsClaim">;
 
 /**
  * Someone who signed in at an account elsewhere, as Memberful's member API or a single sign-on provider
@@ -30,13 +33,14 @@ export interface MemberElsewhere {
   emailAddress: string | null;
   emailVerified?: boolean;
   subscribed: boolean;
-  letInBy?: GroupRules;
+  letInBy?: SignInRules;
 }
 
-/** Whether `a` and `b` let in the same people: everyone, or those in the same groups at the same claim. */
-export const sameGroupRules = (a: GroupRules, b: GroupRules) =>
-  (a.allowedGroups.length === 0 && b.allowedGroups.length === 0) ||
-  (a.groupsClaim === b.groupsClaim && a.allowedGroups.every((group) => b.allowedGroups.includes(group)) && b.allowedGroups.every((group) => a.allowedGroups.includes(group)));
+/** Whether `a` and `b` let in the same people: those the same app signs in, and everyone, or those in the same groups at the same claim. */
+export const sameSignInRules = (a: SignInRules, b: SignInRules) =>
+  a.clientId === b.clientId &&
+  ((a.allowedGroups.length === 0 && b.allowedGroups.length === 0) ||
+    (a.groupsClaim === b.groupsClaim && a.allowedGroups.every((group) => b.allowedGroups.includes(group)) && b.allowedGroups.every((group) => a.allowedGroups.includes(group))));
 
 /** The deployment's issuer and app, from `SSO_ISSUER`, `SSO_CLIENT_ID` and `SSO_CLIENT_SECRET`, or null without all three. */
 export function ssoSecretsOf(env: Env): OidcClient | null {
@@ -164,6 +168,6 @@ export function memberOf(provider: SsoProvider, claims: Claims): MemberElsewhere
     // Some providers send it as text.
     emailVerified: emailAddress !== null && (claims.email_verified === true || claims.email_verified === "true"),
     subscribed: isAllowed(provider, claims),
-    letInBy: { allowedGroups: provider.allowedGroups, groupsClaim: provider.groupsClaim },
+    letInBy: { clientId: provider.clientId, allowedGroups: provider.allowedGroups, groupsClaim: provider.groupsClaim },
   };
 }

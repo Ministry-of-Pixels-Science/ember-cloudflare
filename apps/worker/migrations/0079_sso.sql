@@ -31,6 +31,11 @@ ALTER TABLE identities ADD COLUMN refresh_failing_since INTEGER;
 ALTER TABLE identities ADD COLUMN lapsed INTEGER NOT NULL DEFAULT 0;
 UPDATE identities SET lapsed = 1 WHERE user_id IN (SELECT id FROM users WHERE status = 3);
 
+-- Which way each linked account signs in: "memberful", at a Memberful site, as all of those from before
+-- do, or "sso", at a single sign-on provider. Set up Memberful keeps the site people are linked at
+-- (src/workspace.ts, `memberfulSiteKept`), which a provider's issuer never is.
+ALTER TABLE identities ADD COLUMN via TEXT NOT NULL DEFAULT 'memberful';
+
 -- When the person proved their email address is theirs, by joining with a link Ember emailed to it, or
 -- null for one nobody proved, as an address someone typed when they joined is, or one they've changed
 -- since, which saving their profile forgets it for. A single sign-on provider that says it verified an

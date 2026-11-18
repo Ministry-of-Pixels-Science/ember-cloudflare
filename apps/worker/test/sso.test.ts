@@ -611,6 +611,20 @@ describe("Sign in with SSO", () => {
     expect(locationOf(await signInWithSso(dorothy))).toBe(backToSignIn("membership"));
   });
 
+  it("signs nobody in by an app the card no longer goes by, once its Client ID changes while the provider answers", async () => {
+    const administrator = await setUpWithSso();
+    let answer!: () => void;
+    provider.exchanging = new Promise((resolve) => (answer = resolve));
+    const { params, cookie } = await startAndAuthorize();
+    const signingIn = callback(params, cookie);
+    await vi.waitFor(() => expect(tokenRequests()).toHaveLength(1));
+    // Another app at the same provider, which the ID token on its way isn't for.
+    expect((await saveSso(administrator, { clientId: "another-app", clientSecret: "another-app-secret" })).status).toBe(200);
+    answer();
+    expect(locationOf(await signingIn)).toBe(backToSignIn("failed"));
+    expect(await count("identities")).toBe(0);
+  });
+
   it("reads groups from a claim the card names, as an object of Zitadel's roles", async () => {
     const roles = "urn:zitadel:iam:org:project:roles";
     await setUpWithSso({ allowedGroups: "staff", groupsClaim: roles });
@@ -859,6 +873,24 @@ describe("Members only and SSO only together", () => {
   /** Starts connecting the account `session` signs in to one at `path`'s way in, from their profile, without a password. */
   const connect = (path: string, session: Session) =>
     withMemberful(path, { method: "POST", headers: { ...as(session), "CF-Connecting-IP": IP }, body: JSON.stringify({}) });
+
+  it("keeps no Memberful site for the accounts the provider links, so Set up Memberful takes keys for one", async () => {
+    const administrator = await setUpWithSso();
+    await ssoSession(katherine);
+    // Memberful takes the keys: its admin API answers the API key, and its token endpoint the app, refusing only the code.
+    const fetch = vi.mocked(globalThis.fetch);
+    const answers = fetch.getMockImplementation()!;
+    fetch.mockImplementation(async (input, init) => {
+      const url = new Request(input, init).url;
+      if (url === `${MEMBERFUL_SITE}/api/graphql`) return Response.json({ data: { members: { totalCount: 0 } } });
+      if (url === `${MEMBERFUL_SITE}/oauth/token`) return Response.json({ error: "invalid_grant" }, { status: 400 });
+      return answers(input, init);
+    });
+    const keys = { site: MEMBERFUL_SITE, apiKey: "an-api-key", clientId: "an-oauth-identifier", clientSecret: "an-oauth-secret", webhookSecret: "a-webhook-secret" };
+    const saved = await api("/api/account/memberful_keys", { method: "PUT", headers: as(administrator), body: JSON.stringify(keys) });
+    expect(saved.status, await saved.clone().text()).toBe(200);
+    expect(await saved.json()).toMatchObject({ memberfulSite: MEMBERFUL_SITE, memberfulSiteKept: null });
+  });
 
   it("can both be on, when someone new joins with either, and the join link and guests are off", async () => {
     const administrator = await setUpWithSso({ only: true });
@@ -1350,6 +1382,22 @@ describe("Checking accounts with their refresh tokens", () => {
     expect(await runDurableObjectAlarm(workspaceStub())).toBe(true);
     expect(await statusOf(administrator, session.user.id)).toBe("active");
     expect(await signsIn(session)).toBe(true);
+  });
+
+  it("goes by no group a refresh says once the card's Client ID changes while the provider answers, as another app's word", async () => {
+    const administrator = await setUpWithSso({ allowedGroups: "staff" });
+    const session = await ssoSession(katherine);
+    // Out of every group the card lets in, by the word of the app it's about to stop going by.
+    provider.people.set(katherine.sub, { ...katherine, groups: ["visitors"] });
+    let answer!: () => void;
+    provider.refreshing = new Promise((resolve) => (answer = resolve));
+    await due();
+    const checking = runDurableObjectAlarm(workspaceStub());
+    await vi.waitFor(() => expect(tokenRequests().some(({ body }) => new URLSearchParams(body).get("grant_type") === "refresh_token")).toBe(true));
+    expect((await saveSso(administrator, { clientId: "another-app", clientSecret: "another-app-secret", allowedGroups: "staff" })).status).toBe(200);
+    answer();
+    expect(await checking).toBe(true);
+    expect(await statusOf(administrator, session.user.id)).toBe("active");
   });
 
   it("goes by groups only when a refresh without an ID token says them, since the userinfo endpoint may leave them out", async () => {
