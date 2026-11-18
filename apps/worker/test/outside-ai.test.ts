@@ -1,4 +1,4 @@
-import { HISTORY_PAGE_SIZE, MAX_MESSAGE_LENGTH, MAX_SEARCH_LENGTH, MESSAGE_TOO_LONG, type BotAnswer, type Me, type Message, type NewWorkspace, type ProfileAnswer, type RoomId, type WorkspaceSettings } from "@ember/protocol";
+import { HISTORY_PAGE_SIZE, MAX_MESSAGE_HTML_LENGTH, MAX_MESSAGE_LENGTH, MAX_SEARCH_LENGTH, MESSAGE_TOO_LONG, type BotAnswer, type Me, type Message, type NewWorkspace, type ProfileAnswer, type RoomId, type WorkspaceSettings } from "@ember/protocol";
 import {
   MAX_OUTSIDE_CONNECTIONS,
   OUTSIDE_ASK_REFUSED,
@@ -910,6 +910,8 @@ describe("What a connected AI app sends", () => {
     expect(await refusal(token, "send_message", { room_id: general, text: "word ".repeat(MAX_MESSAGE_LENGTH) })).toBe(MESSAGE_TOO_LONG);
     // Short enough to read as Markdown, and still more than a message holds.
     expect(await refusal(token, "send_message", { room_id: general, text: "w".repeat(MAX_MESSAGE_LENGTH + 1) })).toBe(MESSAGE_TOO_LONG);
+    // Text a message holds, as more markup than it holds, each `&` being `&amp;`.
+    expect(await refusal(token, "send_message", { room_id: general, text: "&".repeat(MAX_MESSAGE_HTML_LENGTH / 4) })).toBe(MESSAGE_TOO_LONG);
     expect(await refusal(token, "send_message", { room_id: secret.id, text: "Hello" })).toBe(NO_ROOM);
     expect(await refusal(token, "send_message", { room_id: general, text: "Hello", thread_id: "no-such-message" })).toBe("That message no longer exists");
     // A reply has no thread of its own.
