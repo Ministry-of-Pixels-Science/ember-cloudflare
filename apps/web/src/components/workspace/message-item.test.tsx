@@ -2,14 +2,15 @@ import type { Boost, Card, DirectoryUser, Message, StoredFile, User } from "@emb
 import { bodyFromPlainText } from "@ember/richtext/dom";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent, { type UserEvent } from "@testing-library/user-event";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { FlashProvider } from "@/components/flash";
+import { BlockingContext } from "@/hooks/use-blocking";
 import { DirectoryLoaded, PeopleContext, type People } from "@/hooks/use-directory";
 import { RefusedUnboosts, RoomConnection } from "@/hooks/use-room";
 import { timeLabel } from "@/lib/messages";
 import type { PendingMessage, PendingUpload } from "@/lib/room-state";
-import { MessageItem, type ThreadPlace } from "./message-item";
+import { BLOCKED_MESSAGE, MessageItem, type ThreadPlace } from "./message-item";
 
 const ada: User = { id: "u1", name: "Ada" };
 const grace: User = { id: "u2", name: "Grace" };
@@ -56,25 +57,32 @@ const fileMessage = (overrides: Partial<Message> = {}) => message({ body: "", pl
 /**
  * Renders one message, opening and closing its editor as the room does, seen by `me`, who's an
  * administrator if `administrator`, in a thread's panel if `thread` says where, and marked as the open
- * thread's if `open`. `sent` is what a reaction, edit or deletion reports: false when there's no
- * connection. `update` hands it a new copy of the message, as the room does when the message changes,
- * `reconnect` lets the page into the room again, and `refuse` has the room refuse to delete a reaction.
+ * thread's if `open`, who has blocked the people `blocked` names. `sent` is what a reaction, edit or
+ * deletion reports: false when there's no connection. `update` hands it a new copy of the message, as the
+ * room does when the message changes, `reconnect` lets the page into the room again, `refuse` has the
+ * room refuse to delete a reaction, `setBlocked` is what Block and Unblock call, and `block` has the
+ * sidebar hear that the people it names are the ones blocked.
  */
 function show(
   m: Message | PendingMessage,
-  { me = ada, administrator = false, threaded = false, sent = true, thread = undefined as ThreadPlace | undefined, open = false } = {},
+  { me = ada, administrator = false, threaded = false, sent = true, thread = undefined as ThreadPlace | undefined, open = false, blocked = [] as string[] } = {},
 ) {
   const actions = { boost: vi.fn(() => sent), unboost: vi.fn(() => sent), edit: vi.fn(() => sent), remove: vi.fn(() => sent), click: vi.fn(() => Promise.resolve(sent)) };
+  const setBlocked = vi.fn((_person: User, _blocked: boolean) => Promise.resolve(true));
   let setEditing: (editing: boolean) => void = () => {};
   let setMessage: (message: Message | PendingMessage) => void = () => {};
   let setConnections: (update: (connections: number) => number) => void = () => {};
   let setRefusals: (update: (refusals: number) => number) => void = () => {};
+  let setBlockedIds: (blocked: string[]) => void = () => {};
   const editors = { open: vi.fn(() => setEditing(true)), close: vi.fn(() => setEditing(false)), returnFocus: vi.fn(), attach: vi.fn(), reply: vi.fn() };
   function Room() {
     const [editing, set] = useState(false);
     const [shown, setShown] = useState(m);
     const [connections, setConnected] = useState(1);
     const [refusals, setRefused] = useState(0);
+    const [blockedIds, setBlockedNow] = useState(blocked);
+    const blocking = useMemo(() => ({ blocked: new Set(blockedIds), setBlocked }), [blockedIds]);
+    setBlockedIds = setBlockedNow;
     setEditing = set;
     setMessage = setShown;
     setConnections = setConnected;
@@ -83,7 +91,9 @@ function show(
       <FlashProvider workspace>
         <RoomConnection value={connections}>
           <RefusedUnboosts value={refusals}>
-            <MessageItem message={shown} me={{ ...me, administrator }} threaded={threaded} editing={editing} actions={actions} editors={editors} thread={thread} open={open} />
+            <BlockingContext value={blocking}>
+              <MessageItem message={shown} me={{ ...me, administrator }} threaded={threaded} editing={editing} actions={actions} editors={editors} thread={thread} open={open} />
+            </BlockingContext>
           </RefusedUnboosts>
         </RoomConnection>
       </FlashProvider>
@@ -93,8 +103,9 @@ function show(
   const update = (next: Message | PendingMessage) => act(() => setMessage(next));
   const reconnect = () => act(() => setConnections((connections) => connections + 1));
   const refuse = () => act(() => setRefusals((refusals) => refusals + 1));
+  const block = (blockedNow: string[]) => act(() => setBlockedIds(blockedNow));
   // The message's article, which holds a bot's cards' own.
-  return { actions, editors, update, reconnect, refuse, user: userEvent.setup(), article: within(container).getAllByRole("article")[0]! };
+  return { actions, editors, update, reconnect, refuse, setBlocked, block, user: userEvent.setup(), article: within(container).getAllByRole("article")[0]! };
 }
 
 /** The editor Edit opens, test-setup.ts's stand-in for Lexxy, which shows a message's text. */
@@ -257,7 +268,7 @@ describe("Download and share files", () => {
   it("offers Download in place of Quote among a file message's actions", async () => {
     const { user } = show(fileMessage(), { me: grace });
     await user.click(optionsOn("Q3 report.pdf"));
-    expect(barNames()).toEqual(["👍Thumbs up", "👏Clapping", "👋Waving hand", "More reactions", "Reply in thread", "Download", "Copy link"]);
+    expect(barNames()).toEqual(["👍Thumbs up", "👏Clapping", "👋Waving hand", "More reactions", "Reply in thread", "Download", "Copy link", "Block Ada"]);
     const download = within(actionBar()).getByRole("link", { name: "Download" });
     expect(download).toHaveAttribute("href", report.downloadUrl);
     expect(download).toHaveAttribute("download", "");
@@ -472,7 +483,7 @@ describe("Edit a message", () => {
   it("puts Edit last, as Slack does, and Delete in the editor", async () => {
     const { user } = show(message({ creator: grace }), { administrator: true });
     await user.click(optionsOn("Hello"));
-    expect(barNames()).toEqual(["👍Thumbs up", "👏Clapping", "👋Waving hand", "More reactions", "Reply in thread", "Quote", "Copy link", "Edit"]);
+    expect(barNames()).toEqual(["👍Thumbs up", "👏Clapping", "👋Waving hand", "More reactions", "Reply in thread", "Quote", "Copy link", "Block Grace", "Edit"]);
   });
 
   it("edits in place of the message, starting from its text, and Ctrl or Cmd+Enter saves", async () => {
@@ -587,7 +598,7 @@ describe("Message action bar", () => {
     await user.click(options);
     expect(options).toHaveAttribute("aria-expanded", "true");
     expect(options).toHaveAttribute("aria-controls", actionBar().id);
-    expect(barNames()).toEqual(["👍Thumbs up", "👏Clapping", "👋Waving hand", "More reactions", "Reply in thread", "Quote", "Copy link"]);
+    expect(barNames()).toEqual(["👍Thumbs up", "👏Clapping", "👋Waving hand", "More reactions", "Reply in thread", "Quote", "Copy link", "Block Ada"]);
 
     await user.click(options);
     expect(options).toHaveAttribute("aria-expanded", "false");
@@ -798,7 +809,7 @@ describe("More actions on a message", () => {
     expect(screen.getByRole("tooltip")).toHaveTextContent("More actions");
 
     await user.click(options);
-    expect(items()).toEqual(["Quote", "Copy text", "Copy link"]);
+    expect(items()).toEqual(["Quote", "Copy text", "Copy link", "Block Ada"]);
     expect(within(moreActions()).getByRole("button", { name: "Quote" })).toHaveFocus();
     expect(options).toHaveClass("bg-hover");
     // The pointer leaving no longer closes the bar.
@@ -822,13 +833,55 @@ describe("More actions on a message", () => {
 
     const file = show(fileMessage(), { me: grace, administrator: true });
     await openMoreActions(file.user, file.article);
-    expect(items()).toEqual(["Copy link", "Delete message"]);
+    expect(items()).toEqual(["Copy link", "Block Ada", "Delete message"]);
     cleanup();
 
     // A bot's cards can't be edited either, but their text can be quoted and copied.
     const cards = show(cardMessage(), { me: grace, administrator: true });
     await openMoreActions(cards.user, cards.article);
-    expect(items()).toEqual(["Quote", "Copy text", "Copy link", "Delete message"]);
+    expect(items()).toEqual(["Quote", "Copy text", "Copy link", "Block Ada", "Delete message"]);
+  });
+
+  it("offers Block on touch screens on the bar, after Copy link, where More actions doesn't open", async () => {
+    const { setBlocked, user } = show(message(), { me: grace });
+    await user.click(optionsOn("Hello"));
+    const block = within(actionBar()).getByRole("button", { name: "Block Ada" });
+    expect(block.querySelector("svg")).toHaveClass("iconoir-user-xmark");
+    await user.click(block);
+    expect(setBlocked).toHaveBeenCalledExactlyOnceWith(ada, true);
+    expect(optionsOn("Hello")).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("blocks the author of someone else's message, or unblocks them once they're blocked, handing focus to the composer", async () => {
+    withMouse();
+    const { article, editors, setBlocked, user } = show(message(), { me: grace });
+    await openMoreActions(user, article);
+    await user.click(within(moreActions()).getByRole("button", { name: "Block Ada" }));
+    expect(setBlocked).toHaveBeenCalledExactlyOnceWith(ada, true);
+    expect(editors.returnFocus).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("group", { name: "More actions" })).not.toBeInTheDocument();
+    cleanup();
+
+    const blocked = show(message(), { me: grace, blocked: [ada.id] });
+    await blocked.user.click(within(blocked.article).getByRole("button", { name: BLOCKED_MESSAGE }));
+    await openMoreActions(blocked.user, screen.getByRole("article"));
+    expect(items()).toEqual(["Quote", "Copy text", "Copy link", "Unblock Ada"]);
+    await blocked.user.click(within(moreActions()).getByRole("button", { name: "Unblock Ada" }));
+    expect(blocked.setBlocked).toHaveBeenCalledExactlyOnceWith(ada, false);
+  });
+
+  it("names the author as the people directory lists them in Block", async () => {
+    withMouse();
+    const actions = { boost: vi.fn(), unboost: vi.fn(), edit: vi.fn(), remove: vi.fn(), click: vi.fn() };
+    const editors = { open: vi.fn(), close: vi.fn(), returnFocus: vi.fn(), attach: vi.fn(), reply: vi.fn() };
+    const king: DirectoryUser = { ...ada, name: "Ada King", bio: null, role: "member", status: "active", avatarUrl: "" };
+    render(
+      <PeopleContext value={new Map([[ada.id, king]])}>
+        <MessageItem message={message()} me={{ ...grace, administrator: false }} threaded={false} editing={false} actions={actions} editors={editors} />
+      </PeopleContext>,
+    );
+    await openMoreActions(userEvent.setup(), screen.getByRole("article"));
+    expect(items()).toContain("Block Ada King");
   });
 
   it("copies the message's text, or its address, turning the item green and leaving the actions open", async () => {
@@ -1018,6 +1071,57 @@ describe("Quote a message", () => {
     const { editors, user } = show(message({ id: "r1", parentId: "m0", plainText: "In the thread" }), { me: grace, thread: { roomName: "general", direct: false } });
     await pressAction(user, "Quote", "In the thread");
     expect(editors.reply.mock.lastCall![0]).toContain(`<a href="${location.origin}/rooms/general/threads/m0/@r1">#</a>`);
+  });
+});
+
+describe("Messages from someone you've blocked", () => {
+  const replies = { count: 2, latestAt: new Date().toISOString(), people: [grace, ada] };
+
+  it("collapses to a button that shows the message, keeping its thread's summary", async () => {
+    const { article, user } = show(message({ thread: replies }), { me: grace, blocked: [ada.id] });
+    expect(article).toHaveTextContent(BLOCKED_MESSAGE);
+    expect(article).not.toHaveTextContent("Hello");
+    expect(within(article).queryByText("Ada")).not.toBeInTheDocument();
+    expect(within(article).queryByRole("button", { name: "Message options" })).not.toBeInTheDocument();
+    expect(within(article).getByRole("link", { name: /^2 replies/ })).toHaveAttribute("href", "/rooms/general/threads/m1");
+
+    await user.click(within(article).getByRole("button", { name: BLOCKED_MESSAGE }));
+    const shown = screen.getByRole("article");
+    expect(shown).toHaveTextContent("Hello");
+    expect(within(shown).getByRole("button", { name: "Message options" })).toBeInTheDocument();
+  });
+
+  it("says whose a message is once it's shown, even where it follows on from the one before", async () => {
+    const { user } = show(message(), { me: grace, blocked: [ada.id], threaded: true });
+    await user.click(screen.getByRole("button", { name: BLOCKED_MESSAGE }));
+    expect(screen.getByRole("heading", { level: 3 })).toHaveTextContent("Ada");
+  });
+
+  it("leaves the messages of anyone else, and your own, as they are", () => {
+    show(message(), { me: grace, blocked: ["u3"] });
+    expect(screen.getByRole("article")).toHaveTextContent("Hello");
+    cleanup();
+
+    show(message(), { me: ada, blocked: [grace.id] });
+    expect(screen.getByRole("article")).toHaveTextContent("Hello");
+  });
+
+  it("collapses as its author is blocked, and shows again as they're unblocked", () => {
+    const { block } = show(message(), { me: grace });
+    block([ada.id]);
+    expect(screen.getByRole("article")).toHaveTextContent(BLOCKED_MESSAGE);
+    block([]);
+    expect(screen.getByRole("article")).toHaveTextContent("Hello");
+  });
+
+  it("stays shown while its author stays blocked, but collapses again once they're unblocked and blocked again", async () => {
+    const { block, user } = show(message(), { me: grace, blocked: [ada.id] });
+    await user.click(screen.getByRole("button", { name: BLOCKED_MESSAGE }));
+    block([ada.id, "u3"]);
+    expect(screen.getByRole("article")).toHaveTextContent("Hello");
+    block([]);
+    block([ada.id]);
+    expect(screen.getByRole("article")).toHaveTextContent(BLOCKED_MESSAGE);
   });
 });
 

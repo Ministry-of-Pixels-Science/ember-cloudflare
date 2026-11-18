@@ -379,7 +379,7 @@ test.describe("Download and share files", () => {
     await expect(bar.getByRole("button", { name: "Quote" })).toHaveCount(0);
     // Quoting a file would quote nothing, so More actions has no Quote either.
     await grace.message("Q3 report.txt").getByRole("button", { name: "Message options" }).click();
-    await expect(grace.message("Q3 report.txt").getByRole("group", { name: "More actions" }).getByRole("button")).toHaveText(["Copy link"]);
+    await expect(grace.message("Q3 report.txt").getByRole("group", { name: "More actions" }).getByRole("button")).toHaveText(["Copy link", `Block ${ada.name}`]);
     // Share shows only where the browser can share, which Chromium on Linux can't, and WebKit on a Mac can.
     const shares = (await grace.page.evaluate(() => "canShare" in navigator)) ? 1 : 0;
     await expect(bar.getByRole("button", { name: "Share" })).toHaveCount(shares);

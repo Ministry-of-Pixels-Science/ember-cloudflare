@@ -61,6 +61,7 @@ import {
   onlyAddressesAt,
   othersAfterMove,
   parseAccountChanges,
+  parseAccountDeletion,
   parseClientFrame,
   parseCustomDomainCheck,
   parseCustomStyles,
@@ -421,6 +422,25 @@ describe("Room settings page", () => {
     ["a kind that isn't one", { name: "Design", kind: "secret" }, 'Kind must be "open" or "closed"'],
   ])("refuses %s and says why", (_, body, error) => {
     expect(parseRoomChanges(body)).toBe(error);
+  });
+});
+
+describe("Allow huddles in a room", () => {
+  it("takes whether huddles are allowed in the room, alone or with its other changes, or nothing to change", () => {
+    expect(parseRoomChanges({ huddles: false })).toEqual({ huddles: false });
+    expect(parseRoomChanges({ kind: "open", huddles: true })).toEqual({ kind: "open", huddles: true });
+    expect(parseRoomChanges({ name: "Leads", kind: "closed", memberIds: ["u1"], huddles: false })).toEqual({ name: "Leads", kind: "closed", memberIds: ["u1"], huddles: false });
+    expect(parseRoomChanges({ name: "Design" })).toHaveProperty("huddles", undefined);
+  });
+
+  it("refuses anything but true or false", () => {
+    for (const huddles of [null, 0, 1, "", "false", "off", [], {}]) {
+      expect(parseRoomChanges({ name: "Design", huddles }), JSON.stringify(huddles)).toBe("Huddles must be true or false");
+    }
+  });
+
+  it("takes nothing of huddles for a new room, which starts with them allowed", () => {
+    expect(parseNewRoom({ kind: "open", name: "Design", huddles: false })).not.toHaveProperty("huddles");
   });
 });
 
@@ -1117,6 +1137,24 @@ describe("Disconnect Memberful", () => {
     ["an endpoint longer than a subscription's", { pushSubscriptionEndpoint: "x".repeat(MAX_PUSH_ENDPOINT_LENGTH + 1) }, "Endpoint can't be longer than 2048 characters"],
   ])("refuses %s and says why", (_, body, error) => {
     expect(parseMemberfulDisconnection(body)).toBe(error);
+  });
+});
+
+describe("Delete my account", () => {
+  it("takes your password or your name as typed, leaving out what isn't sent", () => {
+    expect(parseAccountDeletion({ currentPassword: " compiler " })).toEqual({ currentPassword: " compiler " });
+    expect(parseAccountDeletion({ name: "Grace Hopper", pushSubscriptionEndpoint: "https://push.example" })).toEqual({ name: "Grace Hopper" });
+    expect(parseAccountDeletion({})).toEqual({});
+  });
+
+  it.each([
+    ["no body", null, "Expected a JSON object"],
+    ["a list", [{ name: "Grace Hopper" }], "Expected a JSON object"],
+    ["a password that isn't text", { currentPassword: 12345678 }, "Current password must be text"],
+    ["a name that isn't text", { name: ["Grace"] }, "Name must be text"],
+    ["a name longer than anyone's", { name: "x".repeat(MAX_USER_NAME_LENGTH + 1) }, "Name must be at most 100 characters"],
+  ])("refuses %s and says why", (_, body, error) => {
+    expect(parseAccountDeletion(body)).toBe(error);
   });
 });
 

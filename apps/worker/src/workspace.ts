@@ -4,6 +4,7 @@ import {
   ASSISTANT_NAME,
   CANT_SEND_EMAIL,
   CloseCode,
+  DELETED_PERSON_NAME,
   domainOfEmailAddress,
   EMAILS_PER_ADDRESS,
   EMAIL_LINKS_PER_NETWORK,
@@ -33,6 +34,7 @@ import {
   type Bot,
   type BotChanges,
   type BotSettings,
+  type ChangedBlocks,
   type CustomStyles,
   type DirectoryUser,
   type DirectRoom,
@@ -125,7 +127,7 @@ import { alreadyAMemberEmail, emailDomainLinkEmail, invitationEmail, passwordRes
 import { guestSignIn, type Env } from "./env";
 import { pictureObjects, type StoredPicture } from "./files/pictures";
 import type { RelayKey } from "./huddles/relay";
-import type { HuddleApp, SfuApp } from "./huddles/sfu";
+import type { HuddleApp, RoomHuddles, SfuApp } from "./huddles/sfu";
 import { alphanumeric, sortableId } from "./ids";
 import { sendEmail, sendEmails, senderOf, type Sender } from "./mail";
 import {
@@ -160,6 +162,7 @@ import type { Transfer } from "./transfers";
 import type { TurnstileKeys } from "./turnstile";
 import { isViewing, type Viewing } from "./viewing";
 import {
+  allowingHuddles,
   NEW_ACCOUNT_LOOKS,
   WorkspaceStore,
   type AccountChange,
@@ -169,6 +172,7 @@ import {
   type Client,
   type Connecting,
   type AssistantPicks,
+  type DeletedAccount,
   type DirectoryEntry,
   type Disconnection,
   type InvitationPush,
@@ -1842,6 +1846,16 @@ export class Workspace extends DurableObject<Env> {
     return account && app && { ...app, cameras: account.huddleCameras, screens: account.huddleScreens, relay: await this.openedRelay(account) };
   }
 
+  /**
+   * The same for room `roomId`, with whether the room's settings allow huddles in it. The room asks as
+   * someone joins its huddle and each time it checks one, so turning huddles off in a room's settings
+   * ends the one under way there.
+   */
+  async huddlesIn(roomId: RoomId): Promise<RoomHuddles> {
+    const [app, allowed] = await Promise.all([this.huddleApp(), this.store.roomAllowsHuddles(roomId)]);
+    return { app, allowed };
+  }
+
   /** The SFU app `account` keeps the keys of, with its secret opened, or null while it keeps none or the secret doesn't open. */
   private async openedHuddleApp({ huddles: saved }: Pick<JoinableAccount, "huddles">): Promise<SfuApp | null> {
     if (!saved) return null;
@@ -1873,14 +1887,14 @@ export class Workspace extends DurableObject<Env> {
 
   /**
    * Invites into room `roomId`'s huddle the people `userIds` names, as the room says `by`, who's in it,
-   * does: each of them who's in the room, and hears its @mentions of them or more, is told on every tab
-   * they have open, where it rings. Nobody else is told, so nobody hears of a room they aren't in, and
-   * nothing is kept of an invitation. Whoever of them has Ember in view nowhere, with no tab open or
+   * does: each of them who's in the room, hears its @mentions of them or more and hasn't blocked `by` is
+   * told on every tab they have open, where it rings. Nobody else is told, so nobody hears of a room they
+   * aren't in, and nothing is kept of an invitation. Whoever of them has Ember in view nowhere, with no tab open or
    * none of them shown, is pushed it too, while Web Push is on: this answers their pushes, for the room
    * to send, none of them to a guest while `EMBER_GUEST_SIGN_IN` doesn't let guests stay signed in.
    */
   async inviteToHuddle(roomId: RoomId, by: UserId, userIds: UserId[]): Promise<InvitationPush[]> {
-    const invited = await this.store.huddleInvitees(roomId, userIds);
+    const invited = await this.store.huddleInvitees(roomId, by, userIds);
     this.tell(invited, { type: "huddle.invited", roomId, by });
     const away = invited.filter((userId) => !this.hasInView(userId));
     if (away.length === 0 || !(await webPush(this.env)).on) return [];
@@ -3172,10 +3186,10 @@ export class Workspace extends DurableObject<Env> {
   async sidebar(credentials: Credentials): Promise<Sidebar | null> {
     const user = await this.authenticate(credentials);
     if (!user) return null;
-    const [{ rooms, favorites, sharedOrder, huddles, invitationRoomId }, account] = await Promise.all([this.store.roomsFor(user.id), this.joinableAccount()]);
+    const [{ rooms, favorites, sharedOrder, huddles, blocks, invitationRoomId }, account] = await Promise.all([this.store.roomsFor(user.id), this.joinableAccount()]);
     const invited = invitationRoomId !== null && rooms.some((room) => room.id === invitationRoomId);
     const invitation = account && invited ? { roomId: invitationRoomId, joinCode: account.joinCode } : null;
-    return { rooms, favorites, sharedOrder, invitation, huddles };
+    return { rooms, favorites, sharedOrder, invitation, huddles, blocks };
   }
 
   /**
@@ -3259,6 +3273,47 @@ export class Workspace extends DurableObject<Env> {
     this.tell([userId], { type: "favorites.changed", favorites });
   }
 
+  /**
+   * Has the person `credentials` signs in block whoever has id `userId`, as Block on their page and in
+   * their messages' More actions does: "not found" unless somebody they're told of has it, "yourself" for
+   * their own, or null without a valid session. From then on what the person blocked posts collapses for
+   * them, and doesn't mark their rooms unread, push to them or ring them, and the person blocked can't
+   * start a DM with them, though nothing tells them so. Their DM with them alone leaves their sidebar.
+   * Every tab of theirs hears whom they've blocked now, and the DM's level, when blocking hid it.
+   */
+  async block(credentials: Credentials, userId: UserId): Promise<ChangedBlocks | "not found" | "yourself" | null> {
+    const user = await this.authenticate(credentials);
+    if (!user) return null;
+    if (userId === user.id) return "yourself";
+    if (!(await this.isListedTo(userId, user.id))) return "not found";
+    return this.blocksChanged(user.id, await this.store.block(user.id, userId, new Date().toISOString()));
+  }
+
+  /**
+   * Has the person `credentials` signs in unblock whoever has id `userId`, as Unblock on their page and in
+   * Blocked people on their profile does, giving their DM with them alone the level it had before
+   * blocking hid it, or null without a valid session. Every tab of theirs hears whom they've blocked now,
+   * and the DM's level, when unblocking showed it again. Unblocking someone not blocked changes nothing.
+   */
+  async unblock(credentials: Credentials, userId: UserId): Promise<ChangedBlocks | null> {
+    const user = await this.authenticate(credentials);
+    if (!user) return null;
+    return this.blocksChanged(user.id, await this.store.unblock(user.id, userId));
+  }
+
+  /** Tells every tab of `userId`'s what `change` leaves: their level in the DM it hid or showed again, then whom they've blocked. */
+  private blocksChanged(userId: UserId, change: ChangedBlocks): ChangedBlocks {
+    if (change.direct) this.tell([userId], { type: "room.involvement", roomId: change.direct.roomId, involvement: change.direct.involvement });
+    this.tell([userId], { type: "blocks.changed", blocks: change.blocks });
+    return change;
+  }
+
+  /** Whether somebody has id `userId` whom `askerId` is told of: anyone but an AI agent only administrators' direct messages reach, unless they're one. */
+  private async isListedTo(userId: UserId, askerId: UserId): Promise<boolean> {
+    const [entry] = await this.store.directoryEntries([userId]);
+    return entry !== undefined && (entry.keptFor !== "admin-dms" || (await this.store.isAdministrator(askerId)));
+  }
+
   /** Sends `frame` on the workspace sockets of each of `userIds`, every tab of theirs, and nobody else's. */
   private tell(userIds: Iterable<UserId>, frame: WorkspaceServerFrame): void {
     const data = JSON.stringify(frame);
@@ -3327,17 +3382,18 @@ export class Workspace extends DurableObject<Env> {
    * who exist, whatever their status, or their DM with themselves when it names nobody else. An AI agent
    * kept for administrators counts as nobody to anyone else, and one only their direct messages reach to
    * an administrator who names with it anyone who isn't one, a member or a bot, who would read what it
-   * says (`DIRECT_PEOPLE`). A group of people has one DM, so the one they have opens again. Answers it,
-   * and whether it's new, or null without a valid session. Everyone in a new DM sees it in their sidebars
-   * at once, and nobody else hears of it.
+   * says (`DIRECT_PEOPLE`). A group of people has one DM, so the one they have opens again, but a new one
+   * is refused when someone it names has blocked them, answering the name of the first of those by name.
+   * Answers the DM, and whether it's new, or null without a valid session. Everyone in a new DM sees it in
+   * their sidebars at once, and nobody else hears of it.
    */
-  async startDirect(credentials: Credentials, userIds: UserId[]): Promise<{ room: DirectRoom; started: boolean } | null> {
+  async startDirect(credentials: Credentials, userIds: UserId[]): Promise<{ room: DirectRoom; started: boolean } | { refusedBy: string } | null> {
     const user = await this.authenticate(credentials);
     if (!user) return null;
     const people = userIds.length > 0 ? await this.store.directPeople(userIds, user.id) : [];
     const memberIds = [user.id, ...people.map((person) => person.id)];
     const direct = await this.store.startDirect(sortableId(), user.id, memberIds, new Date().toISOString());
-    if (direct.started) this.tell(direct.room.members.map((member) => member.id), { type: "room.saved", room: direct.room });
+    if ("room" in direct && direct.started) this.tell(direct.room.members.map((member) => member.id), { type: "room.saved", room: direct.room });
     return direct;
   }
 
@@ -3486,6 +3542,82 @@ export class Workspace extends DurableObject<Env> {
     }
     this.broadcast({ type: "user.updated", user: removed });
     return removed;
+  }
+
+  /**
+   * What deleting the account of the person `credentials` signs in checks first: the digest of their
+   * password, if they have one, which the Worker checks the one typed against, counting it against
+   * sign-in's limit for `ip`: "limited" past it. "only administrator" for the only administrator, who
+   * must make someone else one first. Null without a valid session. The password itself stays in the
+   * Worker, as at sign-in.
+   */
+  async accountDeletionCheck(credentials: Credentials, ip: string): Promise<{ passwordDigest: string | null } | "limited" | "only administrator" | null> {
+    const session = await this.session(credentials);
+    const signIn = session && (await this.store.signInOf(session.user.id));
+    if (!signIn) return null;
+    if (await this.isOnlyAdministrator(session.user.id)) return "only administrator";
+    if (signIn.passwordDigest === null) return { passwordDigest: null };
+    return this.signInAttempts.attempt(ip) ? { passwordDigest: signIn.passwordDigest } : "limited";
+  }
+
+  /**
+   * Deletes the account of the person `credentials` signs in, once they've said they mean it: with their
+   * password while they have one, whose digest was `checked` as the Worker checked it, or else by typing
+   * `name`, theirs as `sameName` compares names. "password needed" when they have a password whose
+   * digest isn't `checked`, "name needed" without one when `name` isn't theirs, "only administrator" for
+   * the only administrator, or null without a valid session. Everything removing them does follows
+   * (`deactivate`), and their name, email address, password, bio and avatar go, as do the rooms they
+   * starred and the accounts elsewhere they connected. Their row stays, named as deleted accounts are,
+   * since their DMs name them. The outbox has every room they can have written in delete their messages
+   * and boosts, and R2 their avatar. Everyone's workspace sockets hear of it, and the tabs of whoever had
+   * blocked them whom they've blocked now.
+   */
+  async deleteAccount(
+    credentials: Credentials,
+    checked: string | null,
+    name: string | undefined,
+  ): Promise<"deleted" | "password needed" | "name needed" | "only administrator" | null> {
+    return this.inALaterSecond(() =>
+      this.closingSockets(async () => {
+        const session = await this.session(credentials);
+        if (!session) return null;
+        const person = await this.store.ownProfile(session.user.id);
+        if (!person) return null;
+        // Read again here, since a reset or a change ahead of this in line can have replaced the password checked.
+        const passwordDigest = (await this.store.signInOf(person.id))?.passwordDigest ?? null;
+        if (passwordDigest !== checked) return "password needed";
+        if (passwordDigest === null && (name === undefined || !sameName(name, person.name))) return "name needed";
+        if (await this.isOnlyAdministrator(person.id)) return "only administrator";
+        const now = Date.now();
+        // Their avatar's address changes with the second they last changed in, so the one browsers keep isn't theirs anymore.
+        const tooSoon = tooSoonAfter(person.updatedAt, now);
+        if (tooSoon) return tooSoon;
+        const deletedAt = new Date(now).toISOString();
+        // As when removing someone, until the database says it queued nothing.
+        let deletion: DeletedAccount = { queued: true, blockers: [] };
+        try {
+          deletion = await this.sessions.change(
+            (session) => session.user.id === person.id,
+            () => this.store.deleteAccount(person.id, person.avatar?.key ?? null, CloseCode.Revoked, now, deletedAt),
+          );
+        } finally {
+          this.closeSockets(person.id, CloseCode.Revoked);
+          if (deletion.queued) await this.revocationsQueued(now);
+          else if (person.avatar) await this.wakeAt(now);
+        }
+        if (person.accounts.length > 0) await this.forgetUnlinked();
+        for (const { userId, blocks } of deletion.blockers) this.tell([userId], { type: "blocks.changed", blocks });
+        const deleted = { id: person.id, name: DELETED_PERSON_NAME, bio: null, role: "member", status: "deactivated", updatedAt: deletedAt, agent: false, keptFor: null } as const;
+        this.broadcast({ type: "user.updated", user: await this.directoryUser(deleted) });
+        return "deleted";
+      }),
+    );
+  }
+
+  /** Whether `userId` is the only administrator, whom the account can't do without. */
+  private async isOnlyAdministrator(userId: UserId): Promise<boolean> {
+    const administrators = await this.store.administratorIds();
+    return administrators.length === 1 && administrators[0] === userId;
   }
 
   /** Whether `userId` is @ember's or an agent's, which go with Ember AI, on the AI assistant tab, so that removing or banning them finds nobody. */
@@ -4411,12 +4543,13 @@ export class Workspace extends DurableObject<Env> {
   /**
    * Bans `userId`, whatever their status, as the person `credentials` signs in, answering them as the
    * people directory then lists them: "forbidden" unless that's an administrator, "not found" if nobody
-   * has the id, or it's @ember's or an agent's (`goesWithEmberAi`), or null without a valid session.
-   * Nobody can ban themselves ("yourself"), so there's always an administrator. If any IP address
-   * recorded on their sessions is one a ban can't block, it answers what's wrong with it and changes
-   * nothing. Otherwise it blocks them all, all their sessions end, their sockets close for good, here at
-   * once and in every room they're in through the outbox, and the outbox has every room they can have
-   * written in delete their messages. Everyone's workspace sockets hear of it.
+   * has the id, or it's @ember's or an agent's (`goesWithEmberAi`), or someone who deleted their
+   * account, or null without a valid session. Nobody can ban themselves ("yourself"), so there's always
+   * an administrator. If any IP address recorded on their sessions is one a ban can't block, it answers
+   * what's wrong with it and changes nothing. Otherwise it blocks them all, all their sessions end, their
+   * sockets close for good, here at once and in every room they're in through the outbox, and the outbox
+   * has every room they can have written in delete their messages. Everyone's workspace sockets hear of
+   * it.
    */
   async banPerson(
     credentials: Credentials,
@@ -4426,7 +4559,7 @@ export class Workspace extends DurableObject<Env> {
     if (!user) return null;
     return this.closingSockets(async () => {
       if (!(await this.store.isAdministrator(user.id))) return "forbidden";
-      const person = (await this.goesWithEmberAi(userId)) ? null : await this.store.person(userId);
+      const person = (await this.goesWithEmberAi(userId)) ? null : await this.store.bannablePerson(userId);
       if (!person) return "not found";
       if (userId === user.id) return "yourself";
       const ipAddresses = await this.store.sessionIpAddresses(userId);
@@ -4473,8 +4606,9 @@ export class Workspace extends DurableObject<Env> {
     return this.closingSockets(async () => {
       if (!(await this.store.isAdministrator(user.id))) return "forbidden";
       // As when banning, @ember and the agents go with Ember AI, which lifting a ban would otherwise
-      // bring back, and an agent kept to the open rooms picked would be put in every one.
-      const person = (await this.goesWithEmberAi(userId)) ? null : await this.store.person(userId);
+      // bring back, and an agent kept to the open rooms picked would be put in every one. Nor does it
+      // bring back someone who deleted their account.
+      const person = (await this.goesWithEmberAi(userId)) ? null : await this.store.bannablePerson(userId);
       if (!person) return "not found";
 
       const now = Date.now();
@@ -4690,7 +4824,9 @@ export class Workspace extends DurableObject<Env> {
    * is then: "not found" as for its settings, "forbidden" unless they can change it, or null without
    * a valid session. Anyone it takes out of the room is told to reconnect, and finds it gone, and it
    * leaves their sidebars. Everyone in it sees it as it is now in theirs, or, when only who's in it
-   * changed, the people it puts in do.
+   * changed, the people it puts in do. A huddle going on in a room it turns huddles off in is left
+   * by each tab that hears so, and ends for whoever is in it still as the room next checks it
+   * (`huddlesIn`).
    */
   async changeRoom(credentials: Credentials, roomId: RoomId, changes: RoomChanges): Promise<SharedRoom | "not found" | "forbidden" | null> {
     const user = await this.authenticate(credentials);
@@ -4699,13 +4835,15 @@ export class Workspace extends DurableObject<Env> {
       const found = await this.store.roomToChange(roomId, user.id);
       if (!found) return "not found";
       if (!found.canAdminister) return "forbidden";
+      const { huddles: _, ...room } = found.room;
       const changed: SharedRoom = {
-        ...found.room,
+        ...room,
         ...(changes.name && { name: changes.name }),
         ...(changes.kind && { kind: changes.kind }),
         ...(changes.icon !== undefined && { icon: changes.icon || null }),
+        ...allowingHuddles(changes.huddles ?? found.room.huddles !== false),
       };
-      if (!changes.name && !changes.kind && changes.icon === undefined) return changed;
+      if (!changes.name && !changes.kind && changes.icon === undefined && changes.huddles === undefined) return changed;
       const now = Date.now();
       // As when signing out, until the database says it queued nothing.
       let queued = changes.kind === "closed";
@@ -5214,7 +5352,8 @@ export class Workspace extends DurableObject<Env> {
   /**
    * Asks rooms to delete the messages of the people banned since, up to `limit` rooms, each
    * `MESSAGES_PER_PURGE` at a time, and only those written before the ban was lifted, if it has been,
-   * even while it's asking. A room that has more of theirs left is asked again at once, and one that
+   * even while it's asking, and the messages and boosts of the people who deleted their accounts, all
+   * of them, as many at a time. A room that has more of theirs left is asked again at once, and one that
    * can't be reached later, as a revocation is. A room is asked only once the sockets queued to close
    * there have closed, as those delivered just before may have, so a banned person can't write through
    * one after it's done. Answers how many it read.
@@ -5228,10 +5367,13 @@ export class Workspace extends DurableObject<Env> {
     const finished: number[] = [];
     const unfinished: number[] = [];
     const failed: number[] = [];
-    await eachAtMost(due, ROOMS_AT_ONCE, async ({ id, roomId, userId, liftedAt }) => {
+    await eachAtMost(due, ROOMS_AT_ONCE, async ({ id, roomId, userId, liftedAt, deletedAccount }) => {
       try {
+        const room = this.env.CHAT_ROOM.getByName(roomId);
         const until = liftedAt ?? this.liftedBans.get(userId) ?? null;
-        const more = await this.env.CHAT_ROOM.getByName(roomId).removeMessagesBy(roomId, userId, MESSAGES_PER_PURGE, until);
+        const more = deletedAccount
+          ? await room.removeEverythingBy(roomId, userId, MESSAGES_PER_PURGE)
+          : await room.removeMessagesBy(roomId, userId, MESSAGES_PER_PURGE, until);
         (more ? unfinished : finished).push(id);
       } catch (error) {
         console.error(`Could not delete messages in room ${roomId}; trying again later`, error);

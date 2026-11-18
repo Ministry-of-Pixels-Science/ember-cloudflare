@@ -26,7 +26,7 @@ const direct = (id: string, ...names: string[]): DirectSidebarRoom => ({
 });
 const unstarred: Favorites = { rooms: [], version: 0 };
 /** The sidebar's list of `rooms`, starred as `favorites` says. */
-const sidebar = (rooms: SidebarRoom[], favorites = unstarred): Sidebar => ({ rooms, favorites, sharedOrder: [], invitation: null, huddles: {} });
+const sidebar = (rooms: SidebarRoom[], favorites = unstarred): Sidebar => ({ rooms, favorites, sharedOrder: [], invitation: null, huddles: {}, blocks: { userIds: [], version: 0 } });
 
 describe("Create an open room", () => {
   it("puts a new room last, as the room someone was put in most recently, and the sidebar below every other room, whatever its name", () => {
@@ -251,6 +251,33 @@ describe("Star rooms", () => {
   });
 });
 
+describe("Block someone", () => {
+  const blocks = (userIds: string[], version: number) => ({ userIds, version });
+
+  it("keeps the newest blocks, from a block's answer, the socket or the list, whichever arrives last", () => {
+    const loaded = roomListReducer(NO_ROOM_LIST, { type: "loaded", list: { ...sidebar(four), blocks: blocks(["u2"], 2) } });
+    const blocked = roomListReducer(loaded, { type: "blocked", blocks: blocks(["u2", "u3"], 3) });
+    expect(blocked.list!.blocks).toEqual(blocks(["u2", "u3"], 3));
+    // The answer to the block, arriving after the socket's news of the unblock that followed it.
+    expect(roomListReducer(blocked, { type: "blocked", blocks: blocks(["u2"], 2) }).list).toBe(blocked.list);
+    expect(roomListReducer(blocked, { type: "blocked", blocks: blocks(["u3"], 3) }).list).toBe(blocked.list);
+  });
+
+  it("keeps blocks made while a list is on its way over the list's, unless the list's are newer", () => {
+    const loaded = roomListReducer(NO_ROOM_LIST, { type: "loaded", list: sidebar(four) });
+    const blocked = roomListReducer(roomListReducer(loaded, { type: "asked" }), { type: "blocked", blocks: blocks(["u3"], 1) });
+    expect(roomListReducer(blocked, { type: "loaded", list: sidebar(four) }).list!.blocks).toEqual(blocks(["u3"], 1));
+    const newer = { ...sidebar(four), blocks: blocks(["u3", "u4"], 2) };
+    expect(roomListReducer(blocked, { type: "loaded", list: newer }).list!.blocks).toEqual(blocks(["u3", "u4"], 2));
+  });
+
+  it("starts with nobody blocked when the first list fails to arrive, so the next block counts", () => {
+    const unanswered = roomListReducer(NO_ROOM_LIST, { type: "unanswered" });
+    expect(unanswered.list!.blocks).toEqual(blocks([], 0));
+    expect(roomListReducer(unanswered, { type: "blocked", blocks: blocks(["u2"], 1) }).list!.blocks.userIds).toEqual(["u2"]);
+  });
+});
+
 describe("Reorder starred rooms", () => {
   it("drops the star of a room that's gone, as the server's stars do, so an order saved next is one it knows", () => {
     const loaded = roomListReducer(NO_ROOM_LIST, { type: "loaded", list: sidebar(four, { rooms: ["r1", "r3"], version: 2 }) });
@@ -362,6 +389,15 @@ describe("Huddles in your rooms", () => {
     expect(another.list!.huddles).toEqual({ r1: huddle("ada", "grace"), r2: huddle("linus") });
     expect(roomListReducer(another, { type: "huddle", roomId: "r1", huddle: null }).list!.huddles).toEqual({ r2: huddle("linus") });
     expect(another.list!.rooms).toBe(loaded.list!.rooms);
+  });
+
+  it("takes whether a room allows huddles from the room as it's saved, which says so only while it doesn't", () => {
+    const off = roomListReducer(loaded, { type: "saved", room: { id: "r1", kind: "open", name: "Design", icon: null, huddles: false } });
+    expect(off.list!.rooms).toEqual([{ ...room("r1", "Design"), huddles: false }, room("r2", "general")]);
+    // Its huddle is the room's to end, so the list keeps it until it hears that it's over.
+    expect(off.list!.huddles).toEqual({ r1: huddle("ada") });
+    const on = roomListReducer(off, { type: "saved", room: { id: "r1", kind: "open", name: "Design", icon: null } });
+    expect(on.list!.rooms).toEqual([room("r1", "Design"), room("r2", "general")]);
   });
 
   it("forgets the huddle of a room that's gone", () => {

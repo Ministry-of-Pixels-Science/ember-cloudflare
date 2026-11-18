@@ -3,6 +3,8 @@ import {
   CloseCode,
   CURRENT_PASSWORD_NEEDED,
   CURRENT_PASSWORD_WRONG,
+  DELETION_NAME_NEEDED,
+  DELETION_PASSWORD_NEEDED,
   EMAIL_DOMAIN_NEEDS_EMAIL,
   EMAIL_SIGN_UP_PATH,
   INVITATION_PATH,
@@ -22,13 +24,16 @@ import {
   MEMBERFUL_WEBHOOK_PATH,
   NAME_RESERVED,
   NO_EMAIL_DOMAINS,
+  ONLY_ADMINISTRATOR,
   PASSWORD_RESET_PATH,
   PASSWORD_WITH_MEMBERFUL,
   isPasswordTooLong,
   isReservedName,
   isRoomId,
+  notTakingDirects,
   OPEN_WITH_MEMBERFUL,
   parseAccountChanges,
+  parseAccountDeletion,
   parseCustomDomainCheck,
   parseCustomStyles,
   parseFavoriteOrder,
@@ -53,6 +58,7 @@ import {
   workspacePageOf,
   type Account,
   type Bootstrap,
+  type ChangedBlocks,
   type ChangedPerson,
   type CustomDomainCheck,
   type CustomDomainLookup,
@@ -612,6 +618,23 @@ async function banPerson(request: Request, env: Env, userId: UserId): Promise<Re
   return json({ user: person } satisfies ChangedPerson);
 }
 
+/** Blocks someone, as Block on their page and in their messages' More actions does, answering whom you've blocked now. */
+async function block(request: Request, env: Env, userId: UserId): Promise<Response> {
+  const credentials = await credentialsOf(request, env);
+  const blocked = credentials && (await workspace(env).block(credentials, userId));
+  if (!blocked) return problem(401, "Not signed in");
+  if (blocked === "not found") return problem(404, "Not found");
+  if (blocked === "yourself") return problem(422, "You can't block yourself");
+  return json(blocked satisfies ChangedBlocks);
+}
+
+/** Unblocks someone, as Unblock on their page and in Blocked people on your profile does, answering as `block` does. */
+async function unblock(request: Request, env: Env, userId: UserId): Promise<Response> {
+  const credentials = await credentialsOf(request, env);
+  const unblocked = credentials && (await workspace(env).unblock(credentials, userId));
+  return unblocked ? json(unblocked satisfies ChangedBlocks) : problem(401, "Not signed in");
+}
+
 /** Lifts someone's ban, as Remove ban on their page does, answering them as `banPerson` does. */
 async function unbanPerson(request: Request, env: Env, userId: UserId): Promise<Response> {
   const credentials = await credentialsOf(request, env);
@@ -694,6 +717,36 @@ async function changeProfile(request: Request, env: Env): Promise<Response> {
   if (yours === "agent's name") return problem(422, agentsName(rest.name!));
   if (yours === "password needed") return problem(422, currentPassword ? CURRENT_PASSWORD_WRONG : CURRENT_PASSWORD_NEEDED);
   return profileAnswer(yours, env, memberfulSite);
+}
+
+/**
+ * Delete my account, on your profile: once you've said you mean it, with your password while you have
+ * one, which checking counts against sign-in's limit, or else by typing your name, deletes your account,
+ * as `Workspace.deleteAccount` does, and signs this browser out. 401 without a valid session; 409 for the
+ * only administrator; 422 without your password, or your name, or with one that isn't yours; and 429
+ * past sign-in's limit.
+ */
+async function deleteAccount(request: Request, env: Env): Promise<Response> {
+  const credentials = await credentialsOf(request, env);
+  if (!credentials) return problem(401, "Not signed in");
+  const deletion = parseAccountDeletion(await jsonBodyOf(request));
+  if (typeof deletion === "string") return problem(422, deletion);
+  const { currentPassword, name } = deletion;
+  const check = await workspace(env).accountDeletionCheck(credentials, request.headers.get("CF-Connecting-IP") ?? "unknown");
+  if (!check) return problem(401, "Not signed in");
+  if (check === "limited") return problem(429, SIGN_IN_LIMITED);
+  if (check === "only administrator") return problem(409, ONLY_ADMINISTRATOR);
+  if (check.passwordDigest !== null) {
+    if (!currentPassword) return problem(422, DELETION_PASSWORD_NEEDED);
+    // One longer than the form takes is nobody's, as at sign-in.
+    if (isPasswordTooLong(currentPassword) || !(await passwordHasher(env).verify(currentPassword, check.passwordDigest)).matches) return problem(422, CURRENT_PASSWORD_WRONG);
+  }
+  const deleted = await workspace(env).deleteAccount(credentials, check.passwordDigest, name);
+  if (!deleted) return problem(401, "Not signed in");
+  if (deleted === "password needed") return problem(422, currentPassword ? CURRENT_PASSWORD_WRONG : DELETION_PASSWORD_NEEDED);
+  if (deleted === "name needed") return problem(422, DELETION_NAME_NEEDED);
+  if (deleted === "only administrator") return problem(409, ONLY_ADMINISTRATOR);
+  return new Response(null, { status: 204, headers: { "Set-Cookie": expiredSessionCookie(request) } });
 }
 
 /**
@@ -926,7 +979,8 @@ async function createRoom(request: Request, env: Env): Promise<Response> {
 
 /**
  * Starts a DM with the people it names, or opens the one they have, as New direct message does: 201 for
- * a new DM and 200 for one they had.
+ * a new DM and 200 for one they had, or 403 for a new one with someone who has blocked you, which says
+ * only that they aren't taking direct messages.
  */
 async function startDirect(request: Request, env: Env): Promise<Response> {
   const credentials = await credentialsOf(request, env);
@@ -934,7 +988,9 @@ async function startDirect(request: Request, env: Env): Promise<Response> {
   const direct = parseNewDirect(await jsonBodyOf(request));
   if (typeof direct === "string") return problem(422, direct);
   const started = await workspace(env).startDirect(credentials, direct.userIds);
-  return started ? json({ room: started.room } satisfies StartedDirect, { status: started.started ? 201 : 200 }) : problem(401, "Not signed in");
+  if (!started) return problem(401, "Not signed in");
+  if ("refusedBy" in started) return problem(403, notTakingDirects(started.refusedBy));
+  return json({ room: started.room } satisfies StartedDirect, { status: started.started ? 201 : 200 });
 }
 
 /** Who New room's forms list: everyone active, by name, for anyone who may create rooms. */
@@ -1201,6 +1257,7 @@ function apiAction(request: Request, env: Env, pathname: string): (() => Respons
   if (pathname === "/api/sidebar/order" && request.method === "PUT") return () => setFavoriteOrder(request, env);
   if (pathname === "/api/users/me/profile" && request.method === "GET") return () => profile(request, env);
   if (pathname === "/api/users/me/profile" && request.method === "PATCH") return () => changeProfile(request, env);
+  if (pathname === "/api/users/me" && request.method === "DELETE") return () => deleteAccount(request, env);
   if (pathname === "/api/users/me/assistant" && request.method === "PATCH") return () => changeYourAssistant(request, env);
   const ownAppSignIn = pathname.match(/^\/api\/users\/me\/apps\/([^/]+)\/sign-in$/);
   if (ownAppSignIn && request.method === "POST") return () => beginOwnAppSignIn(request, env, ownAppSignIn[1]!);
@@ -1218,6 +1275,9 @@ function apiAction(request: Request, env: Env, pathname: string): (() => Respons
   const ban = pathname.match(/^\/api\/users\/([^/]+)\/ban$/);
   if (ban && request.method === "POST") return () => banPerson(request, env, segmentText(ban[1]!));
   if (ban && request.method === "DELETE") return () => unbanPerson(request, env, segmentText(ban[1]!));
+  const blocking = pathname.match(/^\/api\/users\/([^/]+)\/block$/);
+  if (blocking && request.method === "POST") return () => block(request, env, segmentText(blocking[1]!));
+  if (blocking && request.method === "DELETE") return () => unblock(request, env, segmentText(blocking[1]!));
   if (pathname === "/api/socket") return () => connectToWorkspace(request, env);
   if (pathname === "/api/rooms" && request.method === "POST") return () => createRoom(request, env);
   if (pathname === "/api/rooms/new" && request.method === "GET") return () => newRoomForm(request, env);

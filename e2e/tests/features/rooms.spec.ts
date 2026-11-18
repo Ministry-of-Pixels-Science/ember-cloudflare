@@ -326,7 +326,7 @@ test.describe("Go back to the last room", () => {
 
   test("shows someone in no rooms a picture of an empty room, with their name for screen readers", async ({ page, session }) => {
     await signInAs(page, session);
-    await page.route("**/api/sidebar", (route) => route.fulfill({ json: { rooms: [], favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: {} } satisfies Sidebar }));
+    await page.route("**/api/sidebar", (route) => route.fulfill({ json: { rooms: [], favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: {}, blocks: { userIds: [], version: 0 } } satisfies Sidebar }));
     await keepOtherRoomsOut(page, []);
     await page.goto("/");
     await expect(page).toHaveTitle("No rooms yet");

@@ -31,6 +31,11 @@ describe("hasHuddles", () => {
     expect(hasHuddles({ ...launch, kind: "closed" }, "ada", joinsNone)).toBe(true);
   });
 
+  it("isn't so of a shared room whose settings don't allow huddles", () => {
+    expect(hasHuddles({ ...launch, huddles: false }, "ada", joinsNone)).toBe(false);
+    expect(hasHuddles({ ...launch, kind: "closed", huddles: false }, "ada", joinsNone)).toBe(false);
+  });
+
   it("is so of a direct message with someone to huddle with, and of no other", () => {
     expect(hasHuddles(directOf(ada!, priya!), "ada", joinsNone)).toBe(true);
     expect(hasHuddles(directOf(ada!, deploys!, sam!), "ada", joinsNone)).toBe(true);

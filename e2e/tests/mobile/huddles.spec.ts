@@ -3,14 +3,14 @@ import type { HuddleClientFrame, HuddleServerFrame, MessageHuddle } from "@ember
 import type { APIRequestContext, Locator, Page, WebSocketRoute } from "@playwright/test";
 import { changeTheWorkspace, cookieHeader, editorField, huddleTilesKeepClear, isolateRoom, listing, openRoom, ROOM_SOCKET, signInAs, type Session, type Tells, type TestRoom } from "../../fixtures";
 import { auditScreen } from "./audits";
-import { expect, hasDrawerLayout, openKeyboard, test } from "./fixtures";
+import { expect, hasDrawerLayout, openKeyboard, SWITCHES, test } from "./fixtures";
 
 // A huddle on a phone: its button in the header of a room or a DM, its message in the room, the preview
 // it starts from, the invitation into one, and the huddle the tab is in, opened and as its bar, which
 // switches between the phone's cameras, keeps its screen awake, invites people from the menu of its
-// More button, and has reactions and stickers. The main test server has no huddles, whose keys
-// Cloudflare would be asked about, so these pages are told that huddles are on, and the huddle a tab
-// joins is the test's own, as is the message of one.
+// More button, and has reactions and stickers; and the Huddles switch of a room's settings. The main
+// test server has no huddles, whose keys Cloudflare would be asked about, so these pages are told that
+// huddles are on, and the huddle a tab joins is the test's own, as is the message of one.
 
 /** A huddle's socket, for `page.routeWebSocket`. */
 const HUDDLE_SOCKET = /\/api\/rooms\/[^/]+\/huddle/;
@@ -54,7 +54,7 @@ async function openDirectWithHuddlesOn(page: Page, request: APIRequestContext, r
     { ...direct, unread: false, involvement: "everything" },
   ];
   await page.route("**/api/sidebar", (route) =>
-    route.fulfill({ json: { rooms, favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: huddle ? { [direct.id]: huddle } : {} } satisfies Sidebar }),
+    route.fulfill({ json: { rooms, favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: huddle ? { [direct.id]: huddle } : {}, blocks: { userIds: [], version: 0 } } satisfies Sidebar }),
   );
   await changeTheWorkspace(page, (account) => ({ ...account, huddles: true }), listing([room.id]));
   await page.goto(`/rooms/${direct.id}`);
@@ -348,7 +348,7 @@ test("more invitations than the phone is tall enough for are a scroll away, unde
   const names = Array.from({ length: 8 }, (_, index) => `Launch ${index + 1}`);
   const others = names.map((name, index): SidebarRoom => ({ id: `invited-${index + 1}`, name, kind: "open", icon: null, unread: false, involvement: "mentions" }));
   const rooms: SidebarRoom[] = [{ ...room, kind: "open", icon: null, unread: false, involvement: "mentions" }, ...others];
-  await page.route("**/api/sidebar", (route) => route.fulfill({ json: { rooms, favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: {} } satisfies Sidebar }));
+  await page.route("**/api/sidebar", (route) => route.fulfill({ json: { rooms, favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: {}, blocks: { userIds: [], version: 0 } } satisfies Sidebar }));
   const tell = await changeTheWorkspace(page, (account) => ({ ...account, huddles: true }), listing([room.id]));
   await openRoom(page, room);
   for (const { id } of [...others, room]) tell({ type: "huddle.invited", roomId: id, by: grace.id });
@@ -970,4 +970,29 @@ test("a huddle with more people in it than the phone shows beside a shared scree
   for (const side of ["x", "y", "width", "height"] as const) expect(after[side], side).toBeCloseTo(before[side], 0);
   await expect(stage).toBeInViewport({ ratio: 1 });
   expect(await page.evaluate(() => scrollY)).toBe(0);
+});
+
+test("a room's settings fit the phone with their Huddles switch, on and off, when it warns of the huddle going on, and so do those that tell someone who can't change the room that it has none", async ({ page, room, session, screenIsFine }) => {
+  await openRoomWithHuddlesOn(page, room, { startedAt: new Date().toISOString(), userIds: ["someone"] });
+  await page.goto(`/rooms/opens/${room.id}/edit`);
+  const allow = page.getByRole("switch", { name: "Allow huddles in this room" });
+  await expect(allow).toBeChecked();
+  await allow.scrollIntoViewIfNeeded();
+  await screenIsFine({ denseTargets: [SWITCHES] });
+  // Off, what's under the switch runs to two lines or three.
+  await allow.tap();
+  await expect(allow).toHaveAccessibleDescription("Members can't start or join huddles in this room. Saving ends the huddle that's going on.");
+  await screenIsFine({ denseTargets: [SWITCHES] });
+  // And on again, which leaves nothing to ask about before the page goes.
+  await allow.tap();
+  await expect(allow).toBeChecked();
+
+  const people = [{ id: session.user.id, name: session.user.name, member: true }];
+  await page.route(`**/api/rooms/${room.id}/settings`, (route) => route.fulfill({ json: { room: { ...room, kind: "open", icon: null, huddles: false }, canAdminister: false, people } satisfies RoomSettings }));
+  await page.reload();
+  const none = page.getByText("Members can't start or join huddles in this room.", { exact: true });
+  await expect(none).toBeVisible();
+  await expect(page.getByRole("switch")).toHaveCount(0);
+  await none.scrollIntoViewIfNeeded();
+  await screenIsFine();
 });

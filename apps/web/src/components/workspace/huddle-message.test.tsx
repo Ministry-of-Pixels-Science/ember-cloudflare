@@ -6,6 +6,7 @@ import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FlashProvider } from "@/components/flash";
 import { AccountContext, useAccount } from "@/hooks/use-account";
+import { BlockingContext } from "@/hooks/use-blocking";
 import { PeopleContext } from "@/hooks/use-directory";
 import { showHuddle, type JoinedHuddle } from "@/lib/huddle-store";
 import { timeLabel } from "@/lib/messages";
@@ -64,6 +65,8 @@ interface Seen {
   people?: User[];
   /** Whether the message's thread is open beside the room. */
   open?: boolean;
+  /** Whom the tab's person has blocked. */
+  blocked?: User[];
 }
 
 /**
@@ -71,12 +74,13 @@ interface Seen {
  * hands it a new copy of the message, as the room does when the message changes, and the huddles going
  * on then.
  */
-function show(message: Message, { me = linus!, administrator = false, live = {}, huddles = true, people = [ada!, grace!, linus!, joan!], open = false }: Seen = {}) {
+function show(message: Message, { me = linus!, administrator = false, live = {}, huddles = true, people = [ada!, grace!, linus!, joan!], open = false, blocked = [] }: Seen = {}) {
   const preview = vi.fn();
   const actions = { boost: vi.fn(() => true), unboost: vi.fn(() => true), edit: vi.fn(() => true), remove: vi.fn(() => true), click: vi.fn(() => Promise.resolve(true)) };
   let setEditing: (editing: boolean) => void = () => {};
   const editors = { open: vi.fn(() => setEditing(true)), close: vi.fn(() => setEditing(false)), returnFocus: vi.fn(), attach: vi.fn(), reply: vi.fn() };
   const directory = new Map(people.map((person) => [person.id, listed(person)]));
+  const blocking = { blocked: new Set(blocked.map((person) => person.id)), setBlocked: vi.fn(() => Promise.resolve(true)) };
   function Room({ shown, liveNow }: { shown: Message; liveNow: Record<string, LiveHuddle> }) {
     const [editing, set] = useState(false);
     setEditing = set;
@@ -85,7 +89,9 @@ function show(message: Message, { me = linus!, administrator = false, live = {},
         <AccountContext value={{ ...useAccount(), huddles }}>
           <PeopleContext value={directory}>
             <HuddlesContext value={{ live: liveNow, preview }}>
-              <MessageItem message={shown} me={{ ...me, administrator }} threaded={false} editing={editing} actions={actions} editors={editors} open={open} />
+              <BlockingContext value={blocking}>
+                <MessageItem message={shown} me={{ ...me, administrator }} threaded={false} editing={editing} actions={actions} editors={editors} open={open} />
+              </BlockingContext>
             </HuddlesContext>
           </PeopleContext>
         </AccountContext>
@@ -291,6 +297,14 @@ describe("What can be done to a huddle's message", () => {
 
     const administrator = show(huddleMessage(), { administrator: true, live: going("ada") });
     expect(await moreActions(administrator.user, administrator.article)).toEqual(["Copy link", "Delete message"]);
+  });
+
+  it("stays as it is for someone who's blocked whoever started it, since the huddle is the room's, offering no Block", async () => {
+    withMouse();
+    const { article, user } = show(huddleMessage(), { live: going("ada"), blocked: [ada!] });
+    expect(heading(article)).toHaveTextContent(`A huddle is happeningLIVE${time}`);
+    expect(join(article)).toBeInTheDocument();
+    expect(await moreActions(user, article)).toEqual(["Copy link"]);
   });
 
   it("opens an editor that shows it as it is, with Delete message alone, which asks first", async () => {

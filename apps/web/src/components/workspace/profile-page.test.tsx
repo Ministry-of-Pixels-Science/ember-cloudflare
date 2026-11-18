@@ -22,6 +22,7 @@ import { MODEL_NOT_LISTED, type YourAssistant, type YourAssistantChanged, type Y
 import { FlashProvider } from "@/components/flash";
 import { Sheet } from "@/components/ui/sheet";
 import { AccountContext } from "@/hooks/use-account";
+import { BlockingContext } from "@/hooks/use-blocking";
 import { PeopleContext, type People } from "@/hooks/use-directory";
 import { PushContext } from "@/hooks/use-push";
 import { navigate } from "@/hooks/use-route";
@@ -107,27 +108,34 @@ function serve({
 /** The profile, with Ada's rooms as the sidebar's list has them, or none while it loads, on `platform`. */
 function showPage(shown = account, rooms: SidebarRoom[] | null = null, platform: Platform = CHROME_MAC) {
   const [onSignOut, onFailed, answered] = [vi.fn(), vi.fn(), vi.fn()];
-  const page = (listed: SidebarRoom[] | null, people: People = new Map()) => (
+  const onDeleteAccount = vi.fn(async () => {});
+  const setBlocked = vi.fn(async () => true);
+  const page = (listed: SidebarRoom[] | null, people: People = new Map(), blocked: string[] = []) => (
     <AccountContext value={shown}>
       <PeopleContext value={people}>
-        <PushContext value={{ ...PUSH_ON, platform }}>
-          <FlashProvider workspace>
-            <Sheet>
-              <ProfilePage me={ada} rooms={listed} askForRoom={() => answered} onSignOut={onSignOut} onFailed={onFailed} />
-            </Sheet>
-          </FlashProvider>
-        </PushContext>
+        <BlockingContext value={{ blocked: new Set(blocked), setBlocked }}>
+          <PushContext value={{ ...PUSH_ON, platform }}>
+            <FlashProvider workspace>
+              <Sheet>
+                <ProfilePage me={ada} rooms={listed} askForRoom={() => answered} onSignOut={onSignOut} onDeleteAccount={onDeleteAccount} onFailed={onFailed} />
+              </Sheet>
+            </FlashProvider>
+          </PushContext>
+        </BlockingContext>
       </PeopleContext>
     </AccountContext>
   );
   const { rerender } = render(page(rooms));
   return {
     onSignOut,
+    onDeleteAccount,
     onFailed,
     answered,
     user: userEvent.setup(),
     showRooms: (listed: SidebarRoom[]) => rerender(page(listed)),
     showPeople: (people: People) => rerender(page(rooms, people)),
+    /** Has the sidebar list the people `blocked` names as blocked, with the people directory listing `people`. */
+    showBlocked: (blocked: string[], people: People) => rerender(page(rooms, people, blocked)),
   };
 }
 
@@ -408,6 +416,94 @@ describe("Private sign-in link", () => {
     await user.type(field("Bio"), "!");
     await user.click(saveButton());
     await waitFor(() => expect(signInLink()).toHaveValue(`http://localhost:3000/session/transfers#token=${SAVED_LINK}`));
+  });
+});
+
+describe("Delete my account", () => {
+  const deleteButton = () => screen.queryByRole("button", { name: "Delete my account" });
+
+  it("ends with Delete my account once your profile loads, after your sign-in link", async () => {
+    showPage();
+    expect(deleteButton()).toBeNull();
+    await loaded();
+    const link = screen.getByRole("textbox", { name: "Use this link to login automatically on another device" });
+    expect(link.compareDocumentPosition(deleteButton()!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+
+  it("asks for your password while you have one, and deletes your account with it", async () => {
+    const { onDeleteAccount, user } = showPage();
+    await loaded();
+    await user.click(deleteButton()!);
+    await user.type(screen.getByLabelText("Your password"), "analytical engine");
+    await user.click(deleteButton()!);
+    expect(onDeleteAccount).toHaveBeenCalledExactlyOnceWith({ currentPassword: "analytical engine" });
+  });
+
+  it("asks someone without one to type their name", async () => {
+    serve({ loaded: () => Response.json({ profile: { ...profile, password: false }, transferId: LOADED_LINK } satisfies ProfileAnswer) });
+    const { onDeleteAccount, user } = showPage();
+    await loaded();
+    await user.click(deleteButton()!);
+    await user.type(screen.getByLabelText("Type your name, Ada Lovelace, to delete your account"), "Ada Lovelace");
+    await user.click(deleteButton()!);
+    expect(onDeleteAccount).toHaveBeenCalledExactlyOnceWith({ name: "Ada Lovelace" });
+  });
+
+  it("asks for the name you saved last, as the server has it, before the workspace's socket brings it", async () => {
+    const without = { ...profile, password: false };
+    serve({
+      loaded: () => Response.json({ profile: without, transferId: LOADED_LINK } satisfies ProfileAnswer),
+      saved: () => Response.json({ profile: { ...without, name: "Ada King" }, transferId: SAVED_LINK } satisfies ProfileAnswer),
+    });
+    const { user } = showPage();
+    await loaded();
+    await user.clear(screen.getByLabelText("Name"));
+    await user.type(screen.getByLabelText("Name"), "Ada King");
+    await user.click(saveButton());
+    await user.click(await screen.findByRole("button", { name: "Delete my account" }));
+    expect(await screen.findByLabelText("Type your name, Ada King, to delete your account")).toBeInTheDocument();
+  });
+
+  it("keeps asking for the name saved last when a photo's answer comes after it, with the name from before", async () => {
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:moon");
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    const without = { ...profile, password: false };
+    let answerUpload = (_: Response) => {};
+    serve({
+      loaded: () => Response.json({ profile: without, transferId: LOADED_LINK } satisfies ProfileAnswer),
+      saved: () => Response.json({ profile: { ...without, name: "Ada King" }, transferId: SAVED_LINK } satisfies ProfileAnswer),
+      uploaded: () => new Promise((resolve) => (answerUpload = resolve)),
+    });
+    const { user } = showPage();
+    await loaded();
+    await user.upload(screen.getByLabelText("Upload avatar", { exact: false }), new File(["moon"], "moon.jpg", { type: "image/jpeg" }));
+    await user.clear(screen.getByLabelText("Name"));
+    await user.type(screen.getByLabelText("Name"), "Ada King");
+    await user.click(saveButton());
+    await waitFor(() => expect(screen.getByLabelText("Name")).toHaveValue("Ada King"));
+    await waitFor(() => expect(saveButton()).toBeEnabled());
+
+    await act(async () => answerUpload(Response.json({ profile: { ...without, avatarUrl: UPLOADED, avatar: true }, transferId: SAVED_LINK } satisfies ProfileAnswer)));
+    await user.click(screen.getByRole("button", { name: "Delete my account" }));
+    expect(await screen.findByLabelText("Type your name, Ada King, to delete your account")).toBeInTheDocument();
+  });
+});
+
+describe("Blocked people on your profile", () => {
+  it("lists whom you've blocked after Conversation notifications, before Delete my account, once you've blocked anyone", async () => {
+    serve();
+    const room: SidebarRoom = { id: "design", name: "Design", kind: "open", icon: null, unread: false, involvement: "mentions" };
+    const { showBlocked } = showPage(account, [room]);
+    await loaded();
+    expect(screen.queryByRole("region", { name: "Blocked people" })).toBeNull();
+
+    const grace: DirectoryUser = { id: "u2", name: "Grace Hopper", bio: null, role: "member", status: "active", avatarUrl: "/users/u2/avatar" };
+    showBlocked([grace.id], new Map([[grace.id, grace]]));
+    const blocked = screen.getByRole("region", { name: "Blocked people" });
+    expect(within(blocked).getByRole("button", { name: "Unblock Grace Hopper" })).toBeVisible();
+    const sections = [screen.getByRole("heading", { name: "Conversation notifications" }), blocked, screen.getByRole("region", { name: "Delete my account" })];
+    expect(sections[0]!.compareDocumentPosition(sections[1]!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(sections[1]!.compareDocumentPosition(sections[2]!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
   });
 });
 

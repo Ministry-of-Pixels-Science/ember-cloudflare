@@ -93,6 +93,20 @@ export const MESSAGES_BY = `SELECT id FROM messages WHERE room_id = ? AND creato
 /** As MESSAGES_BY, but only those written by a time. */
 export const MESSAGES_BY_UNTIL = `SELECT id FROM messages WHERE room_id = ? AND creator_id = ? AND created_at <= ? AND deleted = 0 LIMIT ?`;
 
+/** Up to a number of someone's boosts in a room, in no particular order, read by booster (migrations/0069_boosts_by_booster.sql). */
+export const BOOSTS_BY = `SELECT * FROM boosts WHERE room_id = ? AND booster_id = ? LIMIT ?`;
+
+/**
+ * Numbers the changes to the messages of room ?1 whose boosts go, from ?3: a JSON array ?2 names the
+ * message each boost is on, in the order the boosts go, and one that loses more than one takes the
+ * number of the last.
+ */
+const NUMBER_UNBOOSTED = `UPDATE messages SET change_seq = ?3 + (SELECT max(key) FROM json_each(?2) AS listed WHERE listed.value = messages.id)
+  WHERE room_id = ?1 AND id IN (SELECT value FROM json_each(?2))`;
+
+/** Gives someone's messages in room ?1, ?2's, the name ?3, through the same index as `MESSAGES_BY`. */
+export const RENAME_AUTHOR = `UPDATE messages SET creator_name = ?3 WHERE room_id = ?1 AND creator_id = ?2 AND creator_name <> ?3`;
+
 /** A message being deleted, or whose thread loses replies, as `REPLIES_LEFT` reads it. */
 interface DeletingRow {
   id: string;
@@ -821,6 +835,37 @@ export class MessageStore {
       this.numbered(boost.messageId, seq),
       logIndexing(this.roomId, boost.messageId),
     ]);
+  }
+
+  /** Up to `limit` of `boosterId`'s boosts here. */
+  async boostsBy(boosterId: UserId, limit: number): Promise<Boost[]> {
+    return (await this.db.all<BoostRow>(BOOSTS_BY, this.roomId, boosterId, limit)).map(toBoost);
+  }
+
+  /**
+   * Deletes `boosts`, each a change of its own, numbered in the order they're listed from the number it
+   * answers, logging the messages they were on for the search index, whose results show their boosts.
+   * The ids go as JSON values, which a page of them can fill.
+   */
+  async removeBoosts(boosts: Boost[]): Promise<number> {
+    const boosted = boosts.map((boost) => boost.messageId);
+    return this.change(
+      (seq) => [
+        statement(`DELETE FROM boosts WHERE room_id = ? AND id IN (SELECT value FROM json_each(?))`, this.roomId, JSON.stringify(boosts.map((boost) => boost.id))),
+        statement(NUMBER_UNBOOSTED, this.roomId, JSON.stringify(boosted), seq),
+        logIndexingEach(this.roomId, JSON.stringify([...new Set(boosted)])),
+      ],
+      boosts.length,
+    );
+  }
+
+  /**
+   * Gives `creatorId`'s messages here the name `name`, as what's kept of theirs for their threads'
+   * replies goes by once they've deleted their account. Nobody is told, since tabs show the name the
+   * people directory has for them.
+   */
+  async renameAuthor(creatorId: UserId, name: string): Promise<void> {
+    await this.changingMessages(() => this.db.run(RENAME_AUTHOR, this.roomId, creatorId, name));
   }
 
   /**

@@ -244,6 +244,11 @@ export interface SharedRoom {
   name: string;
   /** Null for the default `#`. */
   icon: RoomIconName | null;
+  /**
+   * False while the room's settings don't allow huddles in it, as a Slack channel's can: nobody starts or
+   * joins one there, where huddles are on. Left out otherwise, which is how every room starts.
+   */
+  huddles?: false;
 }
 
 /**
@@ -301,10 +306,20 @@ export interface Favorites {
 }
 
 /**
+ * The people someone has blocked, in the order they blocked them. Their messages collapse for them, and
+ * their DM with one of them alone leaves the sidebar. `version` counts the changes to them, so of two
+ * lists, the newer is the one with the larger version, whichever arrives last.
+ */
+export interface Blocks {
+  userIds: UserId[];
+  version: number;
+}
+
+/**
  * What `GET /api/sidebar` answers: the rooms someone is in, in the order they were made, the ones
  * they've starred, the invitation, when they're an administrator in its room who hasn't dismissed the
- * card, and the huddles going on in their rooms. It comes with an ETag, and a request whose
- * If-None-Match names it gets 304 Not Modified instead.
+ * card, the huddles going on in their rooms, and the people they've blocked. It comes with an ETag, and
+ * a request whose If-None-Match names it gets 304 Not Modified instead.
  */
 export interface Sidebar {
   rooms: SidebarRoom[];
@@ -318,6 +333,8 @@ export interface Sidebar {
   invitation: Invitation | null;
   /** The huddle going on in each of `rooms` that has one, by the room's id. `room.huddle` frames keep it current. */
   huddles: Record<RoomId, LiveHuddle>;
+  /** Whom they've blocked, which `blocks.changed` frames keep current. */
+  blocks: Blocks;
 }
 
 /**
@@ -349,6 +366,21 @@ export interface StartedDirect {
   room: DirectRoom;
 }
 
+/**
+ * Why `POST /api/directs` refuses a new DM with someone, `name`, who has blocked whoever starts it, in
+ * words that don't say so. A DM they have already opens as ever.
+ */
+export const notTakingDirects = (name: string) => `${name} isn't taking direct messages.`;
+
+/**
+ * What `POST` and `DELETE /api/users/<id>/block` answer, which block someone and unblock them: whom you've
+ * blocked now, and your level in your DM with them alone, when blocking hid it or unblocking showed it again.
+ */
+export interface ChangedBlocks {
+  blocks: Blocks;
+  direct: { roomId: RoomId; involvement: Involvement } | null;
+}
+
 /** What `GET /api/rooms/<id>/settings` answers for a room's settings page. DMs have none. */
 export interface RoomSettings {
   room: SharedRoom;
@@ -359,10 +391,11 @@ export interface RoomSettings {
 }
 
 /**
- * What `PATCH /api/rooms/<id>` changes in a room, as its settings save it: its name, its icon, and who
- * it's for, everyone or just the people `memberIds` names, which takes anyone else out of it.
+ * What `PATCH /api/rooms/<id>` changes in a room, as its settings save it: its name, its icon, whether
+ * huddles are allowed in it, and who it's for, everyone or just the people `memberIds` names, which
+ * takes anyone else out of it.
  */
-export type RoomChanges = { name?: string; icon?: RoomIconChoice } & ({ kind?: "open" } | { kind: "closed"; memberIds: UserId[] });
+export type RoomChanges = { name?: string; icon?: RoomIconChoice; huddles?: boolean } & ({ kind?: "open" } | { kind: "closed"; memberIds: UserId[] });
 
 /**
  * The rail's buttons and the appearance modes, whose icons an administrator can choose in Community
@@ -1338,6 +1371,16 @@ export interface MemberfulDisconnection {
 }
 
 /**
+ * What Delete my account on your profile sends (`DELETE /api/users/me`), saying you mean it: your
+ * password while you have one, as changing your email address takes it, or else your name, typed as
+ * your profile has it.
+ */
+export interface AccountDeletion {
+  currentPassword?: string;
+  name?: string;
+}
+
+/**
  * Where to sign in at the Memberful site, within ten minutes, to connect the account you sign in to there
  * to yours here: what connecting from your profile answers, and what signing in with a password answers a
  * member whose password checks out while Memberful is members only, until they've connected one.
@@ -1489,6 +1532,15 @@ export const CURRENT_PASSWORD_WRONG = "That isn't your current password.";
  * a password that whoever holds their session could set would be another.
  */
 export const PASSWORD_WITH_MEMBERFUL = "You sign in with Memberful, so there's no password to set.";
+
+/** What a deleted account is called from then on, wherever anything still names it. */
+export const DELETED_PERSON_NAME = "Deleted person";
+/** Why Delete my account is refused without your password, while you have one. */
+export const DELETION_PASSWORD_NEEDED = "Enter your password to delete your account.";
+/** Why it's refused to someone without a password who hasn't typed their name as their profile has it. */
+export const DELETION_NAME_NEEDED = "Type your name as your profile has it to delete your account.";
+/** Why it's refused to the only administrator, so that there's always one. */
+export const ONLY_ADMINISTRATOR = "You're the only administrator. Make someone else an administrator before you delete your account.";
 
 export interface Boost {
   id: string;
@@ -1752,6 +1804,8 @@ export type WorkspaceServerFrame =
   | { type: "huddle.answered"; roomId: RoomId }
   /** They've starred or unstarred a room, in this tab or another: their stars as they are now. */
   | { type: "favorites.changed"; favorites: Favorites }
+  /** They've blocked or unblocked someone, in this tab or another: whom they've blocked now. */
+  | { type: "blocks.changed"; blocks: Blocks }
   /** They've given a room of theirs another notification level, in this tab or another. */
   | { type: "room.involvement"; roomId: RoomId; involvement: Involvement }
   /** They've dismissed the welcome card, in this tab or another, so their sidebar has no invitation from now on. */
@@ -2092,7 +2146,9 @@ export function parseRoomChanges(data: unknown): RoomChanges | string {
   if (name === null) return `Name must be 1 to ${MAX_ROOM_NAME_LENGTH} characters`;
   const icon = iconChoice(r.icon);
   if (icon === null) return ICON_REFUSED;
-  const changes = { name, icon };
+  const { huddles } = r;
+  if (huddles !== undefined && typeof huddles !== "boolean") return "Huddles must be true or false";
+  const changes = { name, icon, huddles };
   if (r.kind === undefined) return changes;
   if (r.kind === "open") return { ...changes, kind: r.kind };
   if (r.kind !== "closed") return 'Kind must be "open" or "closed"';
@@ -2509,6 +2565,19 @@ export function parseMemberfulDisconnection(data: unknown): MemberfulDisconnecti
     return `Endpoint can't be longer than ${MAX_PUSH_ENDPOINT_LENGTH} characters`;
   }
   return { ...(currentPassword === undefined ? {} : { currentPassword }), ...(pushSubscriptionEndpoint === undefined ? {} : { pushSubscriptionEndpoint }) };
+}
+
+/**
+ * Parses an untrusted Delete my account. Returns why it's refused instead. Whether what's typed is your
+ * password, or your name, the server checks once it knows who's asking.
+ */
+export function parseAccountDeletion(data: unknown): AccountDeletion | string {
+  if (!isJsonObject(data)) return "Expected a JSON object";
+  const { currentPassword, name } = data;
+  if (currentPassword !== undefined && typeof currentPassword !== "string") return "Current password must be text";
+  if (name !== undefined && typeof name !== "string") return "Name must be text";
+  if (name !== undefined && name.length > MAX_USER_NAME_LENGTH) return NAME_TOO_LONG;
+  return { ...(currentPassword === undefined ? {} : { currentPassword }), ...(name === undefined ? {} : { name }) };
 }
 
 /**

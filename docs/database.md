@@ -32,7 +32,7 @@ So far rooms keep `messages`, `boosts`, `revocations`, `room_events`, `unindexed
 `message_deletions`, `blobs` and `waiting_calls`, the Workspace keeps `accounts`, `users`, `sessions`, `identities`,
 `pending_identities`, `membership_checks`, `membership_catch_ups`, `push_subscriptions`, `webhooks`,
 `bans`, `email_links`, `email_link_requests`, `password_resets`, `searches`, `recent_searches`, `rooms`,
-`memberships`, `favorites`, `pending_revocations`, `pending_purges`, `pending_reindexes`,
+`memberships`, `favorites`, `blocks`, `pending_revocations`, `pending_purges`, `pending_reindexes`,
 `deleted_rooms`, `apps`, `app_sign_ins`, `own_app_sign_ins`, `agent_tools`, `outside_clients`, `outside_connections` and `outside_spent_tokens`, and the search index keeps `search_messages`, `search_mentions`, `search_rooms` and the
 FTS5 table `search_index`. A room's id also
 names its Durable Object, and the Worker asks the Workspace whether someone is a member before it
@@ -267,6 +267,18 @@ Objects, D1 or speed call for something else.
   each purge still waiting, and the room then deletes only what they wrote by then. What they write
   once they're back stays however late a room answers, and what a socket of theirs sent before the
   room closed it still goes.
+- **Deleting your account purges as a ban does, and keeps the row.** Apple asks that deleting an
+  account delete what it shared, so the batch that deletes someone's account ends their sessions,
+  queues closing their sockets by their person tag, which also turns away an AI app's message
+  already on its way, queues a purge in every room they could have written in, as a ban does, takes
+  them out of every shared room, forgets their stars, recent searches, push subscriptions, sign-ins
+  and connected apps, queues deleting their photo, and empties their row: named "Deleted person",
+  with no email address, password, bio or photo, deactivated, and `users.deleted_at` (workspace
+  migration 0068) saying why, which no ban or lifted ban can change. The row stays, since what's
+  left in rooms keeps their id, such as a thread's first message, kept for its replies. Their purge
+  deletes all their messages, 100 at a time, then their boosts on others' messages, through
+  `index_boosts_on_room_id_and_booster_id` (room migration 0069), then renames them on what's left
+  in one `UPDATE` through the index by creator.
 - **Granting rooms is one statement.** Campfire's `grant_to` binds the ids of everyone a room takes
   in, which our bound-value limit would cut to a few dozen rows a statement, and reading them first
   would cost D1 a round trip of its own, so each grant selects from `users` or `rooms` inside its
@@ -295,6 +307,17 @@ Objects, D1 or speed call for something else.
   values however many stars there are, and changes nothing unless the order holds exactly their
   stars. A star outlives its person's membership: it's left out while they can't star the room, and
   dropped at their next star, unstar or reorder.
+- **Blocks are rows of their own**, a `blocks` row for each person someone has blocked (workspace
+  migration 0070), keyed by the two of them, so a block or unblock writes its row and bumps
+  `users.blocks_version`, as stars bump theirs, in one batch. The statements that mark rooms unread,
+  push messages and invite people to huddles each skip whoever has blocked the writer with a probe
+  of that key, and starting a DM refuses a writer someone in it has blocked in the same `INSERT`, so
+  none of them binds a list of who's blocked whom. Blocking hides the DM between the two from the
+  blocker's sidebar by making their membership `invisible`, keeping the level it had in
+  `blocks.direct_involvement`, which unblocking gives back; only the block a request writes hides it,
+  found by its `created_at`, so blocking again leaves be a DM shown since. `index_blocks_on_blocked_id`
+  finds the blocks of someone whose account is deleted, which go with it, as theirs do, bumping the
+  `blocks_version` of each person who had blocked them.
 - **A room's place in the shared order is a column of the room**, `rooms.shared_position` (workspace
   migration 0020), so the sidebar's statement reads each room's place with the room, and listing the
   order costs nothing more, nor reads the places of rooms someone isn't in. Saving it reads the
@@ -326,7 +349,12 @@ Objects, D1 or speed call for something else.
   alarm can say so with nobody left in it, whatever became of the object meanwhile. The tracks
   Cloudflare's Realtime SFU didn't close when asked wait there too (`huddleUnclosed`), for the alarm
   to ask about again, and since the alarm then rings far more often than a failed log is sent again,
-  the room keeps when its logs are next due (`logsDue`).
+  the room keeps when its logs are next due (`logsDue`). Whether a room allows huddles is a column
+  of the room too, `rooms.huddles_allowed` (workspace migration 0067), 1 until its settings turn
+  them off: the sidebar's statement reads it with the room, the room's settings save it in the
+  `UPDATE` that saves its name and icon, which changes nothing while it's as it was, and the room's
+  object asks the Workspace for it with the app huddles run through, in one call, as someone joins
+  and at each check.
 - **A huddle's message is a message's row.** The message a huddle has in its room is a row of
   `messages` like any other, in the name of whoever started the huddle, so its time, link,
   reactions and thread are a message's. What it says of its huddle is JSON in `messages.huddle`

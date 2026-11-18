@@ -15,7 +15,7 @@ import {
 } from "react";
 import { QUICK_REACTION_COUNT, REACTIONS, type Message, type StoredFile } from "@ember/protocol";
 import type { DisplayNode } from "@ember/richtext/dom";
-import { ChatPlusIn, Copy, Download, Edit, Emoji, MessageText, MoreHoriz, QuoteMessage, ShareAndroid, Trash } from "@/components/icons/iconoir";
+import { ChatPlusIn, Copy, Download, Edit, Emoji, MessageText, MoreHoriz, QuoteMessage, ShareAndroid, Trash, UserXmark } from "@/components/icons/iconoir";
 import { PageLink } from "@/components/page-link";
 import { ShareButton } from "@/components/share-button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -74,6 +74,11 @@ interface Props {
   onDelete: () => boolean;
   /** Opens the message's Custom reaction form, from New boost. */
   onNewBoost: () => void;
+  /**
+   * Blocks the message's author from More actions, or unblocks them once `blocked` says they're blocked.
+   * Left out on your own messages and a huddle's.
+   */
+  block?: { blocked: boolean; onChange: () => void };
   ref?: Ref<MessageActionsHandle>;
 }
 
@@ -93,13 +98,14 @@ export interface MessageActionsHandle {
  * order Slack's bar has them. With a mouse, hovering the message opens the bar too, laid over the message's
  * top edge at the timeline's right, with Message options pinned as its last button, and each button names
  * itself in a tooltip as the pointer reaches it. On touch screens it opens beside Message options, with
- * Quote after Reply in thread and Copy link after that. Once opened, the bar stays in the page while it's
- * shut, so Copy link keeps its color.
+ * Quote after Reply in thread, Copy link after that, then Block or Unblock its author on someone else's
+ * message. Once opened, the bar stays in the page while it's shut, so Copy link keeps its color.
  *
  * With a mouse, Message options then opens More actions under the bar, as Slack's does: Quote, Copy text,
- * Copy link, and on messages you can change, Edit message and Delete message.
+ * Copy link, Block or Unblock its author on someone else's message, and on messages you can change, Edit
+ * message and Delete message.
  */
-export function MessageActionsMenu({ message, nodes, row, threaded, editable, threadPath, onReact, onQuote, onEdit, onDelete, onNewBoost, ref }: Props) {
+export function MessageActionsMenu({ message, nodes, row, threaded, editable, threadPath, onReact, onQuote, onEdit, onDelete, onNewBoost, block, ref }: Props) {
   const [open, setOpen] = useState(false);
   const [trayOpen, setTrayOpen] = useState(false);
   const [actionsOpen, setActionsOpen] = useState(false);
@@ -169,6 +175,12 @@ export function MessageActionsMenu({ message, nodes, row, threaded, editable, th
   const newBoost = () => {
     close();
     onNewBoost();
+  };
+
+  // So do Block and Unblock.
+  const changeBlock = () => {
+    close();
+    block?.onChange();
   };
 
   // Delete message asks first, as the editor's does. The composer takes focus as the message goes, or Message
@@ -450,6 +462,7 @@ export function MessageActionsMenu({ message, nodes, row, threaded, editable, th
                 </button>
               </ActionTooltip>
             )}
+            {!overlapping && block && <BlockButton message={message} blocked={block.blocked} onClick={changeBlock} />}
             {/* As Campfire's `.message__edit-btn` shows (messages.css). */}
             {editable && (
               <ActionTooltip label="Edit">
@@ -504,6 +517,12 @@ export function MessageActionsMenu({ message, nodes, row, threaded, editable, th
               <Copy />
               Copy link
             </button>
+            {block && (
+              <>
+                <hr className="my-1 border-message-border" />
+                <BlockButton message={message} blocked={block.blocked} onClick={changeBlock} item />
+              </>
+            )}
             {editable && (
               <>
                 <hr className="my-1 border-message-border" />
@@ -579,6 +598,26 @@ function FileActions({ file }: { file: StoredFile }) {
         </ActionTooltip>
       )}
     </>
+  );
+}
+
+/**
+ * Block or Unblock, naming the message's author as the people directory lists them, which it reads only
+ * while the bar's in the page, as Quote does: More actions' `item`, or the bar's button on touch screens,
+ * which names itself only to screen readers, as the bar's others do.
+ */
+function BlockButton({ message, blocked, onClick, item = false }: { message: Message; blocked: boolean; onClick: () => void; item?: boolean }) {
+  const nameOf = useNameOf();
+  const label = `${blocked ? "Unblock" : "Block"} ${nameOf(message.creator)}`;
+  return item ? (
+    <button type="button" className={ITEM} onClick={onClick}>
+      <UserXmark />
+      <span className="min-w-0 truncate">{label}</span>
+    </button>
+  ) : (
+    <button type="button" aria-label={label} className={ACTION} onClick={onClick}>
+      <UserXmark />
+    </button>
   );
 }
 

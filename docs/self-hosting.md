@@ -1381,6 +1381,16 @@ only. The room takes down whichever cameras and screens a tab left on, eight eve
 Turning a switch on again gives its buttons back, and nobody's camera comes on, or screen is shared,
 by itself.
 
+A room can go without huddles, as a Slack channel can. While huddles are on, a room's settings have
+a Huddles switch for whoever can change the room, an administrator or the person who made it, which
+is on until they turn it off and save. A room with it off has no headphones at its top, its
+huddle's link opens the room and says that huddles are turned off there, and the room lets nobody
+into a huddle. A huddle going on there ends, which the settings say before they're saved: each tab
+in it leaves as it hears of the change, and tells its person why, and the room ends it within half a
+minute for any that didn't. Everyone else in the room reads in its settings that it has no huddles.
+A direct message has no settings, and its huddles go by who's in it. Turning huddles off for
+everyone leaves each room's switch as it was, for when they're on again.
+
 Some networks, like an office's or a hotel's, block the way a browser reaches the SFU, and nobody on
 one can connect to a huddle. A third card, Relay for strict networks, gives huddles a relay for them:
 Cloudflare's [TURN service](https://developers.cloudflare.com/realtime/turn/), by a TURN key in your

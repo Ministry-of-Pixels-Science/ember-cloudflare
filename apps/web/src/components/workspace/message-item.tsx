@@ -1,8 +1,9 @@
-import { memo, useCallback, useContext, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from "react";
 import type { CardAction, Me, Message, User } from "@ember/protocol";
 import { displayBody, isAllEmoji, type DisplayNode } from "@ember/richtext/dom";
 import { NavArrowRight } from "@/components/icons/iconoir";
 import { PageLink } from "@/components/page-link";
+import { BlockingContext } from "@/hooks/use-blocking";
 import { PeopleContext } from "@/hooks/use-directory";
 import { messagePath, permalinkOf, threadPath } from "@/hooks/use-route";
 import { cardsQuote, dateTimeLabel, lastReplyLabel, timeLabel } from "@/lib/messages";
@@ -163,13 +164,19 @@ function ReplyContext({ message, thread }: { message: Message; thread?: ThreadPl
   );
 }
 
+interface StandInProps {
+  message: Message;
+  thread?: ThreadPlace;
+  open?: boolean;
+}
+
 /**
- * A message deleted while its thread has replies, which keeps its place for them: no author, time, text,
- * actions or reactions, and its thread's summary under it, outside its thread. A blank square stands in
- * for its avatar, with the space above a run's first message, so it doesn't read as the message before
- * it going on.
+ * A message that keeps its place without showing itself: no author, time, text, actions or reactions,
+ * but what `children` says of it, and its thread's summary under it, outside its thread. A blank square
+ * stands in for its avatar, with the space above a run's first message, so it doesn't read as the
+ * message before it going on.
  */
-function DeletedMessage({ message, thread, open }: { message: Message; thread?: ThreadPlace; open?: boolean }) {
+function StandIn({ message, thread, open, children }: StandInProps & { children: ReactNode }) {
   return (
     <article
       className={cn(
@@ -179,10 +186,40 @@ function DeletedMessage({ message, thread, open }: { message: Message; thread?: 
     >
       <div aria-hidden className="mt-2 size-9 rounded-[6px] bg-border max-md:size-[30px]" />
       <div data-body-content className="col-start-2 min-w-0 py-1">
-        <p className="text-[15px] leading-[22px] text-message-muted">This message was deleted.</p>
+        {children}
         {!thread && message.thread && <ThreadSummary message={message} />}
       </div>
     </article>
+  );
+}
+
+/** A message deleted while its thread has replies, which keeps its place for them. */
+function DeletedMessage(place: StandInProps) {
+  return (
+    <StandIn {...place}>
+      <p className="text-[15px] leading-[22px] text-message-muted">This message was deleted.</p>
+    </StandIn>
+  );
+}
+
+/** What a message from someone you've blocked collapses to. */
+export const BLOCKED_MESSAGE = "Message from someone you blocked";
+
+/**
+ * A message from someone you've blocked, collapsed, as Discord collapses them, to a button that shows it,
+ * so the replies around it still make sense.
+ */
+function BlockedMessage({ onShow, ...place }: StandInProps & { onShow: () => void }) {
+  return (
+    <StandIn {...place}>
+      <button
+        type="button"
+        onClick={onShow}
+        className="cursor-pointer rounded-[4px] text-start text-[15px] leading-[22px] text-message-muted hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground"
+      >
+        {BLOCKED_MESSAGE}
+      </button>
+    </StandIn>
   );
 }
 
@@ -222,6 +259,12 @@ export const MessageItem = memo(function MessageItem({ message, me, threaded: fo
   // The Custom reaction form goes as the editor opens, as the editor replaces the whole message.
   if (customizing && (editing || !actions)) setCustomizing(false);
   const mine = message.creator.id === me.id;
+  // Someone you've blocked's messages collapse until you show them, but for a huddle's, which is the room's.
+  const blocking = useContext(BlockingContext);
+  const blocked = !mine && blocking.blocked.has(message.creator.id);
+  const [shownAnyway, setShownAnyway] = useState(false);
+  // Blocking them again collapses it again.
+  if (shownAnyway && !blocked) setShownAnyway(false);
   const created = new Date(message.createdAt);
   // Any message that mentions you, yours too, as Campfire's message_formatter.js means to mark them,
   // though it looks for an avatar address that mentions don't have, so it never does.
@@ -237,7 +280,8 @@ export const MessageItem = memo(function MessageItem({ message, me, threaded: fo
   // A reply says where it's from, or where else it went, under its author's name, so it never follows on
   // without one.
   const context = message.parentId !== undefined && (!thread || message.alsoSent) && <ReplyContext message={message} thread={thread} />;
-  const threaded = follows && !context;
+  // A blocked person's message shown says whose it is, as the one before may be collapsed.
+  const threaded = follows && !context && !blocked;
   // Edited messages are marked, as Slack marks them, so readers can tell a message changed.
   const edited = message.editedAt !== null && <span className="text-xs text-message-muted">(edited)</span>;
 
@@ -261,6 +305,7 @@ export const MessageItem = memo(function MessageItem({ message, me, threaded: fo
   );
 
   if (message.deleted) return <DeletedMessage message={message} thread={thread} open={open} />;
+  if (blocked && !shownAnyway && !message.huddle) return <BlockedMessage message={message} thread={thread} open={open} onShow={() => setShownAnyway(true)} />;
   if (shown === null) return <UnrenderableMessage />;
 
   return (
@@ -404,6 +449,18 @@ export const MessageItem = memo(function MessageItem({ message, me, threaded: fo
           }}
           // The form opens with its field focused, or, open already, keeps what's written in it and focuses it.
           onNewBoost={() => (customizing ? customField.current?.focus() : setCustomizing(true))}
+          // As the message collapses, the composer takes focus, as it does once a message goes.
+          block={
+            mine || message.huddle
+              ? undefined
+              : {
+                  blocked,
+                  onChange: () => {
+                    void blocking.setBlocked(message.creator, !blocked);
+                    editors.returnFocus();
+                  },
+                }
+          }
         />
       )}
     </article>

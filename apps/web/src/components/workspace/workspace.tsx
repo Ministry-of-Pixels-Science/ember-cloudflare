@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useReducer, useRef, useState, type MouseEvent, type ReactNode } from "react";
-import { ASSISTANT_ID, searchOfQuery, startingInvolvement, type Account, type DirectRoom, type Favorites, type Me, type Room, type RoomId, type SidebarRoom, type User } from "@ember/protocol";
+import { ASSISTANT_ID, searchOfQuery, startingInvolvement, type Account, type AccountDeletion, type Blocks, type DirectRoom, type Favorites, type Me, type Room, type RoomId, type SidebarRoom, type User, type UserId } from "@ember/protocol";
 import { CAMERAS_OFF, SCREENS_OFF } from "@ember/protocol/huddles";
 import { useFlash } from "@/components/flash";
 import { Xmark } from "@/components/icons/iconoir";
@@ -8,13 +8,14 @@ import { Button } from "@/components/ui/button";
 import { Sheet, SheetClose, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
 import { useAccount, useCamerasAllowed, useScreensAllowed } from "@/hooks/use-account";
 import { useAppBadge } from "@/hooks/use-app-badge";
+import { BlockingContext, type Blocking } from "@/hooks/use-blocking";
 import { DirectoryLoaded, PeopleContext, useDirectory } from "@/hooks/use-directory";
 import { useHuddle } from "@/hooks/use-huddle";
 import { useMounted } from "@/hooks/use-mounted";
 import { useReleaseCheck } from "@/hooks/use-release-check";
 import { useSidebar } from "@/hooks/use-sidebar";
 import { agentsToAsk } from "@/lib/agents";
-import { answerHuddleInvitation, ApiError, dismissInvitation, isSignedOut, startDirect } from "@/lib/api";
+import { answerHuddleInvitation, ApiError, changeBlock, dismissInvitation, isSignedOut, startDirect } from "@/lib/api";
 import { invitationsReducer, NO_INVITATIONS } from "@/lib/huddle-invitations";
 import { hasHuddles } from "@/lib/huddle-people";
 import { hearHuddle, leaveHuddle, muteHuddle, OPEN_HUDDLE, openHuddle, shareHuddleScreen, showHuddleCamera } from "@/lib/huddle-store";
@@ -134,6 +135,7 @@ interface Redirect {
 const NO_ROOMS: SidebarRoom[] = [];
 const NO_FAVORITES: Favorites = { rooms: [], version: 0 };
 const NO_ORDER: RoomId[] = [];
+const NO_BLOCKS: Blocks = { userIds: [], version: 0 };
 
 /** What the page shows while its rooms, or the page itself, load. */
 const LOADING = (
@@ -249,6 +251,8 @@ interface Props {
   onAccountChanged: (account: Account) => void;
   /** Signs out, settling with whether it did. */
   onSignOut: () => Promise<boolean>;
+  /** Deletes your account and goes to sign in, settling once it's deleted, or failing with why not. */
+  onDeleteAccount: (deletion: AccountDeletion) => Promise<void>;
   /**
    * Called when this browser's session stops signing in `me`: with null once it has expired, or with
    * whoever another tab signed in as.
@@ -256,7 +260,7 @@ interface Props {
   onSessionChanged: (me: Me | null) => void;
 }
 
-export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSessionChanged }: Props) {
+export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onDeleteAccount, onSessionChanged }: Props) {
   // How many times the workspace socket has said what the account is. A page's answer from the server
   // shows only if no more has been said since it was asked for, since it may have been read before.
   const accountsHeard = useRef(0);
@@ -365,7 +369,7 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
   const closeHuddlePreview = useCallback(() => setHuddlePreview(null), []);
   const liveHuddles = list?.huddles ?? NO_HUDDLES;
   const huddles = useMemo<Huddles>(() => ({ live: liveHuddles, preview: setHuddlePreview }), [liveHuddles]);
-  // Whether a room has huddles, once they're on: any shared room, and a direct message with someone to huddle with.
+  // Whether a room has huddles, once they're on: a shared room whose settings allow them, and a direct message with someone to huddle with.
   const offersHuddle = (r: Room) => huddlesOn && hasHuddles(r, me.id, (user) => joinsNoHuddle(user, directory.people.get(user.id)));
   // Only a room that's still this person's, and only while it has huddles, has a preview to show.
   const previewedRoom = huddlePreview !== null ? rooms?.find((r) => r.id === huddlePreview) : undefined;
@@ -411,6 +415,15 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
   useEffect(() => {
     openHuddle(opensHuddle.current === visit);
   }, [visit]);
+  // A room whose settings stop allowing huddles has this tab leave the one it's in there, and its person
+  // is told why, so the huddle is over once everyone's tab has heard. The room ends it at its next check
+  // for whoever is in it still.
+  const inHuddleUnallowed = huddleRoom !== null && huddleRoom.kind !== "direct" && huddleRoom.huddles === false;
+  useEffect(() => {
+    if (!inHuddleUnallowed) return;
+    leaveHuddle();
+    flash("alert", "Huddles have been turned off in this room.");
+  }, [inHuddleUnallowed, flash]);
   // What connecting a Memberful account came to, as the address Memberful sent this browser back to says.
   useEffect(() => {
     const message = takeMemberfulFlash();
@@ -486,6 +499,27 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
     }
   }, [failed]);
   const starredRooms = useCallback((favorites: Favorites) => changeRooms({ type: "starred", favorites }), []);
+  // Blocking someone, or unblocking them, collapses their messages here or shows them again once the
+  // server answers, and hides your DM with them alone or shows it again. The set changes only with
+  // whom you've blocked, so that a sidebar loaded again draws no message again.
+  const setBlocked = useCallback(
+    async (person: User, blocked: boolean) => {
+      const answered = askForRoom();
+      try {
+        const changed = await changeBlock(person.id, blocked);
+        changeRooms({ type: "blocked", blocks: changed.blocks });
+        if (changed.direct) answered({ type: "involved", ...changed.direct });
+        return true;
+      } catch (error) {
+        failed(error);
+        return false;
+      }
+    },
+    [askForRoom, failed],
+  );
+  // Whom you've blocked, by a key that stays the same while they do, so a list loaded again renders no message again.
+  const blockedKey = JSON.stringify((list?.blocks ?? NO_BLOCKS).userIds);
+  const blocking = useMemo<Blocking>(() => ({ blocked: new Set(JSON.parse(blockedKey) as UserId[]), setBlocked }), [blockedKey, setBlocked]);
   // A save's answer can come after a newer order has loaded, so the rooms load again once it's taken.
   const reorderedRooms = useCallback(
     (sharedOrder: RoomId[]) => {
@@ -678,6 +712,7 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
   // becomes the room's, so that loading the page again, or coming back to it, doesn't offer it again.
   const followHuddleLink = useEffectEvent((room: Room) => {
     if (!huddlesOn) flash("alert", "Huddles are turned off.");
+    else if (room.kind !== "direct" && room.huddles === false) flash("alert", "Huddles are turned off in this room.");
     else if (offersHuddle(room) && huddle?.roomId !== room.id) setHuddlePreview(room.id);
     navigate(roomPath(room.id), { replace: true });
     if (huddle?.roomId === room.id) opensHuddle.current = pageMark();
@@ -781,7 +816,7 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
       case "app-signed-in":
         return rarePage(({ AppSignedInPage }) => <AppSignedInPage me={me} onFailed={failed} />);
       case "profile":
-        return rarePage(({ ProfilePage }) => <ProfilePage me={me} rooms={rooms} askForRoom={askForRoom} onSignOut={onSignOut} onFailed={failed} />);
+        return rarePage(({ ProfilePage }) => <ProfilePage me={me} rooms={rooms} askForRoom={askForRoom} onSignOut={onSignOut} onDeleteAccount={onDeleteAccount} onFailed={failed} />);
       case "push-subscriptions":
         return rarePage(({ PushSubscriptionsPage }) => <PushSubscriptionsPage back={back} onFailed={failed} />);
       case "search":
@@ -1009,7 +1044,9 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
       <DirectoryLoaded value={directory.loaded}>
         <SettingsLayout value={settings}>
           <OpenSearchContext value={openSearch}>
-            <HuddlesContext value={huddles}>{layout}</HuddlesContext>
+            <HuddlesContext value={huddles}>
+              <BlockingContext value={blocking}>{layout}</BlockingContext>
+            </HuddlesContext>
           </OpenSearchContext>
         </SettingsLayout>
       </DirectoryLoaded>
