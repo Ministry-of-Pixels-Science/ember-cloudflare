@@ -373,7 +373,7 @@ describe("Reports of someone who deletes their account", () => {
     expect(await nextOpenReports(tab)).toBe(1);
   });
 
-  it("are cleared by migration 0077 as deleting it clears them now, when it was deleted before, as 0.5 beta 8 deleted accounts", async () => {
+  it("are cleared by migration 0078 as deleting it clears them now, when it was deleted before, as 0.5 beta 8 deleted accounts", async () => {
     const [grace, linus] = await people("Grace", "Linus");
     await workspaceSql("UPDATE users SET bio = ? WHERE id = ?", "Buy my course", grace.user.id);
     const general = await createRoom("general");
@@ -388,7 +388,7 @@ describe("Reports of someone who deletes their account", () => {
     const subjects = async () => (await workspaceSql("SELECT id, subject FROM reports ORDER BY id")) as Array<{ id: string; subject: string }>;
     const kept = await subjects();
 
-    await workspaceSql(MIGRATIONS.find(({ name }) => name === "0077_cleared_reports.sql")!.sql);
+    await workspaceSql(MIGRATIONS.find(({ name }) => name === "0078_cleared_reports.sql")!.sql);
     const cleared = await subjects();
     for (const { id, subject } of kept) await workspaceSql("UPDATE reports SET subject = ? WHERE id = ?", subject, id);
     await workspaceSql(CLEAR_REPORTS_OF, DELETED_PERSON_NAME, grace.user.id);

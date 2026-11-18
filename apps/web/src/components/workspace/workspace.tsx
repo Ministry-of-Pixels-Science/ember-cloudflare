@@ -826,10 +826,10 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onDe
       case "bots":
         return rarePage(({ BotsPage }) => <BotsPage onFailed={failed} />);
       case "new-bot":
-        return rarePage(({ NewBotPage }) => <NewBotPage me={me} onFailed={failed} />);
+        return rarePage(({ NewBotPage }) => <NewBotPage me={me} rooms={rooms} onFailed={failed} />);
       case "bot-settings":
         return rarePage(({ BotSettingsPage }) => (
-          <BotSettingsPage key={route.userId} botId={route.userId} onMissing={showNotFound} onFailed={failed} />
+          <BotSettingsPage key={route.userId} botId={route.userId} rooms={rooms} onMissing={showNotFound} onFailed={failed} />
         ));
       case "new-agent":
         return rarePage(({ NewAgentPage }) => <NewAgentPage me={me} rooms={rooms} onFailed={failed} />);

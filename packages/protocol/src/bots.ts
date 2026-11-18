@@ -1,3 +1,4 @@
+import { roomsIn } from "./agents.ts";
 import { isReservedName, MAX_USER_NAME_LENGTH, NAME_RESERVED, type DirectoryUser, type RoomId } from "./index.ts";
 
 // Chat bots, as administrators add, change and delete them through `/api/account/bots`, as Campfire's
@@ -44,9 +45,14 @@ export interface Bot extends DirectoryUser {
   rooms: BotRoom[];
 }
 
-/** A bot as its edit page shows it: as the bots page lists it, with where its webhook delivers, or null for nowhere. */
+/**
+ * A bot as its edit page shows it: as the bots page lists it, with where its webhook delivers, or null
+ * for nowhere, and the open rooms it's kept to, by name, or null while it's in every open room, new ones
+ * too, as an AI agent can be kept.
+ */
 export interface BotSettings extends Bot {
   webhookUrl: string | null;
+  pickedRooms: BotRoom[] | null;
 }
 
 /** What `GET /api/account/bots` answers: the active bots, by name. */
@@ -63,28 +69,39 @@ export interface BotAnswer {
 }
 
 /**
- * What `PATCH /api/account/bots/<id>` changes, as the bot form saves it: the bot's name, and where its
- * webhook delivers, "" for nowhere. What's left out stays as it is.
+ * What `PATCH /api/account/bots/<id>` changes, as the bot form saves it: the bot's name, where its
+ * webhook delivers, "" for nowhere, and the open rooms it's kept to, or null for every open room, new
+ * ones too. Private rooms it was put in keep it either way. What's left out stays as it is.
  */
 export interface BotChanges {
   name?: string;
   webhookUrl?: string;
-}
-
-/** What `POST /api/account/bots` takes, as the bot form adds one: a name, and where its webhook delivers, if anywhere. */
-export interface NewBot {
-  name: string;
-  webhookUrl?: string;
+  rooms?: RoomId[] | null;
 }
 
 /**
+ * What `POST /api/account/bots` takes, as the bot form adds one: a name, where its webhook delivers, if
+ * anywhere, and the open rooms it's kept to, or null, or nothing, for every open room.
+ */
+export interface NewBot {
+  name: string;
+  webhookUrl?: string;
+  rooms?: RoomId[] | null;
+}
+
+/** Why the rooms a bot's kept to are refused: they're rooms' IDs, each once, or null for every open room. */
+export const BOT_ROOMS_REFUSED = "Rooms must be a list of rooms' IDs, each once, or null for every open room";
+
+/**
  * Parses an untrusted change to a bot. Returns why it's refused instead: a name has to have more than
- * spaces, and no more than a person's name can (`MAX_USER_NAME_LENGTH`). The name is saved as typed, and
- * the webhook URL trimmed, as the form's URL field sends it; the Worker checks that it's a URL.
+ * spaces, and no more than a person's name can (`MAX_USER_NAME_LENGTH`), and rooms are a list of rooms'
+ * IDs, each once, or null (`roomsIn`). The name is saved as typed, and the webhook URL trimmed, as the
+ * form's URL field sends it; the Worker checks that it's a URL. A room picked that isn't open isn't
+ * joined.
  */
 export function parseBotChanges(data: unknown): BotChanges | string {
   if (typeof data !== "object" || data === null || Array.isArray(data)) return "Expected a JSON object";
-  const { name, webhookUrl } = data as Record<string, unknown>;
+  const { name, webhookUrl, rooms } = data as Record<string, unknown>;
   const changes: BotChanges = {};
   if (name !== undefined) {
     if (typeof name !== "string") return "Name must be text";
@@ -97,6 +114,11 @@ export function parseBotChanges(data: unknown): BotChanges | string {
     const url = webhookUrl.trim();
     if (url.length > MAX_WEBHOOK_URL_LENGTH) return `Webhook URL can't be longer than ${MAX_WEBHOOK_URL_LENGTH} characters`;
     changes.webhookUrl = url;
+  }
+  if (rooms !== undefined) {
+    const picked = roomsIn(rooms);
+    if (picked === undefined) return BOT_ROOMS_REFUSED;
+    changes.rooms = picked;
   }
   return changes;
 }

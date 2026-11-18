@@ -38,8 +38,8 @@ export async function botPage(request: Request, env: Env, pathname: string, botI
 }
 
 /**
- * `POST /api/account/bots`, `{ name, webhookUrl }`: adds a bot, answering 201 with the bot as its edit
- * page shows it. With an avatar, it's a form whose `user` part is that JSON and whose `avatar` and
+ * `POST /api/account/bots`, `{ name, webhookUrl, rooms }`: adds a bot, answering 201 with the bot as its
+ * edit page shows it. With an avatar, it's a form whose `user` part is that JSON and whose `avatar` and
  * `variant` parts are the picture, as the setup and join forms send a photo. Someone who isn't an
  * administrator hears so before anything they sent is read.
  */
@@ -69,8 +69,8 @@ export async function showBot(request: Request, env: Env, botId: UserId): Promis
 }
 
 /**
- * `PATCH /api/account/bots/:id`, `{ name, webhookUrl }`: changes the active bot `id`, answering it as
- * its edit page then shows it, with a new avatar as `createBot` takes one. As there, someone who isn't
+ * `PATCH /api/account/bots/:id`, `{ name, webhookUrl, rooms }`: changes the active bot `id`, answering it
+ * as its edit page then shows it, with a new avatar as `createBot` takes one. As there, someone who isn't
  * an administrator hears so first, then a bot that isn't active isn't found, before anything that was
  * sent is read.
  */

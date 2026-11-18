@@ -43,6 +43,8 @@ describe("Live sidebar updates", () => {
 
   it("shows everyone in a room that its settings no longer allow huddles there, whoever a change puts in it too, and that they do again, and nobody else", async () => {
     const [ada, grace, linus] = [await signIn("Ada"), await signIn("Grace"), await signIn("Linus")];
+    // An administrator, as whoever turns a room's huddles on or off is.
+    await workspaceSql("UPDATE users SET role = 1 WHERE id = ?", ada.user.id);
     const room = await createRoom("Plans", { closedTo: [ada.user.id], as: ada });
     const [adasTab, gracesTab, linussTab] = [await openWorkspaceSocket(ada), await openWorkspaceSocket(grace), await openWorkspaceSocket(linus)];
 

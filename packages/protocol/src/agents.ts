@@ -330,8 +330,8 @@ function oneLineIn(text: unknown): string {
   return /[\p{Cc}\p{Zl}\p{Zp}]/u.test(line) ? "" : line;
 }
 
-/** The rooms `given` lists, each once, or null for every open room, or undefined when it's neither. */
-function roomsIn(given: unknown): RoomId[] | null | undefined {
+/** The rooms `given` lists, each once, or null for every open room, or undefined when it's neither, as an agent's and a chat bot's are picked. */
+export function roomsIn(given: unknown): RoomId[] | null | undefined {
   if (given === null) return null;
   if (!Array.isArray(given) || given.length > MAX_SHARED_ORDER) return undefined;
   const ids = given.filter((id): id is RoomId => typeof id === "string" && isRoomId(id));

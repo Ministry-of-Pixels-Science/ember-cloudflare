@@ -432,14 +432,19 @@ export interface RoomSettings {
   room: SharedRoom;
   /** Whether you can change the room, as administrators and its creator can. Others see it read-only. */
   canAdminister: boolean;
+  /**
+   * Whether you can turn huddles on or off in it, as only administrators can, as a Slack workspace's
+   * owners and admins can in a channel. Its creator, who can change the rest, sees of them what others do.
+   */
+  canChangeHuddles: boolean;
   /** Everyone active who can be put in a room, by name: all but the AI agents only administrators' direct messages reach. */
   people: RoomPerson[];
 }
 
 /**
  * What `PATCH /api/rooms/<id>` changes in a room, as its settings save it: its name, its icon, whether
- * huddles are allowed in it, and who it's for, everyone or just the people `memberIds` names, which
- * takes anyone else out of it.
+ * huddles are allowed in it, which is an administrator's to change, and who it's for, everyone or just
+ * the people `memberIds` names, which takes anyone else out of it.
  */
 export type RoomChanges = { name?: string; icon?: RoomIconChoice; huddles?: boolean } & ({ kind?: "open" } | { kind: "closed"; memberIds: UserId[] });
 

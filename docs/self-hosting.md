@@ -1416,14 +1416,17 @@ Turning a switch on again gives its buttons back, and nobody's camera comes on, 
 by itself.
 
 A room can go without huddles, as a Slack channel can. While huddles are on, a room's settings have
-a Huddles switch for whoever can change the room, an administrator or the person who made it, which
-is on until they turn it off and save. A room with it off has no headphones at its top, its
-huddle's link opens the room and says that huddles are turned off there, and the room lets nobody
-into a huddle. A huddle going on there ends, which the settings say before they're saved: each tab
-in it leaves as it hears of the change, and tells its person why, and the room ends it within half a
-minute for any that didn't. Everyone else in the room reads in its settings that it has no huddles.
-A direct message has no settings, and its huddles go by who's in it. Turning huddles off for
-everyone leaves each room's switch as it was, for when they're on again.
+a Huddles switch for administrators, as only a Slack workspace's owners and admins change a
+channel's, which is on until one turns it off and saves. The person who made the room can change the
+rest of its settings, and has no switch unless they're an administrator. A room with it off has no
+headphones at its top, its huddle's link opens the room and says that huddles are turned off there,
+and the room lets nobody into a huddle. A huddle going on there ends, which the settings say before
+they're saved: each tab in it leaves as it hears of the change, and tells its person why, and the
+room ends it within half a minute for any that didn't. Everyone else in the room reads in its
+settings that it has no huddles. An administrator has a room's settings only while they're in the
+room, so a private room's huddles are for an administrator in it to turn off. A direct message has
+no settings, and its huddles go by who's in it. Turning huddles off for everyone leaves each room's
+switch as it was, for when they're on again.
 
 Some networks, like an office's or a hotel's, block the way a browser reaches the SFU, and nobody on
 one can connect to a huddle. A third card, Relay for strict networks, gives huddles a relay for them:
