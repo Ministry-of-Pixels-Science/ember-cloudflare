@@ -1,22 +1,43 @@
-// `ActionText::PlainTextConversion`.
+// `ActionText::PlainTextConversion`, with a heading of any size ending a block, as `h1` does there, since Ember's
+// formatting row writes `h2` and `h3` as well as Campfire's `h1`.
 
 import { chompNewlines, isBlank } from "./ruby";
 import { ancestors, nodeName, textContent, type Element, type Node, type Parent } from "./tree";
 
+/**
+ * Ember's own limit on the spaces a body's plain text indents its list items with in all, which Action
+ * Text doesn't have: an item takes two for each list around its own, so 100 KB of items in lists as deep
+ * as a body goes read as 20 MB of text. Once a body's items have taken this many, the rest aren't
+ * indented. Its text is longer by then than a message's can be (`MAX_MESSAGE_LENGTH`, which this mustn't
+ * be less than), so the room refuses the body either way, but for a card's table cell, whose text is
+ * measured on one line.
+ */
+export const MAX_LIST_INDENTATION = 10_000;
+
+/** The spaces of `MAX_LIST_INDENTATION` that the list items of the body being read have yet to take. */
+interface IndentationBudget {
+  spaces: number;
+}
+
 /** `PlainTextConversion.node_to_plain_text`: a bottom-up reduction keyed on each node's name. */
 export function nodeToPlainText(node: Parent): string {
-  return chompNewlines(plainTextFor(node));
+  return chompNewlines(plainTextFor(node, 0, { spaces: MAX_LIST_INDENTATION }));
 }
 
 /** `plain_text_for_node(node, index)`, where `index` is the node's among its parent's elements. */
-function plainTextFor(node: Node | Parent, index = 0): string {
-  const children = () => (node.kind === "element" || node.kind === "fragment" ? childrenPlainText(node) : "");
+function plainTextFor(node: Node | Parent, index: number, budget: IndentationBudget): string {
+  const children = () => (node.kind === "element" || node.kind === "fragment" ? childrenPlainText(node, budget) : "");
   switch (node.kind === "fragment" ? "#document-fragment" : nodeName(node)) {
     case "script":
     case "style":
     case "unsupported":
       return "";
     case "h1":
+    case "h2":
+    case "h3":
+    case "h4":
+    case "h5":
+    case "h6":
     case "p":
       return block(children());
     case "ul":
@@ -37,16 +58,23 @@ function plainTextFor(node: Node | Parent, index = 0): string {
       return quoted(block(children()));
     case "li": {
       const depth = listDepth(node);
-      return `${"  ".repeat(Math.max(depth - 1, 0))}${bullet(node as Element, index)} ${chompNewlines(children())}\n`;
+      return `${indentation(Math.max(depth - 1, 0), budget)}${bullet(node as Element, index)} ${chompNewlines(children())}\n`;
     }
     default:
       return children();
   }
 }
 
-function childrenPlainText(parent: Parent): string {
+function childrenPlainText(parent: Parent, budget: IndentationBudget): string {
   let elementIndex = 0;
-  return parent.children.map((child) => plainTextFor(child, child.kind === "element" ? elementIndex++ : 0)).join("");
+  return parent.children.map((child) => plainTextFor(child, child.kind === "element" ? elementIndex++ : 0, budget)).join("");
+}
+
+/** Two spaces for each of a list item's `levels`, out of the `budget`, or none once the body's items have used it up. */
+function indentation(levels: number, budget: IndentationBudget): string {
+  if (budget.spaces <= 0) return "";
+  budget.spaces -= 2 * levels;
+  return "  ".repeat(levels);
 }
 
 function block(text: string): string {

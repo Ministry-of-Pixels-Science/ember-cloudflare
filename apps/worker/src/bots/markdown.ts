@@ -6,9 +6,9 @@ import { anchor, escapeText, linkHref } from "./mrkdwn";
 // read with marked into the rich text a message keeps, as Slack draws it: GitHub's flavor, its line breaks kept,
 // every heading at one size, images as links to them, a task's box as a character, and HTML as the text it's
 // written in. Only web and email addresses link, as in mrkdwn, and the room sanitizes what's left as it does a body.
-// The message's plain text reads it as Action Text does (`nodeToPlainText`), running a heading other than `h1`, a code
-// block and a table's cells into what follows them, so those sit in a `div`, which ends a line there, and each cell
-// ends in a space, which it doesn't show.
+// The message's plain text reads it as Action Text does (`nodeToPlainText`), running a code block and a table's cells
+// into what follows them, so those sit in a `div`, which ends a line there, and each cell ends in a space, which it
+// doesn't show. A heading sits in one too, ending its line where it would end a paragraph.
 
 /** Slack's limit on the Markdown in all of a payload's markdown blocks. */
 export const MAX_MARKDOWN_LENGTH = 12_000;

@@ -110,4 +110,12 @@ describe("@-mention people", () => {
 `);
     expect(mentionPromptItem({ ...ada, agent: false })).toBe(mentionPromptItem(ada));
   });
+
+  it("shows someone's @username after their name in the prompt, escaped, but not in the mention picking them writes", () => {
+    expect(mentionPromptItem({ ...ada, username: "ada<3" })).toBe(`<lexxy-prompt-item search="${name}" sgid="${id(1)}">
+  <template type="menu"><span class="autocomplete__item">${avatar}<span class="autocompletable__name">${name}</span> <span class="autocompletable__username">@ada&lt;3</span></span></template>
+  <template type="editor">${mentionContent(ada)}</template>
+</lexxy-prompt-item>
+`);
+  });
 });

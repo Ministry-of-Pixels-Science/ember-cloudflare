@@ -35,12 +35,14 @@ describe("Keyboard shortcuts dialog", () => {
     on("MacIntel");
     render(<Shortcuts />);
     const dialog = screen.getByRole("dialog", { name: "Keyboard shortcuts" });
-    expect(within(dialog).getAllByRole("region").map((group) => group.getAttribute("aria-label"))).toEqual(["Navigate", "Huddles", "Write a message", "Edit a message"]);
+    expect(within(dialog).getAllByRole("region").map((group) => group.getAttribute("aria-label"))).toEqual(["Navigate", "Huddles", "Write a message", "Format text", "Edit a message"]);
     expect(keysOf("Search")).toEqual(["⌘", "F"]);
     expect(keysOf("Move a starred room up or down")).toEqual(["⌥", "↑ ↓"]);
     expect(keysOf("Start, join or leave a huddle")).toEqual(["⌘", "⌥", "⇧", "H"]);
     expect(keysOf("Edit your last message, with nothing written")).toEqual(["↑"]);
-    expect(keysOf("Send with the formatting toolbar open, or on a touch screen")).toEqual(["⌘", "Enter"]);
+    expect(keysOf("Send, on a touch screen too")).toEqual(["⌘", "Enter"]);
+    expect(keysOf("Strikethrough")).toEqual(["⌘", "⇧", "X"]);
+    expect(keysOf("Code block")).toEqual(["⌘", "⌥", "⇧", "C"]);
   });
 
   it("shows Ctrl and Alt on other keyboards", () => {
@@ -49,7 +51,8 @@ describe("Keyboard shortcuts dialog", () => {
     expect(keysOf("Search")).toEqual(["Ctrl", "F"]);
     expect(keysOf("Move a starred room up or down")).toEqual(["Alt", "↑ ↓"]);
     expect(keysOf("Send")).toEqual(["Enter"]);
-    expect(keysOf("Send with the formatting toolbar open, or on a touch screen")).toEqual(["Ctrl", "Enter"]);
+    expect(keysOf("Send, on a touch screen too")).toEqual(["Ctrl", "Enter"]);
+    expect(keysOf("Code block")).toEqual(["Ctrl", "Alt", "Shift", "C"]);
     expect(keysOf("Save")).toEqual(["Ctrl", "Enter"]);
   });
 

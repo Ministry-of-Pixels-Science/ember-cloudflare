@@ -356,6 +356,40 @@ describe("Ways to join", () => {
   });
 });
 
+describe("Welcome someone who joins", () => {
+  const grace = { id: "u2", name: "Grace" };
+  const joined = { user: grace, at: "2026-10-12T09:30:00" };
+  /** Ada's DM with Grace, started as Grace joined, with `messages`, as far back as the room has said it goes. */
+  const withGrace = (messages: Message[], state: Partial<RoomState> = {}) => list({ messages, paged: false, ...state }, vi.fn(), null, { direct: true, roomName: "Grace", joined });
+  const days = () => screen.getAllByRole("heading", { level: 2 }).flatMap((heading) => (heading.querySelector("time") ? [heading.textContent] : []));
+
+  it("opens a DM started as someone joined with their having joined the workspace, under the day they did", () => {
+    render(withGrace([]));
+    expect(screen.getByText("This is the very beginning of your direct messages.")).toBeInTheDocument();
+    const line = screen.getByText("joined Ember");
+    expect(line).toHaveClass("text-message-muted");
+    const said = line.closest("article")!;
+    expect(within(said).getByRole("heading", { level: 3 })).toHaveTextContent("Grace");
+    expect(said.querySelector("h3 time")).toHaveAttribute("datetime", joined.at);
+    expect(days()).toEqual(["October 12, 2026"]);
+  });
+
+  it("dates the day once when the first message came on it, and the next day the first came on", () => {
+    const { rerender } = render(withGrace([message("m1", "2026-10-12T10:00:00")]));
+    expect(days()).toEqual(["October 12, 2026"]);
+    expect(screen.getByText("joined Ember").closest("[data-row]")!.nextElementSibling).toHaveAttribute("data-message-id", "m1");
+    rerender(withGrace([message("m1", "2026-10-13T10:00:00")]));
+    expect(days()).toEqual(["October 12, 2026", "October 13, 2026"]);
+  });
+
+  it("waits for the room to say its timeline reaches back that far", () => {
+    const { rerender } = render(withGrace([], { status: "connecting", paged: null }));
+    expect(screen.queryByText("joined Ember")).not.toBeInTheDocument();
+    rerender(withGrace(messages(1, 3), { hasMore: true }));
+    expect(screen.queryByText("joined Ember")).not.toBeInTheDocument();
+  });
+});
+
 describe("Day separators", () => {
   it("heads each day with its date, and the date and time of its first message on hover", () => {
     render(list({ messages: [message("Saturday", "2026-10-10T09:00:00"), message("Sunday", "2026-10-11T09:00:00"), message("Later", "2026-10-11T15:04:00")] }));
@@ -670,6 +704,22 @@ describe("Stay at the newest message", () => {
     expect(log.scrollTop).toBe(780);
     rerender(list({ messages: messages(1, 9), arrivals: 1 }));
     expect(log.scrollTop).toBe(880);
+    expect(jump()).not.toBeInTheDocument();
+  });
+
+  it("stays at the newest message as it grows, though the browser scrolls the timeline on its own before that's reported", () => {
+    const { rerender } = render(list({ messages: messages(1, 8) }));
+    const log = screen.getByRole("log");
+    const { heights, resize } = layOut(log);
+    expect(log.scrollTop).toBe(400);
+    // m8 grows 300px, as a message does when its file's text loads, and before that's reported, the browser scrolls
+    // the timeline 50px, as Chrome's scroll anchoring can, which leaves its end 250px below the view.
+    heights.m8 = 400;
+    scrollTo(log, 450);
+    resize();
+    expect(log.scrollTop).toBe(700);
+    rerender(list({ messages: messages(1, 9), arrivals: 1 }));
+    expect(log.scrollTop).toBe(800);
     expect(jump()).not.toBeInTheDocument();
   });
 

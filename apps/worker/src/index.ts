@@ -3,6 +3,8 @@ import {
   CloseCode,
   CURRENT_PASSWORD_NEEDED,
   CURRENT_PASSWORD_WRONG,
+  DELETION_NAME_NEEDED,
+  DELETION_PASSWORD_NEEDED,
   EMAIL_DOMAIN_NEEDS_EMAIL,
   EMAIL_SIGN_UP_PATH,
   INVITATION_PATH,
@@ -22,13 +24,16 @@ import {
   MEMBERFUL_WEBHOOK_PATH,
   NAME_RESERVED,
   NO_EMAIL_DOMAINS,
+  ONLY_ADMINISTRATOR,
   PASSWORD_RESET_PATH,
   PASSWORD_WITH_MEMBERFUL,
   isPasswordTooLong,
   isReservedName,
   isRoomId,
+  notTakingDirects,
   OPEN_WITH_MEMBERFUL,
   parseAccountChanges,
+  parseAccountDeletion,
   parseCustomDomainCheck,
   parseCustomStyles,
   parseFavoriteOrder,
@@ -50,9 +55,11 @@ import {
   SIGN_UP_PATH,
   TRANSFER_PATH,
   TURNSTILE_CHECK_PATH,
+  USERNAME_TAKEN,
   workspacePageOf,
   type Account,
   type Bootstrap,
+  type ChangedBlocks,
   type ChangedPerson,
   type CustomDomainCheck,
   type CustomDomainLookup,
@@ -79,7 +86,10 @@ import {
   type WorkspaceSettings,
 } from "@ember/protocol";
 import { agentsName } from "@ember/protocol/agents";
+import { BLOCKED_WORDS_REFUSED } from "@ember/protocol/blocked-words";
+import { parseHuddleSoundChanges, type HuddleSoundsChanged, type PastHuddles } from "@ember/protocol/huddles";
 import { OUTSIDE_AUTHORIZE_PATH } from "@ember/protocol/outside";
+import { parseNewReport, parseReportHandling, type HandledReports, type Reports } from "@ember/protocol/reports";
 import { mentionPromptItem } from "@ember/richtext";
 import { isAccountLogoPath, showAccountLogo, storeLogo } from "./account-logo";
 import {
@@ -146,7 +156,7 @@ import { CSP_REPORT_PATH, cspReport } from "./csp";
 import { addressRefusal, answerProbe, deployedAddressOf, lookUpDns, originFor, probeOf, reachOf } from "./custom-domain";
 import { redirectToHttps, requiresHttps, withHeaders } from "./headers";
 import { health, isUpPath, up } from "./health";
-import { forgetHuddles, saveHuddles } from "./huddles/settings";
+import { forgetHuddleRelay, forgetHuddles, saveHuddleRelay, saveHuddles } from "./huddles/settings";
 import { invite, lookUpEmailLink, resendInvitation, revokeInvitation } from "./invitations";
 import { askForEmailLink, emailSignUpPage, invitationPage, join, joinCodeOf, joinPage, joinWithEmailLink, signUp, signUpPage } from "./join";
 import { checkResendApiKey } from "./mail";
@@ -171,7 +181,7 @@ import { showQrCode } from "./qr-code";
 import { RECOVERY_PATH, resetPassword } from "./recovery";
 import { releaseCheck } from "./releases";
 import { urlOf } from "./request-url";
-import { MAX_ADDRESS_LENGTH } from "./revocations";
+import { taggedAddress } from "./revocations";
 import { clearSearches, recordSearch, searchMessages } from "./searches";
 import { isOnboardedToEmailSending } from "./sending-domain";
 import { checkSetup, firstRun, isSetupPath, setupAccessOf, setupPage, setupPlaceholdersOf } from "./setup";
@@ -254,7 +264,8 @@ async function signInWithPassword({ emailAddress, password, returnTo }: Record<s
 
 /**
  * Signs someone in with just a name, as someone new every time, when EMBER_GUEST_SIGN_IN allows it,
- * unless Memberful is members only, or the name is @ember's or an agent's.
+ * unless Memberful is members only, or the name is @ember's or an agent's, or has a word Blocked words
+ * keeps out.
  */
 async function signInGuest(given: unknown, request: Request, env: Env): Promise<Response> {
   if (!guestSignIn(env)) return problem(403, "Signing in with just a name is turned off");
@@ -266,6 +277,7 @@ async function signInGuest(given: unknown, request: Request, env: Env): Promise<
   const user = await workspace(env).signInGuest(name, await tokenDigest(token, env.SESSION_SECRET), clientOf(request));
   if (user === "memberful") return problem(403, MEMBERFUL_SIGN_IN_NEEDED);
   if (user === "agent's name") return problem(422, agentsName(name));
+  if (user === "blocked words") return problem(422, BLOCKED_WORDS_REFUSED);
   return json({ user }, { status: 201, headers: { "Set-Cookie": sessionCookie(request, token) } });
 }
 
@@ -612,6 +624,83 @@ async function banPerson(request: Request, env: Env, userId: UserId): Promise<Re
   return json({ user: person } satisfies ChangedPerson);
 }
 
+/** Blocks someone, as Block on their page and in their messages' More actions does, answering whom you've blocked now. */
+async function block(request: Request, env: Env, userId: UserId): Promise<Response> {
+  const credentials = await credentialsOf(request, env);
+  const blocked = credentials && (await workspace(env).block(credentials, userId));
+  if (!blocked) return problem(401, "Not signed in");
+  if (blocked === "not found") return problem(404, "Not found");
+  if (blocked === "yourself") return problem(422, "You can't block yourself");
+  return json(blocked satisfies ChangedBlocks);
+}
+
+/**
+ * Reports a message, as Report message in its More actions does, answering 204 once the administrators
+ * have the report, or had one of it from you already. Only someone in its room can, of someone else's.
+ */
+async function reportMessage(request: Request, env: Env, roomId: RoomId, messageId: string): Promise<Response> {
+  const credentials = await credentialsOf(request, env);
+  if (!credentials) return problem(401, "Not signed in");
+  const report = parseNewReport(await jsonBodyOf(request));
+  if ("error" in report) return problem(422, report.error);
+  const reported = await workspace(env).reportMessage(credentials, roomId, messageId, report);
+  if (!reported) return problem(401, "Not signed in");
+  if (reported === "not found") return problem(404, "Not found");
+  if (reported === "yours") return problem(422, "You can't report your own message");
+  return new Response(null, { status: 204 });
+}
+
+/** Reports someone, as Report on their page does, for their name, picture or bio, answering as `reportMessage` does. */
+async function reportPerson(request: Request, env: Env, userId: UserId): Promise<Response> {
+  const credentials = await credentialsOf(request, env);
+  if (!credentials) return problem(401, "Not signed in");
+  const report = parseNewReport(await jsonBodyOf(request));
+  if ("error" in report) return problem(422, report.error);
+  const reported = await workspace(env).reportPerson(credentials, userId, report);
+  if (!reported) return problem(401, "Not signed in");
+  if (reported === "not found") return problem(404, "Not found");
+  if (reported === "yourself") return problem(422, "You can't report yourself");
+  return new Response(null, { status: 204 });
+}
+
+/** The reports an administrator sees, as Membership's Reports list shows them. */
+async function listReports(request: Request, env: Env): Promise<Response> {
+  const credentials = await credentialsOf(request, env);
+  const reports = credentials && (await workspace(env).listReports(credentials));
+  if (!reports) return problem(401, "Not signed in");
+  if (reports === "forbidden") return problem(403, "Only administrators can see reports");
+  return json(reports satisfies Reports, { headers: { "Cache-Control": "no-store" } });
+}
+
+/**
+ * Handles a report, as the Reports list's Delete message, Remove, Ban and Dismiss do, answering the
+ * reports it closed. Removing and banning answer as Remove and Ban do when they can't, and a report
+ * another administrator has handled answers 409.
+ */
+async function handleReport(request: Request, env: Env, reportId: string): Promise<Response> {
+  const credentials = await credentialsOf(request, env);
+  if (!credentials) return problem(401, "Not signed in");
+  const handling = parseReportHandling(await jsonBodyOf(request));
+  if (!handling) return problem(422, "Delete the message, remove or ban whoever it reports, or dismiss the report");
+  const handled = await workspace(env).handleReport(credentials, reportId, handling.outcome);
+  if (!handled) return problem(401, "Not signed in");
+  if (handled === "forbidden") return problem(403, "Only administrators can handle reports");
+  if (handled === "not found") return problem(404, "Not found");
+  if (handled === "handled") return problem(409, "Another administrator has handled that report");
+  if (handled === "invalid") return problem(422, "Only a message's report can delete it");
+  if (handled === "unremovable") return problem(422, handling.outcome === "removed" ? "They can't be removed" : "They can't be banned");
+  if (handled === "yourself") return problem(403, "Administrators can't remove or ban themselves");
+  if (typeof handled === "string") return problem(422, BAN_PROBLEMS[handled]);
+  return json(handled satisfies HandledReports);
+}
+
+/** Unblocks someone, as Unblock on their page and in Blocked people on your profile does, answering as `block` does. */
+async function unblock(request: Request, env: Env, userId: UserId): Promise<Response> {
+  const credentials = await credentialsOf(request, env);
+  const unblocked = credentials && (await workspace(env).unblock(credentials, userId));
+  return unblocked ? json(unblocked satisfies ChangedBlocks) : problem(401, "Not signed in");
+}
+
 /** Lifts someone's ban, as Remove ban on their page does, answering them as `banPerson` does. */
 async function unbanPerson(request: Request, env: Env, userId: UserId): Promise<Response> {
   const credentials = await credentialsOf(request, env);
@@ -629,7 +718,7 @@ async function unbanPerson(request: Request, env: Env, userId: UserId): Promise<
  * the link.
  */
 async function profileAnswer({ transfer, profile, memberful }: YourProfile, env: Env, site: string | null): Promise<Response> {
-  const transferId = await newTransferId(transfer, env.SESSION_SECRET, Date.now());
+  const transferId = await newTransferId(transfer, env.SESSION_SECRET);
   const answer = { ...profile, memberful: memberfulStatusOf(memberful, site) };
   return json({ profile: answer, transferId } satisfies ProfileAnswer, { headers: { "Cache-Control": "no-store" } });
 }
@@ -692,8 +781,40 @@ async function changeProfile(request: Request, env: Env): Promise<Response> {
   if (yours === "email address taken") return problem(422, "That email address has an account already");
   if (yours === "name reserved") return problem(422, NAME_RESERVED);
   if (yours === "agent's name") return problem(422, agentsName(rest.name!));
+  if (yours === "blocked words") return problem(422, BLOCKED_WORDS_REFUSED);
+  if (yours === "username taken") return problem(422, USERNAME_TAKEN);
   if (yours === "password needed") return problem(422, currentPassword ? CURRENT_PASSWORD_WRONG : CURRENT_PASSWORD_NEEDED);
   return profileAnswer(yours, env, memberfulSite);
+}
+
+/**
+ * Delete my account, on your profile: once you've said you mean it, with your password while you have
+ * one, which checking counts against sign-in's limit, or else by typing your name, deletes your account,
+ * as `Workspace.deleteAccount` does, and signs this browser out. 401 without a valid session; 409 for the
+ * only administrator; 422 without your password, or your name, or with one that isn't yours; and 429
+ * past sign-in's limit.
+ */
+async function deleteAccount(request: Request, env: Env): Promise<Response> {
+  const credentials = await credentialsOf(request, env);
+  if (!credentials) return problem(401, "Not signed in");
+  const deletion = parseAccountDeletion(await jsonBodyOf(request));
+  if (typeof deletion === "string") return problem(422, deletion);
+  const { currentPassword, name } = deletion;
+  const check = await workspace(env).accountDeletionCheck(credentials, request.headers.get("CF-Connecting-IP") ?? "unknown");
+  if (!check) return problem(401, "Not signed in");
+  if (check === "limited") return problem(429, SIGN_IN_LIMITED);
+  if (check === "only administrator") return problem(409, ONLY_ADMINISTRATOR);
+  if (check.passwordDigest !== null) {
+    if (!currentPassword) return problem(422, DELETION_PASSWORD_NEEDED);
+    // One longer than the form takes is nobody's, as at sign-in.
+    if (isPasswordTooLong(currentPassword) || !(await passwordHasher(env).verify(currentPassword, check.passwordDigest)).matches) return problem(422, CURRENT_PASSWORD_WRONG);
+  }
+  const deleted = await workspace(env).deleteAccount(credentials, check.passwordDigest, name);
+  if (!deleted) return problem(401, "Not signed in");
+  if (deleted === "password needed") return problem(422, currentPassword ? CURRENT_PASSWORD_WRONG : DELETION_PASSWORD_NEEDED);
+  if (deleted === "name needed") return problem(422, DELETION_NAME_NEEDED);
+  if (deleted === "only administrator") return problem(409, ONLY_ADMINISTRATOR);
+  return new Response(null, { status: 204, headers: { "Set-Cookie": expiredSessionCookie(request) } });
 }
 
 /**
@@ -825,6 +946,42 @@ async function dismissInvitation(request: Request, env: Env): Promise<Response> 
 }
 
 /**
+ * Stops an invitation into room `roomId`'s huddle ringing in every tab of the signed-in person's, as
+ * joining from it or declining it in one of them does, answering 204. Nothing is kept of an invitation,
+ * so it answers the same for a room with none.
+ */
+async function answerHuddleInvitation(request: Request, env: Env, roomId: RoomId): Promise<Response> {
+  const credentials = await credentialsOf(request, env);
+  const answered = credentials !== null && (await workspace(env).answerHuddleInvitation(credentials, roomId));
+  return answered ? new Response(null, { status: 204 }) : problem(401, "Not signed in");
+}
+
+/**
+ * `PATCH /api/users/me/huddle-sounds`, `{ music?, chimes?, ring? }`: turns a huddle's music, its sounds
+ * of someone joining and leaving, or an invitation's ring on or off for the signed-in person, as the
+ * switches on their profile do, one it leaves out staying as it is, answering which they hear then:
+ * 422 for one that's neither true nor false.
+ */
+async function changeHuddleSounds(request: Request, env: Env): Promise<Response> {
+  const credentials = await credentialsOf(request, env);
+  if (!credentials) return problem(401, "Not signed in");
+  const changes = parseHuddleSoundChanges(await jsonBodyOf(request));
+  if (typeof changes === "string") return problem(422, changes);
+  const sounds = await workspace(env).setHuddleSounds(credentials, changes);
+  return sounds ? json({ sounds } satisfies HuddleSoundsChanged) : problem(401, "Not signed in");
+}
+
+/**
+ * `GET /api/huddles`: the huddles that are over in the rooms the signed-in person is in and hasn't
+ * hidden, the latest to have started first, which the Huddles page lists.
+ */
+async function pastHuddles(request: Request, env: Env): Promise<Response> {
+  const credentials = await credentialsOf(request, env);
+  const huddles = credentials && (await workspace(env).pastHuddles(credentials));
+  return huddles ? json({ huddles } satisfies PastHuddles) : problem(401, "Not signed in");
+}
+
+/**
  * Everyone in the workspace, deactivated and banned people too, with their avatars' addresses, for
  * the app to show people by, but the AI agents only administrators' direct messages reach, which only
  * an administrator is listed. No cache keeps it, as none keeps the sidebar, so the app keeps its own copy.
@@ -856,7 +1013,7 @@ async function showPerson(request: Request, env: Env, userId: UserId): Promise<R
   if (!found) return problem(401, "Not signed in");
   if (found === "not found") return problem(404, "Not found");
   const [shown] = await directoryOf([found.person], env.SESSION_SECRET);
-  const transferId = found.transfer ? await newTransferId(found.transfer, env.SESSION_SECRET, Date.now()) : undefined;
+  const transferId = found.transfer ? await newTransferId(found.transfer, env.SESSION_SECRET) : undefined;
   return json({ person: shown!, transferId, ...(found.agent && { agent: found.agent }) } satisfies PersonAnswer, { headers: { "Cache-Control": "no-store" } });
 }
 
@@ -910,12 +1067,14 @@ async function createRoom(request: Request, env: Env): Promise<Response> {
   }
   const created = await workspace(env).createRoom(credentials, room);
   if (!created) return problem(401, "Not signed in");
+  if (created === "blocked words") return problem(422, BLOCKED_WORDS_REFUSED);
   return created === "forbidden" ? problem(403, ROOM_CREATION_FORBIDDEN) : json({ room: created }, { status: 201 });
 }
 
 /**
  * Starts a DM with the people it names, or opens the one they have, as New direct message does: 201 for
- * a new DM and 200 for one they had.
+ * a new DM and 200 for one they had, or 403 for a new one with someone who has blocked you, which says
+ * only that they aren't taking direct messages.
  */
 async function startDirect(request: Request, env: Env): Promise<Response> {
   const credentials = await credentialsOf(request, env);
@@ -923,7 +1082,9 @@ async function startDirect(request: Request, env: Env): Promise<Response> {
   const direct = parseNewDirect(await jsonBodyOf(request));
   if (typeof direct === "string") return problem(422, direct);
   const started = await workspace(env).startDirect(credentials, direct.userIds);
-  return started ? json({ room: started.room } satisfies StartedDirect, { status: started.started ? 201 : 200 }) : problem(401, "Not signed in");
+  if (!started) return problem(401, "Not signed in");
+  if ("refusedBy" in started) return problem(403, notTakingDirects(started.refusedBy));
+  return json({ room: started.room } satisfies StartedDirect, { status: started.started ? 201 : 200 });
 }
 
 /** Who New room's forms list: everyone active, by name, for anyone who may create rooms. */
@@ -944,7 +1105,8 @@ async function roomSettings(request: Request, env: Env, roomId: RoomId): Promise
 
 /**
  * Changes a room, as its settings page saves it. Someone who can't change it hears so before anything
- * they sent is checked.
+ * they sent is checked, and whoever would turn huddles on or off in it hears that only an administrator
+ * can, unless they're one.
  */
 async function changeRoom(request: Request, env: Env, roomId: RoomId): Promise<Response> {
   const credentials = await credentialsOf(request, env);
@@ -955,6 +1117,8 @@ async function changeRoom(request: Request, env: Env, roomId: RoomId): Promise<R
   if (!room) return problem(401, "Not signed in");
   if (room === "not found") return problem(404, ROOM_NOT_FOUND);
   if (room === "forbidden") return problem(403, "Only administrators and the room's creator can change it");
+  if (room === "administrators only") return problem(403, "Only administrators can turn huddles on or off in a room");
+  if (room === "blocked words") return problem(422, BLOCKED_WORDS_REFUSED);
   return typeof changes === "string" ? problem(422, changes) : json({ room });
 }
 
@@ -1093,9 +1257,8 @@ async function connectToRoom(request: Request, env: Env, roomId: RoomId, huddle 
   headers.set(BANNED_HEADER, String(access.banned));
   // Set either way, so that only the address a socket asks at says which it is.
   headers.set(HUDDLE_HEADER, String(huddle));
-  // An address longer than any IP address isn't one a ban can hold, and would make too long a tag.
-  const { ip } = clientOf(request);
-  if (ip !== null && ip.length <= MAX_ADDRESS_LENGTH) headers.set(ADDRESS_HEADER, ip);
+  const address = taggedAddress(clientOf(request).ip);
+  if (address !== null) headers.set(ADDRESS_HEADER, address);
   else headers.delete(ADDRESS_HEADER);
   return env.CHAT_ROOM.getByName(roomId).fetch(new Request(request, { headers }));
 }
@@ -1158,6 +1321,8 @@ function apiAction(request: Request, env: Env, pathname: string): (() => Respons
   if (pathname === "/api/account/outside_ai" && request.method === "PUT") return () => changeOutsideAi(request, env);
   if (pathname === "/api/account/huddles" && request.method === "PUT") return () => saveHuddles(request, env);
   if (pathname === "/api/account/huddles" && request.method === "DELETE") return () => forgetHuddles(request, env);
+  if (pathname === "/api/account/huddles/relay" && request.method === "PUT") return () => saveHuddleRelay(request, env);
+  if (pathname === "/api/account/huddles/relay" && request.method === "DELETE") return () => forgetHuddleRelay(request, env);
   if (pathname === "/api/account/custom_domain_checks" && request.method === "POST") return () => checkCustomDomain(request, env);
   if (pathname === "/api/account/custom_domain_lookups" && request.method === "POST") return () => lookUpCustomDomain(request, env);
   if (pathname === LOGO_PATH && request.method === "PUT") return () => changeLogo(request, env);
@@ -1188,7 +1353,10 @@ function apiAction(request: Request, env: Env, pathname: string): (() => Respons
   if (pathname === "/api/sidebar/order" && request.method === "PUT") return () => setFavoriteOrder(request, env);
   if (pathname === "/api/users/me/profile" && request.method === "GET") return () => profile(request, env);
   if (pathname === "/api/users/me/profile" && request.method === "PATCH") return () => changeProfile(request, env);
+  if (pathname === "/api/users/me" && request.method === "DELETE") return () => deleteAccount(request, env);
   if (pathname === "/api/users/me/assistant" && request.method === "PATCH") return () => changeYourAssistant(request, env);
+  if (pathname === "/api/users/me/huddle-sounds" && request.method === "PATCH") return () => changeHuddleSounds(request, env);
+  if (pathname === "/api/huddles" && request.method === "GET") return () => pastHuddles(request, env);
   const ownAppSignIn = pathname.match(/^\/api\/users\/me\/apps\/([^/]+)\/sign-in$/);
   if (ownAppSignIn && request.method === "POST") return () => beginOwnAppSignIn(request, env, ownAppSignIn[1]!);
   if (ownAppSignIn && request.method === "DELETE") return () => signOutOfApp(request, env, ownAppSignIn[1]!);
@@ -1205,6 +1373,14 @@ function apiAction(request: Request, env: Env, pathname: string): (() => Respons
   const ban = pathname.match(/^\/api\/users\/([^/]+)\/ban$/);
   if (ban && request.method === "POST") return () => banPerson(request, env, segmentText(ban[1]!));
   if (ban && request.method === "DELETE") return () => unbanPerson(request, env, segmentText(ban[1]!));
+  const blocking = pathname.match(/^\/api\/users\/([^/]+)\/block$/);
+  if (blocking && request.method === "POST") return () => block(request, env, segmentText(blocking[1]!));
+  if (blocking && request.method === "DELETE") return () => unblock(request, env, segmentText(blocking[1]!));
+  const personReport = pathname.match(/^\/api\/users\/([^/]+)\/report$/);
+  if (personReport && request.method === "POST") return () => reportPerson(request, env, segmentText(personReport[1]!));
+  if (pathname === "/api/reports" && request.method === "GET") return () => listReports(request, env);
+  const report = pathname.match(/^\/api\/reports\/([^/]+)$/);
+  if (report && request.method === "POST") return () => handleReport(request, env, segmentText(report[1]!));
   if (pathname === "/api/socket") return () => connectToWorkspace(request, env);
   if (pathname === "/api/rooms" && request.method === "POST") return () => createRoom(request, env);
   if (pathname === "/api/rooms/new" && request.method === "GET") return () => newRoomForm(request, env);
@@ -1243,6 +1419,9 @@ function apiAction(request: Request, env: Env, pathname: string): (() => Respons
   }
   const huddle = pathname.match(/^\/api\/rooms\/([^/]+)\/huddle$/);
   if (huddle) return () => (isRoomId(huddle[1]!) ? connectToRoom(request, env, huddle[1]!, true) : problem(404, ROOM_NOT_FOUND));
+  const huddleInvitation = pathname.match(/^\/api\/rooms\/([^/]+)\/huddle\/invitation$/);
+  if (huddleInvitation && request.method === "DELETE")
+    return () => (isRoomId(huddleInvitation[1]!) ? answerHuddleInvitation(request, env, huddleInvitation[1]!) : problem(404, ROOM_NOT_FOUND));
   const settings = pathname.match(/^\/api\/rooms\/([^/]+)\/settings$/);
   if (settings && request.method === "GET") return () => (isRoomId(settings[1]!) ? roomSettings(request, env, settings[1]!) : problem(404, ROOM_NOT_FOUND));
   const favorite = pathname.match(/^\/api\/rooms\/([^/]+)\/favorite$/);
@@ -1261,6 +1440,9 @@ function apiAction(request: Request, env: Env, pathname: string): (() => Respons
   const preview = pathname.match(/^\/api\/rooms\/([^/]+)\/uploads\/([^/]+)\/preview$/);
   if (preview && request.method === "PUT")
     return () => (isRoomId(preview[1]!) ? uploadPreview(request, env, preview[1]!, preview[2]!) : problem(404, ROOM_NOT_FOUND));
+  const messageReport = pathname.match(/^\/api\/rooms\/([^/]+)\/messages\/([^/]+)\/report$/);
+  if (messageReport && request.method === "POST")
+    return () => (isRoomId(messageReport[1]!) ? reportMessage(request, env, messageReport[1]!, segmentText(messageReport[2]!)) : problem(404, ROOM_NOT_FOUND));
   const room = pathname.match(/^\/api\/rooms\/([^/]+)$/);
   if (room && request.method === "PATCH") return () => (isRoomId(room[1]!) ? changeRoom(request, env, room[1]!) : problem(404, ROOM_NOT_FOUND));
   if (room && request.method === "DELETE") return () => (isRoomId(room[1]!) ? deleteRoom(request, env, room[1]!) : problem(404, ROOM_NOT_FOUND));

@@ -411,11 +411,14 @@ describe("Sign up without a link", () => {
       const cookie = cookieOf(response);
       expect(await (await api("/api/me", { headers: { Cookie: cookie } })).json()).toEqual({ user });
       const { rooms } = (await (await api("/api/sidebar", { headers: { Cookie: cookie } })).json()) as Sidebar;
-      expect(rooms.map((room) => room.id)).toEqual([administrator.general.id, expect.any(String), design.id]);
+      // And the DM that welcomes them, with the administrator, last.
+      const welcome = rooms.find((room) => room.kind === "direct")!;
+      expect(rooms.map((room) => room.id)).toEqual([administrator.general.id, expect.any(String), design.id, welcome.id]);
       expect(rooms.map((room) => room.id)).not.toContain(leads.id);
 
       const { users } = (await (await api("/api/users", { headers: as(administrator) })).json()) as Directory;
       expect(await workspace.next()).toEqual({ type: "user.updated", user: users.find((person) => person.id === user.id) });
+      expect(await workspace.next()).toEqual({ type: "room.saved", room: expect.objectContaining({ id: welcome.id, kind: "direct" }) });
       workspace.ws.close(1000);
     });
 

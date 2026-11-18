@@ -4,7 +4,7 @@ import { Computer, VideoCamera, type IconoirIconProps } from "@/components/icons
 import { Switch } from "@/components/ui/switch";
 import { useCamerasAllowed, useScreensAllowed } from "@/hooks/use-account";
 import { useMounted } from "@/hooks/use-mounted";
-import { forgetHuddles, isSignedOut } from "@/lib/api";
+import { forgetHuddleRelay, forgetHuddles, isSignedOut } from "@/lib/api";
 import { HUDDLE_CHAT_TITLE } from "@/lib/huddle-chat";
 import { cn } from "@/lib/utils";
 import { BUTTON } from "./email-settings";
@@ -18,7 +18,9 @@ import { BUTTON } from "./email-settings";
 // minute. Change keys opens the setup with the app's ID as it is. While huddles are on, a second card
 // has what people may do in one, each on until an administrator turns it off: Cameras, which off keeps
 // huddles to voices and takes down the cameras that are on, and Screen sharing, which off stops the
-// screens people share.
+// screens people share. A third has the relay: whether Ember has a TURN key of that account's, by which
+// people whose network blocks the way to the SFU reach it through Cloudflare's TURN service. Its switch
+// opens Set up the relay (`RelaySetup`) and forgets the key, as the first card's does for the app's.
 
 /** What the card says of huddles while they're off. */
 export const HUDDLES_EXPLAINED =
@@ -30,6 +32,14 @@ export const CONFIRM_STOP_HUDDLES = "Are you sure you want to turn off huddles? 
 /** What the second card says its Cameras switch lets people do, and its Screen sharing switch. */
 export const CAMERAS_EXPLAINED = "People can turn their camera on in a huddle.";
 export const SCREENS_EXPLAINED = "People can share their screen in a huddle, from a computer.";
+
+/** What the third card is called, and what it says of the relay while huddles have none. */
+export const RELAY_TITLE = "Relay for strict networks";
+export const RELAY_EXPLAINED =
+  "Some networks, like an office's or a hotel's, block the way huddles connect. With a relay, people on them connect through Cloudflare's TURN service, with a TURN key in your Cloudflare account.";
+
+/** What taking the relay away asks first. */
+export const CONFIRM_STOP_RELAY = "Are you sure you want to turn off the relay? People whose network blocks huddles won't be able to connect to one, and Ember will forget the TURN key.";
 
 const CARD = "flex flex-col gap-3 rounded-[10px] border bg-surface px-[2ch] py-4 text-start max-md:px-3";
 const NOTE = "text-[0.8em] text-muted-foreground max-md:text-[12px]";
@@ -94,6 +104,75 @@ export function HuddlesSettings({ huddles, onSetUp, onStopped, onFailed }: Props
         <div>
           <button type="button" onClick={onSetUp} disabled={stopping} className={BUTTON}>
             Change keys
+          </button>
+        </div>
+      )}
+    </section>
+  );
+}
+
+interface RelayProps {
+  /** The TURN key the relay goes by, by its ID, or null while huddles have no relay. */
+  relayKeyId: string | null;
+  /** Opens Set up the relay. */
+  onSetUp: () => void;
+  /** Shows huddles as they are once the key is forgotten, which is off where they've been turned off since. */
+  onStopped: (huddles: WorkspaceSettings["huddles"]) => void;
+  /** Says why taking the relay away failed, as the workspace's alerts do. */
+  onFailed: (error: unknown) => void;
+}
+
+/** Whether huddles have a relay, for administrators, which the tab shows while huddles are on, and by which TURN key, or else what a relay would add. */
+export function HuddleRelay({ relayKeyId, onSetUp, onStopped, onFailed }: RelayProps) {
+  const [stopping, setStopping] = useState(false);
+  const mounted = useMounted();
+
+  const stop = () => {
+    if (!confirm(CONFIRM_STOP_RELAY)) return;
+    setStopping(true);
+    forgetHuddleRelay().then(
+      (huddles) => {
+        onStopped(huddles);
+        if (mounted.current) setStopping(false);
+      },
+      (error: unknown) => {
+        if (!mounted.current && !isSignedOut(error)) return;
+        setStopping(false);
+        onFailed(error);
+      },
+    );
+  };
+
+  return (
+    <section aria-labelledby="huddle-relay-heading" className={CARD}>
+      <div className="flex items-center gap-x-[1ch] gap-y-4">
+        <div className="min-w-0 flex-1">
+          <h2 id="huddle-relay-heading" className="text-base font-semibold">
+            {RELAY_TITLE}
+          </h2>
+          <p id="huddle-relay-description" className={NOTE}>
+            {relayKeyId === null ? (
+              RELAY_EXPLAINED
+            ) : (
+              <>
+                People whose network blocks huddles connect through Cloudflare's TURN service, by the TURN key <strong className="font-semibold wrap-anywhere">{relayKeyId}</strong> in your
+                Cloudflare account.
+              </>
+            )}
+          </p>
+        </div>
+        <Switch
+          checked={relayKeyId !== null && !stopping}
+          onCheckedChange={(on) => (on ? onSetUp() : stop())}
+          disabled={stopping}
+          aria-labelledby="huddle-relay-heading"
+          aria-describedby="huddle-relay-description"
+        />
+      </div>
+      {relayKeyId !== null && (
+        <div>
+          <button type="button" onClick={onSetUp} disabled={stopping} className={BUTTON}>
+            Change key
           </button>
         </div>
       )}

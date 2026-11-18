@@ -61,9 +61,24 @@ import appScopeWanted from "../migrations/0060_app_scope_wanted.sql";
 import ownAppSignIns from "../migrations/0061_own_app_sign_ins.sql";
 import outsideAi from "../migrations/0062_outside_ai.sql";
 import agentAccess from "../migrations/0063_agent_access.sql";
+import sessionTransfers from "../migrations/0064_session_transfers.sql";
+import newcomersAndUnreadCounts from "../migrations/0065_newcomers_and_unread_counts.sql";
+import huddleMessages from "../migrations/0066_huddle_messages.sql";
+import roomHuddles from "../migrations/0067_room_huddles.sql";
+import deletedAccounts from "../migrations/0068_deleted_accounts.sql";
+import boostsByBooster from "../migrations/0069_boosts_by_booster.sql";
+import blocks from "../migrations/0070_blocks.sql";
+import huddleSounds from "../migrations/0071_huddle_sounds.sql";
+import usernames from "../migrations/0072_usernames.sql";
+import reports from "../migrations/0073_reports.sql";
+import pastHuddles from "../migrations/0074_past_huddles.sql";
+import changedHuddles from "../migrations/0075_changed_huddles.sql";
+import sessionAddresses from "../migrations/0076_session_addresses.sql";
+import botRooms from "../migrations/0077_bot_rooms.sql";
 import searchIndex from "../search-migrations/0001_search_index.sql";
 import searchResults from "../search-migrations/0002_search_results.sql";
 import searchFilters from "../search-migrations/0003_search_filters.sql";
+import searchFiltersByRoom from "../search-migrations/0004_search_filters_by_room.sql";
 
 /**
  * The kind of Durable Object whose tables a migration creates or changes. On DO SQLite each object
@@ -148,6 +163,20 @@ export const MIGRATIONS: Migration[] = [
   { name: "0061_own_app_sign_ins.sql", scope: "workspace", sql: ownAppSignIns },
   { name: "0062_outside_ai.sql", scope: "workspace", sql: outsideAi },
   { name: "0063_agent_access.sql", scope: "workspace", sql: agentAccess },
+  { name: "0064_session_transfers.sql", scope: "workspace", sql: sessionTransfers },
+  { name: "0065_newcomers_and_unread_counts.sql", scope: "workspace", sql: newcomersAndUnreadCounts },
+  { name: "0066_huddle_messages.sql", scope: "room", sql: huddleMessages },
+  { name: "0067_room_huddles.sql", scope: "workspace", sql: roomHuddles },
+  { name: "0068_deleted_accounts.sql", scope: "workspace", sql: deletedAccounts },
+  { name: "0069_boosts_by_booster.sql", scope: "room", sql: boostsByBooster },
+  { name: "0070_blocks.sql", scope: "workspace", sql: blocks },
+  { name: "0071_huddle_sounds.sql", scope: "workspace", sql: huddleSounds },
+  { name: "0072_usernames.sql", scope: "workspace", sql: usernames },
+  { name: "0073_reports.sql", scope: "workspace", sql: reports },
+  { name: "0074_past_huddles.sql", scope: "workspace", sql: pastHuddles },
+  { name: "0075_changed_huddles.sql", scope: "room", sql: changedHuddles },
+  { name: "0076_session_addresses.sql", scope: "workspace", sql: sessionAddresses },
+  { name: "0077_bot_rooms.sql", scope: "workspace", sql: botRooms },
 ];
 
 /**
@@ -160,6 +189,7 @@ export const SEARCH_MIGRATIONS: Migration[] = [
   { name: "0001_search_index.sql", scope: "search", sql: searchIndex },
   { name: "0002_search_results.sql", scope: "search", sql: searchResults },
   { name: "0003_search_filters.sql", scope: "search", sql: searchFilters },
+  { name: "0004_search_filters_by_room.sql", scope: "search", sql: searchFiltersByRoom },
 ];
 
 /**

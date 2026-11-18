@@ -1,4 +1,4 @@
-import type { Locator } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import { cookieHeader } from "../../fixtures";
 import { expect, test, type Member } from "./fixtures";
 
@@ -14,21 +14,37 @@ const prompt = (member: Member) => member.page.getByRole("listbox");
 /** The people the @ prompt lists, in order. */
 const offered = (member: Member) => prompt(member).getByRole("option");
 
+/**
+ * Waits for the @ prompt's list to close and for Lexxy to listen for the next @, which it starts again a
+ * frame after closing the list: sooner than anyone types one, but not always sooner than a test does,
+ * whose @ it would miss.
+ */
+async function listClosed(member: Member): Promise<void> {
+  await expect(prompt(member)).toBeHidden();
+  await member.page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+}
+
 /** The mention of `name` in `scope`: their avatar, then their name. */
 const mention = (scope: Locator, name: string) => scope.getByText(name, { exact: true });
 
 /**
+ * Resolves as `page` gets the list of people for all of `filter`. Lexxy searches whenever typing pauses and
+ * draws each answer as it comes, picking its first, and an answer for less of `filter` can list the same
+ * people first, as on a busy machine. When someone is picked from that list, the answer for all of it comes
+ * after: Lexxy then closes its list once more, and misses an @ typed in the frame that follows.
+ */
+const answerFor = (page: Page, filter: string) => page.waitForResponse((response) => new URL(response.url()).searchParams.get("filter") === filter);
+
+/**
  * Types @ and then `filter` into `field`, waiting for the list between them, as someone does who reads it
- * first. The list follows what's typed while it loads too ("lists the people for what's typed while…").
- * Lexxy searches whenever typing pauses and draws each answer as it comes, picking its first. An answer
- * for less of `filter` can list the same people first, as on a busy machine, so this waits for the
- * answer for all of it.
+ * first, and then for the answer for all of `filter`. The list follows what's typed while it loads too
+ * ("lists the people for what's typed while…").
  */
 async function typeMention(field: Locator, filter: string): Promise<void> {
   const page = field.page();
   await field.pressSequentially("@");
   await expect(page.getByRole("listbox")).toBeVisible();
-  const answered = page.waitForResponse((response) => new URL(response.url()).searchParams.get("filter") === filter);
+  const answered = answerFor(page, filter);
   await field.pressSequentially(filter);
   await answered;
 }
@@ -82,7 +98,7 @@ test.describe("@-mention people", () => {
       await typeMention(zed.composer(), tag);
       await expect(offered(zed)).toHaveText([`Bea ${tag}`, `Zed ${tag}`]);
       await zed.composer().press(key);
-      await expect(prompt(zed)).toBeHidden();
+      await listClosed(zed);
     }
     await expect(mention(zed.composer(), `Bea ${tag}`)).toHaveCount(3);
     await expect(zed.composer()).toContainText(",");
@@ -99,12 +115,30 @@ test.describe("@-mention people", () => {
 
     // The first time, Lexxy fetches the list before it reads what follows the @, and after that, as the @ is typed.
     for (const time of ["first", "second"]) {
+      const answered = answerFor(zed.page, tag);
       await zed.composer().pressSequentially(`@${tag}`);
+      await answered;
       await expect(offered(zed), `the ${time} time`).toHaveText([`Bea ${tag}`, `Zed ${tag}`]);
       await zed.composer().press("Tab");
-      await expect(prompt(zed)).toBeHidden();
+      await listClosed(zed);
     }
     await expect(mention(zed.composer(), `Bea ${tag}`)).toHaveCount(2);
+  });
+
+  test("lists someone whose username starts with what follows @ too, showing it after their name", async ({ members, participant, request }) => {
+    const tag = newTag();
+    const grace = await participant(`Grace ${tag}`);
+    const username = `amazing.${tag}`;
+    const changed = await request.patch("/api/users/me/profile", { data: { username }, headers: { Cookie: cookieHeader(grace.session) } });
+    expect(changed.status(), await changed.text()).toBe(200);
+    const ada = await members.signIn(`Ada ${tag}`);
+
+    await ada.composer().pressSequentially("Hey ");
+    await typeMention(ada.composer(), username.slice(0, -2));
+    await expect(offered(ada)).toHaveText([`Grace ${tag} @${username}`]);
+    await ada.composer().press("Tab");
+    // The mention names them, as every mention does.
+    await expect(mention(ada.composer(), `Grace ${tag}`)).toBeVisible();
   });
 
   test("says No matches when no one's name has what follows @, and Escape closes the list, keeping what's written", async ({ members }) => {

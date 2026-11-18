@@ -5,8 +5,10 @@ import {
   roomSocketQuery,
   searchQuery,
   WORKSPACE_PRELOADS,
+  workspaceSocketQuery,
   type Account,
   type AccountChanges,
+  type AccountDeletion,
   type AssistantChanged,
   type AssistantChanges,
   type AssistantForgotten,
@@ -19,6 +21,7 @@ import {
   type BotChanges,
   type Bots,
   type BotSettings,
+  type ChangedBlocks,
   type ChangedPerson,
   type CustomDomainCheck,
   type CustomDomainLookup,
@@ -33,6 +36,10 @@ import {
   type EmailLinkSignUp,
   type EmailSettings,
   type Favorites,
+  type HuddleRelaySetup,
+  type HuddleSoundChanges,
+  type HuddleSounds,
+  type HuddleSoundsChanged,
   type HuddlesForgotten,
   type HuddlesSaved,
   type HuddlesSettings,
@@ -55,6 +62,8 @@ import {
   type NewBot,
   type NewWorkspace,
   type OpenSignUp,
+  type PastHuddle,
+  type PastHuddles,
   type PasswordResetDone,
   type PasswordResetRequest,
   type PasswordResetWithCode,
@@ -89,6 +98,7 @@ import {
   type UserId,
   type WebSearchChanged,
   type WorkspaceSettings,
+  type WorkspaceSocketParams,
   type YourAssistantChanged,
   type YourAssistantChanges,
 } from "@ember/protocol";
@@ -116,6 +126,7 @@ import type {
 } from "@ember/protocol/apps";
 import type { MemberfulKeysChange, MemberfulSaved } from "@ember/protocol/memberful";
 import type { OutsideAiSettings, OutsideAnswer, OutsideAnswered, OutsideAsk, OutsideAsked, OutsideScope, YourOutsideAi } from "@ember/protocol/outside";
+import type { HandledReports, NewReport, Report, ReportHandling, ReportOutcome, Reports } from "@ember/protocol/reports";
 import type { LogoVariants } from "@/lib/previews";
 
 // The session lives in an HttpOnly cookie, which the browser sends with every request and socket,
@@ -312,6 +323,15 @@ export async function signInAsGuest(name: string): Promise<Me> {
 export async function signInWithLink(transferId: string): Promise<Me> {
   const body: LinkSignIn = { transferId };
   return (await request<{ user: Me }>("/api/session/transfers", { method: "POST", body: JSON.stringify(body) })).user;
+}
+
+/**
+ * Deletes your account, as Delete my account on your profile does, saying you mean it with your password
+ * while you have one, or else your name, and signs this browser out. Fails with a 409 ApiError for the
+ * only administrator, a 422 when what's typed isn't yours, and a 429 past sign-in's limit.
+ */
+export async function deleteAccount(deletion: AccountDeletion): Promise<void> {
+  await request("/api/users/me", { method: "DELETE", body: JSON.stringify(deletion) });
 }
 
 /**
@@ -590,6 +610,24 @@ export async function forgetHuddles(): Promise<null> {
 }
 
 /**
+ * Gives Ember a TURN key's ID and API token for huddles' relay to go by, answering huddles as they are
+ * then. Fails with a 422 ApiError on the field Ember or Cloudflare refuses, a 502 one when Ember couldn't
+ * ask Cloudflare, a 409 one while huddles are off, and a 403 one for anyone but an administrator.
+ */
+export async function saveHuddleRelay(setup: HuddleRelaySetup): Promise<HuddlesSettings> {
+  return (await request<HuddlesSaved>("/api/account/huddles/relay", { method: "PUT", body: JSON.stringify(setup) })).huddles;
+}
+
+/**
+ * Takes huddles' relay away, forgetting the TURN key Ember was given, answering huddles as they are
+ * then, which is null where they've been turned off since. Fails with a 403 ApiError for anyone but an
+ * administrator.
+ */
+export async function forgetHuddleRelay(): Promise<HuddlesSettings | null> {
+  return (await request<HuddlesSaved | HuddlesForgotten>("/api/account/huddles/relay", { method: "DELETE" })).huddles;
+}
+
+/**
  * The models Ember offers, as Set up Ember AI, Add a model and the agents' pages list them: those the
  * models file lists, then Workers AI's, as Cloudflare's model search lists them for the account `keys`
  * names, with its API token, as Set up Ember AI has them typed, or else Ember AI's, or why they aren't
@@ -781,9 +819,14 @@ export function describeOutsideAsk(ask: OutsideAsk): Promise<OutsideAsked> {
   return request<OutsideAsked>("/api/outside/asks", { method: "POST", body: JSON.stringify(ask) });
 }
 
-/** Answers `ask`, whether to connect its app as you, leaving out `without` of what it asks, answering where to send the browser: back to the app. Fails as `describeOutsideAsk` does, and with a 409 when you have as many connected as one may. */
-export async function answerOutsideAsk(ask: OutsideAsk, allow: boolean, without: OutsideScope[] = []): Promise<string> {
-  return (await request<OutsideAnswered>("/api/outside/answers", { method: "POST", body: JSON.stringify({ ask, allow, without } satisfies OutsideAnswer) })).redirectTo;
+/**
+ * Answers `ask`, whether to connect its app as you, leaving out `without` of what it asks, and with
+ * `ticked` of it, which Ember gives where the page leaves its box unticked only when it's ticked,
+ * answering where to send the browser: back to the app. Fails as `describeOutsideAsk` does, and with a
+ * 409 when you have as many connected as one may.
+ */
+export async function answerOutsideAsk(ask: OutsideAsk, allow: boolean, without: OutsideScope[] = [], ticked: OutsideScope[] = []): Promise<string> {
+  return (await request<OutsideAnswered>("/api/outside/answers", { method: "POST", body: JSON.stringify({ ask, allow, without, with: ticked } satisfies OutsideAnswer) })).redirectTo;
 }
 
 /** Ends the connection `id` of yours, answering the ones you have left. Fails with a 401 ApiError once the session has ended, a 409 while outside AI is off, and a 404 once the connection has ended. */
@@ -848,6 +891,14 @@ export async function changeYourAssistant(changes: YourAssistantChanges): Promis
 }
 
 /**
+ * Turns each of a huddle's sounds that `changes` names on or off for this person, wherever they're signed
+ * in, answering which they hear then.
+ */
+export async function changeHuddleSounds(changes: HuddleSoundChanges): Promise<HuddleSounds> {
+  return (await request<HuddleSoundsChanged>("/api/users/me/huddle-sounds", { method: "PATCH", body: JSON.stringify(changes) })).sounds;
+}
+
+/**
  * Invites each of `emailAddresses`, no more than `INVITATIONS_AT_ONCE`, by email, answering what came of
  * each, in order. Fails with a 422 ApiError for a list it doesn't take, and a 403 one for anyone but an
  * administrator.
@@ -897,6 +948,41 @@ export async function unbanPerson(userId: UserId): Promise<DirectoryUser> {
   return (await request<ChangedPerson>(`/api/users/${encodeURIComponent(userId)}/ban`, { method: "DELETE" })).user;
 }
 
+/**
+ * Blocks someone, or unblocks them once `blocked` is false, answering whom you've blocked now and your
+ * level in your DM with them alone, when that hid it or showed it again.
+ */
+export async function changeBlock(userId: UserId, blocked: boolean): Promise<ChangedBlocks> {
+  return request<ChangedBlocks>(`/api/users/${encodeURIComponent(userId)}/block`, { method: blocked ? "POST" : "DELETE" });
+}
+
+/**
+ * Reports message `messageId` in room `roomId` to the workspace's administrators, as Report message does.
+ * Fails with a 404 ApiError unless you're in the room and it has the message, and a 422 for your own.
+ */
+export async function reportMessage(roomId: RoomId, messageId: string, report: NewReport): Promise<void> {
+  await request(`/api/rooms/${encodeURIComponent(roomId)}/messages/${encodeURIComponent(messageId)}/report`, { method: "POST", body: JSON.stringify(report) });
+}
+
+/** Reports someone to the workspace's administrators, for their name, picture or bio, as Report on their page does. */
+export async function reportPerson(userId: UserId, report: NewReport): Promise<void> {
+  await request(`/api/users/${encodeURIComponent(userId)}/report`, { method: "POST", body: JSON.stringify(report) });
+}
+
+/** The reports an administrator sees: the open ones, newest first, and the ones handled last. */
+export function listReports(): Promise<Reports> {
+  return request<Reports>("/api/reports");
+}
+
+/**
+ * Handles report `reportId` as `outcome` says, answering the reports that closed. Fails with a 409
+ * ApiError once another administrator has handled it, and a 422 saying why when it can't be done.
+ */
+export async function handleReport(reportId: string, outcome: ReportOutcome): Promise<Report[]> {
+  const handling: ReportHandling = { outcome };
+  return (await request<HandledReports>(`/api/reports/${encodeURIComponent(reportId)}`, { method: "POST", body: JSON.stringify(handling) })).reports;
+}
+
 /** A copy of someone's sidebar, and the ETag the server sent it with. */
 export interface SidebarCopy {
   sidebar: Sidebar;
@@ -917,6 +1003,20 @@ export async function fetchSidebar(copy: SidebarCopy | null): Promise<SidebarCop
 /** Dismisses the welcome card for this person, for good: their sidebar, on any device, has no invitation from then on. */
 export async function dismissInvitation(): Promise<void> {
   await request("/api/sidebar/invitation", { method: "DELETE" });
+}
+
+/** Stops an invitation into room `roomId`'s huddle ringing in every tab this person has open, as joining from it or declining it does. */
+export async function answerHuddleInvitation(roomId: RoomId): Promise<void> {
+  await request(`/api/rooms/${encodeURIComponent(roomId)}/huddle/invitation`, { method: "DELETE" });
+}
+
+/**
+ * The latest huddles that are over in this person's rooms and DMs, but for the ones they've hidden, the
+ * latest first, as the Huddles page lists them: those someone else joined, and those whose threads have
+ * a reply.
+ */
+export async function fetchHuddles(): Promise<PastHuddle[]> {
+  return (await request<PastHuddles>("/api/huddles")).huddles;
 }
 
 /** A copy of the people directory, and the ETag the server sent it with. */
@@ -1002,10 +1102,10 @@ export async function leaveRoom(roomId: RoomId): Promise<void> {
 }
 
 /**
- * The preview of the page `url` goes to, for a link pasted in the composer, or null when it has none, as
+ * The preview of the page `url` goes to, for a link in the composer, or null when it has none, as
  * Campfire's unfurl_controller.js asks for it. The page has none when it answers 204.
  */
-export async function fetchLinkPreview(url: string, signal: AbortSignal): Promise<LinkPreview | null> {
+export async function fetchLinkPreview(url: string, signal?: AbortSignal): Promise<LinkPreview | null> {
   const preview = await request<Partial<LinkPreview>>("/api/unfurl", { method: "POST", body: JSON.stringify({ url }), signal });
   return preview.title && preview.url ? (preview as LinkPreview) : null;
 }
@@ -1044,8 +1144,8 @@ export function socketUrl(path: string): string {
 /** The address of a room's socket, which tells the room what `params` says about the tab. */
 export const roomSocketUrl = (roomId: string, params: RoomSocketParams) => socketUrl(`/api/rooms/${encodeURIComponent(roomId)}/socket${roomSocketQuery(params)}`);
 
-/** The address of a tab's workspace socket, which carries what changes outside the room it shows. */
-export const workspaceSocketUrl = () => socketUrl("/api/socket");
+/** The address of a tab's workspace socket, which carries what changes outside the room it shows, and tells the Workspace what `params` says about the tab. */
+export const workspaceSocketUrl = (params: WorkspaceSocketParams) => socketUrl(`/api/socket${workspaceSocketQuery(params)}`);
 
 /** Forgets the session earlier versions of the app kept in localStorage, which nothing reads now. */
 export function forgetStoredSession(): void {

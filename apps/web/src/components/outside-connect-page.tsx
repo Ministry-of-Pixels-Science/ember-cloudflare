@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Me } from "@ember/protocol";
-import { optionalOutsideScopes, OUTSIDE_SCOPE_EXPLAINED, outsideAskOf, type OutsideAsked, type OutsideScope } from "@ember/protocol/outside";
+import { optionalOutsideScopes, OUTSIDE_SCOPE_EXPLAINED, outsideAskOf, UNTICKED_OUTSIDE_SCOPES, type OutsideAsked, type OutsideScope } from "@ember/protocol/outside";
 import { AuthCard, AuthHeading, AuthPage, type SignedOutWorkspace } from "@/components/auth-page";
 import { PRIMARY_BUTTON } from "@/components/field";
 import { Button } from "@/components/ui/button";
@@ -12,9 +12,10 @@ import { rememberThisPage } from "@/lib/return-path";
 
 // The page an AI app, such as Claude, sends your browser to when you connect it to Ember: it says which
 // app asks, where your browser goes back to, and what the app would be able to do as you, with a box to
-// leave out what it needn't have, such as sending messages, and sends you back to the app with your
-// answer. The request is in the address, as OAuth puts it there, and stays
-// there until you answer, so that signing in first comes back to it.
+// leave out what it needn't have, such as sending messages, and one to tick to let it into your direct
+// messages and private rooms, and sends you back to the app with your answer. The request is in the
+// address, as OAuth puts it there, and stays there until you answer, so that signing in first comes
+// back to it.
 
 const SIGN_IN_PATH = "/session/new";
 const NO_CONNECTION = "Couldn't reach Ember. Check your connection and try again.";
@@ -48,8 +49,8 @@ export function OutsideConnectPage({ me, workspace }: Props) {
   const [asked, setAsked] = useState<OutsideAsked | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [answering, setAnswering] = useState(false);
-  /** What the app asks for that you've chosen to leave out. */
-  const [without, setWithout] = useState<OutsideScope[]>([]);
+  /** What the app asks for that you've chosen to leave out, which starts as your direct messages and private rooms, until you tick them. */
+  const [without, setWithout] = useState<OutsideScope[]>(() => [...UNTICKED_OUTSIDE_SCOPES]);
   const mounted = useMounted();
   useTitle("Connect an AI app");
 
@@ -62,9 +63,12 @@ export function OutsideConnectPage({ me, workspace }: Props) {
     return () => void (stopped = true);
   }, [ask]);
 
+  const optional = asked ? optionalOutsideScopes(asked.scopes) : [];
   const answer = (allow: boolean) => {
     setAnswering(true);
-    answerOutsideAsk(ask, allow, allow ? without : []).then(
+    // Its boxes, which say nothing once you don't allow it: those you left clear, and those you ticked.
+    const boxes = allow ? optional : [];
+    answerOutsideAsk(ask, allow, boxes.filter((scope) => without.includes(scope)), boxes.filter((scope) => !without.includes(scope))).then(
       // The app's page takes this one's place, so Back doesn't come back to a request that's answered.
       (redirectTo) => loadPage(redirectTo),
       (error: unknown) => {
@@ -89,7 +93,6 @@ export function OutsideConnectPage({ me, workspace }: Props) {
       </AuthPage>
     );
   }
-  const optional = asked ? optionalOutsideScopes(asked.scopes) : [];
   return (
     <AuthPage workspace={workspace}>
       {asked && (

@@ -38,7 +38,7 @@ export const PLACEHOLDER_MEANINGS: Record<Placeholder, string> = {
   words: "about how many words it may answer in",
   cards: "how it can show cards under its answer, with what they can hold and how to write them",
   web: "what it may do on the web",
-  today: "today's date, in UTC",
+  today: "today's date and the time, in UTC",
   instructions: "your instructions, which it needs once",
 };
 

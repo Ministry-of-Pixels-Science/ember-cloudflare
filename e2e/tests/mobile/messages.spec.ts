@@ -139,6 +139,26 @@ test("your own messages can be edited on a phone", async ({ page, room, screenIs
   await expect(field).toBeHidden();
 });
 
+test("a snippet written on a phone shows its text in its message, folded behind Show more, and fits the phone", async ({ page, room, screenIsFine }) => {
+  await openRoom(page, room);
+  await page.locator("form.composer").getByRole("button", { name: "Attach", exact: true }).tap();
+  await page.getByRole("menuitem", { name: /^Text snippet/ }).tap();
+  const dialog = page.getByRole("dialog", { name: "Create a text snippet" });
+  await dialog.getByLabel("Title (optional)").fill("deploy.sh");
+  await dialog.getByLabel("Content").fill(Array.from({ length: 12 }, (_, step) => `echo "step ${step + 1}"`).join("\n"));
+  await screenIsFine();
+  await dialog.getByRole("button", { name: "Create snippet" }).tap();
+  await page.getByRole("button", { name: "Send Message" }).tap();
+
+  const message = page.getByRole("article").filter({ hasText: "deploy.sh" });
+  await expect(message.locator("pre")).toContainText('echo "step 12"');
+  await expect(message.getByRole("button", { name: "Show more" })).toBeVisible();
+  await screenIsFine();
+  await message.getByRole("button", { name: "Show more" }).tap();
+  await expect(message.getByRole("button", { name: "Show less" })).toBeVisible();
+  await screenIsFine();
+});
+
 test("Jump to newest message appears as one comes while you're scrolled back, and fits", async ({ page, room, participant, screenIsFine }) => {
   const ada = await participant("Ada");
   for (let i = 1; i <= 30; i++) await ada.say(`Message ${i}`);

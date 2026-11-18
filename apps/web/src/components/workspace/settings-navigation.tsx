@@ -59,11 +59,20 @@ export function settingsSectionOf(route: Route, hash: string): SettingsSection |
   }
 }
 
-/** On a page of community settings, its section, and whether whoever's looking administers the workspace. */
+/**
+ * On a page of community settings, its section, whether whoever's looking administers the workspace, and
+ * if they do, how many open reports they see, which Membership counts, and how many times that count has
+ * come, which its Reports list loads again on.
+ */
 export interface SettingsPlace {
   section: SettingsSection;
   administrator: boolean;
+  openReports?: number;
+  reportsHeard?: number;
 }
+
+/** What says how many reports are open: Membership's count, and the rail's dot on Admin. */
+export const openReportsNamed = (open: number) => `${open} open ${open === 1 ? "report" : "reports"}`;
 
 /** The page of community settings shown, which the layout around it follows, or null on any other page. */
 export const SettingsLayout = createContext<SettingsPlace | null>(null);
@@ -99,16 +108,22 @@ const LINK = cn(
   "mb-2 flex min-h-11 items-center gap-2.5 rounded-lg px-3 py-[11px] text-[13px] leading-[1.4] text-muted-foreground",
   "hover:bg-surface hover:text-foreground aria-[current=page]:bg-hover aria-[current=page]:font-semibold aria-[current=page]:text-foreground",
   "max-md:m-0 max-md:flex-[1_0_auto] max-md:justify-center max-md:px-2 max-md:py-2.5 max-md:text-center",
-  "upto-500px:flex-col upto-500px:gap-[5px] upto-500px:text-[11px]",
+  "upto-500px:relative upto-500px:flex-col upto-500px:gap-[5px] upto-500px:text-[11px]",
+);
+
+/** Membership's count: a pill in ink after its label, as Activity counts what's unread, and at 500px and below a badge on its icon's corner. */
+const COUNT = cn(
+  "ms-auto min-w-5 rounded-full bg-foreground px-1.5 text-center text-[11px] leading-5 font-semibold text-background max-md:ms-0",
+  "upto-500px:absolute upto-500px:top-1 upto-500px:start-[calc(50%+3px)] upto-500px:min-w-[17px] upto-500px:px-[3px] upto-500px:text-[10px] upto-500px:leading-[17px]",
 );
 
 /**
  * The links to community settings' sections, the current one marked: a 244px column beside the page,
  * or at 900px and below, a strip under the header that scrolls sideways when they don't all fit, keeping
  * the current one in view. Domain settings, Chat bots, AI assistant, Huddles and Custom styles are for
- * administrators alone.
+ * administrators alone, and Membership counts their open reports, whose list it holds.
  */
-export function SettingsNavigation({ section, administrator }: SettingsPlace) {
+export function SettingsNavigation({ section, administrator, openReports = 0 }: SettingsPlace) {
   const navigation = useRef<HTMLElement>(null);
   useLayoutEffect(() => {
     const strip = navigation.current;
@@ -123,12 +138,20 @@ export function SettingsNavigation({ section, administrator }: SettingsPlace) {
         "max-md:flex max-md:gap-1.5 max-md:overflow-x-auto max-md:border-r-0 max-md:border-b max-md:py-2 max-md:pr-[max(12px,env(safe-area-inset-right))] max-md:pl-[max(12px,env(safe-area-inset-left))]",
       )}
     >
-      {(administrator ? [...LINKS, ...ADMINISTRATOR_LINKS] : LINKS).map(({ section: linked, href, icon: Icon, label }) => (
-        <PageLink key={linked} href={href} aria-current={linked === section ? "page" : undefined} className={LINK}>
-          <Icon className="size-[18px] shrink-0" />
-          <span>{label}</span>
-        </PageLink>
-      ))}
+      {(administrator ? [...LINKS, ...ADMINISTRATOR_LINKS] : LINKS).map(({ section: linked, href, icon: Icon, label }) => {
+        const count = administrator && linked === "membership-settings" && openReports > 0 ? openReports : 0;
+        return (
+          <PageLink key={linked} href={href} aria-current={linked === section ? "page" : undefined} aria-description={count > 0 ? openReportsNamed(count) : undefined} className={LINK}>
+            <Icon className="size-[18px] shrink-0" />
+            <span>{label}</span>
+            {count > 0 && (
+              <span aria-hidden="true" className={COUNT}>
+                {count}
+              </span>
+            )}
+          </PageLink>
+        );
+      })}
     </nav>
   );
 }

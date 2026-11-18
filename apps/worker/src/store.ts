@@ -1,9 +1,10 @@
 import { PARENT_TEXT_LENGTH, parentTextOf, THREAD_FACES, type Boost, type Card, type Message, type RoomId, type ThreadSummary, type TimelinePage, type User, type UserId } from "@ember/protocol";
+import type { MessageHuddle } from "@ember/protocol/huddles";
 import { hasLinkable, type PreparedBody } from "@ember/richtext";
 import { statement, type Db, type Statement } from "./db";
 import { fileSigner, type FileUrls } from "./files/addresses";
 import { deletingAllFiles, deletingFilesOf, type AttachedFile } from "./files/blobs";
-import { logEvent, logIndexing, logIndexingEach, logIndexingReplies } from "./room-log";
+import { logEvent, logHuddle, logHuddlesOver, logIndexing, logIndexingEach, logIndexingReplies } from "./room-log";
 import type { IndexedMessage, SearchFacts } from "./search-index";
 
 // Messages for one room, kept in the room's Durable Object SQLite storage or in D1 (see db.ts), each
@@ -12,7 +13,8 @@ import type { IndexedMessage, SearchFacts } from "./search-index";
 // whose addresses are signed as it's read, so they're always signed under the secret Ember has now, and a
 // bot's message its cards (migrations/0034_message_cards.sql). A reply in a thread names its parent, and shows
 // in the room's timeline only when it was also sent there, and a parent is read with its thread's summary
-// (migrations/0044_threads.sql).
+// (migrations/0044_threads.sql). A huddle's message keeps what it says of its huddle
+// (migrations/0066_huddle_messages.sql).
 
 interface MessageRow {
   id: string;
@@ -51,6 +53,11 @@ interface MessageRow {
   repliers?: string | null;
   /** For a reply, the start of its parent's plain text, or null once the parent is deleted. */
   parent_text?: string | null;
+  /**
+   * What a huddle's message says of its huddle, as JSON (`MessageHuddle`), or null for any other message,
+   * or missing from a row the search index kept before huddles had messages.
+   */
+  huddle?: string | null;
 }
 
 /** How many replies a message's thread has, and when the newest was written, if it has any. */
@@ -86,26 +93,43 @@ export const MESSAGES_BY = `SELECT id FROM messages WHERE room_id = ? AND creato
 /** As MESSAGES_BY, but only those written by a time. */
 export const MESSAGES_BY_UNTIL = `SELECT id FROM messages WHERE room_id = ? AND creator_id = ? AND created_at <= ? AND deleted = 0 LIMIT ?`;
 
+/** Up to a number of someone's boosts in a room, in no particular order, read by booster (migrations/0069_boosts_by_booster.sql). */
+export const BOOSTS_BY = `SELECT * FROM boosts WHERE room_id = ? AND booster_id = ? LIMIT ?`;
+
+/**
+ * Numbers the changes to the messages of room ?1 whose boosts go, from ?3: a JSON array ?2 names the
+ * message each boost is on, in the order the boosts go, and one that loses more than one takes the
+ * number of the last.
+ */
+const NUMBER_UNBOOSTED = `UPDATE messages SET change_seq = ?3 + (SELECT max(key) FROM json_each(?2) AS listed WHERE listed.value = messages.id)
+  WHERE room_id = ?1 AND id IN (SELECT value FROM json_each(?2))`;
+
+/** Gives someone's messages in room ?1, ?2's, the name ?3, through the same index as `MESSAGES_BY`. */
+export const RENAME_AUTHOR = `UPDATE messages SET creator_name = ?3 WHERE room_id = ?1 AND creator_id = ?2 AND creator_name <> ?3`;
+
 /** A message being deleted, or whose thread loses replies, as `REPLIES_LEFT` reads it. */
 interface DeletingRow {
   id: string;
   parent_id: string | null;
   deleted: number;
+  /** 1 when it says what a huddle's message says of its huddle, as one kept for its thread no longer does. */
+  huddle: number;
   /** 1 when its thread has replies left once the messages being deleted have gone. */
   replies_left: number;
 }
 
 /**
  * Of the messages a JSON array ?3 names that room ?1 has, whose replies each is, whether it's been kept for
- * its thread already, and whether its thread has replies other than those a JSON array ?2 names.
+ * its thread already, whether it's a huddle's, and whether its thread has replies other than those a JSON
+ * array ?2 names.
  */
-const REPLIES_LEFT = `SELECT id, parent_id, deleted, EXISTS (
+const REPLIES_LEFT = `SELECT id, parent_id, deleted, huddle IS NOT NULL AS huddle, EXISTS (
     SELECT 1 FROM messages AS replies WHERE replies.parent_id = messages.id AND replies.id NOT IN (SELECT value FROM json_each(?2))
   ) AS replies_left
   FROM messages WHERE room_id = ?1 AND id IN (SELECT value FROM json_each(?3))`;
 
-/** Keeps the messages of room `?` a JSON array names for their threads, at a time, without their text, file or cards. */
-const KEEP_FOR_THREADS = `UPDATE messages SET body = '', plain_text = '', mentions = '[]', attachment = NULL, cards = NULL, deleted = 1, updated_at = ?3
+/** Keeps the messages of room `?` a JSON array names for their threads, at a time, without their text, file, cards or huddle. */
+const KEEP_FOR_THREADS = `UPDATE messages SET body = '', plain_text = '', mentions = '[]', attachment = NULL, cards = NULL, huddle = NULL, deleted = 1, updated_at = ?3
   WHERE room_id = ?1 AND id IN (SELECT value FROM json_each(?2))`;
 
 /** Numbers changes to the messages of room ?1 a JSON array ?2 names from ?3, in the order it names them. */
@@ -143,8 +167,24 @@ function logIndexingRepliesTo(roomId: RoomId, message: Message, plainText: strin
   return retold ? [logIndexingReplies(roomId, JSON.stringify([message.id]))] : [];
 }
 
-/** A link written as one, in a message's markup or its cards'. */
-const WRITTEN_LINK = /<a\s[^>]*\bhref=/i;
+/** What a link written as one is read by: where its tag may start, where a tag ends, and where a tag gives an address. */
+const LINK_MARKS = /<a\s|>|\bhref=/gi;
+
+/**
+ * Whether a message's markup, or its cards', has a link written as one: an `<a ` with an `href=` after it
+ * and no `>` between, which is what `/<a\s[^>]*\bhref=/i` matches. That pattern reads on from every `<a `
+ * to the next `>`, or to the text's end, and a bot can fill its cards' plain text with them, so this reads
+ * the text once instead.
+ */
+function hasWrittenLink(markup: string): boolean {
+  let inLinkTag = false;
+  for (const [mark] of markup.matchAll(LINK_MARKS)) {
+    if (mark === ">") inLinkTag = false;
+    else if (mark.startsWith("<")) inLinkTag = true;
+    else if (inLinkTag) return true;
+  }
+  return false;
+}
 
 /**
  * What search filters narrow a search by, as the search index keeps it: who wrote the message, its
@@ -158,9 +198,9 @@ function searchFactsOf(row: MessageRow): SearchFacts {
     creatorId: row.creator_id,
     threadId: row.parent_id ?? (threadOf(row) ? row.id : null),
     hasLink:
-      WRITTEN_LINK.test(row.body) ||
+      hasWrittenLink(row.body) ||
       (row.attachment === null && hasLinkable(row.plain_text)) ||
-      (row.cards !== null && (WRITTEN_LINK.test(row.cards) || hasLinkable(row.cards))),
+      (row.cards !== null && (hasWrittenLink(row.cards) || hasLinkable(row.cards))),
     hasFile: row.attachment !== null,
     mentionIds: [...new Set((JSON.parse(row.mentions) as (User | UserId)[]).map((person) => (typeof person === "string" ? person : person.id)))],
   };
@@ -194,6 +234,7 @@ function toMessage(row: MessageRow): Message {
     // A row the search index kept from before threads has none of their columns.
     ...(row.parent_id != null && { parentId: row.parent_id, alsoSent: row.in_room === 1, parentText: row.parent_text ?? "" }),
     ...(thread && { thread }),
+    ...(row.huddle != null && { huddle: JSON.parse(row.huddle) as MessageHuddle }),
     ...(row.deleted === 1 && { deleted: true }),
   };
 }
@@ -287,6 +328,8 @@ export const LATEST_CHANGE = `SELECT MAX(
 export const MESSAGES_CHANGED_SINCE = `${SELECT_MESSAGES} WHERE room_id = ? AND change_seq > ? AND in_room = 1 ORDER BY change_seq`;
 /** The messages deleted after a change. */
 export const MESSAGES_DELETED_SINCE = `SELECT message_id FROM message_deletions WHERE room_id = ? AND seq > ? ORDER BY seq`;
+/** The deletion of a message, which its room finds among the few it keeps: `CHANGES_KEPT` at most. */
+export const DELETION_OF = `SELECT seq FROM message_deletions WHERE room_id = ? AND message_id = ?`;
 
 /** The messages whose ids a JSON array lists. */
 const MESSAGES_WITH_IDS = `${SELECT_MESSAGES} WHERE room_id = ? AND id IN (SELECT value FROM json_each(?))`;
@@ -317,12 +360,14 @@ export interface Changed {
 /**
  * What deleting messages did: the ids of those deleted, their deletions numbered from `seq` in that order,
  * and after them the messages changed, each kept without its text for its thread, or a parent whose
- * thread lost replies.
+ * thread lost replies, and whether any of them all was a huddle's message, which the Workspace's list of
+ * the huddles that are over may have to hear of.
  */
 export interface Deletion {
   deletedIds: string[];
   changed: Changed[];
   seq: number;
+  huddles: boolean;
 }
 
 /** Which page `MessageStore.pageAt` reads: the one before a message, or after one, or with neither the newest. */
@@ -494,12 +539,23 @@ export class MessageStore {
   }
 
   /**
+   * The number of the change that deleted the message `id` names, or null when the room keeps no
+   * deletion of it: a later deletion drops those that have fallen out of its latest `CHANGES_KEPT`
+   * changes.
+   */
+  async deletionOf(id: string): Promise<number | null> {
+    const [deletion] = await this.db.all<{ seq: number }>(DELETION_OF, this.roomId, id);
+    return deletion?.seq ?? null;
+  }
+
+  /**
    * Stores a new message, logging it in the same transaction for the Workspace to mark the room unread
    * by, as a reply to a webhook delivery when it's one, and for the search index, and answers it with the
    * change's number. A file message posts `posted`'s file, recording that its upload has finished in
    * the same transaction. A reply in a thread, `inThread`, changes its parent's thread too, as the change
    * after it, logging the parent for the search index, whose results show its thread, and answers the
-   * parent as it is then.
+   * parent as it is then. A parent that says its huddle is over is logged for the Workspace's list of
+   * those too, which counts its replies.
    */
   async create(
     id: string,
@@ -537,6 +593,7 @@ export class MessageStore {
         logIndexing(this.roomId, id),
         ...(posted ? [posted.finished(id)] : []),
         ...(inThread ? [this.numbered(inThread.parent.id, seq + 1), logIndexing(this.roomId, inThread.parent.id)] : []),
+        ...(inThread?.parent.huddle ? [logHuddlesOver(this.roomId, JSON.stringify([inThread.parent.id]))] : []),
       ],
       inThread ? 2 : 1,
     );
@@ -562,6 +619,58 @@ export class MessageStore {
       },
       seq,
     };
+  }
+
+  /**
+   * Stores the message of a huddle `starter` started, in their name, which says `huddle` of it and whose
+   * text is `body`, and answers it with the change's number. It's logged for the search index, as any
+   * message is, and not for the Workspace: a huddle's start marks no room unread, and reaches nobody as
+   * a push or a webhook. One written as its huddle is over is logged for the Workspace's list of those.
+   */
+  async createHuddle(id: string, starter: User, body: StoredBody, huddle: MessageHuddle, now: string): Promise<{ message: Message; seq: number }> {
+    const clientMessageId = crypto.randomUUID();
+    const seq = await this.change((seq) => [
+      statement(
+        `INSERT INTO messages (id, room_id, client_message_id, creator_id, creator_name, body, plain_text, mentions, created_at, updated_at, change_seq, huddle)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        id,
+        this.roomId,
+        clientMessageId,
+        starter.id,
+        starter.name,
+        body.html,
+        body.plainText,
+        JSON.stringify(body.mentions),
+        now,
+        now,
+        seq,
+        JSON.stringify(huddle),
+      ),
+      logIndexing(this.roomId, id),
+      ...(huddle.endedAt === undefined ? [] : [logHuddle(this.roomId, id)]),
+    ]);
+    const message = { id, clientMessageId, roomId: this.roomId, creator: starter, body: body.html, plainText: body.plainText, mentions: body.mentions, createdAt: now, updatedAt: now, editedAt: null, boosts: [], huddle };
+    return { message, seq };
+  }
+
+  /**
+   * Has `message`, a huddle's, say `huddle` of it from now, as its huddle ends, or goes on after all,
+   * logging it for the search index, whose results show it, and for the Workspace's list of the huddles
+   * that are over, and answers the message as it is now with the change's number.
+   */
+  async updateHuddle(message: Message, huddle: MessageHuddle, now: string): Promise<{ message: Message; seq: number }> {
+    const seq = await this.change((seq) => [
+      statement(`UPDATE messages SET huddle = ?, updated_at = ?, change_seq = ? WHERE room_id = ? AND id = ?`, JSON.stringify(huddle), now, seq, this.roomId, message.id),
+      logIndexing(this.roomId, message.id),
+      logHuddle(this.roomId, message.id),
+    ]);
+    return { message: { ...message, huddle, updatedAt: now }, seq };
+  }
+
+  /** The message `creator`'s tab sent as `clientMessageId`, or null when the room has none. */
+  async findSent(creator: User, clientMessageId: string): Promise<Message | null> {
+    const [row] = await this.db.all<MessageRow>(`${SELECT_MESSAGES} WHERE room_id = ? AND creator_id = ? AND client_message_id = ?`, this.roomId, creator.id, clientMessageId);
+    return row ? (await this.messagesOf([row]))[0]! : null;
   }
 
   /** Which of `clientMessageIds` the room has stored from `creator`. */
@@ -591,7 +700,20 @@ export class MessageStore {
    * thread's replies if what they show of it changes, and answers the message as it is now with the
    * change's number, as the methods below that change a message answer theirs.
    */
-  async updateBody(message: Message, body: StoredBody, now: string): Promise<{ message: Message; seq: number }> {
+  updateBody(message: Message, body: StoredBody, now: string): Promise<{ message: Message; seq: number }> {
+    return this.replaceBody(message, body, now, now);
+  }
+
+  /**
+   * Gives `message` the text `body`, its own with the preview of its link below it, which its sender's tab
+   * had once the message had gone, as `updateBody` does, but without marking it edited, as a preview that
+   * comes in time doesn't.
+   */
+  addPreview(message: Message, body: StoredBody, now: string): Promise<{ message: Message; seq: number }> {
+    return this.replaceBody(message, body, now, message.editedAt);
+  }
+
+  private async replaceBody(message: Message, body: StoredBody, now: string, editedAt: string | null): Promise<{ message: Message; seq: number }> {
     const seq = await this.change((seq) => [
       statement(
         `UPDATE messages SET body = ?, plain_text = ?, mentions = ?, updated_at = ?, edited_at = ?, change_seq = ?, cards = ? WHERE room_id = ? AND id = ?`,
@@ -599,7 +721,7 @@ export class MessageStore {
         body.plainText,
         JSON.stringify(body.mentions),
         now,
-        now,
+        editedAt,
         seq,
         body.cards ? JSON.stringify(body.cards) : null,
         this.roomId,
@@ -609,8 +731,8 @@ export class MessageStore {
       ...logIndexingRepliesTo(this.roomId, message, body.plainText),
     ]);
     const { cards: _, ...rest } = message;
-    const edited = { ...rest, body: body.html, plainText: body.plainText, mentions: body.mentions, updatedAt: now, editedAt: now };
-    return { message: body.cards ? { ...edited, cards: body.cards } : edited, seq };
+    const replaced = { ...rest, body: body.html, plainText: body.plainText, mentions: body.mentions, updatedAt: now, editedAt };
+    return { message: body.cards ? { ...replaced, cards: body.cards } : replaced, seq };
   }
 
   /**
@@ -662,7 +784,8 @@ export class MessageStore {
    * marked deleted first, for the room to purge. The ids deleted stay with their deletions' numbers, and
    * the deletions that fall out of the latest `CHANGES_KEPT` go, and the messages deleted, kept or changed
    * are logged for the search index, with the replies to those kept, whose results show none of their
-   * text now. The ids go as JSON values, which a page of them can fill.
+   * text now, and those of them that say their huddles are over for the Workspace's list of those. The
+   * ids go as JSON values, which a page of them can fill.
    */
   async delete(ids: string[]): Promise<Deletion> {
     const listed = JSON.stringify(ids);
@@ -677,15 +800,16 @@ export class MessageStore {
     deletedIds.push(...emptied);
     const changedIds = [...kept, ...parents.map((row) => row.id).filter((id) => !emptied.includes(id))];
     const count = deletedIds.length + changedIds.length;
-    if (count === 0) return { deletedIds, changed: [], seq: (await this.latestChange()) + 1 };
+    if (count === 0) return { deletedIds, changed: [], seq: (await this.latestChange()) + 1, huddles: false };
     const [deletedList, keptList, changedList] = [deletedIds, kept, changedIds].map((list) => JSON.stringify(list)) as [string, string, string];
     const goneOrKept = JSON.stringify([...deletedIds, ...kept]);
     const unindexed = JSON.stringify([...deletedIds, ...changedIds]);
     const now = new Date().toISOString();
     const seq = await this.change(
       (seq) => [
-        // First, while the messages kept still name their files.
+        // First, while the messages kept still name their files, and say their huddles.
         deletingFilesOf(this.roomId, goneOrKept, now),
+        logHuddlesOver(this.roomId, unindexed),
         statement(`DELETE FROM messages WHERE room_id = ? AND id IN (SELECT value FROM json_each(?))`, this.roomId, deletedList),
         statement(`INSERT INTO message_deletions (room_id, seq, message_id) SELECT ?, ? + key, value FROM json_each(?)`, this.roomId, seq, deletedList),
         statement(`DELETE FROM message_deletions WHERE room_id = ? AND seq <= ?`, this.roomId, seq + count - 1 - CHANGES_KEPT),
@@ -698,7 +822,8 @@ export class MessageStore {
       count,
     );
     const changed = new Map((await this.withIds(changedIds)).map((message) => [message.id, message]));
-    return { deletedIds, changed: changedIds.map((id, index) => ({ message: changed.get(id)!, seq: seq + deletedIds.length + index })), seq };
+    const huddles = [...named, ...parents].some((row) => row.huddle === 1);
+    return { deletedIds, changed: changedIds.map((id, index) => ({ message: changed.get(id)!, seq: seq + deletedIds.length + index })), seq, huddles };
   }
 
   /**
@@ -753,6 +878,37 @@ export class MessageStore {
       this.numbered(boost.messageId, seq),
       logIndexing(this.roomId, boost.messageId),
     ]);
+  }
+
+  /** Up to `limit` of `boosterId`'s boosts here. */
+  async boostsBy(boosterId: UserId, limit: number): Promise<Boost[]> {
+    return (await this.db.all<BoostRow>(BOOSTS_BY, this.roomId, boosterId, limit)).map(toBoost);
+  }
+
+  /**
+   * Deletes `boosts`, each a change of its own, numbered in the order they're listed from the number it
+   * answers, logging the messages they were on for the search index, whose results show their boosts.
+   * The ids go as JSON values, which a page of them can fill.
+   */
+  async removeBoosts(boosts: Boost[]): Promise<number> {
+    const boosted = boosts.map((boost) => boost.messageId);
+    return this.change(
+      (seq) => [
+        statement(`DELETE FROM boosts WHERE room_id = ? AND id IN (SELECT value FROM json_each(?))`, this.roomId, JSON.stringify(boosts.map((boost) => boost.id))),
+        statement(NUMBER_UNBOOSTED, this.roomId, JSON.stringify(boosted), seq),
+        logIndexingEach(this.roomId, JSON.stringify([...new Set(boosted)])),
+      ],
+      boosts.length,
+    );
+  }
+
+  /**
+   * Gives `creatorId`'s messages here the name `name`, as what's kept of theirs for their threads'
+   * replies goes by once they've deleted their account. Nobody is told, since tabs show the name the
+   * people directory has for them.
+   */
+  async renameAuthor(creatorId: UserId, name: string): Promise<void> {
+    await this.changingMessages(() => this.db.run(RENAME_AUTHOR, this.roomId, creatorId, name));
   }
 
   /**

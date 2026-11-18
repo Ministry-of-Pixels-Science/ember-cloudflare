@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useReducer, useRef, useState } from "react";
-import { CloseCode, parseServerFrame, type Account, type DirectoryUser, type Me, type RoomId, type User, type UserId, type WorkspaceServerFrame } from "@ember/protocol";
+import { CloseCode, parseServerFrame, type Account, type DirectoryUser, type HuddleSounds, type Me, type RoomId, type User, type UserId, type WorkspaceClientFrame, type WorkspaceServerFrame } from "@ember/protocol";
 import { fetchMe, fetchSidebar, isSignedOut, workspaceSocketUrl, type SidebarCopy } from "@/lib/api";
+import type { InvitationsChange } from "@/lib/huddle-invitations";
+import { activeStore, watchUse } from "@/lib/presence";
 import { reconnectingSocket } from "@/lib/reconnecting-socket";
 import { NO_ROOM_LIST, roomListReducer, type RoomAnswer } from "@/lib/room-list";
 
@@ -69,8 +71,10 @@ const isSame = (you: Me, me: Me) => you.id === me.id && you.name === me.name && 
  * included, as Campfire's rooms_list_controller.js reloads its frame, since nothing that changed while
  * it wasn't connected reached it. Meanwhile the socket brings rooms as they're made, changed and
  * deleted, and as this person is put in them and taken out, marks rooms unread and read, moves DMs as
- * messages come in them, and brings the stars saved in any of their tabs, and the welcome card dismissed
- * in any of them. It loads again when the tab is shown after more than a minute hidden too, as
+ * messages come in them, and brings the stars saved in any of their tabs, whom they've blocked in any of
+ * them, the welcome card dismissed in any of them, which of a huddle's sounds they hear, as a switch in
+ * any of them leaves them, and for an administrator, how many reports are open. It loads again when the
+ * tab is shown after more than a minute hidden too, as
  * `refresh-room:visible` reloads it (Campfire's users/sidebar_helper.rb), which Campfire does on a
  * room's page and this does on every page, and, its rooms only, a while after the socket says the shared
  * order has changed. Once it says this person has been given another role, it loads again with the
@@ -79,13 +83,22 @@ const isSame = (you: Me, me: Me) => you.id === me.id && you.name === me.name && 
  * way. `refresh` asks for it again, settling once a list asked for since has come, or failing as that
  * did.
  *
+ * Once the socket is let in, it says whether this tab is in use, and again whenever that changes
+ * (`watchUse`), and keeps who's `active` in the workspace as it hears (`activeStore`). `reportsHeard`
+ * counts the times the count of open reports has come, with a list or from the socket.
+ *
  * `onSessionChanged` hears when who the browser's session signs in changes: null once it has expired,
  * whoever another tab signed in as, or `me` as they are now, once they've been made an administrator,
  * say. The people `directory` loads again each time the sidebar does by itself, and hears whoever the
  * socket says has changed, or says this person is no longer told of, as an AI agent kept to
  * administrators' direct messages is. `onAccountChanged` hears the workspace as the socket says it is,
  * each time it connects and whenever an administrator changes it. `onGone` hears of each room the
- * socket says is gone as it leaves the list.
+ * socket says is gone as it leaves the list. `onInvitation` hears of each invitation into a huddle the
+ * socket brings this person, and of each that's over: one they've answered, in this tab or another,
+ * and one into a room the socket says is gone.
+ *
+ * `huddleChanges` counts each time it loads everything again, and each time the socket says that the
+ * huddles that are over have changed, which the Huddles page loads its list again by.
  */
 export function useSidebar(
   me: Me,
@@ -93,13 +106,22 @@ export function useSidebar(
   directory: Directory = NO_DIRECTORY,
   onAccountChanged: (account: Account) => void = () => {},
   onGone: (roomId: RoomId) => void = () => {},
+  onInvitation: (change: InvitationsChange) => void = () => {},
 ) {
   const [{ list, askAgain }, change] = useReducer(roomListReducer, NO_ROOM_LIST);
+  const [active] = useState(activeStore);
+  // How many times the count of open reports has come, with a list or from the socket, which the Reports
+  // list loads again on: reports can be made and handled with the count left as it was, as they may have
+  // been while the socket wasn't connected.
+  const [reportsHeard, setReportsHeard] = useState(0);
   // Whether a list the server sent has come, rather than only the empty one a failed first load leaves.
   const [answered, setAnswered] = useState(false);
   // How many of the workspace socket's frames have said what became of a room or of this person's level
   // in it, and the number of the last to speak of each room.
   const roomFrames = useRef({ count: 0, lastOf: new Map<RoomId, number>() });
+  // How many of them have said which of a huddle's sounds this person hears.
+  const soundFrames = useRef(0);
+  const [huddleChanges, huddlesChanged] = useReducer((heard: number) => heard + 1, 0);
   const [refresh] = useState(() => {
     // The last list the server sent, which it says is still current rather than send again.
     let copy: SidebarCopy | null = null;
@@ -108,6 +130,7 @@ export function useSidebar(
       try {
         copy = await fetchSidebar(copy);
         change({ type: "loaded", list: copy.sidebar });
+        setReportsHeard((heard) => heard + 1);
         setAnswered(true);
       } catch (error) {
         change({ type: "unanswered" });
@@ -124,6 +147,7 @@ export function useSidebar(
   // A failed load leaves the avatars as they are until the next.
   const reloadPeople = useEffectEvent(() => void directory.reload().catch(() => {}));
   const gone = useEffectEvent(onGone);
+  const invitation = useEffectEvent(onInvitation);
   const isSomeoneElse = useEffectEvent((user: User) => user.id !== me.id);
   // Who the session signs in as last heard, ahead of `me` until the page takes the change: two changes
   // can come before it takes the first.
@@ -155,6 +179,7 @@ export function useSidebar(
       waiting = undefined;
       reloadPeople();
       reloadRooms();
+      huddlesChanged();
     };
     const reloadRoomsSoon = () => {
       waiting ??= setTimeout(() => {
@@ -167,7 +192,24 @@ export function useSidebar(
     // before its welcome. The welcome may have read it before that change, so it doesn't undo it. Each
     // try starts afresh, after a close or a socket that stopped answering alike.
     let toldOf = { you: false, account: false };
-    const onConnecting = () => void (toldOf = { you: false, account: false });
+    // Whether this connection is yet to say who's active, which its first `presence` frame says in full.
+    let unheard = true;
+    const onConnecting = () => {
+      toldOf = { you: false, account: false };
+      unheard = true;
+    };
+
+    // Tells the Workspace whether the tab is shown, unless its socket's address or an earlier frame said
+    // so already, since an invitation into a huddle is pushed to whoever has Ember in view nowhere. It's
+    // told as that changes, where a room hears once the change has lasted: a phone can stop a tab soon
+    // after hiding it. Until the Workspace lets the socket in, the welcome tells it.
+    const shown = () => document.visibilityState === "visible";
+    let told: boolean;
+    const tellVisibility = () => {
+      const visible = shown();
+      if (visible !== told && workspace.send({ type: "presence.visible", visible })) told = visible;
+    };
+
     const heardOf = (roomId: RoomId) => roomFrames.current.lastOf.set(roomId, ++roomFrames.current.count);
     const onMessage = (data: string) => {
       const frame = parseServerFrame<WorkspaceServerFrame>(data);
@@ -179,6 +221,8 @@ export function useSidebar(
             return sessionChanged(frame.you);
           }
           workspace.connected();
+          workspace.send({ type: "presence.active", active: use.inUse() });
+          tellVisibility();
           if (!toldOf.you) signsIn(frame.you);
           if (!toldOf.account) accountChanged(frame.account);
           return reload();
@@ -188,15 +232,26 @@ export function useSidebar(
         case "room.gone":
           heardOf(frame.roomId);
           gone(frame.roomId);
+          // An invitation into its huddle goes with it, though this tab's rooms never had the room.
+          invitation({ type: "over", roomId: frame.roomId });
           return change({ type: "gone", roomId: frame.roomId });
         case "room.unread":
-          return change({ type: "marked", roomId: frame.roomId, at: frame.at });
+          return change({ type: "marked", roomId: frame.roomId, at: frame.at, count: frame.count });
         case "room.read":
           return change({ type: "marked", roomId: frame.roomId, at: null });
         case "room.active":
           return change({ type: "active", roomId: frame.roomId, at: frame.at });
         case "room.huddle":
           return change({ type: "huddle", roomId: frame.roomId, huddle: frame.huddle });
+        case "huddle.invited":
+          return invitation({ type: "invited", roomId: frame.roomId, by: frame.by, at: Date.now() });
+        case "huddle.answered":
+          return invitation({ type: "over", roomId: frame.roomId });
+        case "huddle.sounds":
+          soundFrames.current++;
+          return change({ type: "huddle sounds", sounds: frame.sounds });
+        case "huddles.changed":
+          return huddlesChanged();
         case "user.updated":
           if (!isSomeoneElse(frame.user)) {
             toldOf.you = true;
@@ -212,6 +267,11 @@ export function useSidebar(
           return change({ type: "involved", roomId: frame.roomId, involvement: frame.involvement });
         case "favorites.changed":
           return change({ type: "starred", favorites: frame.favorites });
+        case "blocks.changed":
+          return change({ type: "blocked", blocks: frame.blocks });
+        case "reports.changed":
+          setReportsHeard((heard) => heard + 1);
+          return change({ type: "reports", open: frame.open });
         case "invitation.dismissed":
           return change({ type: "invitation dismissed" });
         case "rooms.reordered":
@@ -219,6 +279,11 @@ export function useSidebar(
         case "account.updated":
           toldOf.account = true;
           return accountChanged(frame.account);
+        case "presence": {
+          const first = unheard;
+          unheard = false;
+          return active.hear(frame, first);
+        }
       }
     };
 
@@ -250,13 +315,24 @@ export function useSidebar(
     };
 
     reload();
-    const workspace = reconnectingSocket({ url: workspaceSocketUrl, onMessage, onConnecting, onClose, deploySpreadMs: DEPLOY_SPREAD_MS });
+    const workspace = reconnectingSocket<WorkspaceClientFrame>({
+      url: () => workspaceSocketUrl({ visible: (told = shown()) }),
+      onMessage,
+      onConnecting,
+      onClose,
+      deploySpreadMs: DEPLOY_SPREAD_MS,
+    });
+    // A change while the socket isn't let in waits for its welcome, which says how the tab is then.
+    const use = watchUse((inUse) => workspace.send({ type: "presence.active", active: inUse }));
     document.addEventListener("visibilitychange", visibilityChanged);
+    document.addEventListener("visibilitychange", tellVisibility);
     return () => {
       closed = true;
       clearTimeout(waiting);
       workspace.close();
+      use.stop();
       document.removeEventListener("visibilitychange", visibilityChanged);
+      document.removeEventListener("visibilitychange", tellVisibility);
     };
   }, [refresh]);
 
@@ -274,5 +350,18 @@ export function useSidebar(
     };
   }, []);
 
-  return { list, answered, change, refresh, askForRoom };
+  /**
+   * Called as a switch saves which of a huddle's sounds this person hears: what keeps the sounds the
+   * server answers, unless the workspace socket has said which they hear since, which the answer could
+   * undo, as with a sound turned on or off in another tab just after. The socket brings this change too,
+   * in its turn.
+   */
+  const askForHuddleSounds = useCallback(() => {
+    const asked = soundFrames.current;
+    return (sounds: HuddleSounds) => {
+      if (soundFrames.current === asked) change({ type: "huddle sounds", sounds });
+    };
+  }, []);
+
+  return { list, answered, change, refresh, askForRoom, askForHuddleSounds, active, huddleChanges, reportsHeard };
 }

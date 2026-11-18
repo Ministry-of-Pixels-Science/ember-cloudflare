@@ -7,7 +7,7 @@ import { attachmentNodes } from "./content";
 import { setInnerHtml, type HtmlParser } from "./markup";
 import { htmlEscape, isBlank, strip, truncate } from "./ruby";
 import { toHtml } from "./serialize";
-import { descendants, detach, getAttr, isElement, type Element, type Fragment } from "./tree";
+import { descendants, detach, getAttr, isElement, removeChildren, type Element, type Fragment } from "./tree";
 import { InvalidComponentError, isHttp, parseUri, uriToString } from "./uri";
 
 /**
@@ -33,12 +33,27 @@ export function unfurledLinks(root: Fragment | Element): Element[] {
   return attachmentNodes(root).filter((node) => getAttr(node, "content-type") === OPENGRAPH_EMBED_CONTENT_TYPE);
 }
 
+/** Whether the body `markup` has a link's preview, as the composer adds one below a link. */
+export function hasPreview(parse: HtmlParser, markup: string): boolean {
+  return unfurledLinks(parse(markup)).length > 0;
+}
+
+/**
+ * Ember's own limit on the markup the copies of a preview come to, in characters, which Campfire
+ * doesn't have. Every div of a body that's only a link gets a copy, so 100 KB of empty divs and a
+ * long preview could otherwise show as hundreds of megabytes. A message that's only a link has a
+ * div or two.
+ */
+export const MAX_PREVIEW_COPIES_LENGTH = 100_000;
+
 /**
  * RemoveSoloUnfurledLinkText, on a loaded body whose plain text is `plainText`: when the body is
  * only the link its one preview is of, the link goes. A body with divs, as Trix wrote them, gets the
- * preview as each div's only content; Lexxy's loses every paragraph without an attachment. Rails
- * raises comparing a plain text that parses as a malformed address with x.com in it, such as
- * "mailto:x.com", and shows nothing of the message; Ember shows it as written.
+ * preview as the only content of its first div, and of as many after it as
+ * `MAX_PREVIEW_COPIES_LENGTH` has room for, and the rest of its divs end up empty; Lexxy's loses
+ * every paragraph without an attachment. Rails raises comparing a plain text that parses as a
+ * malformed address with x.com in it, such as "mailto:x.com", and shows nothing of the message;
+ * Ember shows it as written.
  */
 export function removeSoloUnfurledLinkText(parse: HtmlParser, content: Fragment, plainText: string, host: string): void {
   const links = unfurledLinks(content);
@@ -46,9 +61,14 @@ export function removeSoloUnfurledLinkText(parse: HtmlParser, content: Fragment,
   const normalized = solo === undefined ? undefined : normalizeTweetUrl(solo);
   if (normalized === undefined || normalized !== normalizeTweetUrl(plainText)) return;
   const nodes = descendants(content);
-  if (nodes.some((node) => isElement(node, "div"))) {
+  const divs = nodes.filter((node): node is Element => isElement(node, "div"));
+  if (divs.length > 0) {
     const preview = toHtml(links[0]!);
-    for (const node of nodes) if (isElement(node, "div")) setInnerHtml(parse, node, preview);
+    const copies = Math.max(1, Math.floor(MAX_PREVIEW_COPIES_LENGTH / preview.length));
+    divs.forEach((div, index) => {
+      if (index < copies) setInnerHtml(parse, div, preview);
+      else removeChildren(div);
+    });
   } else {
     for (const node of nodes) if (isElement(node, "p") && attachmentNodes(node).length === 0) detach(node);
   }

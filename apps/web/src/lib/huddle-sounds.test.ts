@@ -1,9 +1,10 @@
+import { ALL_HUDDLE_SOUNDS, type HuddleSounds } from "@ember/protocol/huddles";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MUSIC_AFTER_MS } from "./huddle-sounds";
 import type { HuddleSpeaker } from "./huddle-speaker";
 
 /** Stands in for the huddle's speaker, which plays nothing here: the tests say what it was asked to play. */
-const speaker = { play: vi.fn<HuddleSpeaker["play"]>(), stop: vi.fn<HuddleSpeaker["stop"]>(), playOnce: vi.fn<HuddleSpeaker["playOnce"]>(), stopAll: vi.fn() } satisfies HuddleSpeaker;
+const speaker = { play: vi.fn<HuddleSpeaker["play"]>(), stop: vi.fn<HuddleSpeaker["stop"]>(), playOnce: vi.fn<HuddleSpeaker["playOnce"]>(), use: vi.fn(), stopAll: vi.fn() } satisfies HuddleSpeaker;
 
 const wait = (ms: number) => vi.advanceTimersByTimeAsync(ms);
 const settled = () => wait(0);
@@ -25,6 +26,11 @@ function hold(name: string) {
 
 /** The huddle's sounds in a page that has fetched none of them yet. */
 const inNewPage = async () => (await import("./huddle-sounds")).huddleSounds;
+/** One huddle's sounds, as that page gives them. */
+type Sounds = ReturnType<Awaited<ReturnType<typeof inNewPage>>>;
+
+/** Has the tab's person hear every sound of a huddle but those `off` turns off, as the page does once their profile's switches say so, in the page `inNewPage` gives. */
+const hear = async (off: Partial<HuddleSounds> = {}) => (await import("./huddle-store")).hearSounds({ ...ALL_HUDDLE_SOUNDS, ...off });
 
 /** What the speaker was asked to play in that way: each sound's name, and the address it plays from. */
 const asked = (to: "play" | "playOnce") => speaker[to].mock.calls.map(([audio]) => [audio.dataset.huddleSound, audio.src]);
@@ -267,5 +273,160 @@ describe("A huddle's music", () => {
     await wait(MUSIC_AFTER_MS);
     expect(fetched).toEqual(["joined.mp3", "left.mp3", "music.mp3", "music.mp3"]);
     expect(speaker.play).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("A huddle's sounds for someone who has turned some off", () => {
+  it("plays no sound of someone joining or leaving, their own leaving included, to someone who has turned them off, and fetches neither", async () => {
+    await hear({ chimes: false });
+    const sounds = (await inNewPage())(speaker);
+    sounds.joined();
+    sounds.left();
+    await settled();
+    expect(fetched).toEqual([]);
+
+    // Its music is another sound, which they still hear.
+    sounds.setAlone(true);
+    await wait(MUSIC_AFTER_MS);
+    expect(asked("play")).toEqual([["music", "blob:copy-1"]]);
+    sounds.end(true);
+    await settled();
+    expect(speaker.playOnce).not.toHaveBeenCalled();
+    expect(fetched).toEqual(["music.mp3"]);
+  });
+
+  it("goes by which they hear at the time: turned on in a huddle, each sound is fetched as it's first due and plays from then, and turned off, plays no more", async () => {
+    await hear({ chimes: false });
+    const sounds = (await inNewPage())(speaker);
+    sounds.joined();
+    await hear();
+    await settled();
+    expect(fetched).toEqual([]);
+    expect(speaker.playOnce).not.toHaveBeenCalled();
+
+    sounds.joined();
+    await settled();
+    expect(fetched).toEqual(["joined.mp3"]);
+    expect(asked("playOnce")).toEqual([["joined", "blob:copy-1"]]);
+
+    await hear({ chimes: false });
+    sounds.left();
+    sounds.joined();
+    sounds.end(true);
+    await settled();
+    expect(speaker.playOnce).toHaveBeenCalledTimes(1);
+    expect(fetched).toEqual(["joined.mp3"]);
+  });
+
+  it.each([
+    ["someone joining", "joined.mp3", (sounds: Sounds) => sounds.joined()],
+    ["someone leaving", "left.mp3", (sounds: Sounds) => sounds.left()],
+    ["their own leaving", "left.mp3", (sounds: Sounds) => sounds.end(true)],
+  ] as const)("plays no sound of %s whose file comes once they've turned such sounds off, though it was due while they heard them", async (_, file, due) => {
+    const give = hold(file);
+    const sounds = (await inNewPage())(speaker);
+    due(sounds);
+    await hear({ chimes: false });
+    give(await theFile());
+    await settled();
+    expect(speaker.playOnce).not.toHaveBeenCalled();
+  });
+
+  it("plays a sound whose file comes once they've turned such sounds back on", async () => {
+    const give = hold("joined.mp3");
+    const sounds = (await inNewPage())(speaker);
+    sounds.joined();
+    await hear({ chimes: false });
+    await hear();
+    give(await theFile());
+    await settled();
+    expect(asked("playOnce")).toEqual([["joined", "blob:copy-2"]]);
+  });
+
+  it("neither starts nor fetches its music for someone who has turned it off, however long they're alone", async () => {
+    await hear({ music: false });
+    const sounds = (await inNewPage())(speaker);
+    sounds.setAlone(true);
+    await wait(MUSIC_AFTER_MS * 2);
+    expect(speaker.play).not.toHaveBeenCalled();
+    expect(fetched).toEqual(["joined.mp3", "left.mp3"]);
+
+    // The sounds of joining and leaving are others, which they still hear.
+    sounds.joined();
+    await settled();
+    expect(asked("playOnce")).toEqual([["joined", "blob:copy-1"]]);
+  });
+
+  it("stops its music as soon as they turn it off, and starts it five seconds after they turn it back on, as if they had just found themselves alone", async () => {
+    const sounds = (await inNewPage())(speaker);
+    sounds.setAlone(true);
+    await wait(MUSIC_AFTER_MS);
+    const music = speaker.play.mock.calls[0]![0];
+    speaker.stop.mockClear();
+    await hear({ music: false });
+    expect(speaker.stop).toHaveBeenCalledExactlyOnceWith(music);
+
+    await hear();
+    await wait(MUSIC_AFTER_MS - 1);
+    expect(speaker.play).toHaveBeenCalledTimes(1);
+    await wait(1);
+    expect(speaker.play.mock.calls).toEqual([[music], [music]]);
+  });
+
+  it("doesn't start its music for someone who turns it off within the five seconds, nor for someone who turns it on while they aren't alone", async () => {
+    const sounds = (await inNewPage())(speaker);
+    sounds.setAlone(true);
+    await wait(MUSIC_AFTER_MS - 1);
+    await hear({ music: false });
+    await wait(MUSIC_AFTER_MS);
+    expect(speaker.play).not.toHaveBeenCalled();
+
+    sounds.setAlone(false);
+    await hear();
+    await wait(MUSIC_AFTER_MS * 2);
+    expect(speaker.play).not.toHaveBeenCalled();
+    // Alone again, they wait the five seconds from then.
+    sounds.setAlone(true);
+    await wait(MUSIC_AFTER_MS - 1);
+    expect(speaker.play).not.toHaveBeenCalled();
+    await wait(1);
+    expect(speaker.play).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves its music as it is when they turn another sound on or off, waiting or playing", async () => {
+    const sounds = (await inNewPage())(speaker);
+    sounds.setAlone(true);
+    await wait(MUSIC_AFTER_MS - 1);
+    await hear({ ring: false });
+    await hear({ ring: false, chimes: false });
+    await wait(1);
+    expect(speaker.play).toHaveBeenCalledTimes(1);
+
+    await hear({ chimes: false });
+    await hear();
+    await wait(MUSIC_AFTER_MS);
+    expect(speaker.play).toHaveBeenCalledTimes(1);
+    expect(speaker.stop).not.toHaveBeenCalled();
+  });
+
+  it("stops following which they hear once the huddle has ended", async () => {
+    const store = await import("./huddle-store");
+    const watch = store.watchHeardSounds;
+    let following = 0;
+    vi.spyOn(store, "watchHeardSounds").mockImplementation((listener) => {
+      following++;
+      const unwatch = watch(listener);
+      return () => {
+        following--;
+        unwatch();
+      };
+    });
+    const huddleSounds = await inNewPage();
+    const [first, second] = [huddleSounds(speaker), huddleSounds(speaker)];
+    expect(following).toBe(2);
+    first.end(true);
+    expect(following).toBe(1);
+    second.end(false);
+    expect(following).toBe(0);
   });
 });

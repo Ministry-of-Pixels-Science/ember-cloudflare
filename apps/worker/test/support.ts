@@ -4,6 +4,7 @@ import {
   startingInvolvement,
   uploadPartPath,
   uploadsPath,
+  workspaceSocketQuery,
   type ClientFrame,
   type DirectRoom,
   type Me,
@@ -19,6 +20,7 @@ import {
   type User,
   type UserId,
   type WorkspaceServerFrame,
+  type WorkspaceSocketParams,
 } from "@ember/protocol";
 import type { ModelFormat, ThinkingLevel } from "@ember/protocol/assistant";
 import { applyD1Migrations, evictDurableObject, reset, runInDurableObject, type D1Migration } from "cloudflare:test";
@@ -229,7 +231,7 @@ export async function withWorkspaceEnv(changes: Partial<Env>, run: () => Promise
 export const searchIndexStub = () => searchIndex(env as unknown as Env);
 
 /** The calls the Workspace makes on a room, as a test answers them in every room's stead. */
-export type RoomStandIn = Partial<Pick<ChatRoom, "revoke" | "removeMessagesBy" | "reindex" | "authors">>;
+export type RoomStandIn = Partial<Pick<ChatRoom, "revoke" | "removeMessagesBy" | "removeEverythingBy" | "reindex" | "authors">>;
 
 /** Has `rooms` answer the Workspace's calls to rooms until the function it answers with is called, which gives the rooms back. */
 export async function standInForRooms(rooms: RoomStandIn): Promise<() => Promise<void>> {
@@ -498,9 +500,12 @@ export async function settle(...clients: Socket[]): Promise<void> {
   }
 }
 
-/** Opens a workspace socket in `session`, as a tab does, and queues what the Workspace sends on it after its welcome. */
-export async function openWorkspaceSocket(session: Session) {
-  const response = await api("/api/socket", upgrade(session.cookie));
+/**
+ * Opens a workspace socket in `session`, as a tab does, and queues what the Workspace sends on it after
+ * its welcome. Its address says whether the tab is shown only if `params` does.
+ */
+export async function openWorkspaceSocket(session: Session, params?: WorkspaceSocketParams) {
+  const response = await api(`/api/socket${params ? workspaceSocketQuery(params) : ""}`, upgrade(session.cookie));
   if (!response.webSocket) throw new Error(`No socket: ${response.status} ${await response.text()}`);
   const ws = response.webSocket;
   const frames: WorkspaceServerFrame[] = [];

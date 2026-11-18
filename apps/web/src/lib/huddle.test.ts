@@ -1,12 +1,16 @@
 import { CloseCode, type User } from "@ember/protocol";
 import {
+  CAMERA_SIZES,
   CAMERAS_FULL,
   CAMERAS_OFF,
   HuddleCloseCode,
   MAX_HUDDLE_CAMERAS,
   MAX_HUDDLE_SCREENS,
+  NOBODY_INVITED,
+  RELAY_TTL_S,
   SCREENS_FULL,
   SCREENS_OFF,
+  type HuddleIceServer,
   type HuddlePerson,
   type HuddleServerFrame,
   type HuddleTrackKind,
@@ -14,11 +18,32 @@ import {
 } from "@ember/protocol/huddles";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { audioEngine } from "@/test-audio-engine";
-import { ANSWER_TIMEOUT_MS, CAMERA_BITRATE, joinHuddle, LISTEN_AGAIN_MS, PUBLISH_AGAIN_MS, SCREEN_BITRATE } from "./huddle";
-import { NO_CAMERA, NO_SCREEN } from "./huddle-devices";
+import { ANSWER_TIMEOUT_MS, CAMERA_BITRATE, joinHuddle, LISTEN_AGAIN_MS, PUBLISH_AGAIN_MS, SCREEN_BITRATE, SMALL_CAMERA_BITRATE } from "./huddle";
+import { CAMERA_WENT_OFF, NO_CAMERA, NO_OTHER_CAMERA, NO_OTHER_MICROPHONE, NO_OTHER_SPEAKER, NO_SCREEN, STILL_NO_MICROPHONE } from "./huddle-devices";
+import { NO_REACTIONS, REACTION_SHOWS_MS } from "./huddle-reactions";
 import { MUSIC_AFTER_MS } from "./huddle-sounds";
 import { MEASURED_EVERY_MS, SPEAKING_LEVEL } from "./huddle-speaking";
-import { hearHuddle, isSpeaking, joinedHuddle, leaveHuddle, muteHuddle, openHuddle, shareHuddleScreen, showHuddleCamera, watchHuddle, watchSpeaking } from "./huddle-store";
+import {
+  chooseHuddleDevice,
+  hearHuddle,
+  inviteToHuddle,
+  isSpeaking,
+  joinedHuddle,
+  leaveHuddle,
+  muteHuddle,
+  openHuddle,
+  reactInHuddle,
+  shareHuddleScreen,
+  showHuddleCamera,
+  showHuddleSticker,
+  showHuddleThread,
+  shownReactions,
+  switchHuddleCamera,
+  takeCamerasSmall,
+  watchHuddle,
+  watchReactions,
+  watchSpeaking,
+} from "./huddle-store";
 
 /** Stands in for the browser's WebSocket; tests play the room and the network. */
 class FakeSocket {
@@ -81,8 +106,18 @@ class FakeTrack extends EventTarget {
   readyState: MediaStreamTrackState = "live";
   contentHint = "";
 
-  constructor(readonly kind: HuddleTrackKind = "audio") {
+  constructor(
+    readonly kind: HuddleTrackKind = "audio",
+    /** The device it's from, by its id, where the browser says. */
+    readonly deviceId = "",
+    /** How large its picture is, and which way its camera faces, where the browser says. */
+    readonly said: { width?: number; height?: number; facingMode?: string } = {},
+  ) {
     super();
+  }
+
+  getSettings() {
+    return { deviceId: this.deviceId, ...this.said };
   }
 
   stop() {
@@ -103,11 +138,47 @@ class FakeStream {
   getVideoTracks = () => this.tracks.filter(({ kind }) => kind === "video");
 }
 
+/**
+ * Stands in for what sends a track over a connection, which a browser has send another in its place,
+ * unless the connection has closed, and in the sizes the connection was made to send, or what's left
+ * of them: the first alone, once an answer has taken one.
+ */
+class FakeSender {
+  readonly #connection: FakeConnection;
+  #sizes: RTCRtpEncodingParameters[];
+
+  constructor(
+    connection: FakeConnection,
+    public track: FakeTrack | null,
+    sizes: RTCRtpEncodingParameters[] = [],
+  ) {
+    this.#connection = connection;
+    this.#sizes = sizes;
+  }
+
+  async replaceTrack(track: FakeTrack | null) {
+    if (FakeConnection.keepingTracks || this.#connection.connectionState === "closed") throw new DOMException("The connection can't send another track", "InvalidStateError");
+    this.track = track;
+  }
+
+  getParameters() {
+    return { encodings: this.#sizes.map((size) => ({ ...size })) };
+  }
+
+  async setParameters({ encodings }: { encodings: RTCRtpEncodingParameters[] }) {
+    this.#sizes = encodings;
+  }
+
+  takeOneSize() {
+    this.#sizes = this.#sizes.slice(0, 1);
+  }
+}
+
 interface FakeTransceiver {
   mid: string | null;
   direction?: string;
   sendEncodings?: RTCRtpEncodingParameters[];
-  sender: { track: FakeTrack | null };
+  sender: FakeSender;
   receiver: { track: FakeTrack };
 }
 
@@ -120,6 +191,12 @@ class FakeConnection {
   static offers = 0;
   /** What the next description set fails with, as a browser refuses one it can't make sense of. */
   static refusing = false;
+  /** Whether the connections refuse to send another track in place of the one they send. */
+  static keepingTracks = false;
+  /** Whether the answers the connections are given take one size of a track sent in several, as an SFU that takes no more does. */
+  static takingOneSize = false;
+  /** Whether a connection can't be made by a relay's servers, as in a browser that can't make sense of one of them. */
+  static refusingRelays = false;
 
   connectionState: RTCPeerConnectionState = "new";
   onconnectionstatechange: (() => void) | null = null;
@@ -128,16 +205,18 @@ class FakeConnection {
   transceivers: FakeTransceiver[] = [];
 
   constructor(readonly configuration: RTCConfiguration) {
+    if (FakeConnection.refusingRelays && configuration.iceServers?.some(({ username }) => username !== undefined)) throw new DOMException("Failed to parse the servers", "SyntaxError");
     FakeConnection.all.push(this);
   }
 
   addTransceiver(track: FakeTrack, { direction, sendEncodings }: RTCRtpTransceiverInit) {
-    const transceiver: FakeTransceiver = { mid: null, direction, ...(sendEncodings && { sendEncodings }), sender: { track }, receiver: { track: new FakeTrack() } };
+    const transceiver: FakeTransceiver = { mid: null, direction, ...(sendEncodings && { sendEncodings }), sender: new FakeSender(this, track, sendEncodings), receiver: { track: new FakeTrack() } };
     this.transceivers.push(transceiver);
     return transceiver;
   }
 
   getTransceivers = () => this.transceivers;
+  getSenders = () => this.transceivers.map(({ sender }) => sender);
 
   async createOffer(): Promise<RTCSessionDescriptionInit> {
     return { type: "offer", sdp: `offer ${++FakeConnection.offers}` };
@@ -156,9 +235,12 @@ class FakeConnection {
   async setRemoteDescription(description: RTCSessionDescriptionInit) {
     this.refuseIfTold();
     this.remoteDescription = description;
-    if (description.type !== "offer") return;
+    if (description.type !== "offer") {
+      if (FakeConnection.takingOneSize) for (const sender of this.getSenders()) sender.takeOneSize();
+      return;
+    }
     for (const mid of description.sdp!.split(":")[1]!.split(",")) {
-      if (!this.transceivers.some((transceiver) => transceiver.mid === mid)) this.transceivers.push({ mid, sender: { track: null }, receiver: { track: new FakeTrack() } });
+      if (!this.transceivers.some((transceiver) => transceiver.mid === mid)) this.transceivers.push({ mid, sender: new FakeSender(this, null), receiver: { track: new FakeTrack() } });
     }
   }
 
@@ -274,6 +356,32 @@ async function sharedRound(...tracks: Array<[mid: string, user: User]>) {
 let camera: FakeStream;
 const cameraTrack = () => camera.tracks[0]!;
 const asCamera = () => camera as unknown as MediaStream;
+/** A camera's stream from the device `deviceId`, whose picture is as large as the browser says. */
+const cameraFrom = (deviceId: string, width: number, height: number) => new FakeStream([new FakeTrack("video", deviceId, { width, height })]);
+
+/** The tab's camera is published, and its connection has connected. */
+async function cameraConnected() {
+  const picture = connection();
+  socket().receive({ type: "huddle.published", kind: "video", sdp: "the SFU's answer" });
+  await settled();
+  picture.becomes("connected");
+  socket().take();
+  return picture;
+}
+
+/** What Chrome says of itself, which is known to send a camera in two sizes at once, and what Safari says. */
+const CHROME = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36";
+const SAFARI = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15";
+/** The two sizes such a browser sends a camera in: the smaller first, and then the picture whole. */
+const TWO_SIZES = [
+  { rid: CAMERA_SIZES.small, maxBitrate: SMALL_CAMERA_BITRATE, scaleResolutionDownBy: 2 },
+  { rid: CAMERA_SIZES.large, maxBitrate: CAMERA_BITRATE },
+];
+
+/** Has the browser say `userAgent` of itself, with the devices the test has given it. */
+function browserIs(userAgent: string) {
+  vi.stubGlobal("navigator", { userAgent, mediaDevices: navigator.mediaDevices });
+}
 
 /** Has the browser give the tab `camera` when it asks for one, or with `none`, refuse. Answers what the tab asked it. */
 function browserCamera(none = false) {
@@ -315,8 +423,11 @@ beforeEach(() => {
   FakeConnection.all = [];
   FakeConnection.offers = 0;
   FakeConnection.refusing = false;
-  microphone = new FakeStream([new FakeTrack()]);
-  camera = new FakeStream([new FakeTrack("video")]);
+  FakeConnection.keepingTracks = false;
+  FakeConnection.takingOneSize = false;
+  FakeConnection.refusingRelays = false;
+  microphone = new FakeStream([new FakeTrack("audio", "built-in")]);
+  camera = new FakeStream([new FakeTrack("video", "front")]);
   display = new FakeStream([new FakeTrack("video")]);
   vi.stubGlobal("WebSocket", FakeSocket);
   vi.stubGlobal("RTCPeerConnection", FakeConnection);
@@ -346,7 +457,8 @@ describe("Joining a huddle", () => {
     joinHuddle({ roomId: "general", muted: false, microphone: microphone as unknown as MediaStream, camera: null, speakerId: "" });
 
     expect(socket().url).toBe("ws://localhost:3000/api/rooms/general/huddle");
-    expect(joinedHuddle()).toEqual({ roomId: "general", connected: false, you: null, people: [], muted: false, microphone: true, camera: null, watched: new Map(), screen: null, screens: new Map(), open: true });
+    const joining = { roomId: "general", connected: false, you: null, people: [], muted: false, sticker: null, microphone: true, microphoneId: "built-in", speakerId: "", camera: null, watched: new Map(), screen: null, screens: new Map(), open: true, thread: true };
+    expect(joinedHuddle()).toEqual(joining);
     expect(shown).toHaveBeenCalledTimes(1);
     // Nothing is asked of the room before it has said who the tab is.
     socket().open();
@@ -355,8 +467,61 @@ describe("Joining a huddle", () => {
     expect(FakeConnection.all).toEqual([]);
 
     await welcomed([person(grace)]);
-    expect(joinedHuddle()).toEqual({ roomId: "general", connected: true, you: ada, people: [person(grace), person(ada, { audio: false })], muted: false, microphone: true, camera: null, watched: new Map(), screen: null, screens: new Map(), open: true });
+    expect(joinedHuddle()).toEqual({ ...joining, connected: true, you: ada, people: [person(grace), person(ada, { audio: false })] });
     stop();
+  });
+
+  it("has the message the room names as it lets the tab in as the huddle's, and again each time it lets it back in", async () => {
+    const room = await joined();
+    // A huddle of sockets from before huddles named their messages names none.
+    expect(joinedHuddle()!.messageId).toBeUndefined();
+
+    const letIn = async (messageId: string) => {
+      socket().receive({ type: "huddle.welcome", you: ada, people: [person(ada, { audio: false })], startedAt: STARTED_AT, messageId });
+      await settled();
+    };
+    room.drop();
+    await wait(500);
+    socket().open();
+    await letIn("m1");
+    expect(joinedHuddle()).toMatchObject({ connected: true, messageId: "m1" });
+
+    // Back after the huddle it was in was over, the tab is in another, whose message is another.
+    socket().drop();
+    expect(joinedHuddle()).toMatchObject({ connected: false, messageId: "m1" });
+    await wait(500);
+    socket().open();
+    await letIn("m2");
+    expect(joinedHuddle()).toMatchObject({ connected: true, messageId: "m2" });
+  });
+
+  it("shows its thread until its person closes it, and again once they show it, telling whoever shows the huddle of each change", async () => {
+    await joined();
+    expect(joinedHuddle()).toMatchObject({ thread: true });
+    const shown = vi.fn();
+    const stop = watchHuddle(shown);
+
+    showHuddleThread(false);
+    expect(joinedHuddle()).toMatchObject({ thread: false });
+    expect(shown).toHaveBeenCalledTimes(1);
+    // Closed already, there's nothing to tell.
+    showHuddleThread(false);
+    expect(shown).toHaveBeenCalledTimes(1);
+
+    // Minimizing the huddle and opening it again leaves the thread as it was.
+    openHuddle(false);
+    openHuddle(true);
+    expect(joinedHuddle()).toMatchObject({ open: true, thread: false });
+
+    showHuddleThread(true);
+    expect(joinedHuddle()).toMatchObject({ thread: true });
+    stop();
+
+    // The next huddle the tab joins shows its thread, whatever the last did.
+    showHuddleThread(false);
+    leaveHuddle();
+    await joined();
+    expect(joinedHuddle()).toMatchObject({ thread: true });
   });
 
   it("says in the address that the tab joins muted, and keeps its microphone off", async () => {
@@ -507,7 +672,7 @@ describe("A huddle's microphone", () => {
 
     microphoneTrack().end();
     expect(room.take()).toEqual([{ type: "huddle.mute", muted: true }]);
-    expect(joinedHuddle()).toMatchObject({ muted: true, microphone: false });
+    expect(joinedHuddle()).toMatchObject({ muted: true, microphone: false, microphoneId: "" });
     muteHuddle(false);
     expect(joinedHuddle()).toMatchObject({ muted: true });
     // And nothing more is published of it.
@@ -1412,6 +1577,259 @@ describe("Watching the others in a huddle", () => {
   });
 });
 
+describe("A camera's sizes in a huddle", () => {
+  /** The tab's camera is on as it joins, and published once the room lets it in: answers the room's socket and the camera's connection. */
+  async function showing() {
+    const room = await joined([], { camera: asCamera() });
+    room.take();
+    return [room, connection()] as const;
+  }
+
+  it("sends a camera in two sizes from a browser known to send them: the smaller first, half as wide and half as tall, and then the picture whole", async () => {
+    camera = cameraFrom("front", 640, 360);
+    browserIs(CHROME);
+    const [, picture] = await showing();
+    expect(picture.transceivers).toEqual([expect.objectContaining({ direction: "sendonly", sendEncodings: TWO_SIZES, sender: { track: cameraTrack() } })]);
+  });
+
+  it.each([
+    ["from any other browser", SAFARI, cameraFrom("front", 640, 360)],
+    ["of a picture too small for two", CHROME, cameraFrom("front", 320, 180)],
+    ["of a picture the browser says no size of", CHROME, new FakeStream([new FakeTrack("video", "front")])],
+  ])("sends it in one size %s", async (_why, userAgent, from) => {
+    camera = from;
+    browserIs(userAgent);
+    const [, picture] = await showing();
+    expect(picture.transceivers[0]!.sendEncodings).toEqual([{ maxBitrate: CAMERA_BITRATE }]);
+  });
+
+  it("leaves both sizes as they are once the SFU's answer has taken both, and the one size of a camera sent in one", async () => {
+    const changed = vi.spyOn(FakeSender.prototype, "setParameters");
+    camera = cameraFrom("front", 640, 360);
+    browserIs(CHROME);
+    const [room, picture] = await showing();
+    room.receive({ type: "huddle.published", kind: "video", sdp: "the SFU's answer" });
+    await settled();
+    expect(picture.getSenders()[0]!.getParameters().encodings).toEqual(TWO_SIZES);
+
+    // One size offered is one size sent, whatever the answer takes of it.
+    FakeConnection.takingOneSize = true;
+    showHuddleCamera(false);
+    camera = cameraFrom("front", 320, 180);
+    browserCamera();
+    showHuddleCamera(true);
+    await settled();
+    room.receive({ type: "huddle.published", kind: "video", sdp: "the SFU's answer" });
+    await settled();
+    expect(connection()).not.toBe(picture);
+    expect(connection().getSenders()[0]!.getParameters().encodings).toEqual([{ maxBitrate: CAMERA_BITRATE }]);
+    expect(changed).not.toHaveBeenCalled();
+  });
+
+  it("sends its camera whole when the SFU's answer takes one size of the two: the smaller, which the browser is left sending, as large as the picture and at as many bits", async () => {
+    FakeConnection.takingOneSize = true;
+    camera = cameraFrom("front", 640, 360);
+    browserIs(CHROME);
+    const [room, picture] = await showing();
+    room.receive({ type: "huddle.published", kind: "video", sdp: "an answer that takes one size" });
+    await settled();
+    expect(picture.getSenders()[0]!.getParameters().encodings).toEqual([{ rid: CAMERA_SIZES.small, maxBitrate: CAMERA_BITRATE, scaleResolutionDownBy: 1 }]);
+    expect(picture.connectionState).toBe("new");
+    expect(room.take()).toEqual([]);
+  });
+
+  it("asks nothing more of a connection whose camera was turned off while the browser took the SFU's answer", async () => {
+    const changed = vi.spyOn(FakeSender.prototype, "setParameters");
+    FakeConnection.takingOneSize = true;
+    camera = cameraFrom("front", 640, 360);
+    browserIs(CHROME);
+    const [room, picture] = await showing();
+    room.receive({ type: "huddle.published", kind: "video", sdp: "an answer that takes one size" });
+    showHuddleCamera(false);
+    await settled();
+    expect(picture.connectionState).toBe("closed");
+    expect(changed).not.toHaveBeenCalled();
+  });
+
+  it("goes on with the huddle when the browser won't send that one size whole", async () => {
+    vi.spyOn(FakeSender.prototype, "setParameters").mockRejectedValue(new DOMException("The connection has closed", "InvalidStateError"));
+    FakeConnection.takingOneSize = true;
+    camera = cameraFrom("front", 640, 360);
+    browserIs(CHROME);
+    const [room, picture] = await showing();
+    room.receive({ type: "huddle.published", kind: "video", sdp: "an answer that takes one size" });
+    await settled();
+    picture.becomes("connected");
+    expect(room.take()).toEqual([{ type: "huddle.connected", kind: "video" }]);
+    expect(joinedHuddle()).toMatchObject({ camera });
+  });
+
+  it("publishes its camera again in one size, whole, once the room couldn't publish it in two, which may be what the SFU wouldn't take, and keeps to one in that huddle", async () => {
+    camera = cameraFrom("front", 640, 360);
+    browserIs(CHROME);
+    const [room, picture] = await showing();
+    expect(picture.transceivers[0]!.sendEncodings).toEqual(TWO_SIZES);
+
+    room.receive({ type: "error", message: "The huddle couldn't connect. Trying again.", failed: "huddle.publish", kind: "video" });
+    await wait(PUBLISH_AGAIN_MS[0]);
+    const whole = connection();
+    expect(whole).not.toBe(picture);
+    expect(whole.transceivers).toEqual([expect.objectContaining({ direction: "sendonly", sendEncodings: [{ maxBitrate: CAMERA_BITRATE }], sender: { track: cameraTrack() } })]);
+    expect(room.take()).toEqual([{ type: "huddle.publish", sdp: "offer 3", tracks: [{ mid: "0", kind: "video" }] }]);
+    room.receive({ type: "huddle.published", kind: "video", sdp: "the SFU's answer" });
+    await settled();
+
+    // Turned off and on again, it goes out in one.
+    showHuddleCamera(false);
+    camera = cameraFrom("front", 640, 360);
+    browserCamera();
+    browserIs(CHROME);
+    showHuddleCamera(true);
+    await settled();
+    expect(connection()).not.toBe(whole);
+    expect(connection().transceivers[0]!.sendEncodings).toEqual([{ maxBitrate: CAMERA_BITRATE }]);
+  });
+
+  it("sends two sizes still of a camera the room refused itself, the huddle showing as many as it does, once it's turned on again", async () => {
+    camera = cameraFrom("front", 640, 360);
+    browserIs(CHROME);
+    const [room] = await showing();
+    room.receive({ type: "error", message: CAMERAS_FULL, failed: "huddle.publish", kind: "video", refused: true });
+    expect(joinedHuddle()).toMatchObject({ camera: null });
+
+    camera = cameraFrom("front", 640, 360);
+    browserCamera();
+    browserIs(CHROME);
+    showHuddleCamera(true);
+    await settled();
+    expect(connection().transceivers[0]!.sendEncodings).toEqual(TWO_SIZES);
+  });
+
+  it("asks for the cameras it watches small once its huddle shows them in small tiles, and large again once it shows them larger", async () => {
+    const room = await joined([person(grace, { video: true })]);
+    await watchedRound(["0", grace]);
+    room.take();
+
+    takeCamerasSmall(true);
+    expect(room.take()).toEqual([{ type: "huddle.listen", kind: "video", watch: [grace.id], small: true }]);
+    // The room has the SFU send her camera in its smaller size, and has nobody to offer.
+    room.receive({ type: "huddle.listening", kind: "video" });
+    await wait(LISTEN_AGAIN_MS[1] * 2);
+    expect(room.take()).toEqual([]);
+    expect([...joinedHuddle()!.watched.keys()]).toEqual([grace.id]);
+    // Said again, it's nothing to ask.
+    takeCamerasSmall(true);
+    expect(room.take()).toEqual([]);
+
+    takeCamerasSmall(false);
+    expect(room.take()).toEqual([{ type: "huddle.listen", kind: "video", watch: [grace.id] }]);
+  });
+
+  it("asks in the size it shows by then, once the round under way is over, when its tiles change size meanwhile", async () => {
+    const room = await joined([person(grace, { video: true })]);
+    await watchedRound(["0", grace]);
+    room.take();
+
+    takeCamerasSmall(true);
+    room.take();
+    takeCamerasSmall(false);
+    expect(room.take()).toEqual([]);
+    room.receive({ type: "huddle.listening", kind: "video" });
+    expect(room.take()).toEqual([{ type: "huddle.listen", kind: "video", watch: [grace.id] }]);
+    // And nothing more once that's answered.
+    room.receive({ type: "huddle.listening", kind: "video" });
+    await wait(LISTEN_AGAIN_MS[1] * 2);
+    expect(room.take()).toEqual([]);
+  });
+
+  it("says nothing of sizes while it watches nobody, and asks small for the first camera that comes on", async () => {
+    const room = await joined([person(grace)]);
+    room.take();
+    takeCamerasSmall(true);
+    expect(room.take()).toEqual([]);
+
+    room.receive({ type: "huddle.changed", person: person(grace, { video: true }) });
+    expect(taken("video")).toEqual([{ type: "huddle.listen", kind: "video", fresh: true, watch: [grace.id], small: true }]);
+  });
+
+  it("says small of cameras alone: never of voices, nor of the screens people share", async () => {
+    const room = await joined([person(grace, { video: true })]);
+    await offeredRound(["0", grace]);
+    room.receive({ type: "huddle.listening", kind: "audio" });
+    await watchedRound(["0", grace]);
+    takeCamerasSmall(true);
+    room.take();
+
+    room.receive({ type: "huddle.joined", person: person(linus) });
+    expect(taken("audio")).toEqual([{ type: "huddle.listen", kind: "audio" }]);
+    room.receive({ type: "huddle.changed", person: person(grace, { video: true, screen: true }) });
+    expect(taken("screen")).toEqual([{ type: "huddle.listen", kind: "screen", fresh: true, watch: [grace.id] }]);
+  });
+
+  it("answers a change of sizes that takes an offer on the connection it has, and goes on showing whom it watched", async () => {
+    const room = await joined([person(grace, { video: true })]);
+    await watchedRound(["0", grace]);
+    const watching = connection();
+    const shown = joinedHuddle()!.watched.get(grace.id);
+    takeCamerasSmall(true);
+    room.take();
+
+    // The SFU's offer carries the camera it sent already, and nobody new.
+    room.receive({ type: "huddle.offer", kind: "video", sdp: "offer:0", tracks: [] });
+    await settled();
+    expect(room.take()).toEqual([{ type: "huddle.answer", kind: "video", sdp: "answer to offer:0" }]);
+    expect(connection()).toBe(watching);
+    expect(joinedHuddle()!.watched.get(grace.id)).toBe(shown);
+    // Then it asks once more, as after any offer, in the size it shows.
+    room.receive({ type: "huddle.listening", kind: "video" });
+    expect(room.take()).toEqual([{ type: "huddle.listen", kind: "video", watch: [grace.id], small: true }]);
+  });
+
+  it("shows a camera it watches from the track it's offered of it anew, which the room does of one the SFU won't make larger", async () => {
+    const room = await joined([person(grace, { video: true })]);
+    await watchedRound(["0", grace]);
+    const watching = connection();
+    takeCamerasSmall(true);
+    room.receive({ type: "huddle.listening", kind: "video" });
+    const small = joinedHuddle()!.watched.get(grace.id)!;
+    takeCamerasSmall(false);
+    room.take();
+
+    // The room has had the SFU close the track it sent of her, and offers her camera again on the connection's next media section.
+    room.receive(pictures(["1", grace]));
+    await settled();
+    expect(room.take()).toEqual([expect.objectContaining({ type: "huddle.answer", kind: "video" })]);
+    expect(connection()).toBe(watching);
+    const large = joinedHuddle()!.watched.get(grace.id)!;
+    expect(large).not.toBe(small);
+    expect(large.getTracks()).toEqual([watching.transceivers.find(({ mid }) => mid === "1")!.receiver.track]);
+    expect([...joinedHuddle()!.watched.keys()]).toEqual([grace.id]);
+  });
+
+  it("keeps to the size its tiles last showed as the huddle closes to its bar and opens again, and as the room lets the tab back in", async () => {
+    const room = await joined([person(grace, { video: true })]);
+    await watchedRound(["0", grace]);
+    takeCamerasSmall(true);
+    room.receive({ type: "huddle.listening", kind: "video" });
+    room.take();
+
+    openHuddle(false);
+    room.receive({ type: "huddle.listening", kind: "video" });
+    openHuddle(true);
+    expect(taken("video")).toEqual([
+      { type: "huddle.listen", kind: "video", watch: [], small: true },
+      { type: "huddle.listen", kind: "video", fresh: true, watch: [grace.id], small: true },
+    ]);
+
+    room.drop();
+    await wait(1_000);
+    socket().open();
+    const again = await welcomed([person(grace, { video: true })]);
+    expect(taken("video")).toEqual([{ type: "huddle.listen", kind: "video", fresh: true, watch: [grace.id], small: true }]);
+    expect(again).not.toBe(room);
+  });
+});
+
 describe("A screen shared in a huddle", () => {
   it("is shared once its person has chosen it: the browser asks them what to share, and the huddle shows it and publishes it from a connection of its own", async () => {
     const asked = browserScreen();
@@ -1745,6 +2163,833 @@ describe("Watching the screens shared in a huddle", () => {
   });
 });
 
+describe("Choosing another device in a huddle", () => {
+  /** A microphone's stream, or a camera's, from the device `deviceId`. */
+  const deviceStream = (kind: "audio" | "video", deviceId: string) => new FakeStream([new FakeTrack(kind, deviceId)]);
+  const trackOf = (stream: FakeStream) => stream.tracks[0]!;
+  /** What the tab asks the browser for the camera `deviceId` with. */
+  const cameraAsked = (deviceId: string) => ({ video: { width: { ideal: 640 }, height: { ideal: 360 }, deviceId: { exact: deviceId } } });
+
+  /**
+   * Has the browser open, of `streams`, the one from the device the tab asks for, or the first when it
+   * asks for the browser's own choice, and refuse it any other. Answers what the tab asked it.
+   */
+  function browserDevices(...streams: FakeStream[]) {
+    const getUserMedia = vi.fn(async ({ audio, video }: MediaStreamConstraints) => {
+      const { deviceId } = (audio ?? video) as { deviceId?: { exact: string } };
+      const stream = deviceId ? streams.find((from) => trackOf(from).deviceId === deviceId.exact) : streams[0];
+      if (!stream) throw new DOMException("Permission denied", "NotAllowedError");
+      return stream;
+    });
+    vi.stubGlobal("navigator", { mediaDevices: Object.assign(new EventTarget(), { getUserMedia }) });
+    return getUserMedia;
+  }
+
+  afterEach(() => {
+    for (const kind of ["microphone", "speaker", "camera"]) localStorage.removeItem(`ember:huddle-${kind}`);
+  });
+
+  it("speaks through another microphone once the browser has opened it: on the connection it has, measured in the first one's place, which is closed", async () => {
+    const usb = deviceStream("audio", "usb");
+    const asked = browserDevices(usb);
+    const engine = audioEngine();
+    const room = await joined();
+    const sending = await publishedAndConnected();
+    const first = microphoneTrack();
+    room.take();
+    expect(joinedHuddle()).toMatchObject({ microphoneId: "built-in" });
+
+    chooseHuddleDevice("microphone", "usb");
+    await settled();
+    expect(asked).toHaveBeenCalledExactlyOnceWith({ audio: { deviceId: { exact: "usb" } } });
+    expect(sending.transceivers[0]!.sender.track).toBe(trackOf(usb));
+    expect([first.readyState, trackOf(usb).readyState]).toEqual(["ended", "live"]);
+    expect(joinedHuddle()).toMatchObject({ muted: false, microphone: true, microphoneId: "usb" });
+    expect(engine.measured()).toEqual([trackOf(usb)]);
+    expect(localStorage.getItem("ember:huddle-microphone")).toBe("usb");
+    // The SFU carries the track it did, so the room hears nothing of it.
+    expect(room.take()).toEqual([]);
+    expect(FakeConnection.all).toEqual([sending]);
+
+    // Chosen again, the one it has is nothing to ask the browser for.
+    chooseHuddleDevice("microphone", "usb");
+    await settled();
+    expect(asked).toHaveBeenCalledTimes(1);
+  });
+
+  it("stays as muted as it was, and mutes and unmutes the microphone it speaks through now", async () => {
+    const usb = deviceStream("audio", "usb");
+    browserDevices(usb);
+    const room = await joined();
+    muteHuddle(true);
+    room.take();
+
+    chooseHuddleDevice("microphone", "usb");
+    await settled();
+    expect(trackOf(usb).enabled).toBe(false);
+    expect(joinedHuddle()).toMatchObject({ muted: true, microphone: true });
+    expect(room.take()).toEqual([]);
+
+    muteHuddle(false);
+    expect(trackOf(usb).enabled).toBe(true);
+    expect(room.take()).toEqual([{ type: "huddle.mute", muted: false }]);
+  });
+
+  it("leaves its person listening once the microphone chosen is unplugged, where the end of the one before is nothing to it", async () => {
+    const usb = deviceStream("audio", "usb");
+    browserDevices(usb);
+    const room = await joined();
+    const first = microphoneTrack();
+    chooseHuddleDevice("microphone", "usb");
+    await settled();
+    room.take();
+
+    first.end();
+    expect(room.take()).toEqual([]);
+    expect(joinedHuddle()).toMatchObject({ muted: false, microphone: true });
+    trackOf(usb).end();
+    expect(room.take()).toEqual([{ type: "huddle.mute", muted: true }]);
+    expect(joinedHuddle()).toMatchObject({ muted: true, microphone: false, microphoneId: "" });
+  });
+
+  it("publishes the microphone anew when its connection won't send another track", async () => {
+    const usb = deviceStream("audio", "usb");
+    browserDevices(usb);
+    const room = await joined();
+    const first = await publishedAndConnected();
+    room.take();
+    FakeConnection.keepingTracks = true;
+
+    chooseHuddleDevice("microphone", "usb");
+    await settled();
+    expect(first.connectionState).toBe("closed");
+    expect(connection().transceivers[0]!.sender.track).toBe(trackOf(usb));
+    expect(room.take()).toEqual([{ type: "huddle.publish", sdp: "offer 2", tracks: [{ mid: "0", kind: "audio" }] }]);
+  });
+
+  it("publishes a microphone chosen before the room lets the tab in with the room's welcome, which measures it as its person's", async () => {
+    const usb = deviceStream("audio", "usb");
+    browserDevices(usb);
+    const engine = audioEngine();
+    joinHuddle({ roomId: "general", muted: false, microphone: microphone as unknown as MediaStream, camera: null, speakerId: "" });
+    socket().open();
+    chooseHuddleDevice("microphone", "usb");
+    await settled();
+    expect(FakeConnection.all).toEqual([]);
+    expect(engine.measured()).toEqual([]);
+
+    const room = await welcomed();
+    expect(FakeConnection.all).toHaveLength(1);
+    expect(connection().transceivers[0]!.sender.track).toBe(trackOf(usb));
+    expect(room.take()).toEqual([{ type: "huddle.publish", sdp: "offer 1", tracks: [{ mid: "0", kind: "audio" }] }]);
+    expect(engine.measured()).toEqual([trackOf(usb)]);
+  });
+
+  it("gives a tab that joined to listen the browser's own choice of microphone, which it publishes, and stays muted on until its person unmutes", async () => {
+    const builtIn = deviceStream("audio", "built-in");
+    const asked = browserDevices(builtIn);
+    const engine = audioEngine();
+    const room = await joined([], { microphone: null });
+    expect(room.take()).toEqual([]);
+    expect(joinedHuddle()).toMatchObject({ muted: true, microphone: false, microphoneId: "" });
+
+    chooseHuddleDevice("microphone", "");
+    await settled();
+    expect(asked).toHaveBeenCalledExactlyOnceWith({ audio: true });
+    expect(joinedHuddle()).toMatchObject({ muted: true, microphone: true, microphoneId: "built-in" });
+    expect(trackOf(builtIn).enabled).toBe(false);
+    expect(connection().transceivers[0]!.sender.track).toBe(trackOf(builtIn));
+    expect(room.take()).toEqual([{ type: "huddle.publish", sdp: "offer 1", tracks: [{ mid: "0", kind: "audio" }] }]);
+    expect(engine.measured()).toEqual([trackOf(builtIn)]);
+
+    muteHuddle(false);
+    expect(trackOf(builtIn).enabled).toBe(true);
+    expect(room.take()).toEqual([{ type: "huddle.mute", muted: false }]);
+    expect(joinedHuddle()).toMatchObject({ muted: false });
+  });
+
+  it("has a microphone again, muted still, once one is chosen after its own was unplugged", async () => {
+    const usb = deviceStream("audio", "usb");
+    browserDevices(usb);
+    const room = await joined();
+    const sending = await publishedAndConnected();
+    microphoneTrack().end();
+    room.take();
+
+    chooseHuddleDevice("microphone", "usb");
+    await settled();
+    expect(joinedHuddle()).toMatchObject({ muted: true, microphone: true, microphoneId: "usb" });
+    expect(trackOf(usb).enabled).toBe(false);
+    expect(sending.transceivers[0]!.sender.track).toBe(trackOf(usb));
+    expect(room.take()).toEqual([]);
+  });
+
+  it("keeps the microphone it has, and says so, when the browser won't open the one chosen", async () => {
+    browserDevices();
+    const said = vi.fn();
+    const stop = hearHuddle(said);
+    const room = await joined();
+    const sending = connection();
+    room.take();
+
+    chooseHuddleDevice("microphone", "usb");
+    await settled();
+    expect(said).toHaveBeenCalledExactlyOnceWith(NO_OTHER_MICROPHONE);
+    expect(microphoneTrack().readyState).toBe("live");
+    expect(sending.transceivers[0]!.sender.track).toBe(microphoneTrack());
+    expect(joinedHuddle()).toMatchObject({ microphone: true, microphoneId: "built-in" });
+    expect(room.take()).toEqual([]);
+    stop();
+  });
+
+  it("tells someone who only listens that there's no microphone for them still, when the browser won't open one", async () => {
+    browserDevices();
+    const said = vi.fn();
+    const stop = hearHuddle(said);
+    await joined([], { microphone: null });
+
+    chooseHuddleDevice("microphone", "");
+    await settled();
+    expect(said).toHaveBeenCalledExactlyOnceWith(STILL_NO_MICROPHONE);
+    expect(joinedHuddle()).toMatchObject({ muted: true, microphone: false });
+    stop();
+  });
+
+  it("speaks through the last of the microphones chosen while the browser opens them, whichever it opens last, and closes the others", async () => {
+    const [usb, headset] = [deviceStream("audio", "usb"), deviceStream("audio", "headset")];
+    // The browser takes its time over the first one chosen.
+    let openFirst = () => {};
+    const getUserMedia = vi.fn(({ audio }: MediaStreamConstraints) =>
+      (audio as { deviceId: { exact: string } }).deviceId.exact === "usb" ? new Promise<FakeStream>((resolve) => (openFirst = () => resolve(usb))) : Promise.resolve(headset),
+    );
+    vi.stubGlobal("navigator", { mediaDevices: Object.assign(new EventTarget(), { getUserMedia }) });
+    await joined();
+    const sending = connection();
+
+    chooseHuddleDevice("microphone", "usb");
+    chooseHuddleDevice("microphone", "headset");
+    await settled();
+    expect(sending.transceivers[0]!.sender.track).toBe(trackOf(headset));
+    openFirst();
+    await settled();
+    expect([trackOf(usb).readyState, trackOf(headset).readyState]).toEqual(["ended", "live"]);
+    expect(sending.transceivers[0]!.sender.track).toBe(trackOf(headset));
+    expect(joinedHuddle()).toMatchObject({ microphoneId: "headset" });
+    expect(localStorage.getItem("ember:huddle-microphone")).toBe("headset");
+  });
+
+  it("keeps the microphone it has when that's chosen while the browser opens another, which is closed", async () => {
+    const usb = deviceStream("audio", "usb");
+    browserDevices(usb);
+    await joined();
+
+    chooseHuddleDevice("microphone", "usb");
+    chooseHuddleDevice("microphone", "built-in");
+    await settled();
+    expect([microphoneTrack().readyState, trackOf(usb).readyState]).toEqual(["live", "ended"]);
+    expect(joinedHuddle()).toMatchObject({ microphoneId: "built-in" });
+    expect(localStorage.getItem("ember:huddle-microphone")).toBe("built-in");
+  });
+
+  it("closes a microphone the browser opens once the tab has left", async () => {
+    const usb = deviceStream("audio", "usb");
+    browserDevices(usb);
+    await joined();
+
+    chooseHuddleDevice("microphone", "usb");
+    leaveHuddle();
+    await settled();
+    expect(trackOf(usb).readyState).toBe("ended");
+  });
+
+  it("plays through another speaker: what the huddle plays now, and what it plays after", async () => {
+    const setSinkId = vi.fn(async () => {});
+    Object.defineProperty(HTMLMediaElement.prototype, "setSinkId", { configurable: true, value: setSinkId });
+    try {
+      await joined([person(grace), person(linus)]);
+      await offeredRound(["0", grace]);
+      expect(setSinkId).not.toHaveBeenCalled();
+
+      chooseHuddleDevice("speaker", "headphones");
+      expect(setSinkId).toHaveBeenCalledExactlyOnceWith("headphones");
+      expect(madeOn(setSinkId)).toEqual([grace.id]);
+      // Shown, and kept for the next huddle, once the browser plays through it.
+      expect(joinedHuddle()).toMatchObject({ speakerId: "" });
+      await settled();
+      expect(joinedHuddle()).toMatchObject({ speakerId: "headphones" });
+      expect(localStorage.getItem("ember:huddle-speaker")).toBe("headphones");
+      await offeredRound(["1", linus]);
+      expect(setSinkId.mock.calls).toEqual([["headphones"], ["headphones"]]);
+      expect(madeOn(setSinkId)).toEqual([grace.id, linus.id]);
+
+      // And through the system's again, which this browser's next huddle starts with.
+      setSinkId.mockClear();
+      chooseHuddleDevice("speaker", "");
+      expect(setSinkId.mock.calls).toEqual([[""], [""]]);
+      await settled();
+      expect(joinedHuddle()).toMatchObject({ speakerId: "" });
+      expect(localStorage.getItem("ember:huddle-speaker")).toBeNull();
+    } finally {
+      delete (HTMLMediaElement.prototype as { setSinkId?: unknown }).setSinkId;
+    }
+  });
+
+  it("keeps the speaker it has, and says so, when the browser won't play through the one chosen", async () => {
+    const setSinkId = vi.fn(async (deviceId: string) => {
+      if (deviceId === "monitor") throw new DOMException("Refused", "NotAllowedError");
+    });
+    Object.defineProperty(HTMLMediaElement.prototype, "setSinkId", { configurable: true, value: setSinkId });
+    const said = vi.fn();
+    const stop = hearHuddle(said);
+    try {
+      await joined([person(grace)]);
+      await offeredRound(["0", grace]);
+      chooseHuddleDevice("speaker", "headphones");
+      await settled();
+      setSinkId.mockClear();
+
+      chooseHuddleDevice("speaker", "monitor");
+      await settled();
+      expect(said).toHaveBeenCalledExactlyOnceWith(NO_OTHER_SPEAKER);
+      // Back through the one before, which the huddle shows still, and this browser's next huddle starts with.
+      expect(setSinkId.mock.calls).toEqual([["monitor"], ["headphones"]]);
+      expect(joinedHuddle()).toMatchObject({ speakerId: "headphones" });
+      expect(localStorage.getItem("ember:huddle-speaker")).toBe("headphones");
+    } finally {
+      stop();
+      delete (HTMLMediaElement.prototype as { setSinkId?: unknown }).setSinkId;
+    }
+  });
+
+  it("shows the last of two speakers chosen one right after the other, however long the browser takes over the first", async () => {
+    let take = () => {};
+    const taken = new Promise<void>((resolve) => (take = resolve));
+    const setSinkId = vi.fn(async (deviceId: string) => {
+      if (deviceId === "headphones") await taken;
+    });
+    Object.defineProperty(HTMLMediaElement.prototype, "setSinkId", { configurable: true, value: setSinkId });
+    try {
+      await joined([person(grace)]);
+      await offeredRound(["0", grace]);
+
+      chooseHuddleDevice("speaker", "headphones");
+      chooseHuddleDevice("speaker", "monitor");
+      await settled();
+      expect(joinedHuddle()).toMatchObject({ speakerId: "" });
+      take();
+      await settled();
+      expect(setSinkId.mock.calls).toEqual([["headphones"], ["monitor"]]);
+      expect(joinedHuddle()).toMatchObject({ speakerId: "monitor" });
+      expect(localStorage.getItem("ember:huddle-speaker")).toBe("monitor");
+    } finally {
+      delete (HTMLMediaElement.prototype as { setSinkId?: unknown }).setSinkId;
+    }
+  });
+
+  it("forgets a speaker chosen as the tab leaves, which its next huddle doesn't start with", async () => {
+    const setSinkId = vi.fn(async () => {});
+    Object.defineProperty(HTMLMediaElement.prototype, "setSinkId", { configurable: true, value: setSinkId });
+    const said = vi.fn();
+    const stop = hearHuddle(said);
+    try {
+      await joined([person(grace)]);
+      await offeredRound(["0", grace]);
+
+      chooseHuddleDevice("speaker", "headphones");
+      leaveHuddle();
+      await settled();
+      expect(localStorage.getItem("ember:huddle-speaker")).toBeNull();
+      expect(said).not.toHaveBeenCalled();
+    } finally {
+      stop();
+      delete (HTMLMediaElement.prototype as { setSinkId?: unknown }).setSinkId;
+    }
+  });
+
+  it("shows another camera in place of the one that's on, once the browser has opened it: on the connection it has, with the first one closed", async () => {
+    const rear = deviceStream("video", "rear");
+    const asked = browserDevices(rear);
+    const room = await joined([], { camera: asCamera() });
+    const picture = await cameraConnected();
+    const first = cameraTrack();
+
+    chooseHuddleDevice("camera", "rear");
+    await settled();
+    expect(asked).toHaveBeenCalledExactlyOnceWith(cameraAsked("rear"));
+    expect(joinedHuddle()).toMatchObject({ camera: rear });
+    expect(picture.transceivers[0]!.sender.track).toBe(trackOf(rear));
+    expect([first.readyState, trackOf(rear).readyState]).toEqual(["ended", "live"]);
+    expect(localStorage.getItem("ember:huddle-camera")).toBe("rear");
+    expect(room.take()).toEqual([]);
+    expect(FakeConnection.all).toHaveLength(2);
+
+    // The end of the one before is nothing to it, and the one chosen goes off as it's unplugged.
+    first.end();
+    expect(joinedHuddle()).toMatchObject({ camera: rear });
+    trackOf(rear).end();
+    expect(joinedHuddle()).toMatchObject({ camera: null });
+    expect(room.take()).toEqual([{ type: "huddle.unpublish", kind: "video" }]);
+  });
+
+  it("asks the browser for nothing when the camera chosen is the one that's on", async () => {
+    const asked = browserDevices();
+    await joined([], { camera: asCamera() });
+
+    chooseHuddleDevice("camera", "front");
+    await settled();
+    expect(asked).not.toHaveBeenCalled();
+    expect(joinedHuddle()).toMatchObject({ camera });
+  });
+
+  it("publishes anew a camera chosen in place of one sent in another number of sizes, which its connection wasn't made to send", async () => {
+    camera = cameraFrom("front", 640, 360);
+    const [rear, side] = [cameraFrom("rear", 320, 180), cameraFrom("side", 1280, 720)];
+    browserDevices(rear, side);
+    browserIs(CHROME);
+    const room = await joined([], { camera: asCamera() });
+    const first = await cameraConnected();
+    expect(first.transceivers[0]!.sendEncodings).toEqual(TWO_SIZES);
+
+    // Of a picture too small for two, a connection made for two would send the smaller size alone.
+    chooseHuddleDevice("camera", "rear");
+    await settled();
+    const second = connection();
+    expect(first.connectionState).toBe("closed");
+    expect(second.transceivers).toEqual([expect.objectContaining({ sendEncodings: [{ maxBitrate: CAMERA_BITRATE }], sender: { track: trackOf(rear) } })]);
+    expect(room.take()).toEqual([{ type: "huddle.publish", sdp: "offer 3", tracks: [{ mid: "0", kind: "video" }] }]);
+
+    // And one made for one size would send a larger picture in that one alone.
+    await cameraConnected();
+    chooseHuddleDevice("camera", "side");
+    await settled();
+    expect(second.connectionState).toBe("closed");
+    expect(connection().transceivers).toEqual([expect.objectContaining({ sendEncodings: TWO_SIZES, sender: { track: trackOf(side) } })]);
+    expect(room.take()).toEqual([{ type: "huddle.publish", sdp: "offer 4", tracks: [{ mid: "0", kind: "video" }] }]);
+  });
+
+  it("sends a camera chosen in place of one sent in as many sizes on the connection it has, in both of them", async () => {
+    camera = cameraFrom("front", 640, 360);
+    const rear = cameraFrom("rear", 1280, 720);
+    browserDevices(rear);
+    browserIs(CHROME);
+    const room = await joined([], { camera: asCamera() });
+    const picture = await cameraConnected();
+
+    chooseHuddleDevice("camera", "rear");
+    await settled();
+    expect(connection()).toBe(picture);
+    expect(picture.transceivers[0]!.sender.track).toBe(trackOf(rear));
+    expect(picture.getSenders()[0]!.getParameters().encodings).toEqual(TWO_SIZES);
+    expect(room.take()).toEqual([]);
+  });
+
+  it("sends a camera chosen in a huddle that keeps to one size, the room having failed to publish two, on the connection it has, though the camera would go out in two", async () => {
+    camera = cameraFrom("front", 640, 360);
+    const rear = cameraFrom("rear", 1280, 720);
+    browserDevices(rear);
+    browserIs(CHROME);
+    const room = await joined([], { camera: asCamera() });
+    room.receive({ type: "error", message: "The huddle couldn't connect. Trying again.", failed: "huddle.publish", kind: "video" });
+    await wait(PUBLISH_AGAIN_MS[0]);
+    const whole = await cameraConnected();
+    expect(whole.transceivers[0]!.sendEncodings).toEqual([{ maxBitrate: CAMERA_BITRATE }]);
+
+    chooseHuddleDevice("camera", "rear");
+    await settled();
+    expect(connection()).toBe(whole);
+    expect(whole.transceivers[0]!.sender.track).toBe(trackOf(rear));
+    expect(room.take()).toEqual([]);
+  });
+
+  it("turns the camera on with the one chosen while it's off", async () => {
+    const rear = deviceStream("video", "rear");
+    const asked = browserDevices(rear);
+    const room = await joined();
+    room.take();
+
+    chooseHuddleDevice("camera", "rear");
+    await settled();
+    expect(asked).toHaveBeenCalledExactlyOnceWith(cameraAsked("rear"));
+    expect(joinedHuddle()).toMatchObject({ camera: rear });
+    expect(connection().transceivers[0]!.sender.track).toBe(trackOf(rear));
+    expect(room.take()).toEqual([{ type: "huddle.publish", sdp: "offer 2", tracks: [{ mid: "0", kind: "video" }] }]);
+    expect(localStorage.getItem("ember:huddle-camera")).toBe("rear");
+  });
+
+  it("publishes a camera chosen before the room lets the tab in with the room's welcome", async () => {
+    const rear = deviceStream("video", "rear");
+    browserDevices(rear);
+    joinHuddle({ roomId: "general", muted: false, microphone: microphone as unknown as MediaStream, camera: asCamera(), speakerId: "" });
+    socket().open();
+    chooseHuddleDevice("camera", "rear");
+    await settled();
+    expect(joinedHuddle()).toMatchObject({ camera: rear });
+    expect(FakeConnection.all).toEqual([]);
+
+    await welcomed();
+    expect(FakeConnection.all).toHaveLength(2);
+    expect(connection().transceivers[0]!.sender.track).toBe(trackOf(rear));
+  });
+
+  it("has the camera that was on back on, and says so, when the browser won't open the one chosen: opened again, on the connection it has", async () => {
+    const again = deviceStream("video", "front");
+    const asked = browserDevices(again);
+    const said = vi.fn();
+    const stop = hearHuddle(said);
+    const room = await joined([], { camera: asCamera() });
+    const picture = await cameraConnected();
+
+    chooseHuddleDevice("camera", "rear");
+    await settled();
+    expect(asked.mock.calls).toEqual([[cameraAsked("rear")], [cameraAsked("front")]]);
+    expect(said).toHaveBeenCalledExactlyOnceWith(NO_OTHER_CAMERA);
+    expect(joinedHuddle()).toMatchObject({ camera: again });
+    expect([cameraTrack().readyState, trackOf(again).readyState]).toEqual(["ended", "live"]);
+    expect(picture.transceivers[0]!.sender.track).toBe(trackOf(again));
+    expect(room.take()).toEqual([]);
+
+    // It goes off as it's unplugged, as the one before it would have.
+    trackOf(again).end();
+    expect(joinedHuddle()).toMatchObject({ camera: null });
+    stop();
+  });
+
+  it("is left with its camera off, and says so, when the browser won't open the one chosen, nor the one that was on again", async () => {
+    browserDevices();
+    const said = vi.fn();
+    const stop = hearHuddle(said);
+    const room = await joined([], { camera: asCamera() });
+    const picture = await cameraConnected();
+
+    chooseHuddleDevice("camera", "rear");
+    await settled();
+    expect(said).toHaveBeenCalledExactlyOnceWith(CAMERA_WENT_OFF);
+    expect(joinedHuddle()).toMatchObject({ camera: null });
+    expect(cameraTrack().readyState).toBe("ended");
+    expect(picture.connectionState).toBe("closed");
+    expect(room.take()).toEqual([{ type: "huddle.unpublish", kind: "video" }]);
+
+    // Its person turns it on again, with the one they chose, which the browser opens by now.
+    const rear = deviceStream("video", "rear");
+    browserDevices(rear);
+    showHuddleCamera(true);
+    await settled();
+    expect(joinedHuddle()).toMatchObject({ camera: rear });
+    expect(connection().transceivers[0]!.sender.track).toBe(trackOf(rear));
+    expect(room.take()).toEqual([{ type: "huddle.publish", sdp: "offer 3", tracks: [{ mid: "0", kind: "video" }] }]);
+    stop();
+  });
+
+  it("takes up no camera chosen while the browser opens another, which is the one this browser remembers", async () => {
+    const [rear, side] = [deviceStream("video", "rear"), deviceStream("video", "side")];
+    const asked = browserDevices(rear, side);
+    await joined([], { camera: asCamera() });
+
+    chooseHuddleDevice("camera", "rear");
+    chooseHuddleDevice("camera", "side");
+    await settled();
+    expect(asked).toHaveBeenCalledExactlyOnceWith(cameraAsked("rear"));
+    expect(joinedHuddle()).toMatchObject({ camera: rear });
+    expect(localStorage.getItem("ember:huddle-camera")).toBe("rear");
+  });
+
+  it("closes a camera the browser opens once the one it was to take the place of is off", async () => {
+    const rear = deviceStream("video", "rear");
+    browserDevices(rear);
+    const room = await joined([], { camera: asCamera() });
+    room.take();
+
+    chooseHuddleDevice("camera", "rear");
+    showHuddleCamera(false);
+    await settled();
+    expect(trackOf(rear).readyState).toBe("ended");
+    expect(joinedHuddle()).toMatchObject({ camera: null });
+    expect(room.take()).toEqual([{ type: "huddle.unpublish", kind: "video" }]);
+  });
+
+  it("closes a camera the browser opens once the tab has left", async () => {
+    const rear = deviceStream("video", "rear");
+    browserDevices(rear);
+    await joined([], { camera: asCamera() });
+
+    chooseHuddleDevice("camera", "rear");
+    leaveHuddle();
+    await settled();
+    expect(trackOf(rear).readyState).toBe("ended");
+  });
+});
+
+describe("Switching cameras in a huddle", () => {
+  /** One of the browser's cameras: the device it is, and which way it faces, where the browser says. */
+  interface Camera {
+    deviceId: string;
+    facingMode?: "user" | "environment";
+  }
+  const FRONT: Camera = { deviceId: "front", facingMode: "user" };
+  const BACK: Camera = { deviceId: "back", facingMode: "environment" };
+
+  const SIZE = { width: { ideal: 640 }, height: { ideal: 360 } };
+  /** What the tab asks the browser for the camera that faces `facingMode` with, and for the camera `deviceId`. */
+  const facingAsked = (facingMode: string) => ({ video: { ...SIZE, facingMode: { exact: facingMode } } });
+  const cameraAsked = (deviceId: string) => ({ video: { ...SIZE, deviceId: { exact: deviceId } } });
+
+  const trackOf = (stream: FakeStream) => stream.tracks[0]!;
+  /** The tab's camera as its huddle has it, the device that's from, and which this browser's next huddle starts with. */
+  const shown = () => joinedHuddle()!.camera as unknown as FakeStream | null;
+  const showing = () => shown()?.tracks[0]?.deviceId ?? null;
+  const remembered = () => localStorage.getItem("ember:huddle-camera");
+
+  /**
+   * Has the browser be a phone's, which lists `cameras` and has one of them open at a time: the one that
+   * faces the way the tab asks for, the one from the device it asks for, or its first as its own choice,
+   * opened anew each time. Answers what the tab asked it, each camera it has opened, and what opens the
+   * one a test joins with.
+   */
+  function phoneWith(...cameras: Camera[]) {
+    const opened: FakeStream[] = [];
+    const open = (camera: Camera) => {
+      const stream = new FakeStream([new FakeTrack("video", camera.deviceId, { facingMode: camera.facingMode })]);
+      opened.push(stream);
+      return stream as unknown as MediaStream;
+    };
+    const asked = vi.fn(async ({ video }: MediaStreamConstraints) => {
+      const { deviceId, facingMode } = video as { deviceId?: { exact: string }; facingMode?: { exact: string } };
+      const camera = cameras.find((listed) => (facingMode ? listed.facingMode === facingMode.exact : !deviceId || listed.deviceId === deviceId.exact));
+      if (!camera) throw new DOMException("No such camera", "OverconstrainedError");
+      if (opened.some((stream) => trackOf(stream).readyState === "live")) throw new DOMException("Could not start video source", "NotReadableError");
+      return open(camera);
+    });
+    const enumerateDevices = async () => cameras.map(({ deviceId }) => ({ kind: "videoinput", deviceId, label: "" }));
+    vi.stubGlobal("navigator", { mediaDevices: Object.assign(new EventTarget(), { getUserMedia: asked, enumerateDevices }) });
+    return { asked, opened, open };
+  }
+
+  afterEach(() => {
+    localStorage.removeItem("ember:huddle-camera");
+  });
+
+  it("shows the camera that faces away in place of the one that faces the tab's person, and then that one again: each once the one before is let go of, on the connection it has", async () => {
+    const phone = phoneWith(FRONT, BACK);
+    const room = await joined([], { camera: phone.open(FRONT) });
+    const picture = await cameraConnected();
+
+    switchHuddleCamera();
+    await settled();
+    expect(phone.asked.mock.calls).toEqual([[facingAsked("environment")]]);
+    expect(showing()).toBe("back");
+    expect(picture.transceivers[0]!.sender.track).toBe(trackOf(shown()!));
+    expect(phone.opened.map((stream) => trackOf(stream).readyState)).toEqual(["ended", "live"]);
+    expect(remembered()).toBe("back");
+
+    switchHuddleCamera();
+    await settled();
+    expect(phone.asked.mock.calls.slice(1)).toEqual([[facingAsked("user")]]);
+    expect(showing()).toBe("front");
+    expect(picture.transceivers[0]!.sender.track).toBe(trackOf(shown()!));
+    expect(phone.opened.map((stream) => trackOf(stream).readyState)).toEqual(["ended", "ended", "live"]);
+    expect(remembered()).toBe("front");
+    expect(room.take()).toEqual([]);
+    expect(FakeConnection.all).toHaveLength(2);
+
+    // The end of one it let go of is nothing to it, and the one it shows goes off as it's unplugged.
+    trackOf(phone.opened[1]!).end();
+    expect(showing()).toBe("front");
+    trackOf(shown()!).end();
+    expect(shown()).toBeNull();
+    expect(room.take()).toEqual([{ type: "huddle.unpublish", kind: "video" }]);
+  });
+
+  it("goes to the next camera the browser lists, and round to its first after its last, where the browser doesn't say which way they face", async () => {
+    const phone = phoneWith({ deviceId: "built-in" }, { deviceId: "usb" }, { deviceId: "capture" });
+    await joined([], { camera: phone.open({ deviceId: "built-in" }) });
+
+    for (const next of ["usb", "capture", "built-in"]) {
+      switchHuddleCamera();
+      await settled();
+      expect(phone.asked).toHaveBeenLastCalledWith(cameraAsked(next));
+      expect([showing(), remembered()]).toEqual([next, next]);
+    }
+    expect(phone.asked).toHaveBeenCalledTimes(3);
+  });
+
+  it("goes to the next camera the browser lists where it has none that faces the other way", async () => {
+    const phone = phoneWith(FRONT, { deviceId: "usb" });
+    await joined([], { camera: phone.open(FRONT) });
+
+    switchHuddleCamera();
+    await settled();
+    expect(phone.asked.mock.calls).toEqual([[facingAsked("environment")], [cameraAsked("usb")]]);
+    expect([showing(), remembered()]).toEqual(["usb", "usb"]);
+
+    switchHuddleCamera();
+    await settled();
+    expect(phone.asked.mock.calls.slice(2)).toEqual([[cameraAsked("front")]]);
+    expect([showing(), remembered()]).toEqual(["front", "front"]);
+  });
+
+  it("has the camera that was on back on, and says so, when the browser has no other: opened again, on the connection it has", async () => {
+    const phone = phoneWith(FRONT);
+    localStorage.setItem("ember:huddle-camera", "usb");
+    const said = vi.fn();
+    const stop = hearHuddle(said);
+    const room = await joined([], { camera: phone.open(FRONT) });
+    const picture = await cameraConnected();
+
+    switchHuddleCamera();
+    await settled();
+    expect(phone.asked.mock.calls).toEqual([[facingAsked("environment")], [cameraAsked("front")]]);
+    expect(said).toHaveBeenCalledExactlyOnceWith(NO_OTHER_CAMERA);
+    expect(showing()).toBe("front");
+    expect(phone.opened.map((stream) => trackOf(stream).readyState)).toEqual(["ended", "live"]);
+    expect(picture.transceivers[0]!.sender.track).toBe(trackOf(shown()!));
+    // The one this browser's next huddle starts with is the one it was.
+    expect(remembered()).toBe("usb");
+    expect(room.take()).toEqual([]);
+    stop();
+  });
+
+  it("is left with its camera off, and says so, when the browser opens neither another camera nor the one that was on again", async () => {
+    const phone = phoneWith(FRONT, BACK);
+    localStorage.setItem("ember:huddle-camera", "front");
+    const said = vi.fn();
+    const stop = hearHuddle(said);
+    const room = await joined([], { camera: phone.open(FRONT) });
+    const picture = await cameraConnected();
+    phone.asked.mockRejectedValue(new DOMException("Could not start video source", "NotReadableError"));
+
+    switchHuddleCamera();
+    await settled();
+    expect(phone.asked.mock.calls).toEqual([[facingAsked("environment")], [cameraAsked("back")], [cameraAsked("front")]]);
+    expect(said).toHaveBeenCalledExactlyOnceWith(CAMERA_WENT_OFF);
+    expect(shown()).toBeNull();
+    expect(picture.connectionState).toBe("closed");
+    expect(remembered()).toBe("front");
+    expect(room.take()).toEqual([{ type: "huddle.unpublish", kind: "video" }]);
+    stop();
+  });
+
+  it("leaves a camera that's off off", async () => {
+    const phone = phoneWith(FRONT, BACK);
+    const room = await joined();
+    room.take();
+
+    switchHuddleCamera();
+    await settled();
+    expect(phone.asked).not.toHaveBeenCalled();
+    expect(shown()).toBeNull();
+    expect(room.take()).toEqual([]);
+  });
+
+  it("takes up no switch while the browser opens a camera already, nor a camera chosen while it switches, which this browser doesn't remember", async () => {
+    const phone = phoneWith(FRONT, BACK, { deviceId: "usb" });
+    await joined([], { camera: phone.open(FRONT) });
+
+    switchHuddleCamera();
+    switchHuddleCamera();
+    chooseHuddleDevice("camera", "usb");
+    await settled();
+    expect(phone.asked).toHaveBeenCalledExactlyOnceWith(facingAsked("environment"));
+    expect([showing(), remembered()]).toEqual(["back", "back"]);
+
+    // And none while it opens one chosen.
+    chooseHuddleDevice("camera", "usb");
+    switchHuddleCamera();
+    await settled();
+    expect(phone.asked.mock.calls.slice(1)).toEqual([[cameraAsked("usb")]]);
+    expect([showing(), remembered()]).toEqual(["usb", "usb"]);
+  });
+
+  it("closes the camera the browser opens once the one it was to take the place of is turned off, which stays off", async () => {
+    const phone = phoneWith(FRONT, BACK);
+    localStorage.setItem("ember:huddle-camera", "front");
+    const room = await joined([], { camera: phone.open(FRONT) });
+    room.take();
+
+    switchHuddleCamera();
+    showHuddleCamera(false);
+    await settled();
+    expect(phone.opened.map((stream) => trackOf(stream).readyState)).toEqual(["ended", "ended"]);
+    expect(shown()).toBeNull();
+    expect(remembered()).toBe("front");
+    expect(room.take()).toEqual([{ type: "huddle.unpublish", kind: "video" }]);
+  });
+
+  it("closes the camera the browser opens once the tab has left, and remembers nothing of it", async () => {
+    const phone = phoneWith(FRONT, BACK);
+    localStorage.setItem("ember:huddle-camera", "front");
+    await joined([], { camera: phone.open(FRONT) });
+
+    switchHuddleCamera();
+    leaveHuddle();
+    await settled();
+    expect(phone.opened.map((stream) => trackOf(stream).readyState)).toEqual(["ended", "ended"]);
+    expect(remembered()).toBe("front");
+  });
+
+  it("opens no camera again for a tab whose camera is off, or that has left, by the time the browser has no other for it, and says nothing", async () => {
+    const phone = phoneWith(FRONT);
+    const said = vi.fn();
+    const stop = hearHuddle(said);
+    await joined([], { camera: phone.open(FRONT) });
+
+    switchHuddleCamera();
+    showHuddleCamera(false);
+    await settled();
+    expect(phone.asked).toHaveBeenCalledExactlyOnceWith(facingAsked("environment"));
+    expect(shown()).toBeNull();
+
+    showHuddleCamera(true);
+    await settled();
+    expect(showing()).toBe("front");
+    switchHuddleCamera();
+    leaveHuddle();
+    await settled();
+    expect(phone.asked.mock.calls.slice(1)).toEqual([[{ video: SIZE }], [facingAsked("environment")]]);
+    expect(trackOf(phone.opened.at(-1)!).readyState).toBe("ended");
+    expect(said).not.toHaveBeenCalled();
+    stop();
+  });
+});
+
+describe("A huddle on a phone", () => {
+  /**
+   * Has the browser be one that keeps its screen awake when it's asked to, on a phone, or with `touch`
+   * false, on a computer. Answers what it was asked, and what the tab has let go of.
+   */
+  function keepsScreenAwake(touch = true) {
+    const release = vi.fn(async () => {});
+    const request = vi.fn(async (_what: string) => Object.assign(new EventTarget(), { released: false, release }));
+    vi.stubGlobal("navigator", { wakeLock: { request } });
+    vi.stubGlobal("matchMedia", (media: string) => ({ matches: touch && media === "(pointer: coarse)", media, addEventListener() {}, removeEventListener() {} }));
+    return { request, release };
+  }
+
+  it("keeps the phone's screen awake from when the tab joins until it leaves", async () => {
+    const screen = keepsScreenAwake();
+    await joined();
+    expect(screen.request).toHaveBeenCalledExactlyOnceWith("screen");
+    expect(screen.release).not.toHaveBeenCalled();
+
+    leaveHuddle();
+    await settled();
+    expect(screen.release).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets the phone's screen sleep once the room ends the huddle for the tab", async () => {
+    const screen = keepsScreenAwake();
+    const room = await joined();
+    room.drop(HuddleCloseCode.Off);
+    await settled();
+    expect(screen.release).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves a computer's screen to sleep as it does", async () => {
+    const screen = keepsScreenAwake(false);
+    await joined();
+    expect(screen.request).not.toHaveBeenCalled();
+  });
+});
+
 describe("A huddle's own sounds", () => {
   it("play as the room lets the tab in and as someone else joins, and as someone leaves and the tab does", async () => {
     const room = await joined([person(grace)]);
@@ -1915,6 +3160,406 @@ describe("A huddle whose socket closes", () => {
     socket().open();
     await welcomed(people ? [person(grace)] : []);
     expect(socket().take()).toEqual([...(people ? [{ type: "huddle.listen", kind: "audio", fresh: true }] : []), expect.objectContaining({ type: "huddle.publish" })]);
+  });
+});
+
+describe("A huddle's relay", () => {
+  /** The servers a room whose huddles have a relay welcomes a tab with: Cloudflare's STUN server, and its relay, with what the tab uses it with for a day. */
+  const relayed = (nth = 1): HuddleIceServer[] => [
+    { urls: ["stun:stun.cloudflare.com:3478"] },
+    { urls: ["turn:turn.cloudflare.com:3478?transport=udp", "turns:turn.cloudflare.com:443?transport=tcp"], username: `the relay's name ${nth}`, credential: `the relay's credential ${nth}` },
+  ];
+  /** How a connection reaches the SFU by `servers`. */
+  const by = (servers: HuddleIceServer[]) => ({ iceServers: servers, bundlePolicy: "max-bundle" });
+  /** And by Cloudflare's STUN server alone, as it does without a relay. */
+  const DIRECT = { iceServers: [{ urls: "stun:stun.cloudflare.com:3478" }], bundlePolicy: "max-bundle" };
+  const DAY_MS = RELAY_TTL_S * 1000;
+  /** How each connection the tab has made reaches the SFU, in the order it made them. */
+  const reached = () => FakeConnection.all.map(({ configuration }) => configuration);
+
+  /** The room lets the newest socket in, to a huddle with `people` in it besides Ada, with `iceServers` for the tab's connections. */
+  async function welcomedBy(iceServers: HuddleIceServer[], people: HuddlePerson[] = []) {
+    socket().receive({ type: "huddle.welcome", you: ada, people: [...people, person(ada, { audio: false, muted: joinedHuddle()!.muted })], startedAt: STARTED_AT, iceServers });
+    await settled();
+    return socket();
+  }
+
+  /** Joins general's huddle, which the room lets the tab into as `welcomedBy` has it. */
+  async function joinedBy(iceServers: HuddleIceServer[], people: HuddlePerson[] = [], join: Partial<Parameters<typeof joinHuddle>[0]> = {}) {
+    joinHuddle({ roomId: "general", muted: false, microphone: microphone as unknown as MediaStream, camera: null, speakerId: "", ...join });
+    socket().open();
+    return welcomedBy(iceServers, people);
+  }
+
+  it("makes each of the tab's connections by the servers the room welcomed it with, the relay's among them", async () => {
+    const room = await joinedBy(relayed(), [person(grace, { video: true })], { camera: asCamera() });
+    // The ones it sends its microphone and its camera on.
+    expect(reached()).toEqual([by(relayed()), by(relayed())]);
+    // And the ones it hears and watches the others on, which it makes as the SFU's offers come.
+    room.receive(offer(["0", grace]));
+    room.receive(pictures(["0", grace]));
+    await settled();
+    expect(reached()).toEqual([by(relayed()), by(relayed()), by(relayed()), by(relayed())]);
+  });
+
+  it("goes by Cloudflare's STUN server alone once the room welcomes the tab with no servers, as it does once the relay has been taken away", async () => {
+    const room = await joinedBy(relayed(), [person(grace)]);
+    expect(reached()).toEqual([by(relayed())]);
+
+    room.drop();
+    await wait(500);
+    socket().open();
+    await welcomed([person(grace)]);
+    expect(connection().configuration).toEqual(DIRECT);
+    // A day later, a connection that fails is made again on the socket the tab has: there's nothing to have run out.
+    vi.setSystemTime(Date.now() + 2 * DAY_MS);
+    connection().becomes("failed");
+    expect(socket().closedWith).toBeUndefined();
+
+    // Nor does a list of none leave a connection without a server.
+    socket().drop();
+    await wait(500);
+    socket().open();
+    await welcomedBy([], [person(grace)]);
+    expect(connection().configuration).toEqual(DIRECT);
+  });
+
+  it("joins again, for the room to give it the relay anew, when a connection fails once the day it was given the relay for has passed, and not before", async () => {
+    const room = await joinedBy(relayed(), [person(grace)]);
+    const welcomedAt = Date.now();
+    const sending = await publishedAndConnected();
+    await offeredRound(["0", grace]);
+    const receiving = connection();
+
+    // Within the day, the tab makes the connection again on the socket it has.
+    vi.setSystemTime(welcomedAt + DAY_MS - 1);
+    receiving.becomes("failed");
+    expect(room.closedWith).toBeUndefined();
+    expect(joinedHuddle()).toMatchObject({ connected: true });
+    // After it, what it has no longer opens the relay, so it joins again.
+    vi.setSystemTime(welcomedAt + DAY_MS);
+    sending.becomes("failed");
+    expect(room.closedWith).toBe(1000);
+    expect(joinedHuddle()).toMatchObject({ connected: false });
+    for (const each of FakeConnection.all) expect(each.connectionState).toBe("closed");
+    await wait(500);
+    expect(FakeSocket.all).toHaveLength(2);
+    socket().open();
+    const again = await welcomedBy(relayed(2), [person(grace)]);
+    const welcomedAgainAt = Date.now();
+    expect(again.take()).toEqual([{ type: "huddle.listen", kind: "audio", fresh: true }, expect.objectContaining({ type: "huddle.publish" })]);
+    expect(connection().configuration).toEqual(by(relayed(2)));
+
+    // The day counts from that welcome: the connection it sends on fails within it, and the one it receives on after.
+    again.receive(offer(["0", grace]));
+    await settled();
+    const [sendingAgain, receivingAgain] = FakeConnection.all.slice(-2);
+    expect(receivingAgain!.configuration).toEqual(by(relayed(2)));
+    vi.setSystemTime(welcomedAgainAt + DAY_MS - 1);
+    sendingAgain!.becomes("failed");
+    expect(again.closedWith).toBeUndefined();
+    vi.setSystemTime(welcomedAgainAt + DAY_MS);
+    receivingAgain!.becomes("failed");
+    expect(again.closedWith).toBe(1000);
+    expect(joinedHuddle()).toMatchObject({ connected: false });
+  });
+
+  it("goes without the relay in a browser that can't make a connection by the servers it's given", async () => {
+    FakeConnection.refusingRelays = true;
+    const room = await joinedBy(relayed(), [person(grace)]);
+    expect(reached()).toEqual([DIRECT]);
+    expect(room.take()).toEqual([{ type: "huddle.listen", kind: "audio", fresh: true }, expect.objectContaining({ type: "huddle.publish" })]);
+    room.receive(offer(["0", grace]));
+    await settled();
+    expect(reached()).toEqual([DIRECT, DIRECT]);
+    expect(room.take()).toEqual([{ type: "huddle.answer", kind: "audio", sdp: "answer to offer:0" }]);
+  });
+});
+
+describe("Whoever a huddle is told to invite", () => {
+  const types = (room: FakeSocket) => room.take().map(({ type }) => type);
+
+  it("is invited once the room lets the tab into a huddle with nobody else in it, as starting one in a direct message does", async () => {
+    const room = await joined([], { roomId: "direct-1", invite: [grace.id, linus.id] });
+    expect(room.take()).toContainEqual({ type: "huddle.invite", userIds: [grace.id, linus.id] });
+  });
+
+  it("isn't invited into a huddle someone else is in already", async () => {
+    const room = await joined([person(grace)], { roomId: "direct-1", invite: [grace.id, linus.id] });
+    expect(types(room)).not.toContain("huddle.invite");
+  });
+
+  it("is nobody unless the tab is told so, as in a shared room, whose huddle invites no one", async () => {
+    expect(types(await joined())).not.toContain("huddle.invite");
+  });
+
+  it("is invited the once, and not again as the room lets the tab back in after its socket dropped", async () => {
+    const room = await joined([], { invite: [grace.id] });
+    expect(types(room)).toContain("huddle.invite");
+    room.drop();
+    await wait(500);
+    socket().open();
+    expect(types(await welcomed())).not.toContain("huddle.invite");
+  });
+
+  it("is said not to have been when the room couldn't invite anyone, which leaves the huddle as it is", async () => {
+    const said = vi.fn();
+    const stop = hearHuddle(said);
+    const room = await joined([], { invite: [grace.id] });
+    room.take();
+    room.receive({ type: "error", message: NOBODY_INVITED, failed: "huddle.invite" });
+    await settled();
+    expect(said).toHaveBeenCalledExactlyOnceWith(NOBODY_INVITED);
+    expect(joinedHuddle()).toMatchObject({ connected: true });
+    expect(room.take()).toEqual([]);
+    expect(FakeConnection.all).toHaveLength(1);
+    stop();
+  });
+});
+
+describe("Whoever someone in a huddle invites", () => {
+  it("is who the room is asked to invite, whoever else is in the huddle, as often as they're invited", async () => {
+    const room = await joined([person(grace)]);
+    room.take();
+    expect(inviteToHuddle([linus.id])).toBe(true);
+    expect(inviteToHuddle([linus.id, "u4"])).toBe(true);
+    expect(room.take()).toEqual([
+      { type: "huddle.invite", userIds: [linus.id] },
+      { type: "huddle.invite", userIds: [linus.id, "u4"] },
+    ]);
+  });
+
+  it("isn't invited while the huddle's socket is down, which it says, nor once the room lets the tab back in", async () => {
+    const room = await joined([person(grace)]);
+    room.drop();
+    expect(inviteToHuddle([linus.id])).toBe(false);
+    await wait(500);
+    socket().open();
+    expect((await welcomed([person(grace)])).take().map(({ type }) => type)).not.toContain("huddle.invite");
+    expect(inviteToHuddle([linus.id])).toBe(true);
+  });
+
+  it("isn't invited by a tab that's in no huddle, which it says", async () => {
+    expect(inviteToHuddle([linus.id])).toBe(false);
+    const room = await joined();
+    leaveHuddle();
+    room.take();
+    expect(inviteToHuddle([linus.id])).toBe(false);
+    expect(room.take()).toEqual([]);
+  });
+});
+
+describe("The sticker someone shows in a huddle", () => {
+  it("shows on the tab's own person at once, in place of any they showed, and is told to the room, which hears nothing of one that's shown already", async () => {
+    const room = await joined([person(grace)]);
+    room.take();
+
+    showHuddleSticker("hand");
+    expect(room.take()).toEqual([{ type: "huddle.sticker", sticker: "hand" }]);
+    expect(joinedHuddle()).toMatchObject({ sticker: "hand", people: [person(grace), person(ada, { audio: false, sticker: "hand" })] });
+    showHuddleSticker("hand");
+    expect(room.take()).toEqual([]);
+
+    showHuddleSticker("brb");
+    expect(room.take()).toEqual([{ type: "huddle.sticker", sticker: "brb" }]);
+    expect(joinedHuddle()).toMatchObject({ sticker: "brb", people: [person(grace), person(ada, { audio: false, sticker: "brb" })] });
+
+    // Taken off, their person names none, as the room's names none.
+    showHuddleSticker(null);
+    expect(room.take()).toEqual([{ type: "huddle.sticker", sticker: null }]);
+    expect(joinedHuddle()!.sticker).toBeNull();
+    expect(joinedHuddle()!.people).toStrictEqual([person(grace), person(ada, { audio: false })]);
+    showHuddleSticker(null);
+    expect(room.take()).toEqual([]);
+  });
+
+  it("is someone else's as the room tells of it, until the room tells of them without one", async () => {
+    const room = await joined([person(grace)]);
+    room.receive({ type: "huddle.changed", person: person(grace, { sticker: "done" }) });
+    expect(joinedHuddle()).toMatchObject({ sticker: null, people: [person(grace, { sticker: "done" }), person(ada, { audio: false })] });
+    room.receive({ type: "huddle.changed", person: person(grace) });
+    expect(joinedHuddle()!.people).toStrictEqual([person(grace), person(ada, { audio: false })]);
+  });
+
+  it("is the tab's own as the tab has it, whatever the room says of its person meanwhile", async () => {
+    const room = await joined();
+    showHuddleSticker("hand");
+    // The room tells of the camera before it has heard of the sticker.
+    room.receive({ type: "huddle.changed", person: person(ada, { video: true }) });
+    expect(joinedHuddle()!.people).toStrictEqual([person(ada, { video: true, sticker: "hand" })]);
+
+    showHuddleSticker(null);
+    // And of them again before it has heard that the sticker's off.
+    room.receive({ type: "huddle.changed", person: person(ada, { video: true, sticker: "hand" }) });
+    expect(joinedHuddle()!.people).toStrictEqual([person(ada, { video: true })]);
+  });
+
+  it("is told to the room again as it lets the tab back in, which is how the room hears of one shown or taken off meanwhile", async () => {
+    const room = await joined();
+    showHuddleSticker("hand");
+    room.drop();
+    await wait(500);
+    socket().open();
+    // The room has a tab that joins again as showing none.
+    expect((await welcomed()).take()[0]).toEqual({ type: "huddle.sticker", sticker: "hand" });
+    expect(joinedHuddle()).toMatchObject({ connected: true, sticker: "hand", people: [person(ada, { audio: false, sticker: "hand" })] });
+
+    // Shown while the socket is down, it shows on the tab's person all the same.
+    socket().drop();
+    showHuddleSticker("done");
+    expect(joinedHuddle()).toMatchObject({ connected: false, sticker: "done", people: [person(ada, { audio: false, sticker: "done" })] });
+    await wait(500);
+    socket().open();
+    expect((await welcomed()).take()[0]).toEqual({ type: "huddle.sticker", sticker: "done" });
+
+    // And one the room still has, were it to, is taken off.
+    socket().drop();
+    showHuddleSticker(null);
+    await wait(500);
+    socket().open();
+    expect((await welcomed([], { sticker: "done" })).take()[0]).toEqual({ type: "huddle.sticker", sticker: null });
+    expect(joinedHuddle()!.people).toStrictEqual([person(ada, { audio: false })]);
+  });
+
+  it("is told after how the tab is muted, when both changed while it connected", async () => {
+    const room = await joined();
+    room.drop();
+    await wait(500);
+    muteHuddle(true);
+    showHuddleSticker("brb");
+    socket().open();
+    expect((await welcomed([], { muted: false })).take().slice(0, 2)).toEqual([
+      { type: "huddle.mute", muted: true },
+      { type: "huddle.sticker", sticker: "brb" },
+    ]);
+  });
+
+  it("is shown by no tab that's in no huddle", async () => {
+    showHuddleSticker("hand");
+    const room = await joined();
+    leaveHuddle();
+    room.take();
+    showHuddleSticker("hand");
+    expect(room.take()).toEqual([]);
+    expect(joinedHuddle()).toBeNull();
+  });
+});
+
+describe("A reaction in a huddle", () => {
+  /** The reactions that rise, the oldest first, each by which of the huddle's it is, whose, and its emoji. */
+  const rising = () => shownReactions().rising.map(({ nth, userId, emoji }) => [nth, userId, emoji]);
+
+  it("is sent to the room, and rises only once the room tells of it, as everyone's does, for a moment, which only what shows reactions hears of", async () => {
+    const [shown, reacted] = [vi.fn(), vi.fn()];
+    const stops = [watchHuddle(shown), watchReactions(reacted)];
+    const room = await joined([person(grace)]);
+    room.take();
+    shown.mockClear();
+
+    reactInHuddle("🎉");
+    expect(room.take()).toEqual([{ type: "huddle.react", emoji: "🎉" }]);
+    expect(shownReactions()).toEqual(NO_REACTIONS);
+    room.receive({ type: "huddle.reacted", userId: ada.id, emoji: "🎉" });
+    expect(rising()).toEqual([[1, ada.id, "🎉"]]);
+    expect(shownReactions().runs).toEqual([{ emoji: "🎉", first: ada.id, more: 0 }]);
+    await wait(1_000);
+    room.receive({ type: "huddle.reacted", userId: grace.id, emoji: "👍" });
+    expect(rising()).toEqual([
+      [1, ada.id, "🎉"],
+      [2, grace.id, "👍"],
+    ]);
+    expect(shownReactions().runs).toEqual([
+      { emoji: "🎉", first: ada.id, more: 0 },
+      { emoji: "👍", first: grace.id, more: 0 },
+    ]);
+    // What shows is the same until it changes, as what reads it over and over needs.
+    expect(shownReactions()).toBe(shownReactions());
+    expect(reacted).toHaveBeenCalledTimes(2);
+
+    await wait(REACTION_SHOWS_MS - 1_000);
+    expect(rising()).toEqual([[2, grace.id, "👍"]]);
+    expect(shownReactions().runs).toEqual([{ emoji: "👍", first: grace.id, more: 0 }]);
+    await wait(1_000);
+    expect(shownReactions()).toEqual(NO_REACTIONS);
+    expect(reacted).toHaveBeenCalledTimes(4);
+    expect(shown).not.toHaveBeenCalled();
+    expect(room.take()).toEqual([]);
+    for (const stop of stops) stop();
+  });
+
+  it("rises beside its person's last, the same emoji again as another, which is counted after the first", async () => {
+    const room = await joined();
+    room.receive({ type: "huddle.reacted", userId: ada.id, emoji: "🎉" });
+    await wait(REACTION_SHOWS_MS - 1);
+    room.receive({ type: "huddle.reacted", userId: ada.id, emoji: "🎉" });
+    expect(rising()).toEqual([
+      [1, ada.id, "🎉"],
+      [2, ada.id, "🎉"],
+    ]);
+    expect(shownReactions().runs).toEqual([{ emoji: "🎉", first: ada.id, more: 1 }]);
+    await wait(1);
+    expect(rising()).toEqual([[2, ada.id, "🎉"]]);
+    expect(shownReactions().runs).toEqual([{ emoji: "🎉", first: ada.id, more: 1 }]);
+    await wait(REACTION_SHOWS_MS - 2);
+    expect(rising()).toEqual([[2, ada.id, "🎉"]]);
+    await wait(1);
+    expect(shownReactions()).toEqual(NO_REACTIONS);
+  });
+
+  it("shows nothing of someone the room hasn't said is in the huddle, nor any more of someone who leaves it, whose emoji is whoever's still rises", async () => {
+    const reacted = vi.fn();
+    const stop = watchReactions(reacted);
+    const room = await joined([person(grace)]);
+    room.receive({ type: "huddle.reacted", userId: linus.id, emoji: "👍" });
+    expect(shownReactions()).toEqual(NO_REACTIONS);
+    expect(reacted).not.toHaveBeenCalled();
+
+    room.receive({ type: "huddle.reacted", userId: grace.id, emoji: "👍" });
+    room.receive({ type: "huddle.reacted", userId: grace.id, emoji: "🎉" });
+    room.receive({ type: "huddle.reacted", userId: ada.id, emoji: "👍" });
+    room.receive({ type: "huddle.left", userId: grace.id });
+    expect(rising()).toEqual([[3, ada.id, "👍"]]);
+    expect(shownReactions().runs).toEqual([{ emoji: "👍", first: ada.id, more: 1 }]);
+    expect(reacted).toHaveBeenCalledTimes(4);
+    // Nor is one of theirs left to go.
+    await wait(REACTION_SHOWS_MS);
+    expect(shownReactions()).toEqual(NO_REACTIONS);
+    expect(reacted).toHaveBeenCalledTimes(5);
+    stop();
+  });
+
+  it("shows nothing more of someone who left while the tab's connection to the room was down, whose emoji is whoever's still rises", async () => {
+    const room = await joined([person(grace), person(linus)]);
+    room.receive({ type: "huddle.reacted", userId: grace.id, emoji: "🎉" });
+    room.receive({ type: "huddle.reacted", userId: linus.id, emoji: "🎉" });
+    room.drop();
+    await wait(500);
+    socket().open();
+    await welcomed([person(linus)]);
+    expect(rising()).toEqual([[2, linus.id, "🎉"]]);
+    expect(shownReactions().runs).toEqual([{ emoji: "🎉", first: linus.id, more: 1 }]);
+  });
+
+  it("shows no more once the tab leaves, and is sent by no tab that's in no huddle", async () => {
+    reactInHuddle("🎉");
+    const room = await joined();
+    room.receive({ type: "huddle.reacted", userId: ada.id, emoji: "🎉" });
+    expect(rising()).toEqual([[1, ada.id, "🎉"]]);
+    leaveHuddle();
+    expect(shownReactions()).toEqual(NO_REACTIONS);
+    room.take();
+    reactInHuddle("🎉");
+    expect(room.take()).toEqual([]);
+  });
+
+  it("isn't sent while the huddle's socket is down, nor once the room lets the tab back in", async () => {
+    const room = await joined();
+    room.drop();
+    reactInHuddle("🎉");
+    await wait(500);
+    socket().open();
+    expect((await welcomed()).take().map(({ type }) => type)).not.toContain("huddle.react");
+    expect(shownReactions()).toEqual(NO_REACTIONS);
   });
 });
 

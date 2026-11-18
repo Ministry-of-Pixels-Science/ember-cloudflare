@@ -6,15 +6,15 @@ import { outsideAddress } from "./your-outside-ai";
 
 // The Outside AI card on the AI assistant tab, for administrators: a switch that lets the people in the
 // workspace connect AI apps, such as Claude and ChatGPT, to Ember, each as themselves. It's apart from
-// Ember AI, whose agents answer in the rooms: an app that connects reads Ember from outside it, with
-// what the person who connected it can see. Off until an administrator turns it on, and turning it off
-// asks first, as it disconnects every app.
+// Ember AI, whose agents answer in the rooms: an app that connects reads Ember from outside it, as the
+// person who connected it, in the rooms they let it into. Off until an administrator turns it on, and
+// turning it off asks first, as it disconnects every app.
 
 const NOTE = "text-[0.8em] text-muted-foreground max-md:text-[12px]";
 
 /** What the card says of letting AI apps connect, and of what turning it off does. */
 export const OUTSIDE_AI_SETTING_EXPLAINED =
-  "Let people connect AI apps, such as Claude and ChatGPT, to Ember as themselves. Each person allows an app on a page here first, and it can then see the rooms they're in, read their messages and search them, and send messages as them if they let it. People who signed in with just a name can't. Turning this off disconnects every app.";
+  "Let people connect AI apps, such as Claude and ChatGPT, to Ember as themselves. Each person allows an app on a page here first, and it can then see the open rooms they're in, read their messages and search them, and send messages as them if they let it, and their direct messages and private rooms only if they let it into those too. People who signed in with just a name can't. Turning this off disconnects every app.";
 
 /** What turning it off asks first. */
 export const CONFIRM_STOP_OUTSIDE_AI = "Are you sure you want to stop AI apps connecting to Ember? Every app people have connected will be disconnected.";

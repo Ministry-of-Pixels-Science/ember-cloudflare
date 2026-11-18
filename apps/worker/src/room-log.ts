@@ -1,10 +1,12 @@
 import type { RoomId, UserId } from "@ember/protocol";
+import type { MessageHuddle, PastHuddle } from "@ember/protocol/huddles";
 import { statement, type Db, type Statement } from "./db";
 
 // Each room's change log (migrations/0010_room_events.sql), kept in the room's Durable Object SQLite
 // storage or in D1 (see db.ts): what has happened in the room that the Workspace marks it unread and
 // read by, and has yet to hear of. Beside it, the log of the messages the search index has yet to hear
-// of (migrations/0021_unindexed_messages.sql).
+// of (migrations/0021_unindexed_messages.sql), and the log of the huddles' messages the Workspace's list
+// of the huddles that are over has yet to hear of (migrations/0075_changed_huddles.sql).
 
 /** Something that happened in a room that the Workspace keeps track of. */
 export interface RoomEvent {
@@ -25,7 +27,7 @@ export interface RoomEvent {
   /**
    * For a reply sent only to its thread, who the room says is viewing the thread as it sends the event,
    * and for a message in the room, who was viewing the room as it came or is as the room sends it, when
-   * the room knows.
+   * the room knows, with who was viewing its thread as it came, for a reply sent to the room too.
    */
   viewerIds?: UserId[];
   /**
@@ -120,6 +122,71 @@ export const logIndexingEach = (roomId: RoomId, listed: string): Statement =>
 export const logIndexingReplies = (roomId: RoomId, listed: string): Statement =>
   statement(`INSERT INTO unindexed_messages (room_id, message_id) SELECT ?1, id FROM messages WHERE room_id = ?1 AND parent_id IN (SELECT value FROM json_each(?2))`, roomId, listed);
 
+/**
+ * What the Workspace's list of the huddles that are over is to say of a huddle's message, as the message
+ * is when its room sends it: when its huddle started and ended and everyone who was in it, by their ids
+ * in the order they first joined, or null while the huddle goes on, and once the message is deleted, even
+ * if its thread keeps its place, and how many replies its thread has.
+ */
+export interface HuddleChange {
+  messageId: string;
+  over: Pick<PastHuddle, "startedAt" | "endedAt" | "userIds"> | null;
+  replies: number;
+}
+
+/** A huddle's message that the Workspace's list has yet to hear of, with what the list is to say of it. */
+export interface ChangedHuddle {
+  /** Its place in the room's log of them, whose numbers only grow. */
+  seq: number;
+  change: HuddleChange;
+}
+
+/**
+ * The oldest huddles' messages the Workspace's list has yet to hear of, up to a number of them, each
+ * with what it says of its huddle now, which is nothing once it's deleted, as one kept for its thread
+ * says nothing either, and how many replies its thread has, counted as a message's thread is.
+ */
+export const CHANGED_HUDDLES = `SELECT changed_huddles.seq, changed_huddles.message_id AS messageId, messages.huddle,
+    (SELECT count(*) FROM messages AS replies WHERE replies.parent_id = changed_huddles.message_id) AS replies
+  FROM changed_huddles LEFT JOIN messages ON messages.id = changed_huddles.message_id
+  WHERE changed_huddles.room_id = ? ORDER BY changed_huddles.seq LIMIT ?`;
+
+interface ChangedHuddleRow {
+  seq: number;
+  messageId: string;
+  /** What the message says of its huddle, as JSON (`MessageHuddle`), or null once it's deleted. */
+  huddle: string | null;
+  replies: number;
+}
+
+function overOf(huddle: string | null): HuddleChange["over"] {
+  if (huddle === null) return null;
+  const { startedAt, endedAt, people = [] } = JSON.parse(huddle) as MessageHuddle;
+  return endedAt === undefined ? null : { startedAt, endedAt, userIds: people.map(({ id }) => id) };
+}
+
+const changedHuddleOf = ({ seq, messageId, huddle, replies }: ChangedHuddleRow): ChangedHuddle => ({ seq, change: { messageId, over: overOf(huddle), replies } });
+
+/**
+ * Logs a huddle's message that comes to say its huddle is over, or that it goes on after all, for the
+ * Workspace's list of the huddles that are over, in the batch that makes the change.
+ */
+export const logHuddle = (roomId: RoomId, messageId: string): Statement =>
+  statement(`INSERT INTO changed_huddles (room_id, message_id) VALUES (?, ?)`, roomId, messageId);
+
+/**
+ * The same for each of the messages whose ids a JSON array lists that says its huddle is over, as the
+ * batch finds it: one whose thread gains or loses a reply, and one being deleted, which the batch logs
+ * before it deletes it.
+ */
+export const logHuddlesOver = (roomId: RoomId, listed: string): Statement =>
+  statement(
+    `INSERT INTO changed_huddles (room_id, message_id)
+       SELECT room_id, id FROM messages WHERE room_id = ?1 AND id IN (SELECT value FROM json_each(?2)) AND json_extract(huddle, '$.endedAt') IS NOT NULL`,
+    roomId,
+    listed,
+  );
+
 export class RoomLog {
   constructor(
     private readonly db: Db,
@@ -152,13 +219,27 @@ export class RoomLog {
     await this.db.run(`DELETE FROM unindexed_messages WHERE room_id = ? AND seq <= ?`, this.roomId, seq);
   }
 
+  /** The oldest `limit` huddles' messages the Workspace's list of the huddles that are over has yet to hear of, oldest first, as they are now. */
+  async changedHuddles(limit: number): Promise<ChangedHuddle[]> {
+    return (await this.db.all<ChangedHuddleRow>(CHANGED_HUDDLES, this.roomId, limit)).map(changedHuddleOf);
+  }
+
+  /** Forgets the huddles' messages up to `seq`, which the Workspace's list has taken. */
+  async huddlesListed(seq: number): Promise<void> {
+    await this.db.run(`DELETE FROM changed_huddles WHERE room_id = ? AND seq <= ?`, this.roomId, seq);
+  }
+
   /** Logs every message the room has, oldest first, for the search index to take them all afresh. */
   async reindex(): Promise<void> {
     await this.db.run(`INSERT INTO unindexed_messages (room_id, message_id) SELECT room_id, id FROM messages WHERE room_id = ? ORDER BY id`, this.roomId);
   }
 
-  /** Forgets every event, and every message the search index has yet to hear of, as deleting the room does. */
+  /** Forgets every event, and every message the search index or the Workspace's list of huddles has yet to hear of, as deleting the room does. */
   async forget(): Promise<void> {
-    await this.db.batch([statement(`DELETE FROM room_events WHERE room_id = ?`, this.roomId), statement(`DELETE FROM unindexed_messages WHERE room_id = ?`, this.roomId)]);
+    await this.db.batch([
+      statement(`DELETE FROM room_events WHERE room_id = ?`, this.roomId),
+      statement(`DELETE FROM unindexed_messages WHERE room_id = ?`, this.roomId),
+      statement(`DELETE FROM changed_huddles WHERE room_id = ?`, this.roomId),
+    ]);
   }
 }

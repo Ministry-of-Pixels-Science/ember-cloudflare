@@ -1,7 +1,7 @@
 import type { Message } from "@ember/protocol";
 import { describe, expect, it, vi } from "vitest";
 import { displayBody, OPENGRAPH_EMBED_CONTENT_TYPE, previewContent } from "@ember/richtext/dom";
-import { dateLabel, dateTimeLabel, lastReplyLabel, replyQuote, timeLabel, timeline } from "./messages";
+import { dateLabel, dateTimeLabel, huddleStartedLabel, lastReplyLabel, newestWrittenBy, replyQuote, timeLabel, timeline } from "./messages";
 
 const at = (iso: string, creatorId = "u1"): Message => ({
   id: iso,
@@ -38,6 +38,22 @@ describe("Group messages by author", () => {
       [true, true],
     ]);
   });
+
+  it("groups nothing under a huddle's message, nor it under anything, as it shows its huddle where its author would be", () => {
+    const huddle: Message = { ...at("2026-10-12T09:01:00"), huddle: { startedAt: "2026-10-12T09:01:00.000Z" } };
+    const items = timeline([at("2026-10-12T09:00:00"), huddle, at("2026-10-12T09:02:00")]);
+    expect(items.map((i) => i.threaded)).toEqual([false, false, false]);
+  });
+});
+
+describe("Edit your newest message", () => {
+  it("finds the newest message someone wrote, which the message of a huddle they started isn't", () => {
+    const [first, theirs, second] = [at("2026-10-12T09:00:00"), at("2026-10-12T09:01:00", "u2"), at("2026-10-12T09:02:00")];
+    const huddle: Message = { ...at("2026-10-12T09:03:00"), huddle: { startedAt: "2026-10-12T09:03:00.000Z" } };
+    expect(newestWrittenBy([first, theirs, second, huddle], "u1")).toBe(second);
+    expect(newestWrittenBy([first, theirs, second, huddle], "u2")).toBe(theirs);
+    expect(newestWrittenBy([huddle], "u1")).toBeUndefined();
+  });
 });
 
 describe("Threads", () => {
@@ -56,6 +72,20 @@ describe("Threads", () => {
     expect(lastReplyLabel(new Date(2026, 9, 12, 9, 41), now)).toEqual({ long: "on Oct 12", short: "on Oct 12" });
     expect(lastReplyLabel(new Date(2025, 9, 12, 9, 41), now)).toEqual({ long: "on Oct 12, 2025", short: "on Oct 12, 2025" });
     expect(lastReplyLabel(new Date(2026, 9, 31, 23, 0), new Date(2026, 10, 1, 0, 5)).short).toBe("yesterday");
+  });
+});
+
+describe("The Huddles page", () => {
+  it("says when a huddle started: today or yesterday at its time, or the day, with its year in another", () => {
+    const now = new Date(2026, 9, 30, 15, 0);
+    const today = new Date(2026, 9, 30, 9, 41);
+    const yesterday = new Date(2026, 9, 29, 9, 41);
+    const lastNight = new Date(2026, 9, 31, 23, 0);
+    expect(huddleStartedLabel(today, now)).toBe(`Today at ${timeLabel(today)}`);
+    expect(huddleStartedLabel(yesterday, now)).toBe(`Yesterday at ${timeLabel(yesterday)}`);
+    expect(huddleStartedLabel(new Date(2026, 9, 12, 9, 41), now)).toBe("Oct 12");
+    expect(huddleStartedLabel(new Date(2025, 9, 12, 9, 41), now)).toBe("Oct 12, 2025");
+    expect(huddleStartedLabel(lastNight, new Date(2026, 10, 1, 0, 5))).toBe(`Yesterday at ${timeLabel(lastNight)}`);
   });
 });
 

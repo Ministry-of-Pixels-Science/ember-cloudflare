@@ -4,9 +4,9 @@ import { toBase64url, urlsafeDecode64 } from "../src/encoding";
 import type { Env } from "../src/env";
 import { DEFAULT_VAPID_SUBJECT, sendPushes } from "../src/push/delivery";
 import { webPush, type VapidKeys } from "../src/push/keys";
-import { encodedPush, MAX_BODY_BYTES, MAX_TITLE_BYTES, messagePayload, type PushPayload } from "../src/push/payload";
+import { encodedPush, INVITATION_TTL_SECONDS, invitationPayload, MAX_BODY_BYTES, MAX_TITLE_BYTES, messagePayload, type PushPayload } from "../src/push/payload";
 import { encryptPush, InvalidPushKeyError, PushArgumentError, vapidAuthorization } from "../src/push/web-push";
-import type { MessagePush } from "../src/workspace-store";
+import type { InvitationPush, MessagePush } from "../src/workspace-store";
 import recorded from "./fixtures/web_push_expected.json";
 import { gemMessage, pushBrowser } from "./support";
 
@@ -130,6 +130,15 @@ describe("What a push says", () => {
     expect(messagePayload("dm", { kind: "direct", name: null }, "David", "Hi")).toEqual({ title: "David", body: "Hi", path: "/rooms/dm" });
   });
 
+  it("titles an invitation's push with whoever invites, and says which room's huddle it's into unless it's a DM's, opening the room", () => {
+    expect(invitationPayload("launch", { kind: "closed", name: "Launch" }, "David")).toEqual({ title: "David", body: "Invites you to a huddle in Launch", path: "/rooms/launch" });
+    expect(invitationPayload("designers", { kind: "open", name: "Designers" }, "David")).toEqual({ title: "David", body: "Invites you to a huddle in Designers", path: "/rooms/designers" });
+    expect(invitationPayload("dm", { kind: "direct", name: null }, "David")).toEqual({ title: "David", body: "Invites you to a huddle", path: "/rooms/dm" });
+    // Cut short as a message's push is, should a name be too long for it.
+    expect(invitationPayload("dm", { kind: "direct", name: null }, "x".repeat(MAX_TITLE_BYTES + 1)).title).toBe(`${"x".repeat(MAX_TITLE_BYTES - 3)}…`);
+    expect(invitationPayload("launch", { kind: "closed", name: "é".repeat(2000) }, "David").body).toBe(`Invites you to a huddle in ${"é".repeat(1521)}…`);
+  });
+
   it("cuts a long title at 256 bytes and text at 3,072, as escaped JSON, between characters, with an ellipsis that fits", () => {
     const room = (name: string) => messagePayload("designers", { kind: "open", name }, "David", "");
     // Two-byte characters, a quote that escapes to two, then one-byte ones.
@@ -201,6 +210,22 @@ describe("Who gets a push", () => {
     expect(k).toBe((await keys()).publicKey);
     expect(claims).toMatchObject({ aud: "https://fcm.googleapis.com", sub: DEFAULT_VAPID_SUBJECT });
     expect(claims.exp - Date.now() / 1000).toBeGreaterThan(12 * 60 * 60 - 60);
+  });
+
+  it("has a push service keep an invitation's push as long as the invitation says, a minute, beside a message's four weeks, and as urgent", async () => {
+    const receiver = await pushBrowser();
+    const { send, sent } = pushService();
+    const invitation: InvitationPush = { ...messagePush(invitationPayload("dm", { kind: "direct", name: null }, "David"), ["https://fcm.googleapis.com/fcm/send/invitation", receiver, 2]), ttl: INVITATION_TTL_SECONDS };
+    expect(await sendPushes(pushEnv(), [messagePush(PAYLOAD, ["https://fcm.googleapis.com/fcm/send/message", receiver]), invitation], anyone, send)).toEqual([]);
+
+    const headersTo = (label: string) => {
+      const { Authorization: _, ...headers } = sent.find(([endpoint]) => endpoint.endsWith(`/${label}`))![1].headers as Record<string, string>;
+      return headers;
+    };
+    expect(headersTo("message")).toEqual({ "Content-Type": "application/octet-stream", TTL: "2419200", Urgency: "high", "Content-Encoding": "aes128gcm" });
+    expect(headersTo("invitation")).toEqual({ "Content-Type": "application/octet-stream", TTL: "60", Urgency: "high", "Content-Encoding": "aes128gcm" });
+    const { plaintext } = await receiver.read(sent.find(([endpoint]) => endpoint.endsWith("/invitation"))![1].body as Uint8Array);
+    expect(JSON.parse(gemMessage(plaintext))).toEqual({ title: "David", options: { body: "Invites you to a huddle", icon: "/account/logo", data: { path: "/rooms/dm", badge: 2 } } });
   });
 
   it("names VAPID_SUBJECT as whom the push service may contact, when it's set", async () => {

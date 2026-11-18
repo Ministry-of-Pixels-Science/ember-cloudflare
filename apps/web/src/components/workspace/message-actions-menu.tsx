@@ -15,7 +15,7 @@ import {
 } from "react";
 import { QUICK_REACTION_COUNT, REACTIONS, type Message, type StoredFile } from "@ember/protocol";
 import type { DisplayNode } from "@ember/richtext/dom";
-import { ChatPlusIn, Copy, Download, Edit, Emoji, MessageText, MoreHoriz, QuoteMessage, ShareAndroid, Trash } from "@/components/icons/iconoir";
+import { ChatPlusIn, Copy, Download, Edit, Emoji, MessageText, MoreHoriz, QuoteMessage, ShareAndroid, Trash, TriangleFlag, UserXmark } from "@/components/icons/iconoir";
 import { PageLink } from "@/components/page-link";
 import { ShareButton } from "@/components/share-button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -74,6 +74,13 @@ interface Props {
   onDelete: () => boolean;
   /** Opens the message's Custom reaction form, from New boost. */
   onNewBoost: () => void;
+  /**
+   * Blocks the message's author from More actions, or unblocks them once `blocked` says they're blocked.
+   * Left out on your own messages and a huddle's.
+   */
+  block?: { blocked: boolean; onChange: () => void };
+  /** Opens Report for the message, from More actions. Left out on your own messages and a huddle's. */
+  onReport?: () => void;
   ref?: Ref<MessageActionsHandle>;
 }
 
@@ -93,13 +100,15 @@ export interface MessageActionsHandle {
  * order Slack's bar has them. With a mouse, hovering the message opens the bar too, laid over the message's
  * top edge at the timeline's right, with Message options pinned as its last button, and each button names
  * itself in a tooltip as the pointer reaches it. On touch screens it opens beside Message options, with
- * Quote after Reply in thread and Copy link after that. Once opened, the bar stays in the page while it's
- * shut, so Copy link keeps its color.
+ * Quote after Reply in thread, Copy link after that, then Block or Unblock its author and Report message
+ * on someone else's message. Once opened, the bar stays in the page while it's shut, so Copy link keeps
+ * its color.
  *
  * With a mouse, Message options then opens More actions under the bar, as Slack's does: Quote, Copy text,
- * Copy link, and on messages you can change, Edit message and Delete message.
+ * Copy link, Block or Unblock its author and Report message on someone else's message, and on messages
+ * you can change, Edit message and Delete message.
  */
-export function MessageActionsMenu({ message, nodes, row, threaded, editable, threadPath, onReact, onQuote, onEdit, onDelete, onNewBoost, ref }: Props) {
+export function MessageActionsMenu({ message, nodes, row, threaded, editable, threadPath, onReact, onQuote, onEdit, onDelete, onNewBoost, block, onReport, ref }: Props) {
   const [open, setOpen] = useState(false);
   const [trayOpen, setTrayOpen] = useState(false);
   const [actionsOpen, setActionsOpen] = useState(false);
@@ -124,8 +133,8 @@ export function MessageActionsMenu({ message, nodes, row, threaded, editable, th
   const menuId = useId();
   const trayId = useId();
   // What Copy text copies: the message's plain text, which holds a bot's cards' too. A file message has none
-  // but its file's name.
-  const text = message.attachment ? null : message.plainText;
+  // but its file's name, and a huddle's message none that it shows.
+  const text = message.attachment || message.huddle ? null : message.plainText;
 
   const show = (byHovering: boolean) => {
     hoverOpened.current = byHovering;
@@ -169,6 +178,16 @@ export function MessageActionsMenu({ message, nodes, row, threaded, editable, th
   const newBoost = () => {
     close();
     onNewBoost();
+  };
+
+  // So do Block and Unblock, and Report message, whose dialog takes it.
+  const changeBlock = () => {
+    close();
+    block?.onChange();
+  };
+  const report = () => {
+    close();
+    onReport?.();
   };
 
   // Delete message asks first, as the editor's does. The composer takes focus as the message goes, or Message
@@ -279,9 +298,12 @@ export function MessageActionsMenu({ message, nodes, row, threaded, editable, th
   });
 
   // Focus leaving the bar closes it, rather than focus landing anywhere else, which would shut a bar the
-  // pointer opened as the composer, ready a moment after the messages show, takes focus.
+  // pointer opened as the composer, ready a moment after the messages show, takes focus. Focus going to
+  // what holds the bar isn't leaving it: Safari doesn't focus a button that's clicked or tapped, but what
+  // holds it and can take focus, the page's main content, a moment before the click would land.
   const focusLeft = useEffectEvent((event: FocusEvent) => {
-    if (event.relatedTarget && !container.current?.contains(event.relatedTarget as Node)) close();
+    const to = event.relatedTarget as Node | null;
+    if (to && !container.current?.contains(to) && !to.contains(container.current)) close();
   });
 
   // Escape closes a bar Add a boost opened, handing focus back to it. Otherwise it closes the tray first,
@@ -398,7 +420,7 @@ export function MessageActionsMenu({ message, nodes, row, threaded, editable, th
             ref={bar}
             className={cn(
               PANEL,
-              "flex flex-wrap items-center p-1 group-data-[two-rows]/menu:grid group-data-[two-rows]/menu:grid-cols-[repeat(4,auto)] group-data-[two-rows]/menu:justify-self-end",
+              "flex flex-wrap items-center p-1 group-data-[two-rows]/menu:grid group-data-[two-rows]/menu:grid-cols-[repeat(var(--bar-columns,4),auto)] group-data-[two-rows]/menu:justify-self-end",
               overlapping && "pr-9 touch:pr-12",
             )}
           >
@@ -427,11 +449,12 @@ export function MessageActionsMenu({ message, nodes, row, threaded, editable, th
                 </PageLink>
               </ActionTooltip>
             )}
-            {/* More actions holds Quote and Copy link with a mouse. */}
+            {/* More actions holds Quote and Copy link with a mouse. A huddle's message has nothing of its author's to quote. */}
             {message.attachment ? (
               <FileActions file={message.attachment} />
             ) : (
-              !overlapping && (
+              !overlapping &&
+              !message.huddle && (
                 <ActionTooltip label="Quote">
                   <QuoteButton message={message} nodes={nodes} aria-label="Quote" className={ACTION} onQuote={quote}>
                     <QuoteMessage />
@@ -445,6 +468,12 @@ export function MessageActionsMenu({ message, nodes, row, threaded, editable, th
                   <Copy />
                 </button>
               </ActionTooltip>
+            )}
+            {!overlapping && block && <BlockButton message={message} blocked={block.blocked} onClick={changeBlock} />}
+            {!overlapping && onReport && (
+              <button type="button" aria-label="Report message" className={ACTION} onClick={report}>
+                <TriangleFlag />
+              </button>
             )}
             {/* As Campfire's `.message__edit-btn` shows (messages.css). */}
             {editable && (
@@ -483,8 +512,8 @@ export function MessageActionsMenu({ message, nodes, row, threaded, editable, th
             hidden={!actionsOpen}
             className={cn(PANEL, "w-max max-w-full justify-self-end overflow-y-auto overscroll-contain p-1 group-data-[panel-above]/menu:-order-1")}
           >
-            {/* Quoting a file message would quote nothing, as its text is empty. */}
-            {!message.attachment && (
+            {/* Quoting a file message would quote nothing, as its text is empty, and a huddle's message shows none of its own. */}
+            {!message.attachment && !message.huddle && (
               <QuoteButton message={message} nodes={nodes} className={ITEM} onQuote={quote}>
                 <QuoteMessage />
                 Quote
@@ -500,11 +529,19 @@ export function MessageActionsMenu({ message, nodes, row, threaded, editable, th
               <Copy />
               Copy link
             </button>
+            {(block || onReport) && <hr className="my-1 border-message-border" />}
+            {block && <BlockButton message={message} blocked={block.blocked} onClick={changeBlock} item />}
+            {onReport && (
+              <button type="button" className={ITEM} onClick={report}>
+                <TriangleFlag />
+                Report message
+              </button>
+            )}
             {editable && (
               <>
                 <hr className="my-1 border-message-border" />
-                {/* The text of a file message, or of a bot's cards, can't be changed, so only the bar's Edit opens their editor. */}
-                {!message.attachment && !message.cards && (
+                {/* The text of a file message, of a bot's cards or of a huddle's message can't be changed, so only the bar's Edit opens their editor. */}
+                {!message.attachment && !message.cards && !message.huddle && (
                   <button type="button" className={ITEM} onClick={edit}>
                     <Edit />
                     Edit message
@@ -563,7 +600,7 @@ function FileActions({ file }: { file: StoredFile }) {
   return (
     <>
       <ActionTooltip label="Download">
-        <a href={file.downloadUrl} aria-label="Download" className={cn(ACTION, "ios-pwa:hidden")}>
+        <a href={file.downloadUrl} download aria-label="Download" className={cn(ACTION, "ios-pwa:hidden")}>
           <Download />
         </a>
       </ActionTooltip>
@@ -575,6 +612,26 @@ function FileActions({ file }: { file: StoredFile }) {
         </ActionTooltip>
       )}
     </>
+  );
+}
+
+/**
+ * Block or Unblock, naming the message's author as the people directory lists them, which it reads only
+ * while the bar's in the page, as Quote does: More actions' `item`, or the bar's button on touch screens,
+ * which names itself only to screen readers, as the bar's others do.
+ */
+function BlockButton({ message, blocked, onClick, item = false }: { message: Message; blocked: boolean; onClick: () => void; item?: boolean }) {
+  const nameOf = useNameOf();
+  const label = `${blocked ? "Unblock" : "Block"} ${nameOf(message.creator)}`;
+  return item ? (
+    <button type="button" className={ITEM} onClick={onClick}>
+      <UserXmark />
+      <span className="min-w-0 truncate">{label}</span>
+    </button>
+  ) : (
+    <button type="button" aria-label={label} className={ACTION} onClick={onClick}>
+      <UserXmark />
+    </button>
   );
 }
 
@@ -630,15 +687,46 @@ interface Placed {
 }
 
 /**
+ * How many columns a bar for fingers has in rows: the quick reactions and More reactions over the
+ * `rest` of its buttons, so four, or as many as the rest are while they fit in `width`.
+ */
+function columnsOf(bar: HTMLElement, rest: number, width: number): number {
+  const style = getComputedStyle(bar);
+  const frame = bar.offsetWidth - bar.clientWidth + parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+  const fit = Math.floor((width - frame) / (bar.lastElementChild as HTMLElement).offsetWidth);
+  return Math.max(QUICK_REACTION_COUNT + 1, Math.min(rest, fit));
+}
+
+/**
+ * Lays a bar for fingers out in rows as wide as fit in `width` (`columnsOf`), the quick reactions and
+ * More reactions over the rest, every row ending at the bar's right edge: the first, and the rest's
+ * last, where it has fewer buttons than the others, start that far in.
+ */
+function layOutRows(bar: HTMLElement, width: number) {
+  const rest = (Array.from(bar.children) as HTMLElement[]).slice(2).filter((button) => getComputedStyle(button).display !== "none");
+  const columns = columnsOf(bar, rest.length, width);
+  bar.style.setProperty("--bar-columns", String(columns));
+  (bar.firstElementChild as HTMLElement).style.gridColumnStart = String(columns - QUICK_REACTION_COUNT);
+  const short = rest.length % columns;
+  rest.forEach((button, index) => (button.style.gridColumnStart = short > 0 && index === rest.length - short ? String(columns - short + 1) : ""));
+}
+
+/** Where a message's row starts what it says, past its avatar's column, which a bar for fingers keeps clear of. */
+function contentLeft(row: HTMLElement): number {
+  const style = getComputedStyle(row);
+  return row.getBoundingClientRect().left + parseFloat(style.paddingLeft) + parseFloat(style.gridTemplateColumns) + parseFloat(style.columnGap);
+}
+
+/**
  * Places an open bar within the timeline less 8px on each side, and within what's on screen. With a
  * mouse, it overlaps the row, its top 17px above the row's, or higher to keep clear of a code block's
  * Copy code, and its right 16px in from the timeline's,
  * with Message options pinned as its last button, and the tray or More actions opens below it, or above
  * when there's more room there. For fingers, it opens 6px below its anchor, lined up with its right
  * edge, or above when it doesn't fit, or beside it when it fits neither, so it doesn't cover what opened
- * it, nor Message options. Its buttons then go in two rows of four, where a row of them would wrap or
- * doesn't fit beside its anchor. Answers false, placing nothing, once the row is out of the timeline's
- * sight, when the bar should close.
+ * it, nor Message options. Its buttons then go in rows, the reactions over the rest (`layOutRows`),
+ * where a row of them would wrap, reach over the message's avatar or not fit beside its anchor. Answers
+ * false, placing nothing, once the row is out of the timeline's sight, when the bar should close.
  */
 function placeMenu({ row, container, trigger, anchor, menu, bar, panel, overlapping }: Placed): boolean {
   const viewport = window.visualViewport;
@@ -703,7 +791,10 @@ function placeMenu({ row, container, trigger, anchor, menu, bar, panel, overlapp
     };
     let spot = spotFor(menuBox);
     const [first, last] = [bar.firstElementChild as HTMLElement, bar.lastElementChild as HTMLElement];
-    if (!spot.fits || last.offsetTop > first.offsetTop) {
+    const reachesAvatar = Math.min(spot.right, bounds.right) - menuBox.width < contentLeft(row);
+    if (!spot.fits || last.offsetTop > first.offsetTop || reachesAvatar) {
+      // As wide as fits right of the avatars' column, so lined up with Message options it keeps clear of them.
+      layOutRows(bar, bounds.right - contentLeft(row));
       menu.setAttribute("data-two-rows", "");
       menuBox = menu.getBoundingClientRect();
       spot = spotFor(menuBox);

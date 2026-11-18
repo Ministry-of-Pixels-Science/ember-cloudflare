@@ -1,26 +1,37 @@
 import { CloseCode, type RoomId, type User, type UserId } from "@ember/protocol";
 import {
+  CAMERA_SIZES,
   CAMERAS_FULL,
   CAMERAS_OFF,
+  carriesBothSizes,
   HUDDLE_FAILED,
   HUDDLE_TRACK_KINDS,
   HuddleCloseCode,
+  INVITED_TOO_OFTEN,
   MAX_HUDDLE_CAMERAS,
   MAX_HUDDLE_PEOPLE,
   MAX_HUDDLE_SCREENS,
+  NOBODY_INVITED,
   parseHuddleClientFrame,
   SCREENS_FULL,
   SCREENS_OFF,
+  type CameraSize,
   type HuddleClientFrame,
+  type HuddleIceServer,
   type HuddlePerson,
   type HuddleServerFrame,
+  type HuddleSticker,
   type HuddleTrack,
   type HuddleTrackKind,
 } from "@ember/protocol/huddles";
 import type { Env } from "../env";
-import { CLOSE_REASONS, closedAtOnce, closeTooLarge, isTooLarge, MAX_ROOM_FRAME_SIZE } from "../sockets";
+import { sortableId } from "../ids";
+import { CLOSE_REASONS, closedAtOnce, isTooLarge, MAX_ROOM_FRAME_SIZE, TOO_LARGE } from "../sockets";
 import { workspace } from "../workspace";
-import { acceptAnswer, closeTracks, publishTracks, pullTracks, SfuError, startSession, TRACKS_PER_REQUEST, type HuddleApp, type SfuApp } from "./sfu";
+import type { InvitationPush } from "../workspace-store";
+import type { HuddleNow, ResumedHuddle } from "./message";
+import { relayServers } from "./relay";
+import { acceptAnswer, closeTracks, publishTracks, pullTracks, resizeTracks, SfuError, startSession, TRACKS_PER_REQUEST, type HuddleApp, type Pulled, type SfuApp } from "./sfu";
 
 // A room's huddle, which the room's Durable Object keeps beside its own sockets (src/chat-room.ts): who's
 // in it, and what each of them publishes and receives at Cloudflare's Realtime SFU, which carries what
@@ -37,7 +48,13 @@ import { acceptAnswer, closeTracks, publishTracks, pullTracks, SfuError, startSe
 // doesn't hear yet (`huddle.listen`), rather than the room adding each newcomer to everyone's
 // connection: an event then asks the SFU a few things however many are in the huddle, where Workers'
 // free plan lets an event make 50 requests. It asks for cameras and screens by whose they are, and
-// only while it shows the huddle open, so what nobody looks at isn't sent.
+// only while it shows the huddle open, so what nobody looks at isn't sent. A camera whose browser
+// sends it in two sizes at once (simulcast) is sent to each tab in the one that tab says it shows
+// cameras in, so that small tiles cost a small picture.
+//
+// A network that blocks the way to the SFU is gone around by Cloudflare's TURN service, where an
+// administrator has given huddles a relay (./relay.ts): the room asks Cloudflare, as a tab joins, for
+// the servers its connections go by, and welcomes the tab with them.
 //
 // What a socket publishes and hears is in its attachment, which outlives hibernation, so a huddle costs
 // the room nothing between its frames but a check every `HUDDLE_CHECK_MS`. When someone leaves, or loses
@@ -46,6 +63,18 @@ import { acceptAnswer, closeTracks, publishTracks, pullTracks, SfuError, startSe
 //
 // The room tells the Workspace who's in the huddle as they join and leave, and the Workspace tells
 // everyone in the room, in the huddle or not, so their sidebars and the room's header can show it.
+// Someone in the huddle invites others into it through the Workspace too (`huddle.invite`), which
+// knows who's in the room, and has every tab of theirs. Whoever it finds with Ember in view nowhere is
+// pushed the invitation, which the room sends, as it sends its messages' pushes.
+//
+// The sticker someone shows is in their socket's attachment, as whether they're muted is, and the
+// others hear of it as of that. A reaction is kept nowhere: the room tells everyone in the huddle of
+// it as it comes, and it's gone.
+//
+// The room keeps a message of each huddle among its own (./message.ts), which it brings in step as
+// people join and leave: the huddle tells it that they have, and what it is now. The huddle gives the
+// message its id as it starts, and tells it to everyone it welcomes, whose tabs show the message's
+// thread as the huddle's.
 
 /**
  * The tag on a huddle's sockets, besides the tags a room's own sockets carry. Nobody's id has a colon in
@@ -63,11 +92,19 @@ export const HUDDLE_CHECK_MS = 30_000;
  */
 export const HUDDLE_SILENT_MS = 90_000;
 
-/** How long the room goes by what the Workspace last said of the SFU app huddles run through. */
-const APP_KEPT_MS = 30_000;
+/** How long the room goes by what the Workspace last said of the SFU app huddles run through, and of huddles in the room. */
+export const APP_KEPT_MS = 30_000;
 
 /** How many of a socket's frames for one of its connections can wait behind the one the SFU is answering. */
 const FRAMES_WAITING = 4;
+
+/** How often a tab may invite people into the huddle in a minute: each time has the Workspace read who of them is in the room. */
+export const INVITES_A_MINUTE = 20;
+const MINUTE_MS = 60_000;
+
+/** How many of a tab's reactions the room tells the huddle of in ten seconds: everyone in it hears of each. */
+export const REACTIONS_IN_TEN_SECONDS = 20;
+const TEN_SECONDS_MS = 10_000;
 
 /**
  * The most people one check takes out for being unheard. The SFU is asked about each of them once for
@@ -91,6 +128,13 @@ const UNCLOSED_KEPT = 200;
  * many requests as an event may make. The rest wait for its alarm.
  */
 const SILENCED_PER_DELETE = 50;
+
+/**
+ * The most sessions a check has the SFU close what was published on as it ends a huddle that its room's
+ * settings no longer allow: with the sessions the check asks about again, as many requests as an event
+ * may make. The rest wait for the checks after it.
+ */
+const SILENCED_PER_CHECK = SILENCED_PER_DELETE - RETRIED_PER_CHECK;
 
 /** What the room's object keeps in its own storage while the SFU has tracks to close that it didn't: the sessions and their tracks. */
 const UNCLOSED = "huddleUnclosed";
@@ -136,6 +180,8 @@ interface Publishing {
   tracks: HuddleTrack[];
   /** When the tab said the connection had connected, from when the others can listen to it. */
   connectedAt?: number;
+  /** Whether it's a camera the SFU takes in both of a camera's sizes, as the tab's offer and the SFU's answer to it both said. */
+  sized?: true;
 }
 
 /** A track a tab hears, or has been offered. */
@@ -145,20 +191,46 @@ interface Heard {
   /** The session that publishes it. */
   from: string;
   kind: HuddleTrackKind;
+  /** The size the SFU was last asked to send, of a camera it takes in both. */
+  size?: CameraSize;
 }
+
+/** A track a tab doesn't hear yet, as the SFU is asked for it. */
+type Wanted = Omit<Heard, "mid">;
 
 /** What a tab hears, or watches, on one of its receiving connections. */
 interface Receiving {
   sessionId: string;
   heard: Heard[];
-  /** What the SFU's latest offer adds, until the tab has answered it. */
+  /** What the SFU's latest offer adds, until the tab has answered it: nothing, where the offer is of a change of sizes. */
   offered?: Heard[];
+  /** Set once the SFU has refused to send a camera in the size asked for, or to make one larger: it's asked for none on this connection from then on, and sends what it chooses. */
+  unsized?: true;
+}
+
+/** What someone publishes on one of their sending connections, as a tab that would receive it is told of it. */
+interface Publication {
+  userId: UserId;
+  tracks: HuddleTrack[];
+  sized: boolean;
 }
 
 /** A tab's pair of connections for one kind of track: the one it sends on, and the one it receives on. */
 interface Connections {
   publishing?: Publishing;
   receiving?: Receiving;
+}
+
+/** How often a tab has done something in a stretch of time, which started at `since`. */
+interface Tally {
+  since: number;
+  count: number;
+}
+
+/** `tally` with one more counted at `now`, in a stretch `ms` long that takes `most`, or null once the stretch has had that many. */
+function oneMore(tally: Tally | undefined, now: number, ms: number, most: number): Tally | null {
+  const stretch = tally && now - tally.since < ms ? tally : { since: now, count: 0 };
+  return stretch.count < most ? { since: stretch.since, count: stretch.count + 1 } : null;
 }
 
 /** What each of a huddle's sockets remembers across hibernation. */
@@ -173,7 +245,11 @@ export interface HuddleAttachment {
   openedAt: number;
   /** When the huddle started. */
   startedAt: string;
+  /** The id of the room's message of the huddle. A socket from before huddles named their messages has none, nor does one that joined a huddle of such sockets. */
+  messageId?: string;
   muted: boolean;
+  /** The sticker the person shows, while they show one. A tab they move to starts with none. */
+  sticker?: HuddleSticker;
   /** The SFU app the tab's connections are with: a huddle runs through one. */
   appId: string;
   /** The pair that carries the voices: the tab's microphone, and everyone else's. */
@@ -183,6 +259,12 @@ export interface HuddleAttachment {
   cameras?: Connections;
   /** The pair that carries the screens people share, once the tab has shared its own or watched another's. */
   screens?: Connections;
+  /** How often the tab has invited people into the huddle in the minute that started at `since`, once it has. */
+  inviting?: Tally;
+  /** Set once the tab has invited someone who isn't in the huddle into it. */
+  invited?: true;
+  /** How many reactions of the tab's the room has told the huddle of in the ten seconds that started at `since`, once it has told of one. */
+  reacting?: Tally;
   /** Set once the room has closed the socket itself, having told the others whatever they're to hear of it. */
   revoked?: true;
 }
@@ -230,12 +312,13 @@ const changeConnections = (ws: WebSocket, kind: HuddleTrackKind, changed: (conne
 /** Whether the others can receive what a tab publishes: its sending connection has connected. */
 const isConnected = (publishing: Publishing | undefined) => publishing?.connectedAt !== undefined;
 
-const personOf = ({ user, muted, publishing, cameras, screens }: HuddleAttachment): HuddlePerson => ({
+const personOf = ({ user, muted, sticker, publishing, cameras, screens }: HuddleAttachment): HuddlePerson => ({
   user,
   muted,
   audio: isConnected(publishing),
   video: isConnected(cameras?.publishing),
   screen: isConnected(screens?.publishing),
+  ...(sticker && { sticker }),
 });
 
 const midsOf = (tracks: Array<{ mid: string }>) => tracks.map(({ mid }) => mid);
@@ -286,9 +369,20 @@ function send(ws: WebSocket, frame: HuddleServerFrame): void {
 /** What's logged of a failure: the SFU's status and error code, or the kind of error, and never what was sent. */
 const logged = (error: unknown) => (error instanceof SfuError ? error.message : error instanceof Error ? error.name : "unknown error");
 
+/**
+ * Whether the SFU answered that it didn't do what it was asked, by its status or by an error code in
+ * place of its answer. Not when it didn't answer, or answered what the room can't read: the room can't
+ * tell what it did then.
+ */
+const isRefusal = (error: unknown): error is SfuError => error instanceof SfuError && error.status !== null && (error.status >= 400 || error.code !== null);
+
 export class Huddle {
-  /** The SFU app huddles run through, and whether cameras may go on in them and screens be shared, as the Workspace last said, and when it did. */
-  private known: { app: HuddleApp | null; at: number } | null = null;
+  /**
+   * The SFU app huddles run through, and whether cameras may go on in them and screens be shared, as the
+   * Workspace last said, and when it did, with whether the room's settings allow huddles in it, if that
+   * was asked too.
+   */
+  private known: { app: HuddleApp | null; allowed?: boolean; at: number } | null = null;
   /** What each socket's frames for its sending connections wait behind, and those for its receiving connections. */
   private readonly sending = noLines();
   private readonly receiving = noLines();
@@ -307,6 +401,13 @@ export class Huddle {
     private readonly env: Env,
     /** Sets the room's alarm to check the huddle by a time, unless it's set for sooner, once the room's events before it are done. */
     private readonly wakeBy: (time: number) => Promise<void>,
+    /** Sends an invitation's pushes, as the room sends its messages'. */
+    private readonly push: (pushes: InvitationPush[]) => Promise<void>,
+    /**
+     * Brings the room's message of the huddle in step with `now`, the huddle as a change of who's in it
+     * left it, once the room's events before it are done: whoever leaves again before then was in it.
+     */
+    private readonly changed: (now: HuddleNow | null) => Promise<unknown>,
   ) {}
 
   /** Whether `ws` is one of the huddle's sockets, rather than one of the room's own. */
@@ -319,43 +420,76 @@ export class Huddle {
     return this.ctx.getWebSockets(HUDDLE_TAG).some((socket) => socket.readyState === WebSocket.OPEN);
   }
 
+  /** The huddle as it is now, which the room's message of it goes by, or null with nobody in it. */
+  now(): HuddleNow | null {
+    const members = this.members();
+    const first = members[0]?.attachment;
+    if (!first) return null;
+    const { roomId, startedAt, messageId } = first;
+    const invited = members.some(({ attachment }) => attachment.invited === true);
+    return { roomId, startedAt, people: members.map(({ attachment }) => attachment.user), ...(messageId !== undefined && { messageId }), ...(invited && { invited }) };
+  }
+
   /**
    * Lets `user` into room `roomId`'s huddle, on a socket carrying `tags`, once the room has checked the
-   * Workspace's word for them. A huddle that's full, or huddles being off, closes the socket at once
-   * with the code that says so. Someone already in the huddle moves to this tab: their other socket
-   * closes, and the others hear that they changed rather than that they left and joined. The room,
-   * which lets people in one at a time, sets its alarm to check the huddle once someone's in it.
+   * Workspace's word for them. A huddle that's full, or huddles being off, for everyone or in the
+   * room's settings, closes the socket at once with the code that says so. Someone already in the
+   * huddle moves to this tab: their other socket closes, and the others hear that they changed rather
+   * than that they left and joined. The room, which lets people in one at a time, sets its alarm to
+   * check the huddle once someone's in it. The tab is welcomed with `iceServers`, the servers its
+   * connections go by, if the room has any for it. Whoever joins with nobody in the huddle starts one,
+   * whose message gets its id here, unless `resumed` is the room's last, which then goes on
+   * (./message.ts).
    */
-  async join(user: User, roomId: RoomId, tags: string[], muted: boolean): Promise<Response> {
-    const app = await this.appNow();
+  async join(user: User, roomId: RoomId, tags: string[], muted: boolean, iceServers: HuddleIceServer[] | null, resumed?: ResumedHuddle): Promise<Response> {
+    const app = await this.appIn(roomId);
     if (!app) return closedAtOnce(HuddleCloseCode.Off);
     let members = this.members();
     // Whoever joined through an app huddles no longer run through connects again, through this one, to
-    // a huddle that starts with whoever is first.
+    // the huddle as it goes on with whoever is first. Nothing is told of their going: the Workspace and
+    // the room's message of the huddle hear how this join leaves it, which is going on.
     if (members.some(({ attachment }) => attachment.appId !== app.appId)) {
-      this.end(CloseCode.Reconnect);
+      for (const { socket } of members) this.close(socket, CloseCode.Reconnect, false);
       members = [];
     }
-    const startedAt = members[0]?.attachment.startedAt ?? new Date().toISOString();
+    const { startedAt, messageId } = members[0]?.attachment ?? resumed ?? { startedAt: new Date().toISOString(), messageId: sortableId() };
+    const itsMessage = messageId !== undefined && { messageId };
     const earlier = members.filter(({ attachment }) => attachment.user.id === user.id);
     if (members.length - earlier.length >= MAX_HUDDLE_PEOPLE) return closedAtOnce(HuddleCloseCode.Full);
 
     const { 0: client, 1: server } = new WebSocketPair();
     this.ctx.acceptWebSocket(server, [...tags, HUDDLE_TAG]);
     const now = Date.now();
-    const attachment: HuddleAttachment = { huddle: true, user, roomId, joinedAt: earlier[0]?.attachment.joinedAt ?? now, openedAt: now, startedAt, muted, appId: app.appId };
+    const attachment: HuddleAttachment = { huddle: true, user, roomId, joinedAt: earlier[0]?.attachment.joinedAt ?? now, openedAt: now, startedAt, ...itsMessage, muted, appId: app.appId };
     server.serializeAttachment(attachment);
     for (const { socket } of earlier) this.close(socket, HuddleCloseCode.Moved);
-    send(server, { type: "huddle.welcome", you: user, people: this.people(), startedAt });
+    send(server, { type: "huddle.welcome", you: user, people: this.people(), startedAt, ...itsMessage, ...(iceServers && { iceServers }) });
     this.broadcast({ type: earlier.length > 0 ? "huddle.changed" : "huddle.joined", person: personOf(attachment) }, server);
     if (earlier.length === 0) this.reportSoon();
     return new Response(null, { status: 101, webSocket: client });
   }
 
+  /**
+   * The servers a tab that joins room `roomId`'s huddle now makes its connections by, while huddles
+   * have a relay: what Cloudflare answers the room with for the tab, or null without a relay, or when
+   * the room can't say. The tab is let in either way. The Workspace is asked afresh, so a relay set up
+   * a moment ago is the next tab's to use, and the join that follows goes by what the room's settings
+   * say of huddles now.
+   */
+  async iceServers(roomId: RoomId): Promise<HuddleIceServer[] | null> {
+    const app = await this.appIn(roomId, true).catch(() => null);
+    return app?.relay ? relayServers(this.env, app.relay) : null;
+  }
+
   /** Does what a frame from one of the huddle's sockets asks. */
   async message(ws: WebSocket, raw: string | ArrayBuffer): Promise<void> {
+    // A socket the room has closed, as when its person lost the room, can't change anything, even with
+    // frames it sent before it heard.
+    if (ws.readyState !== WebSocket.OPEN) return;
     // A session description is the largest thing a tab sends, and fits a room's largest frame twice over.
-    if (isTooLarge(raw, MAX_ROOM_FRAME_SIZE)) return closeTooLarge(ws);
+    // Whoever sends more leaves the huddle as the room closes their socket, rather than when their tab
+    // answers the close, which it may never do.
+    if (isTooLarge(raw, MAX_ROOM_FRAME_SIZE)) return this.remove(ws, TOO_LARGE);
     const frame = typeof raw === "string" ? parseHuddleClientFrame(raw) : null;
     if (!frame) return send(ws, { type: "error", message: UNRECOGNIZED });
     switch (frame.type) {
@@ -374,9 +508,15 @@ export class Huddle {
         return this.inTurn(this.sending, frame.kind, ws, frame.type, async () => this.unpublish(ws, frame.kind));
       case "huddle.listen":
         // Voices aren't asked for by name: a tab hears everyone.
-        return this.inTurn(this.receiving, frame.kind, ws, frame.type, () => this.listen(ws, frame.kind, frame.fresh === true, frame.kind === "audio" ? null : (frame.watch ?? [])));
+        return this.inTurn(this.receiving, frame.kind, ws, frame.type, () => this.listen(ws, frame.kind, frame.fresh === true, frame.kind === "audio" ? null : (frame.watch ?? []), frame.small === true));
       case "huddle.answer":
         return this.inTurn(this.receiving, frame.kind, ws, frame.type, () => this.answer(ws, frame.kind, frame.sdp));
+      case "huddle.invite":
+        return this.invite(ws, frame.userIds);
+      case "huddle.sticker":
+        return this.showSticker(ws, frame.sticker);
+      case "huddle.react":
+        return this.react(ws, frame.emoji);
     }
   }
 
@@ -390,7 +530,7 @@ export class Huddle {
   }
 
   /** Takes `socket`'s person out of the huddle: closes it with `code`, tells the others they left, and has the SFU close their tracks. */
-  remove(socket: WebSocket, code: CloseCode | HuddleCloseCode): void {
+  remove(socket: WebSocket, code: CloseCode | HuddleCloseCode | typeof TOO_LARGE): void {
     const attachment = this.close(socket, code);
     if (!attachment) return;
     this.broadcast({ type: "huddle.left", userId: attachment.user.id });
@@ -402,32 +542,36 @@ export class Huddle {
    * went, and every tab closes its own connections as its socket closes. Unless `silence` says to, the
    * SFU is asked nothing: with huddles off or their app changed there's no asking it as the app those
    * connections are with. A room that's deleted can ask, and has it close what everyone published, so
-   * that a tab which kept its connections open is heard by nobody, and hears nobody.
+   * that a tab which kept its connections open is heard by nobody, and hears nobody. So can the check
+   * of a huddle that only its room's settings end (`check`), which asks about `most` of it at once.
+   * It's what each had published as their socket closed that the SFU closes, so a tab that published
+   * while the room was finding out that the huddle ends is no exception.
    */
-  end(code: CloseCode | HuddleCloseCode, silence = false): void {
+  end(code: CloseCode | HuddleCloseCode, silence = false, most = SILENCED_PER_DELETE): void {
     const members = this.members();
     if (members.length === 0) return;
     for (const { socket } of members) this.close(socket, code, false);
-    if (silence) this.ctx.waitUntil(this.silence(members));
+    if (silence) this.ctx.waitUntil(this.silence(members, most));
     this.reportSoon();
   }
 
   /**
    * Has the SFU close what each of `members` published, as it was when their sockets closed. That's a
-   * request for each microphone, each camera and each screen, the microphones first, and as many now as
-   * the 50 an event may make on Workers' free plan: a full huddle's microphones fit, which closing what
-   * each heard as well wouldn't, and it's all it takes for nobody to hear anything. The cameras and
-   * screens that don't fit, and whatever the SFU didn't close, are kept for the deleted room's alarm,
-   * which asks about them (`closeUnclosed`) before it erases the room.
+   * request for each microphone, each camera and each screen, the microphones first, and `most` of them
+   * now. A deleted room's are as many as the 50 an event may make on Workers' free plan: a full huddle's
+   * microphones fit, which closing what each heard as well wouldn't, and it's all it takes for nobody
+   * to hear anything. The cameras and screens that don't fit, and whatever the SFU didn't close, are
+   * kept for the room's alarm, which asks about them (`closeUnclosed`), a deleted room's before it
+   * erases the room.
    */
-  private async silence(members: Member[]): Promise<void> {
+  private async silence(members: Member[], most: number): Promise<void> {
     const app = await this.appNow().catch(() => undefined);
     if (!app) return;
     const published = HUDDLE_TRACK_KINDS.flatMap((kind) =>
       members.flatMap(({ socket, attachment }) => (attachment.appId === app.appId ? sessionsOf({ publishing: connectionsOf(attachment, kind).publishing }).map((session) => ({ socket, kind, session })) : [])),
     );
-    const unclosed = published.slice(SILENCED_PER_DELETE).map(({ session }) => session);
-    for (const { socket, kind, session } of published.slice(0, SILENCED_PER_DELETE)) {
+    const unclosed = published.slice(most).map(({ session }) => session);
+    for (const { socket, kind, session } of published.slice(0, most)) {
       // A tab publishing as its socket closed has what that made closed by the frame that made it.
       await this.sending[kind].get(socket)?.last;
       const mids = await this.closeOn(app, session);
@@ -438,18 +582,22 @@ export class Huddle {
 
   /**
    * Checks the huddle, as the room's alarm has it do every `HUDDLE_CHECK_MS` while one goes on: ends it
-   * once huddles are off or run through another app, takes out whoever's socket has gone unheard, tells
-   * the Workspace who's in it again, which is what makes up for a report that failed, and asks the SFU
-   * again to close the tracks it didn't. Answers when to check next, or null once there's nobody in the
-   * huddle, the Workspace has heard so, and nothing is left to close.
+   * once huddles are off, for everyone or in the room's settings, or run through another app, takes
+   * out whoever's socket has gone unheard, tells the Workspace who's in it again, which is what makes
+   * up for a report that failed, and asks the SFU again to close the tracks it didn't. A huddle the
+   * room's settings end has the SFU close what everyone in it published, as a deleted room's does.
+   * Answers when to check next, or null once there's nobody in the huddle, the Workspace has heard so,
+   * and nothing is left to close.
    */
   async check(now = Date.now()): Promise<number | null> {
     const members = this.members();
     if (members.length > 0) {
-      // Asked afresh, so turning huddles off ends one within a check. Unanswered, the huddle goes on.
-      const app = await this.appNow(true).catch(() => undefined);
-      if (app === null || (app && members.some(({ attachment }) => attachment.appId !== app.appId))) this.end(app ? CloseCode.Reconnect : HuddleCloseCode.Off);
-      else {
+      // Asked afresh, so turning huddles off, for everyone or in this room, ends one within a check. Unanswered, the huddle goes on.
+      const app = await this.appIn(members[0]!.attachment.roomId, true).catch(() => undefined);
+      if (app === null || (app && members.some(({ attachment }) => attachment.appId !== app.appId))) {
+        // Where only the room's settings end it, huddles still run through the app, which the SFU is asked as.
+        this.end(app ? CloseCode.Reconnect : HuddleCloseCode.Off, !app, SILENCED_PER_CHECK);
+      } else {
         for (const { socket } of members.filter((member) => this.isSilent(member, now)).slice(0, REMOVED_PER_CHECK)) this.remove(socket, CloseCode.Reconnect);
         if (app) this.takeDownWhatsOff(app);
       }
@@ -493,12 +641,59 @@ export class Huddle {
     this.broadcast({ type: "huddle.changed", person: personOf(change(ws, (attachment) => ({ ...attachment, muted }))) }, ws);
   }
 
+  /** Tells the others that `ws`'s person shows `sticker` now, in place of any they showed, or with null, none. */
+  private showSticker(ws: WebSocket, sticker: HuddleSticker | null): void {
+    if ((attachmentOf(ws).sticker ?? null) === sticker) return;
+    this.broadcast({ type: "huddle.changed", person: personOf(change(ws, ({ sticker: _, ...attachment }) => ({ ...attachment, ...(sticker && { sticker }) }))) }, ws);
+  }
+
+  /**
+   * Tells everyone in the huddle that `ws`'s person reacted with `emoji`, their own tab included, which
+   * shows it as the others do. Past as many as the room tells of in ten seconds, a tab's reactions go
+   * unheard, by its own person too.
+   */
+  private react(ws: WebSocket, emoji: string): void {
+    const reacting = oneMore(attachmentOf(ws).reacting, Date.now(), TEN_SECONDS_MS, REACTIONS_IN_TEN_SECONDS);
+    if (!reacting) return;
+    const { user } = change(ws, (attachment) => ({ ...attachment, reacting }));
+    this.broadcast({ type: "huddle.reacted", userId: user.id, emoji });
+  }
+
+  /**
+   * Invites into the huddle the people `ws`'s person names, but for whoever is in it already: the
+   * Workspace tells those of them who are in the room, on every tab they have open, and the room pushes
+   * the invitation to whoever the Workspace finds with Ember in view nowhere, without the tab waiting
+   * on it. A tab that has invited people as often as one may in a minute hears that nobody more is, and
+   * so does one whose invitation the Workspace couldn't be given. The room's message of the huddle is
+   * theirs to come back to, should they not join, so the room keeps that someone was invited before
+   * anyone is, and whoever invites them can leave at once (./message.ts).
+   */
+  private async invite(ws: WebSocket, userIds: UserId[]): Promise<void> {
+    const inviting = oneMore(attachmentOf(ws).inviting, Date.now(), MINUTE_MS, INVITES_A_MINUTE);
+    if (!inviting) return send(ws, { type: "error", message: INVITED_TOO_OFTEN, failed: "huddle.invite" });
+    const { user, roomId } = change(ws, (attachment) => ({ ...attachment, inviting }));
+    const inIt = new Set(this.members().map(({ attachment }) => attachment.user.id));
+    const invited = userIds.filter((userId) => !inIt.has(userId));
+    if (invited.length === 0) return;
+    change(ws, (attachment) => ({ ...attachment, invited: true }));
+    this.ctx.waitUntil(this.changed(this.now()));
+    try {
+      const pushes = await workspace(this.env).inviteToHuddle(roomId, user.id, invited);
+      // A Workspace still on the code from before it answered pushes, as it may be for some minutes after an update, answers nothing.
+      if (pushes?.length > 0) this.ctx.waitUntil(this.push(pushes));
+    } catch (error) {
+      console.warn("Inviting people into a huddle failed:", logged(error));
+      send(ws, { type: "error", message: NOBODY_INVITED, failed: "huddle.invite" });
+    }
+  }
+
   /**
    * Publishes a tab's track on a new session, with the offer its sending connection made for it, and
    * sends it the SFU's answer. The track goes by its kind, which is how the others' sessions ask for
    * it. What the tab published of that kind before, on a connection it has given up, is closed. A
    * camera or a screen is refused while an administrator has them off, or past as many as a huddle
-   * shows, which its tab hears.
+   * shows, which its tab hears. A camera is sent in sizes only where the offer says the tab sends both
+   * and the answer that the SFU takes both: a browser sends one size to an SFU that takes one.
    */
   private async publish(ws: WebSocket, offer: string, track: HuddleTrack): Promise<void> {
     const { kind } = track;
@@ -518,7 +713,8 @@ export class Huddle {
       return this.cut(app.appId, published);
     }
     const earlier = connectionsOf(attachmentOf(ws), kind).publishing;
-    const attachment = changeConnections(ws, kind, (connections) => ({ ...connections, publishing: { sessionId, tracks: [track] } }));
+    const sized = kind === "video" && carriesBothSizes(offer, track.mid, "send") && carriesBothSizes(answer, track.mid, "recv");
+    const attachment = changeConnections(ws, kind, (connections) => ({ ...connections, publishing: { sessionId, tracks: [track], ...(sized && { sized }) } }));
     send(ws, { type: "huddle.published", kind, sdp: answer });
     if (!earlier) return;
     // Nobody can listen to them, or watch them, until the new connection has connected.
@@ -588,8 +784,15 @@ export class Huddle {
    * they published before: named, the tab would take it for what they publish now, and never ask for
    * that. Should the SFU refuse, the room lets go of the connection, since it can't tell what the
    * session then carries.
+   *
+   * Of a camera the SFU takes in both sizes, a tab is sent the smaller while it says it shows cameras
+   * `small`, and otherwise the larger: the cameras it's offered now, and those it watches already in
+   * the other size, which the SFU is asked to change first. A camera the SFU won't send in a size, or
+   * won't make larger, is asked for without one, as is every other on that connection from then on,
+   * so that it shows in whatever size the SFU chooses rather than not at all, or small in a large tile.
+   * Where the SFU would otherwise offer the tab nothing, it's asked for without one in the same round.
    */
-  private async listen(ws: WebSocket, kind: HuddleTrackKind, fresh: boolean, only: UserId[] | null): Promise<void> {
+  private async listen(ws: WebSocket, kind: HuddleTrackKind, fresh: boolean, only: UserId[] | null, small: boolean): Promise<void> {
     const app = await this.appOf(ws);
     if (!app) return;
     if (fresh) this.letGo(ws, kind);
@@ -597,34 +800,41 @@ export class Huddle {
     // The tab answers the offer it has before it's made another.
     if (before?.offered) return;
     const publications = this.publications(ws, kind, only);
-    const heard = (before?.heard ?? []).filter(({ from }) => publications.has(from));
+    let heard = (before?.heard ?? []).filter(({ from }) => publications.has(from));
+    let unsized = before?.unsized;
     try {
       if (before && heard.length < before.heard.length) {
         const stale = before.heard.filter(({ from }) => !publications.has(from));
         await this.cut(app.appId, [{ sessionId: before.sessionId, mids: midsOf(stale) }]);
         if (ws.readyState !== WebSocket.OPEN) return;
-        changeConnections(ws, kind, (connections) => ({ ...connections, receiving: { sessionId: before.sessionId, heard } }));
+        changeConnections(ws, kind, (connections) => ({ ...connections, receiving: { ...before, heard } }));
       }
-      const wanted = [...publications].flatMap(([from, { tracks }]) => tracks.filter(({ kind }) => !heard.some((track) => track.from === from && track.kind === kind)).map(({ kind }) => ({ from, kind })));
+      const resized = before ? await this.resized(app, { ...before, heard }, small) : null;
+      if (before && resized) {
+        if (ws.readyState !== WebSocket.OPEN) return;
+        ({ heard, unsized } = resized);
+        changeConnections(ws, kind, (connections) => ({ ...connections, receiving: { ...before, heard, ...(unsized && { unsized }), ...(resized.offer !== null && { offered: [] }) } }));
+        // The session takes nothing more until the tab has answered, which is when the tab asks again, for anyone new.
+        if (resized.offer !== null) return send(ws, { type: "huddle.offer", kind, sdp: resized.offer, tracks: [] });
+      }
+      const size = unsized ? undefined : CAMERA_SIZES[small ? "small" : "large"];
+      const wanted = [...publications].flatMap(([from, { tracks, sized }]) =>
+        tracks.filter(({ kind }) => !heard.some((track) => track.from === from && track.kind === kind)).map(({ kind }) => ({ from, kind, ...(sized && size && { size }) })),
+      );
       if (wanted.length === 0) return send(ws, { type: "huddle.listening", kind });
 
-      const asked = wanted.slice(0, TRACKS_PER_REQUEST);
       const sessionId = before?.sessionId ?? (await startSession(this.env, app));
-      const pulled = await pullTracks(
-        this.env,
-        app,
-        sessionId,
-        asked.map(({ from, kind }) => ({ sessionId: from, trackName: kind })),
-      );
-      const offered = pulled.tracks.flatMap(({ sessionId: from, trackName, mid }) => asked.filter((track) => track.from === from && track.kind === trackName).map(({ kind }) => ({ mid, from, kind })));
+      const { asked, pulled, sizeRefused } = await this.pulled(app, sessionId, wanted.slice(0, TRACKS_PER_REQUEST));
+      const offered = pulled.tracks.flatMap(({ sessionId: from, trackName, mid }) => asked.filter((track) => track.from === from && track.kind === trackName).map((track) => ({ mid, ...track })));
       // They left while the SFU answered, so it sends them nothing of this.
       if (ws.readyState !== WebSocket.OPEN) return this.cut(app.appId, [{ sessionId, mids: midsOf(offered) }]);
       this.republish(
         kind,
         pulled.missing.filter(({ code }) => code === NOT_PUBLISHED).map(({ sessionId }) => sessionId),
       );
+      if (sizeRefused) unsized = true;
       // The session waits for the tab's answer to whatever it offers, even an offer of nobody.
-      changeConnections(ws, kind, (connections) => ({ ...connections, receiving: pulled.offer === null ? { sessionId, heard } : { sessionId, heard, offered } }));
+      changeConnections(ws, kind, (connections) => ({ ...connections, receiving: { sessionId, heard, ...(pulled.offer !== null && { offered }), ...(unsized && { unsized }) } }));
       if (pulled.offer === null) return send(ws, { type: "huddle.listening", kind });
       // As the others publish now, which the SFU's answer may have taken long enough to change.
       const current = this.publications(ws, kind, only);
@@ -645,16 +855,96 @@ export class Huddle {
     if (!app) return;
     const { receiving } = connectionsOf(attachmentOf(ws), kind);
     if (!receiving?.offered) return send(ws, { type: "error", message: NO_OFFER });
-    const { sessionId, heard, offered } = receiving;
+    const { offered, ...answered } = receiving;
     try {
-      await acceptAnswer(this.env, app, sessionId, sdp);
+      await acceptAnswer(this.env, app, answered.sessionId, sdp);
     } catch (error) {
       this.letGo(ws, kind);
       throw error;
     }
     if (ws.readyState !== WebSocket.OPEN) return;
-    changeConnections(ws, kind, (connections) => ({ ...connections, receiving: { sessionId, heard: [...heard, ...offered] } }));
+    changeConnections(ws, kind, (connections) => ({ ...connections, receiving: { ...answered, heard: [...answered.heard, ...offered] } }));
     send(ws, { type: "huddle.listening", kind });
+  }
+
+  /**
+   * Has the SFU send a receiving connection the cameras it hears in the other size than its tab shows
+   * them in, `small` or not, in that one from now, and answers what's left of the connection then,
+   * with the SFU's offer, should the change take one: null when nothing changed.
+   *
+   * A camera the SFU won't make smaller stays as large as it was, to be asked for again with the tab's
+   * next round. One it won't make larger is closed, and no longer heard, and the connection asks for
+   * no sizes from then on, so that the round asks for the camera anew, as the SFU would send it: a tab
+   * that shows cameras large isn't left with a small picture of one. The same goes for the small ones
+   * on a connection that asks for no sizes already. Nothing else the round does waits on a change.
+   */
+  private async resized(app: HuddleApp, { sessionId, heard, unsized }: Receiving, small: boolean): Promise<(Pick<Receiving, "heard" | "unsized"> & { offer: string | null }) | null> {
+    const size = CAMERA_SIZES[small ? "small" : "large"];
+    const outgrown = heard.filter((track) => track.size !== undefined && track.size !== size).slice(0, TRACKS_PER_REQUEST);
+    if (outgrown.length === 0) return null;
+    const { offer, refused } = unsized ? { offer: null, refused: outgrown } : await this.resizedBySfu(app, sessionId, outgrown, size);
+    const leftSmall = small ? [] : refused;
+    if (leftSmall.length > 0) await this.cut(app.appId, [{ sessionId, mids: midsOf(leftSmall) }]);
+    if (refused.length === outgrown.length && leftSmall.length === 0 && offer === null) return null;
+    const changed = (track: Heard) => outgrown.includes(track) && !refused.includes(track);
+    return {
+      heard: heard.filter((track) => !leftSmall.includes(track)).map((track) => (changed(track) ? { ...track, size } : track)),
+      ...((unsized || leftSmall.length > 0) && { unsized: true as const }),
+      offer,
+    };
+  }
+
+  /** Asks the SFU to send a session the cameras `outgrown` in `size`, and answers its offer, should the change take one, and the cameras it left as they were: all of them, where it refused the request. */
+  private async resizedBySfu(app: HuddleApp, sessionId: string, outgrown: Heard[], size: CameraSize): Promise<{ offer: string | null; refused: Heard[] }> {
+    try {
+      const { offer, refused } = await resizeTracks(
+        this.env,
+        app,
+        sessionId,
+        outgrown.map(({ mid, from, kind }) => ({ mid, sessionId: from, trackName: kind, rid: size })),
+      );
+      if (refused[0]) console.warn("The Realtime SFU didn't change the size of a huddle's camera:", refused[0].code);
+      return { offer, refused: outgrown.filter(({ mid }) => refused.some((track) => track.mid === mid)) };
+    } catch (error) {
+      if (!(error instanceof SfuError)) throw error;
+      console.warn("Changing the size of a huddle's cameras failed:", logged(error));
+      return { offer: null, refused: outgrown };
+    }
+  }
+
+  /**
+   * Pulls the tracks `wanted` into a tab's session, each camera in the size wanted of it, and answers
+   * what the SFU made of them, the tracks as it was asked for them, and whether it refused a camera
+   * its size. A refusal that leaves the tab without an offer, because the SFU offered nobody else or
+   * refused the whole request, has them all asked for again at once, without sizes, and it's that
+   * request this answers for: a tab makes its connection of an offer, so with none it would ask again
+   * on a fresh one, by size, and never be shown the camera. Whatever the SFU refuses a whole request
+   * for counts, since it doesn't say how it would refuse one for its sizes.
+   */
+  private async pulled(app: HuddleApp, sessionId: string, wanted: Wanted[]): Promise<{ asked: Wanted[]; pulled: Pulled; sizeRefused: boolean }> {
+    const pull = (asked: Wanted[]) =>
+      pullTracks(
+        this.env,
+        app,
+        sessionId,
+        asked.map(({ from, kind, size }) => ({ sessionId: from, trackName: kind, ...(size && { rid: size }) })),
+      );
+    const pulled = await pull(wanted).catch((error: unknown) => {
+      if (!isRefusal(error) || !wanted.some(({ size }) => size)) throw error;
+      console.warn("The Realtime SFU didn't take a request for a huddle's cameras in sizes:", logged(error));
+      return null;
+    });
+    const sizeRefused = pulled === null || this.wontSize(pulled.missing);
+    if (pulled && (pulled.offer !== null || !sizeRefused)) return { asked: wanted, pulled, sizeRefused };
+    const unsized = wanted.map(({ from, kind }) => ({ from, kind }));
+    return { asked: unsized, pulled: await pull(unsized), sizeRefused: true };
+  }
+
+  /** Whether the SFU found a camera among those it was asked for and didn't offer, and wouldn't send it in the size asked for, which it says once. */
+  private wontSize(missing: Array<{ rid?: string; code: string }>): boolean {
+    const refused = missing.find(({ rid, code }) => rid !== undefined && code !== NOT_PUBLISHED);
+    if (refused) console.warn("The Realtime SFU didn't send a huddle's camera in the size asked for:", refused.code);
+    return refused !== undefined;
   }
 
   /** Forgets `ws`'s receiving connection for `kind`, having the SFU close what it received on it, for its tab to start a fresh one. */
@@ -685,14 +975,15 @@ export class Huddle {
 
   /**
    * What the others in the huddle publish of `kind` that can be received, by the session each publishes
-   * it on: everyone's, or with `only`, that of the people it names.
+   * it on, and whether it's a camera the SFU takes in both sizes: everyone's, or with `only`, that of
+   * the people it names.
    */
-  private publications(except: WebSocket, kind: HuddleTrackKind, only: UserId[] | null): Map<string, { userId: UserId; tracks: HuddleTrack[] }> {
-    const publications = new Map<string, { userId: UserId; tracks: HuddleTrack[] }>();
+  private publications(except: WebSocket, kind: HuddleTrackKind, only: UserId[] | null): Map<string, Publication> {
+    const publications = new Map<string, Publication>();
     for (const { socket, attachment } of this.members()) {
       const { publishing } = connectionsOf(attachment, kind);
       const { id } = attachment.user;
-      if (socket !== except && publishing && isConnected(publishing) && (only === null || only.includes(id))) publications.set(publishing.sessionId, { userId: id, tracks: publishing.tracks });
+      if (socket !== except && publishing && isConnected(publishing) && (only === null || only.includes(id))) publications.set(publishing.sessionId, { userId: id, tracks: publishing.tracks, sized: publishing.sized === true });
     }
     return publications;
   }
@@ -710,18 +1001,28 @@ export class Huddle {
   }
 
   /** The SFU app huddles run through, or null while they're off, as the Workspace said within `APP_KEPT_MS`, or says now. */
-  private async appNow(fresh = false): Promise<HuddleApp | null> {
-    if (!fresh && this.known && Date.now() - this.known.at < APP_KEPT_MS) return this.known.app;
+  private async appNow(): Promise<HuddleApp | null> {
+    if (this.known && Date.now() - this.known.at < APP_KEPT_MS) return this.known.app;
     const app = await workspace(this.env).huddleApp();
     this.known = { app, at: Date.now() };
     return app;
   }
 
   /**
+   * The same for a huddle in room `roomId`, as the Workspace said of the room within `APP_KEPT_MS`, or
+   * says now: null, too, while the room's settings don't allow huddles in it. The app is known either
+   * way, so the room still has the SFU close what a huddle that its settings end leaves open.
+   */
+  private async appIn(roomId: RoomId, fresh = false): Promise<HuddleApp | null> {
+    if (fresh || this.known?.allowed === undefined || Date.now() - this.known.at >= APP_KEPT_MS) this.known = { ...(await workspace(this.env).huddlesIn(roomId)), at: Date.now() };
+    return this.known.allowed ? this.known.app : null;
+  }
+
+  /**
    * Closes `socket` itself, with `code`, if it's open, and answers what it remembered. Unless `cut` says
    * not to, the SFU closes its tab's tracks.
    */
-  private close(socket: WebSocket, code: CloseCode | HuddleCloseCode, cut = true): HuddleAttachment | null {
+  private close(socket: WebSocket, code: CloseCode | HuddleCloseCode | typeof TOO_LARGE, cut = true): HuddleAttachment | null {
     if (socket.readyState !== WebSocket.OPEN) return null;
     const attachment = change(socket, (attachment) => ({ ...attachment, revoked: true }));
     socket.close(code, CLOSE_REASONS[code]);
@@ -825,9 +1126,10 @@ export class Huddle {
     return true;
   }
 
-  /** Tells the Workspace who's in the huddle now, which has changed, without anything waiting on it. */
+  /** Tells the Workspace who's in the huddle now, which has changed, and has the room bring its message of the huddle in step with it as it is now, without anything waiting on either. */
   private reportSoon(): void {
     this.ctx.waitUntil(this.report());
+    this.ctx.waitUntil(this.changed(this.now()));
   }
 
   /**

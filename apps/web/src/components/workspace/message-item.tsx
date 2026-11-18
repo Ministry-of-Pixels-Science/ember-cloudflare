@@ -1,8 +1,11 @@
-import { memo, useCallback, useContext, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from "react";
 import type { CardAction, Me, Message, User } from "@ember/protocol";
-import { displayBody, isAllEmoji, type DisplayNode } from "@ember/richtext/dom";
+import { isAllEmoji } from "@ember/richtext/dom";
 import { NavArrowRight } from "@/components/icons/iconoir";
 import { PageLink } from "@/components/page-link";
+import { useAccount } from "@/hooks/use-account";
+import { BlockingContext } from "@/hooks/use-blocking";
+import { ReportingContext } from "@/hooks/use-reporting";
 import { PeopleContext } from "@/hooks/use-directory";
 import { messagePath, permalinkOf, threadPath } from "@/hooks/use-route";
 import { cardsQuote, dateTimeLabel, lastReplyLabel, timeLabel } from "@/lib/messages";
@@ -11,8 +14,9 @@ import { cn } from "@/lib/utils";
 import { AgentBadge, isAgent } from "./agent-badge";
 import { Attachment } from "./attachment";
 import { BotCards } from "./bot-card";
+import { HuddleShown, HuddleSummary, HuddleTile, HuddleTitle, isLive } from "./huddle-message";
 import { MessageActionsMenu, type MessageActionsHandle } from "./message-actions-menu";
-import { MessageBody } from "./message-body";
+import { MessageBody, shownBody } from "./message-body";
 import { MessageBoosts } from "./message-boosts";
 import { FixedMessageEditor, MessageEditor, type MessageEditorHandle } from "./message-editor";
 import { UploadCard } from "./upload-card";
@@ -70,19 +74,6 @@ interface Props {
   thread?: ThreadPlace;
   /** Whether the message's thread is open beside its room, which marks it there, as Slack does. */
   open?: boolean;
-}
-
-/**
- * What a stored body shows, or null when it can't be shown. `plainText` is the body's, which tells when a
- * message is only the link its preview is of, and a preview can't link to the page's own host.
- */
-function shownBody(body: string, plainText: string): DisplayNode[] | null {
-  try {
-    return displayBody(body, plainText, location.hostname);
-  } catch (error) {
-    console.error("Could not show a message", error);
-    return null;
-  }
 }
 
 /**
@@ -162,13 +153,19 @@ function ReplyContext({ message, thread }: { message: Message; thread?: ThreadPl
   );
 }
 
+interface StandInProps {
+  message: Message;
+  thread?: ThreadPlace;
+  open?: boolean;
+}
+
 /**
- * A message deleted while its thread has replies, which keeps its place for them: no author, time, text,
- * actions or reactions, and its thread's summary under it, outside its thread. A blank square stands in
- * for its avatar, with the space above a run's first message, so it doesn't read as the message before
- * it going on.
+ * A message that keeps its place without showing itself: no author, time, text, actions or reactions,
+ * but what `children` says of it, and its thread's summary under it, outside its thread. A blank square
+ * stands in for its avatar, with the space above a run's first message, so it doesn't read as the
+ * message before it going on.
  */
-function DeletedMessage({ message, thread, open }: { message: Message; thread?: ThreadPlace; open?: boolean }) {
+function StandIn({ message, thread, open, children }: StandInProps & { children: ReactNode }) {
   return (
     <article
       className={cn(
@@ -178,10 +175,40 @@ function DeletedMessage({ message, thread, open }: { message: Message; thread?: 
     >
       <div aria-hidden className="mt-2 size-9 rounded-[6px] bg-border max-md:size-[30px]" />
       <div data-body-content className="col-start-2 min-w-0 py-1">
-        <p className="text-[15px] leading-[22px] text-message-muted">This message was deleted.</p>
+        {children}
         {!thread && message.thread && <ThreadSummary message={message} />}
       </div>
     </article>
+  );
+}
+
+/** A message deleted while its thread has replies, which keeps its place for them. */
+function DeletedMessage(place: StandInProps) {
+  return (
+    <StandIn {...place}>
+      <p className="text-[15px] leading-[22px] text-message-muted">This message was deleted.</p>
+    </StandIn>
+  );
+}
+
+/** What a message from someone you've blocked collapses to. */
+export const BLOCKED_MESSAGE = "Message from someone you blocked";
+
+/**
+ * A message from someone you've blocked, collapsed, as Discord collapses them, to a button that shows it,
+ * so the replies around it still make sense.
+ */
+function BlockedMessage({ onShow, ...place }: StandInProps & { onShow: () => void }) {
+  return (
+    <StandIn {...place}>
+      <button
+        type="button"
+        onClick={onShow}
+        className="cursor-pointer rounded-[4px] text-start text-[15px] leading-[22px] text-message-muted hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground"
+      >
+        {BLOCKED_MESSAGE}
+      </button>
+    </StandIn>
   );
 }
 
@@ -204,7 +231,34 @@ function Author({ user }: { user: User }) {
   );
 }
 
-/** One message: a 36px avatar gutter, author and time, then the body. */
+/**
+ * The line a DM started as someone joined the workspace opens with, as Slack's does: their avatar, name
+ * and when they joined, as a message's header shows them, then that they joined, in muted type. It's no
+ * message, so it has no permalink, actions or reactions.
+ */
+export function JoinedItem({ user, at }: { user: User; at: string }) {
+  const { name } = useAccount();
+  const joined = new Date(at);
+  return (
+    <article className="relative grid grid-cols-[36px_minmax(0,1fr)] gap-x-2 px-5 pt-1 max-md:grid-cols-[30px_minmax(0,1fr)] max-md:gap-x-2.5 max-md:px-3">
+      <AvatarLink user={user} square className="mt-2 size-9 max-md:size-[30px]" />
+      <div className="col-start-2 min-w-0 py-1">
+        <h3 className="flex min-h-[22px] items-baseline gap-2 text-[15px] leading-[22px] max-md:flex-wrap max-md:gap-x-2 max-md:gap-y-0.5">
+          <Author user={user} />
+          <time dateTime={at} title={dateTimeLabel(joined)} className="text-xs leading-[18px] whitespace-nowrap text-message-muted">
+            {timeLabel(joined)}
+          </time>
+        </h3>
+        <p className="text-[15px] leading-[22px] text-message-muted">joined {name}</p>
+      </div>
+    </article>
+  );
+}
+
+/**
+ * One message: a 36px avatar gutter, author and time, then the body. A huddle's message shows its huddle
+ * where its author and its text would be (./huddle-message.tsx).
+ */
 export const MessageItem = memo(function MessageItem({ message, me, threaded: follows, editing: editorOpen, actions, editors, thread, open }: Props) {
   const article = useRef<HTMLElement>(null);
   const menu = useRef<MessageActionsHandle>(null);
@@ -218,6 +272,13 @@ export const MessageItem = memo(function MessageItem({ message, me, threaded: fo
   // The Custom reaction form goes as the editor opens, as the editor replaces the whole message.
   if (customizing && (editing || !actions)) setCustomizing(false);
   const mine = message.creator.id === me.id;
+  // Someone you've blocked's messages collapse until you show them, but for a huddle's, which is the room's.
+  const blocking = useContext(BlockingContext);
+  const openReport = useContext(ReportingContext);
+  const blocked = !mine && blocking.blocked.has(message.creator.id);
+  const [shownAnyway, setShownAnyway] = useState(false);
+  // Blocking them again collapses it again.
+  if (shownAnyway && !blocked) setShownAnyway(false);
   const created = new Date(message.createdAt);
   // Any message that mentions you, yours too, as Campfire's message_formatter.js means to mark them,
   // though it looks for an avatar address that mentions don't have, so it never does.
@@ -233,7 +294,8 @@ export const MessageItem = memo(function MessageItem({ message, me, threaded: fo
   // A reply says where it's from, or where else it went, under its author's name, so it never follows on
   // without one.
   const context = message.parentId !== undefined && (!thread || message.alsoSent) && <ReplyContext message={message} thread={thread} />;
-  const threaded = follows && !context;
+  // A blocked person's message shown says whose it is, as the one before may be collapsed.
+  const threaded = follows && !context && !blocked;
   // Edited messages are marked, as Slack marks them, so readers can tell a message changed.
   const edited = message.editedAt !== null && <span className="text-xs text-message-muted">(edited)</span>;
 
@@ -257,6 +319,7 @@ export const MessageItem = memo(function MessageItem({ message, me, threaded: fo
   );
 
   if (message.deleted) return <DeletedMessage message={message} thread={thread} open={open} />;
+  if (blocked && !shownAnyway && !message.huddle) return <BlockedMessage message={message} thread={thread} open={open} onShow={() => setShownAnyway(true)} />;
   if (shown === null) return <UnrenderableMessage />;
 
   return (
@@ -273,15 +336,23 @@ export const MessageItem = memo(function MessageItem({ message, me, threaded: fo
         // messages in a row don't overlap.
         "touch:min-h-11",
         pending && !upload && "opacity-60",
+        // A huddle that's going on tints its message green, as Slack's does, unless its thread is open beside the room.
+        message.huddle && isLive(message.huddle) && !open && "bg-positive/8 hover:bg-positive/8",
         open && "bg-hover",
       )}
     >
       {/* The avatar sits 8px down, level with the author's name, and 4px below where the editor starts. */}
-      {!threaded && <AvatarLink user={message.creator} square className="mt-2 size-9 max-md:size-[30px]" />}
+      {!threaded && (message.huddle ? <HuddleTile huddle={message.huddle} /> : <AvatarLink user={message.creator} square className="mt-2 size-9 max-md:size-[30px]" />)}
 
-      {editing && (message.attachment || message.cards) ? (
+      {editing && (message.attachment || message.cards || message.huddle) ? (
         <FixedMessageEditor ref={attachEditor} onDelete={() => actions.remove(message.id) && editors.returnFocus()} onClose={() => editors.close(message.id)}>
-          {message.attachment ? <Attachment file={message.attachment} /> : message.body !== "" && <MessageBody nodes={shown} mentions={message.mentions} />}
+          {message.attachment ? (
+            <Attachment file={message.attachment} />
+          ) : message.huddle ? (
+            <HuddleShown huddle={message.huddle} roomId={message.roomId} meId={me.id} />
+          ) : (
+            message.body !== "" && <MessageBody nodes={shown} mentions={message.mentions} />
+          )}
           {message.cards && <BotCards cards={message.cards} />}
         </FixedMessageEditor>
       ) : editing ? (
@@ -311,7 +382,7 @@ export const MessageItem = memo(function MessageItem({ message, me, threaded: fo
             <h3 className="contents text-[15px]">{permalink}</h3>
           ) : (
             <h3 className="flex min-h-[22px] items-baseline gap-2 text-[15px] leading-[22px] max-md:flex-wrap max-md:gap-x-2 max-md:gap-y-0.5 max-md:pr-[22px]">
-              <Author user={message.creator} />
+              {message.huddle ? <HuddleTitle huddle={message.huddle} /> : <Author user={message.creator} />}
               {permalink}
               {edited}
             </h3>
@@ -321,11 +392,14 @@ export const MessageItem = memo(function MessageItem({ message, me, threaded: fo
           {/* A grouped message has no header, so its mark follows the text, or the file a bot replaced. Where
               Message options is 44px, the text stops 32px short of the row's end, clear of it. A file message
               shows its file in place of its text, and its upload's
-              card until the room has it. A bot's cards follow, with no text before them where it sent none. */}
+              card until the room has it, and a huddle's message what it says of its huddle. A bot's cards
+              follow, with no text before them where it sent none. */}
           {upload ? (
             <div className={threaded ? "col-start-1 row-start-1" : "touch:pr-8"}>
               <UploadCard upload={upload} />
             </div>
+          ) : message.huddle ? (
+            <HuddleSummary huddle={message.huddle} roomId={message.roomId} meId={me.id} />
           ) : message.attachment ? (
             <div dir="auto" className={threaded ? "col-start-1 row-start-1" : "touch:pr-8"}>
               <Attachment file={message.attachment} />
@@ -389,6 +463,20 @@ export const MessageItem = memo(function MessageItem({ message, me, threaded: fo
           }}
           // The form opens with its field focused, or, open already, keeps what's written in it and focuses it.
           onNewBoost={() => (customizing ? customField.current?.focus() : setCustomizing(true))}
+          // As the message collapses, the composer takes focus, as it does once a message goes.
+          block={
+            mine || message.huddle
+              ? undefined
+              : {
+                  blocked,
+                  onChange: () => {
+                    void blocking.setBlocked(message.creator, !blocked);
+                    editors.returnFocus();
+                  },
+                }
+          }
+          // The composer takes focus once Report closes.
+          onReport={mine || message.huddle ? undefined : () => openReport({ kind: "message", message }, editors.returnFocus)}
         />
       )}
     </article>

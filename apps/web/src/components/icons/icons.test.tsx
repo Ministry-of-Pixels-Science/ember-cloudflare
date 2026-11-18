@@ -37,11 +37,11 @@ function drawing(svg: Element) {
   return { stroke, shapes: shapes.sort() };
 }
 
-/** The formatting toolbar's stylesheet, from disk, since Vitest imports every stylesheet empty. */
-const toolbarStyles = readFileSync(`${import.meta.dirname}/../workspace/rich-text-editor.css`, "utf8");
+/** The editor's stylesheet, from disk, since Vitest imports every stylesheet empty. */
+const editorStyles = readFileSync(`${import.meta.dirname}/../workspace/rich-text-editor.css`, "utf8");
 
-/** The Iconoir files it paints Lexxy's buttons with. */
-const toolbarFiles = [...toolbarStyles.matchAll(/url\("\.\.\/icons\/iconoir\/([\w/-]+)\.svg"\)/g)].map(([, file]) => file!);
+/** The Iconoir files it paints over Lexxy's icons with. */
+const editorFiles = [...editorStyles.matchAll(/url\("\.\.\/icons\/iconoir\/([\w/-]+)\.svg"\)/g)].map(([, file]) => file!);
 
 /** The icons each error page draws inline: its picture, then its buttons'. */
 const ERROR_PAGES = {
@@ -74,9 +74,9 @@ describe("Ember's icons", () => {
       expect(svg).toHaveAccessibleName("Notifications are off");
     });
 
-    it("paints the formatting toolbar with Iconoir's files", () => {
-      expect(toolbarFiles.length).toBeGreaterThan(0);
-      for (const file of toolbarFiles) expect(files.has(file), `iconoir/ has no ${file}.svg`).toBe(true);
+    it("paints over Lexxy's icons with Iconoir's files", () => {
+      expect(editorFiles.length).toBeGreaterThan(0);
+      for (const file of editorFiles) expect(files.has(file), `iconoir/ has no ${file}.svg`).toBe(true);
     });
 
     it.each(Object.entries(ERROR_PAGES))("draws %s with Iconoir's files, sized by the page", (path, icons) => {
@@ -90,7 +90,7 @@ describe("Ember's icons", () => {
     });
 
     it("bundles only Iconoir's files that Ember draws", () => {
-      const drawn = new Set([...Object.keys(iconoir).map((name) => fileOf.get(name)), ...toolbarFiles, ...Object.values(ERROR_PAGES).flat(), ...Object.values(PUBLIC_COPIES)]);
+      const drawn = new Set([...Object.keys(iconoir).map((name) => fileOf.get(name)), ...editorFiles, ...Object.values(ERROR_PAGES).flat(), ...Object.values(PUBLIC_COPIES)]);
       expect([...files.keys()].filter((file) => !drawn.has(file))).toEqual([]);
     });
   });

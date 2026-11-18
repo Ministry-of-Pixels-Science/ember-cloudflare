@@ -6,7 +6,7 @@ import type { AccountSettings, WorkspaceSettings } from "@ember/protocol";
 import { HUDDLES_FORBIDDEN } from "@ember/protocol/huddles";
 import { AccountContext, useAccount } from "@/hooks/use-account";
 import { ApiError } from "@/lib/api";
-import { CAMERAS_EXPLAINED, CONFIRM_STOP_HUDDLES, HUDDLES_EXPLAINED, HuddlesSettings, HuddleSwitches, SCREENS_EXPLAINED } from "./huddles-settings";
+import { CAMERAS_EXPLAINED, CONFIRM_STOP_HUDDLES, CONFIRM_STOP_RELAY, HuddleRelay, HUDDLES_EXPLAINED, HuddlesSettings, HuddleSwitches, RELAY_EXPLAINED, RELAY_TITLE, SCREENS_EXPLAINED } from "./huddles-settings";
 
 const APP_ID = "2a95132c15732412d22c1476fa83f27a";
 
@@ -56,7 +56,7 @@ describe("Set up huddles", () => {
 
   it("names the SFU app huddles run through, its switch on, with Change keys", async () => {
     serve();
-    const { user, onSetUp } = showCard({ appId: APP_ID });
+    const { user, onSetUp } = showCard({ appId: APP_ID, relayKeyId: null });
     const description = `Huddles run through the Realtime SFU app ${APP_ID} in your Cloudflare account.`;
     expect(card()).toHaveTextContent(description);
     expect(huddlesSwitch()).toBeChecked();
@@ -71,7 +71,7 @@ describe("Set up huddles", () => {
     const answer = held(() => Response.json({ huddles: null }));
     const fetch = serve(answer.answered);
     const sure = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
-    const { user, onStopped } = showCard({ appId: APP_ID });
+    const { user, onStopped } = showCard({ appId: APP_ID, relayKeyId: null });
     await user.click(huddlesSwitch());
     expect(sure).toHaveBeenCalledWith(CONFIRM_STOP_HUDDLES);
     expect(fetch).not.toHaveBeenCalled();
@@ -90,12 +90,108 @@ describe("Set up huddles", () => {
   it("leaves turning it off that failed to the page's alerts, its switch back on", async () => {
     serve(() => Response.json({ error: HUDDLES_FORBIDDEN }, { status: 403 }));
     vi.spyOn(window, "confirm").mockReturnValue(true);
-    const { user, onStopped, onFailed } = showCard({ appId: APP_ID });
+    const { user, onStopped, onFailed } = showCard({ appId: APP_ID, relayKeyId: null });
     await user.click(huddlesSwitch());
     await waitFor(() => expect(onFailed).toHaveBeenCalledWith(new ApiError(403, HUDDLES_FORBIDDEN)));
     expect(onStopped).not.toHaveBeenCalled();
     expect(huddlesSwitch()).toBeChecked();
     expect(huddlesSwitch()).toBeEnabled();
+  });
+});
+
+describe("Huddles' relay", () => {
+  /** A TURN key's ID, as the card names the key the relay goes by. */
+  const KEY_ID = "5b1e9a0c7d3f4e2a8b6c1d0e9f7a3b5c";
+  /** Huddles as they are once the relay is taken away. */
+  const unrelayed = { appId: APP_ID, relayKeyId: null };
+
+  /** Answers taking the relay away as the server would, or as `stopped` says. */
+  function serveRelay(stopped: () => Response | Promise<Response> = () => Response.json({ huddles: unrelayed })) {
+    return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (`${init?.method} ${String(input)}` === "DELETE /api/account/huddles/relay") return stopped();
+      throw new Error(`Unexpected request for ${init?.method} ${String(input)}`);
+    });
+  }
+
+  /** The relay's card, for a workspace whose relay goes by the TURN key `relayKeyId`, if it has one. */
+  function showRelay(relayKeyId: string | null) {
+    const callbacks = { onSetUp: vi.fn(), onStopped: vi.fn(), onFailed: vi.fn() };
+    render(<HuddleRelay relayKeyId={relayKeyId} {...callbacks} />);
+    return { ...callbacks, user: userEvent.setup() };
+  }
+
+  const relayCard = () => screen.getByRole("region", { name: RELAY_TITLE });
+  const relaySwitch = () => within(relayCard()).getByRole("switch", { name: RELAY_TITLE });
+  const named = `People whose network blocks huddles connect through Cloudflare's TURN service, by the TURN key ${KEY_ID} in your Cloudflare account.`;
+
+  it("says what a relay is for while its switch is off, which turning on opens Set up the relay", async () => {
+    serveRelay();
+    const { user, onSetUp } = showRelay(null);
+    expect(RELAY_TITLE).toBe("Relay for strict networks");
+    expect(relayCard()).toHaveTextContent(RELAY_EXPLAINED);
+    expect(RELAY_EXPLAINED).toMatch(/^Some networks, like an office's or a hotel's, block the way huddles connect\./);
+    expect(within(relayCard()).getByRole("heading", { level: 2, name: RELAY_TITLE })).toBeVisible();
+    expect(relaySwitch()).not.toBeChecked();
+    expect(relaySwitch()).toHaveAccessibleDescription(RELAY_EXPLAINED);
+    expect(within(relayCard()).queryAllByRole("button")).toEqual([]);
+    await user.click(relaySwitch());
+    expect(onSetUp).toHaveBeenCalledOnce();
+    // It stays off until the TURN key is given.
+    expect(relaySwitch()).not.toBeChecked();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("names the TURN key the relay goes by, its switch on, with Change key", async () => {
+    serveRelay();
+    const { user, onSetUp } = showRelay(KEY_ID);
+    expect(relayCard()).toHaveTextContent(named);
+    expect(relayCard()).not.toHaveTextContent(RELAY_EXPLAINED);
+    expect(relaySwitch()).toBeChecked();
+    expect(relaySwitch()).toBeEnabled();
+    expect(relaySwitch()).toHaveAccessibleDescription(named);
+    expect(within(relayCard()).getAllByRole("button").map((button) => button.textContent)).toEqual(["Change key"]);
+    await user.click(screen.getByRole("button", { name: "Change key" }));
+    expect(onSetUp).toHaveBeenCalledOnce();
+  });
+
+  it("forgets the TURN key once the administrator confirms turning its switch off, and shows huddles as they are then", async () => {
+    const answer = held(() => Response.json({ huddles: unrelayed }));
+    const fetch = serveRelay(answer.answered);
+    const sure = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
+    const { user, onStopped, onSetUp } = showRelay(KEY_ID);
+    await user.click(relaySwitch());
+    expect(sure).toHaveBeenCalledWith(CONFIRM_STOP_RELAY);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(relaySwitch()).toBeChecked();
+
+    await user.click(relaySwitch());
+    expect(fetch).toHaveBeenCalledWith("/api/account/huddles/relay", expect.objectContaining({ method: "DELETE" }));
+    expect(relaySwitch()).not.toBeChecked();
+    expect(relaySwitch()).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Change key" })).toBeDisabled();
+    await answer.answer();
+    expect(onStopped).toHaveBeenCalledExactlyOnceWith(unrelayed);
+    expect(relaySwitch()).toBeEnabled();
+    expect(onSetUp).not.toHaveBeenCalled();
+  });
+
+  it("shows huddles off where they were turned off while the relay was being taken away", async () => {
+    serveRelay(() => Response.json({ huddles: null }));
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const { user, onStopped } = showRelay(KEY_ID);
+    await user.click(relaySwitch());
+    await waitFor(() => expect(onStopped).toHaveBeenCalledExactlyOnceWith(null));
+  });
+
+  it("leaves taking it away that failed to the page's alerts, its switch back on", async () => {
+    serveRelay(() => Response.json({ error: HUDDLES_FORBIDDEN }, { status: 403 }));
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const { user, onStopped, onFailed } = showRelay(KEY_ID);
+    await user.click(relaySwitch());
+    await waitFor(() => expect(onFailed).toHaveBeenCalledWith(new ApiError(403, HUDDLES_FORBIDDEN)));
+    expect(onStopped).not.toHaveBeenCalled();
+    expect(relaySwitch()).toBeChecked();
+    expect(relaySwitch()).toBeEnabled();
   });
 });
 

@@ -1,7 +1,7 @@
 import { INVITATION_GONE, type WorkspaceSettings } from "@ember/protocol";
 import type { APIRequestContext, Browser, Page } from "@playwright/test";
 import { expect, test } from "../../fixtures";
-import { ADMINISTRATOR, administratorSession, cookieHeader, SAME_ORIGIN, sentFrom, signInAsAdministrator, useOwnAddress } from "../../fixtures";
+import { ADMINISTRATOR, administratorSession, allowClipboard, cookieHeader, SAME_ORIGIN, sentFrom, signInAsAdministrator, useOwnAddress } from "../../fixtures";
 import { forgetResendKey, giveResendKey, startFakeResend, type FakeResend, type SentEmail } from "./fake-resend";
 
 // Membership's Invite by email card, and the page an invitation's link opens, on the second test server,
@@ -143,7 +143,7 @@ test.describe("Invite people by email", () => {
     const row = card.getByRole("region", { name: "Pending invitations" }).getByRole("listitem").filter({ hasText: hal });
     await expect(row).toContainText(`Not emailed · Invited by ${ADMINISTRATOR.name} · Expires `);
 
-    await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await allowClipboard(page.context());
     await row.getByRole("button", { name: `Copy the invite link for ${hal}` }).click();
     const link = await page.evaluate(() => navigator.clipboard.readText());
     expect(link).toMatch(new RegExp(`^${baseURL}/join/invitation#token=[\\w-]{43}$`));

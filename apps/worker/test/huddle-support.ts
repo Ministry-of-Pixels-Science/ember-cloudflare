@@ -1,5 +1,5 @@
 import type { NewWorkspace, RoomId, UserId } from "@ember/protocol";
-import { huddleSocketQuery, type HuddleClientFrame, type HuddleServerFrame, type HuddleSocketParams } from "@ember/protocol/huddles";
+import { huddleSocketQuery, type HuddleClientFrame, type HuddleIceServer, type HuddleServerFrame, type HuddleSocketParams } from "@ember/protocol/huddles";
 import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { expect, vi } from "vitest";
 import { ADDRESS_HEADER, AUTHORIZED_AT_HEADER, BANNED_HEADER, HUDDLE_HEADER, ROOM_HEADER, SESSION_HEADER, USER_HEADER } from "../src/chat-room";
@@ -12,8 +12,52 @@ export const OTHER_APP = { appId: "f".repeat(32), appSecret: "0123456789abcdef".
 
 const SECRETS = new Map([APP, OTHER_APP].map(({ appId, appSecret }) => [appId, appSecret]));
 
-/** Where Cloudflare's Realtime SFU answers. */
+/** A TURN key, as an administrator copies it from Cloudflare's dashboard. */
+export const RELAY = { keyId: "5b1e9a0c7d3f4e2a8b6c1d0e9f7a3b5c", apiToken: "9f3c5a7e1b2d4f6a8c0e2b4d6f8a1c3e5b7d9f0a2c4e6b8d0f1a3c5e7b9d2f4a" };
+/** Another. */
+export const OTHER_RELAY = { keyId: "e".repeat(32), apiToken: "0f1e2d3c4b5a6978".repeat(4) };
+
+const TOKENS = new Map([RELAY, OTHER_RELAY].map(({ keyId, apiToken }) => [keyId, apiToken]));
+
+/** Where Cloudflare's Realtime SFU answers, and its TURN service beside it. */
 const SFU = "https://rtc.live.cloudflare.com";
+
+/** Where the TURN service is asked for a relay's servers, by a TURN key's ID. */
+const RELAY_SERVERS = /^\/v1(\/turn\/keys\/([^/]+)\/credentials\/generate-ice-servers)$/;
+
+/**
+ * The servers a tab's connections go by as Cloudflare's TURN service answers them
+ * (https://developers.cloudflare.com/realtime/turn/generate-credentials/), with the name and the
+ * credential it made the `nth` time it was asked, and with the addresses on port 53, which it says
+ * browsers won't connect to.
+ */
+export const relayServersMade = (nth = 1) => ({
+  iceServers: [
+    { urls: ["stun:stun.cloudflare.com:3478", "stun:stun.cloudflare.com:53"] },
+    {
+      urls: [
+        "turn:turn.cloudflare.com:3478?transport=udp",
+        "turn:turn.cloudflare.com:53?transport=udp",
+        "turn:turn.cloudflare.com:3478?transport=tcp",
+        "turn:turn.cloudflare.com:80?transport=tcp",
+        "turns:turn.cloudflare.com:5349?transport=tcp",
+        "turns:turn.cloudflare.com:443?transport=tcp",
+      ],
+      username: `the relay's name ${nth}`,
+      credential: `the relay's credential ${nth}`,
+    },
+  ],
+});
+
+/** Those servers as a tab is welcomed with them: without the addresses browsers won't connect to. */
+export const relayServersGiven = (nth = 1): HuddleIceServer[] => [
+  { urls: ["stun:stun.cloudflare.com:3478"] },
+  {
+    urls: ["turn:turn.cloudflare.com:3478?transport=udp", "turn:turn.cloudflare.com:3478?transport=tcp", "turn:turn.cloudflare.com:80?transport=tcp", "turns:turn.cloudflare.com:5349?transport=tcp", "turns:turn.cloudflare.com:443?transport=tcp"],
+    username: `the relay's name ${nth}`,
+    credential: `the relay's credential ${nth}`,
+  },
+];
 
 /** A request the stand-in SFU was sent. */
 export interface AskedOfSfu {
@@ -26,10 +70,11 @@ export interface AskedOfSfu {
   body: unknown;
 }
 
-/** A track a session pulls: the session that publishes it, and its name there. */
+/** A track a session pulls: the session that publishes it, its name there, and the size of it the session was last sent, by its RID, if it asked for one. */
 interface Pulled {
   sessionId: string;
   trackName: string;
+  rid?: string;
 }
 
 /** A session the stand-in started, with what it carries now. */
@@ -53,45 +98,79 @@ const refused = (status: number, errorCode: string) => Response.json({ errorCode
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
 
+/** The size a session asks to be sent of a track it pulls, by its RID, or undefined when it asks for none. */
+const ridAsked = ({ simulcast }: Record<string, unknown>): string | undefined => (isRecord(simulcast) && typeof simulcast.preferredRid === "string" ? simulcast.preferredRid : undefined);
+
 /**
  * Stands in for Cloudflare's Realtime SFU as far as huddles ask it, by its HTTPS API: it starts
- * sessions, takes what one publishes, offers a session what others publish and takes its answer, and
- * closes tracks, refusing what the SFU refuses: an app or a secret it doesn't know, a session it never
- * started, a track nobody publishes, and anything asked of a session whose offer is still unanswered.
- * It keeps what it was asked, and never sees a session description beyond passing it on.
+ * sessions, takes what one publishes, offers a session what others publish and takes its answer, sends
+ * a track in another of its sizes, and closes tracks, refusing what the SFU refuses: an app or a secret
+ * it doesn't know, a session it never started, a track nobody publishes, and anything asked of a
+ * session whose offer is still unanswered. It keeps what it was asked, and passes a session
+ * description on as it is, but for an offer's word that it sends a track in several sizes, which its
+ * answer says it takes.
+ *
+ * It stands in for Cloudflare's TURN service as well, which makes a relay's servers for a TURN key,
+ * refusing a key it doesn't know and a token that isn't the key's.
  */
 export function standInSfu() {
   const asked: AskedOfSfu[] = [];
+  /** What was asked for each relay's servers, with the TURN key it was asked by, in order. */
+  const relayAsked: Array<{ keyId: string; body: unknown }> = [];
+  /** How many relays' servers it has made. */
+  let relaysMade = 0;
   const sessions = new Map<string, StandInSession>();
-  const instead: Array<{ path: RegExp; answer: (request: AskedOfSfu) => Response | Promise<Response> }> = [];
+  const instead: Array<{ path: RegExp; answer: (otherwise: () => Response) => Response | Promise<Response> }> = [];
   /** The sessions that have published, in the order they first did. */
   const publishers: string[] = [];
   let offers = 0;
+  /** Whether it takes a track in one size, whatever the offer sends. */
+  let oneSize = false;
+  /** The sessions whose tracks it sends in no size asked for, only to whoever asks for none. */
+  const unsized = new Set<string>();
 
   function publish(sessionId: string, session: StandInSession, body: Record<string, unknown>, tracks: Array<Record<string, unknown>>): Response {
     const offer = isRecord(body.sessionDescription) && body.sessionDescription.type === "offer" ? body.sessionDescription.sdp : null;
     if (typeof offer !== "string") return refused(400, "invalid_params");
     for (const { mid, trackName } of tracks) session.published.set(String(mid), String(trackName));
     if (!publishers.includes(sessionId)) publishers.push(sessionId);
+    // As an answer does, it says of the sizes an offer sends that it takes them, or says nothing of sizes.
+    const sdp = oneSize ? offer.replaceAll(/^a=simulcast:.*\r\n/gm, "") : offer.replaceAll("a=simulcast:send ", "a=simulcast:recv ");
     return Response.json({
       requiresImmediateRenegotiation: false,
-      sessionDescription: { type: "answer", sdp: `answer to ${offer}` },
+      sessionDescription: { type: "answer", sdp: `answer to ${sdp}` },
       tracks: tracks.map(({ mid, trackName }) => ({ mid, trackName })),
     });
   }
 
   function pull(session: StandInSession, tracks: Array<Record<string, unknown>>): Response {
-    const results = tracks.map(({ sessionId, trackName }) => {
+    const results = tracks.map((track) => {
+      const { sessionId, trackName } = track;
       const published = [...(sessions.get(String(sessionId))?.published.values() ?? [])].includes(String(trackName));
       if (!published) return { sessionId, trackName, errorCode: "not_found_track_error", errorDescription: "Track not found" };
+      const rid = ridAsked(track);
+      if (rid !== undefined && unsized.has(String(sessionId))) return { sessionId, trackName, errorCode: "invalid_params", errorDescription: "No such size" };
       // A session numbers its own media sections, so two sessions carry different tracks in sections of one name.
       const mid = String(session.offered++);
-      session.pulled.set(mid, { sessionId: String(sessionId), trackName: String(trackName) });
+      session.pulled.set(mid, { sessionId: String(sessionId), trackName: String(trackName), ...(rid !== undefined && { rid }) });
       return { sessionId, trackName, mid };
     });
     if (results.every((result) => "errorCode" in result)) return Response.json({ requiresImmediateRenegotiation: false, tracks: results });
     session.offering = true;
     return Response.json({ requiresImmediateRenegotiation: true, sessionDescription: { type: "offer", sdp: `offer ${++offers}` }, tracks: results });
+  }
+
+  /** Sends a session the tracks it pulls in the sizes it now asks for, each of which it names by its media section and by what it carries. */
+  function resize(session: StandInSession, tracks: Array<Record<string, unknown>>): Response {
+    const results = tracks.map((track) => {
+      const { mid, sessionId, trackName } = track;
+      const pulled = session.pulled.get(String(mid));
+      const rid = ridAsked(track);
+      if (!pulled || pulled.sessionId !== sessionId || pulled.trackName !== trackName || rid === undefined) return { mid, sessionId, trackName, errorCode: "update_track_error", errorDescription: "Track can't be updated" };
+      pulled.rid = rid;
+      return { mid, sessionId, trackName };
+    });
+    return Response.json({ requiresImmediateRenegotiation: false, tracks: results });
   }
 
   function close(session: StandInSession, body: Record<string, unknown>): Response {
@@ -132,12 +211,32 @@ export function standInSfu() {
       if (tracks.every(({ location }) => location === "local")) return publish(sessionId, session, body, tracks);
       if (tracks.every(({ location }) => location === "remote")) return pull(session, tracks);
     }
+    if (method === "PUT" && what === "/tracks/update" && Array.isArray(body.tracks)) {
+      const tracks = (body.tracks as unknown[]).filter(isRecord);
+      if (tracks.length > 0 && tracks.length <= 64 && tracks.every(({ location }) => location === "remote")) return resize(session, tracks);
+    }
     return refused(400, "invalid_params");
+  }
+
+  /** What a test had it answer the next request whose address ends as `path` does, or else what it would `otherwise`. */
+  function answered(path: string, otherwise: () => Response): Response | Promise<Response> {
+    const index = instead.findIndex((one) => one.path.test(path));
+    return index >= 0 ? instead.splice(index, 1)[0]!.answer(otherwise) : otherwise();
+  }
+
+  /** Makes a relay's servers for the TURN key `keyId`, as `request` asks. */
+  async function relay(request: Request, path: string, keyId: string): Promise<Response> {
+    relayAsked.push({ keyId, body: JSON.parse(await request.text()) as unknown });
+    if (!TOKENS.has(keyId)) return new Response(null, { status: 404 });
+    if (request.method !== "POST" || request.headers.get("Authorization") !== `Bearer ${TOKENS.get(keyId)}`) return new Response(null, { status: 401 });
+    return answered(path, () => Response.json(relayServersMade(++relaysMade), { status: 201 }));
   }
 
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const request = new Request(input, init);
     const url = new URL(request.url);
+    const [, relayPath, keyId] = RELAY_SERVERS.exec(url.pathname) ?? [];
+    if (url.origin === SFU && relayPath !== undefined && keyId !== undefined) return relay(request, relayPath, keyId);
     const [, appId, path] = /^\/v1\/apps\/([^/]+)(\/.*)$/.exec(url.pathname) ?? [];
     if (url.origin !== SFU || appId === undefined || path === undefined) throw new Error(`Not a request for the Realtime SFU: ${request.method} ${request.url}`);
     const text = await request.text();
@@ -145,8 +244,7 @@ export function standInSfu() {
     asked.push(sent);
     if (!SECRETS.has(appId)) return refused(404, "not_found");
     if (request.headers.get("Authorization") !== `Bearer ${SECRETS.get(appId)}`) return refused(401, "unauthorized");
-    const index = instead.findIndex((one) => one.path.test(path));
-    return index >= 0 ? instead.splice(index, 1)[0]!.answer(sent) : answer(sent);
+    return answered(path, () => answer(sent));
   });
 
   /** Everything asked of the SFU whose address ends as `path` does, in order. */
@@ -155,20 +253,25 @@ export function standInSfu() {
   return {
     asked,
     askedTo,
+    relayAsked,
     sessions,
     publishers,
-    /** Has the SFU answer the next request whose address ends as `path` does with `answer`, doing nothing of what's asked. */
+    /** Has the SFU take every track in one size from now, whatever sizes its offer sends, as an SFU that takes no more does. */
+    takeOneSize: () => void (oneSize = true),
+    /** Has the SFU refuse to send what session `id` publishes in any size asked for, from now: it sends it to whoever asks for no size. */
+    refuseSizesOf: (id: string) => void unsized.add(id),
+    /** Has the SFU, or the TURN service, answer the next request whose address ends as `path` does with `answer`, doing nothing of what's asked. */
     answerInstead: (path: RegExp, answer: () => Response | Promise<Response>) => void instead.push({ path, answer }),
     /** Has the SFU refuse the next such request, with a status and an error code. */
     refuse: (path: RegExp, status = 500, errorCode = "internal_error") => void instead.push({ path, answer: () => refused(status, errorCode) }),
     /**
-     * Has the SFU hold its answer to the next such request, which it then answers as it would have,
-     * until the function this answers is called.
+     * Has the SFU, or the TURN service, hold its answer to the next such request, which it then answers
+     * as it would have, until the function this answers is called.
      */
     hold(path: RegExp): () => void {
       let release!: () => void;
       const held = new Promise<void>((resolve) => (release = resolve));
-      instead.push({ path, answer: async (request) => (await held, answer(request)) });
+      instead.push({ path, answer: async (otherwise) => (await held, otherwise()) });
       return release;
     },
   };
@@ -266,19 +369,25 @@ export const publishCamera = (client: HuddleSocket, sdp = "a camera's offer") =>
 /** Publishes the screen `client` shares, as `publishShown` does. */
 export const publishScreen = (client: HuddleSocket, sdp = "a screen's offer") => publishShown(client, "screen", sdp);
 
+/** Has `client` ask what `asking` does, and answer the offer it's made, which this answers: null when it's made none. */
+async function offeredFor(client: HuddleSocket, asking: Extract<HuddleClientFrame, { type: "huddle.listen" }>) {
+  client.send(asking);
+  const offer = await client.next("huddle.offer", "huddle.listening");
+  if (offer.type === "huddle.listening") return null;
+  client.send({ type: "huddle.answer", kind: asking.kind, sdp: `answer to ${offer.sdp}` });
+  await client.next("huddle.listening");
+  return offer;
+}
+
 /**
  * Has `client` ask to watch the cameras of `people`, or their screens if `kind` says so, and nobody
  * else's, on a `fresh` connection if said, and answer the offer it's made, which this answers: null when
  * it's made none.
  */
-export async function watch(client: HuddleSocket, people: UserId[], fresh = false, kind: "video" | "screen" = "video") {
-  client.send({ type: "huddle.listen", kind, watch: people, ...(fresh && { fresh: true }) });
-  const offer = await client.next("huddle.offer", "huddle.listening");
-  if (offer.type === "huddle.listening") return null;
-  client.send({ type: "huddle.answer", kind, sdp: `answer to ${offer.sdp}` });
-  await client.next("huddle.listening");
-  return offer;
-}
+export const watch = (client: HuddleSocket, people: UserId[], fresh = false, kind: "video" | "screen" = "video") => offeredFor(client, { type: "huddle.listen", kind, watch: people, ...(fresh && { fresh: true as const }) });
+
+/** Has `client` ask to watch the cameras of `people` as a tab that shows cameras small does, and answer as `watch` does. */
+export const watchSmall = (client: HuddleSocket, people: UserId[], fresh = false) => offeredFor(client, { type: "huddle.listen", kind: "video", watch: people, small: true, ...(fresh && { fresh: true as const }) });
 
 const founder = { name: "Ada Lovelace", emailAddress: "ada@example.com", password: "analytical engine" };
 
@@ -292,6 +401,18 @@ export async function setUp(): Promise<Session> {
 /** Gives Ember `app`'s keys as `administrator`, as Set up huddles does. */
 export async function giveKeys(administrator: Session, app = APP): Promise<void> {
   const response = await api("/api/account/huddles", { method: "PUT", headers: { Cookie: administrator.cookie }, body: JSON.stringify(app) });
+  expect(response.status, await response.clone().text()).toBe(200);
+}
+
+/** Gives huddles a relay by the TURN key `key` as `administrator`, as Set up the relay does. */
+export async function giveRelay(administrator: Session, key = RELAY): Promise<void> {
+  const response = await api("/api/account/huddles/relay", { method: "PUT", headers: { Cookie: administrator.cookie }, body: JSON.stringify(key) });
+  expect(response.status, await response.clone().text()).toBe(200);
+}
+
+/** Takes huddles' relay away as `administrator`, as its switch on the Huddles tab does. */
+export async function takeRelayAway(administrator: Session): Promise<void> {
+  const response = await api("/api/account/huddles/relay", { method: "DELETE", headers: { Cookie: administrator.cookie } });
   expect(response.status, await response.clone().text()).toBe(200);
 }
 

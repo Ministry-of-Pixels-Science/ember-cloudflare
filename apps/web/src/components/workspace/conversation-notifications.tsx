@@ -5,7 +5,7 @@ import { useNameOf } from "@/hooks/use-directory";
 import { roomPath } from "@/hooks/use-route";
 import { roomName } from "@/lib/directs";
 import { isHidden, profileOrder } from "@/lib/involvement";
-import type { RoomAnswer } from "@/lib/room-list";
+import { isQuietWelcome, type RoomAnswer } from "@/lib/room-list";
 import { cn } from "@/lib/utils";
 import { InvolvementButton } from "./involvement-button";
 import { ROUND_BUTTON } from "./link-buttons";
@@ -31,11 +31,12 @@ interface Props {
  * Conversation notifications on your profile:
  * your rooms, then your DMs, with a rule between them, each a link to it in a pill, then a dashed line and
  * its bell, which goes round your levels there. A room you've hidden is listed too, dimmed, as Campfire's
- * `.membership-item:has(.btn.invisible)` is (base.css), for you to show it again.
+ * `.membership-item:has(.btn.invisible)` is (base.css), for you to show it again, but not the DMs that
+ * welcomed you as you joined that nobody has written in yet, which your sidebar leaves out too.
  */
 export function ConversationNotifications({ me, rooms, askForRoom, onFailed }: Props) {
   const nameOf = useNameOf();
-  const { shared, directs } = useMemo(() => profileOrder(rooms), [rooms]);
+  const { shared, directs } = useMemo(() => profileOrder(rooms.filter((room) => !isQuietWelcome(room, me.id))), [rooms, me.id]);
 
   const row = (room: SidebarRoom) => (
     <li key={room.id} className={cn("flex min-w-0 items-center gap-x-[1ch]", isHidden(room) && "opacity-50")}>

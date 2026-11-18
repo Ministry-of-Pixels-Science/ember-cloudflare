@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { MAX_ATTRIBUTES, MAX_REOPENED_ELEMENTS, ParseLimitError } from "./markup";
+import { forOneReading, MAX_ATTRIBUTES, MAX_COPIED_ATTRIBUTES_LENGTH, MAX_REOPENED_ELEMENTS, ParseLimitError } from "./markup";
 import { parseHtml } from "./parse";
 import { toHtml } from "./serialize";
 
 const roundTrip = (markup: string) => toHtml(parseHtml(markup));
 
-const failure = (markup: string) => {
+const failure = (markup: string, parse = parseHtml) => {
   try {
-    parseHtml(markup);
+    parse(markup);
     return undefined;
   } catch (error) {
     if (error instanceof ParseLimitError) return error.limit;
@@ -17,6 +17,12 @@ const failure = (markup: string) => {
 
 const numberedAttributes = (from: number, to: number) =>
   Array.from({ length: to - from + 1 }, (_, i) => `a${from + i}=${from + i}`).join(" ");
+
+/** A title that serializes to `length` units, the space before it included. */
+const titleOf = (length: number) => `title="${"x".repeat(length - ' title=""'.length)}"`;
+
+/** A `<b>` with `attributes` that the first paragraph leaves open, reopened in each of `copies` more. */
+const reopening = (attributes: string, copies: number) => `<p><b ${attributes}>x</p>${"<p>x</p>".repeat(copies)}`;
 
 // The answers come from Nokogiri 1.19.4.
 describe("Rich text, safely", () => {
@@ -100,6 +106,48 @@ describe("Rich text, safely", () => {
     const paragraphs = (n: number) => `<p><b><i><u>x</p>${"<p>x</p>".repeat(n)}`;
     expect(failure(paragraphs(333))).toBeUndefined();
     expect(failure(paragraphs(334))).toBe("reopened");
+  });
+
+  it("limits the attributes a parse copies with its formatting elements, which Gumbo doesn't", () => {
+    expect(MAX_COPIED_ATTRIBUTES_LENGTH).toBe(100_000);
+    expect(failure(reopening(titleOf(1_000), 100))).toBeUndefined();
+    expect(failure(reopening(titleOf(1_000), 101))).toBe("copied");
+    // One copy each: of an element reopened, of one the adoption agency closes around a block, and of
+    // a formatting element between the two
+    const copiedOnce = [
+      (attributes: string) => `<p><b ${attributes}>x<p>x`,
+      (attributes: string) => `<b ${attributes}><div></b>`,
+      (attributes: string) => `<b><i ${attributes}><div></b>`,
+    ];
+    for (const markup of copiedOnce) {
+      expect(roundTrip(markup("title=x")).split('title="x"').length - 1, markup("title=x")).toBe(2);
+      expect(failure(markup(titleOf(100_000)))).toBeUndefined();
+      expect(failure(markup(titleOf(100_001)))).toBe("copied");
+    }
+    // Each end tag has the adoption agency close another <b> around the block, and copy the <i> again
+    const unclosed = Array.from({ length: 300 }, (_, i) => `<b id=${i}>`).join("");
+    const copiedByEach = (attributes: string) => `${unclosed}<i ${attributes}><div>${"</b>".repeat(300)}`;
+    expect(roundTrip(copiedByEach("title=x")).split('title="x"').length - 1).toBe(301);
+    expect(failure(copiedByEach(titleOf(1_000)))).toBe("copied");
+  });
+
+  it("counts copied attributes as the stored form writes them", () => {
+    // Five characters that serialize to 25, each escaped
+    const escaped = `title='${'"&\u00A0<>'.repeat(39)}${"x".repeat(16)}'`;
+    expect(toHtml(parseHtml(`<b ${escaped}>`), { escapeAttributeBrackets: true })).toHaveLength("<b></b>".length + 1_000);
+    expect(failure(reopening(escaped, 100))).toBeUndefined();
+    expect(failure(reopening(escaped, 101))).toBe("copied");
+  });
+
+  it("counts what the parses of one reading copy together", () => {
+    const read = forOneReading(parseHtml);
+    expect(failure(reopening(titleOf(1_000), 60), read)).toBeUndefined();
+    expect(failure(reopening(titleOf(1_000), 40), read)).toBeUndefined();
+    expect(failure(reopening(titleOf(1_000), 1), read)).toBe("copied");
+    // Another reading counts apart, as does each parse outside one
+    expect(failure(reopening(titleOf(1_000), 100), forOneReading(read))).toBeUndefined();
+    expect(failure(reopening(titleOf(1_000), 100))).toBeUndefined();
+    expect(failure(reopening(titleOf(1_000), 100))).toBeUndefined();
   });
 
   it("keeps what the tokenizer already deduplicated", () => {

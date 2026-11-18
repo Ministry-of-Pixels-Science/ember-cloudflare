@@ -60,22 +60,25 @@ test.describe("New direct message dialog", () => {
 });
 
 test.describe("DMs in the sidebar", () => {
-  test("the DMs fit under their heading, a long name and all, and are easy to tap", async ({ page, room, session, screenIsFine }) => {
-    // This test's room, and a DM with someone made up, whose row is all that's looked at.
+  test("the DMs fit under their heading, a long name, a count of unread messages and all, and are easy to tap", async ({ page, room, session, screenIsFine }) => {
+    // This test's room, and a DM with someone made up, whose row is all that's looked at, away, with messages unread.
     const direct: SidebarRoom = {
       id: `${room.id}-direct`,
       kind: "direct",
       members: [session.user, { id: `${session.user.id}-grace`, name: "Grace Brewster Murray Hopper, Rear Admiral" }],
       activeAt: new Date().toISOString(),
-      unread: false,
+      unread: true,
+      unreadSince: new Date().toISOString(),
+      unreadCount: 120,
       involvement: "everything",
     };
     await page.route("**/api/sidebar", (route) =>
-      route.fulfill({ json: { rooms: [{ ...room, kind: "open", icon: null, unread: false, involvement: "mentions" }, direct], favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: {} } satisfies Sidebar }),
+      route.fulfill({ json: { rooms: [{ ...room, kind: "open", icon: null, unread: false, involvement: "mentions" }, direct], favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: {}, blocks: { userIds: [], version: 0 } } satisfies Sidebar }),
     );
     await openRoom(page, room);
     if (hasDrawerLayout(page)) await page.getByRole("button", { name: "Open conversations" }).tap();
-    await expect(page.getByRole("region", { name: "DMs" }).getByRole("link", { name: /^Direct message with / })).toBeVisible();
+    const row = page.getByRole("region", { name: "DMs" }).getByRole("link", { name: /^Direct message with / });
+    await expect(row).toHaveAccessibleDescription("Away 120 unread messages");
     await settle(page);
     await screenIsFine();
   });

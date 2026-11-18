@@ -1,16 +1,18 @@
 import { useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
-import type { LiveHuddle, Me, SharedRoom } from "@ember/protocol";
-import { CAMERAS_OFF } from "@ember/protocol/huddles";
+import type { LiveHuddle, Me, Room } from "@ember/protocol";
+import { CAMERAS_OFF, MAX_HUDDLE_INVITED } from "@ember/protocol/huddles";
 import { Field } from "@/components/field";
 import { Microphone, MicrophoneMute, VideoCamera, VideoCameraOff, Xmark } from "@/components/icons/iconoir";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { useCamerasAllowed } from "@/hooks/use-account";
-import { PeopleContext } from "@/hooks/use-directory";
+import { PeopleContext, useNameOf } from "@/hooks/use-directory";
 import { useHuddle } from "@/hooks/use-huddle";
+import { roomName } from "@/lib/directs";
 import { joinHuddle } from "@/lib/huddle";
-import { cameraOf, closeDevice, listDevices, microphoneOf, NO_CAMERA, NO_DEVICES, openCamera, openMicrophone, rememberDevice, rememberedDevice, watchDevices } from "@/lib/huddle-devices";
-import { inItNow } from "@/lib/huddle-people";
+import { cameraOf, closeDevice, facesAway, listDevices, microphoneOf, NO_CAMERA, NO_DEVICES, openCamera, openMicrophone, rememberDevice, rememberedDevice, speakerChoices, watchDevices, withOpen } from "@/lib/huddle-devices";
+import { huddledWith, huddlePlace, inItNow, invitedOnceItStarts } from "@/lib/huddle-people";
 import { cn } from "@/lib/utils";
+import { useJoinsNoHuddle } from "./huddle-button";
 import { HuddlePicture } from "./huddle-picture";
 import { SELECT } from "./model-picker";
 import { DIALOG, DIALOG_BACKDROP, DIALOG_CLOSE, DIALOG_TITLE, MAIN_ACTION, OTHER_ACTION } from "./unsaved-changes";
@@ -158,11 +160,6 @@ function usePreviewCamera(opened: () => void, allowed: boolean) {
   return { stream, refused, takenDown, turnOn, turnOff, take };
 }
 
-/** The devices to choose among, led by the one that's open where the browser's list leaves it out. */
-function withOpen(listed: MediaDeviceInfo[], deviceId: string, open: MediaStreamTrack | undefined): Pick<MediaDeviceInfo, "deviceId" | "label">[] {
-  return listed.some((device) => device.deviceId === deviceId) ? listed : [{ deviceId, label: open?.label ?? "" }, ...listed];
-}
-
 interface SwitchProps {
   label: string;
   /** Whether what it switches is on, which fills it. */
@@ -191,10 +188,10 @@ function PreviewSwitch({ label, on, disabled, onClick, children }: SwitchProps) 
 }
 
 /** Keeps a button's words on one line beside the other button, on a phone 320px wide too. */
-const ON_ONE_LINE = "whitespace-nowrap upto-480px:px-4";
+export const ON_ONE_LINE = "whitespace-nowrap upto-480px:px-4";
 
 interface Props {
-  room: SharedRoom;
+  room: Room;
   me: Me;
   /** The huddle going on in the room, as the sidebar last heard, if one is. */
   live: LiveHuddle | undefined;
@@ -207,10 +204,13 @@ interface Props {
  * and be seen through, then Cancel and Start Huddle or Join Huddle. Opening it asks the browser for the
  * microphone, so the huddle starts with it open, or listening only when there's none. The camera stays
  * off, and unasked for, until its switch turns it on, when the picture is its own. It has no switch
- * while an administrator has cameras off.
+ * while an administrator has cameras off. A huddle in a direct message is with the others in it, whom
+ * starting it invites.
  */
 export function HuddlePreview({ room, me, live, onClose }: Props) {
   const people = useContext(PeopleContext);
+  const nameOf = useNameOf();
+  const joinsNone = useJoinsNoHuddle();
   const joined = useHuddle();
   const { stream, devices, ask, list, take } = usePreviewMicrophone();
   const camerasAllowed = useCamerasAllowed();
@@ -222,9 +222,17 @@ export function HuddlePreview({ room, me, live, onClose }: Props) {
   const inIt = live?.userIds ?? [];
   const others = inIt.filter((userId) => userId !== me.id);
   const going = inIt.length > 0;
+  // Whether this person is in it already, in another tab or on another device, from where joining here moves them.
+  const moving = inIt.length > others.length;
+  const place = huddlePlace(room, roomName(room, me.id, nameOf));
+  // Whoever a direct message's huddle rings as it starts: the others in it, as many as one invitation
+  // names. Moved here by the only person in it, it starts again for nobody, so it rings none of them.
+  const invited = room.kind === "direct" && !moving ? huddledWith(room, me.id, joinsNone).slice(0, MAX_HUDDLE_INVITED) : [];
   const description = [
-    others.length > 0 ? inItNow(others.flatMap((userId) => people.get(userId)?.name ?? []), others.length) : !going && `Everyone in ${room.name} can join once it starts.`,
-    inIt.length > others.length && "You're in it in another tab or on another device, and joining here leaves it there.",
+    others.length > 0
+      ? inItNow(others.flatMap((userId) => people.get(userId)?.name ?? []), others.length)
+      : !going && (room.kind === "direct" ? invitedOnceItStarts(invited.map(nameOf)) : `Everyone in ${room.name} can join once it starts.`),
+    moving && "You're in it in another tab or on another device, and joining here leaves it there.",
     joined && `${going ? "Joining" : "Starting"} it leaves the huddle you're in now.`,
   ];
 
@@ -232,8 +240,7 @@ export function HuddlePreview({ room, me, live, onClose }: Props) {
   const microphones = withOpen(devices.microphones, microphone, stream?.getAudioTracks()[0]);
   const shown = cameraOf(camera.stream);
   const cameras = withOpen(devices.cameras, shown, camera.stream?.getVideoTracks()[0]);
-  // A browser that lists its own choice of speaker has it first, and the others get one to choose.
-  const speakers = devices.speakers.some(({ deviceId }) => deviceId === "default") ? devices.speakers : [{ deviceId: "", label: "System default" }, ...devices.speakers];
+  const speakers = speakerChoices(devices.speakers);
   const speaker = speakers.find(({ deviceId }) => deviceId === speakerId)?.deviceId ?? speakers[0]!.deviceId;
   const silent = muted || !stream;
   // Why the camera is off though its switch was turned on: the browser has none to give, or an administrator turned cameras off meanwhile.
@@ -252,7 +259,7 @@ export function HuddlePreview({ room, me, live, onClose }: Props) {
     void camera.turnOn(deviceId);
   };
   const join = () => {
-    joinHuddle({ roomId: room.id, muted, microphone: take(), camera: camera.take(), speakerId: speaker });
+    joinHuddle({ roomId: room.id, muted, microphone: take(), camera: camera.take(), speakerId: speaker, invite: invited.map(({ id }) => id) });
     onClose();
   };
 
@@ -271,13 +278,17 @@ export function HuddlePreview({ room, me, live, onClose }: Props) {
           <Xmark className="size-[18px]" />
         </button>
         <DialogTitle ref={title} tabIndex={-1} className={cn(DIALOG_TITLE, "pe-10 wrap-anywhere outline-none")}>
-          {going ? `Join the huddle in ${room.name}` : `Start a huddle in ${room.name}`}
+          {going ? `Join the huddle ${place}` : `Start a huddle ${place}`}
         </DialogTitle>
         <DialogDescription className="leading-[1.65] text-muted-foreground">{description.filter(Boolean).join(" ")}</DialogDescription>
 
         {/* As wide as a camera's picture, which fills it while the camera's on, and taller where a narrow phone's wouldn't hold the avatar and the switches. */}
         <div className={cn("relative mt-5 grid aspect-[16/9] justify-center justify-items-center gap-3.5 overflow-hidden rounded-xl border bg-surface py-4", camera.stream ? "content-end" : "content-center")}>
-          {camera.stream ? <HuddlePicture stream={camera.stream} label="Your camera" mirrored /> : <UserAvatar user={me} square className="size-[88px] rounded-2xl upto-480px:size-[72px]" />}
+          {camera.stream ? (
+            <HuddlePicture stream={camera.stream} label="Your camera" mirrored={!facesAway(camera.stream)} />
+          ) : (
+            <UserAvatar user={me} square className="size-[88px] rounded-2xl upto-480px:size-[72px]" />
+          )}
           <div className="relative flex gap-2.5">
             <PreviewSwitch label={silent ? "Unmute microphone" : "Mute microphone"} on={!silent} disabled={!stream} onClick={() => setMuted(!muted)}>
               {silent ? <MicrophoneMute /> : <Microphone />}
