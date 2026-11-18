@@ -1487,6 +1487,7 @@ interface HuddlesAllowedRow {
 
 interface RoomToChangeRow extends Omit<SharedRoom, "huddles">, HuddlesAllowedRow {
   can_administer: number;
+  can_change_huddles: number;
 }
 
 /** A room's huddle as the room last reported it: when it started, and who's in it, a JSON list of their ids in the order they joined. */
@@ -1585,7 +1586,7 @@ const sidebarRoom = (row: SidebarRow, members?: DirectMemberRow[]): SidebarRoom 
   involvement: row.involvement,
 });
 
-const roomToChange = (row: RoomToChangeRow) => ({ room: { id: row.id, kind: row.kind, name: row.name, icon: row.icon, ...allowingHuddles(allowsHuddles(row)) }, canAdminister: row.can_administer === 1 });
+const roomToChange = (row: RoomToChangeRow) => ({ room: { id: row.id, kind: row.kind, name: row.name, icon: row.icon, ...allowingHuddles(allowsHuddles(row)) }, canAdminister: row.can_administer === 1, canChangeHuddles: row.can_change_huddles === 1 });
 
 const storedSession = (row: SessionRow): StoredSession => ({
   id: row.session_id,
@@ -2880,8 +2881,11 @@ const MENTIONABLE_MEMBERS = `SELECT ${DIRECTORY_COLUMNS}
 /** Whether someone in a room can change it: administrators and the room's creator can. */
 const CAN_ADMINISTER = `(users.role = ${ADMINISTRATOR} OR rooms.creator_id = users.id) AS can_administer`;
 
-/** A room someone is in, unless it's a DM, and whether they can change it. */
-export const ROOM_TO_CHANGE = `SELECT rooms.id, rooms.kind, rooms.name, rooms.icon, rooms.huddles_allowed, ${CAN_ADMINISTER}
+/** Whether they can turn huddles on or off in it: only administrators can, as a Slack workspace's owners and admins can in a channel. */
+const CAN_CHANGE_HUDDLES = `users.role = ${ADMINISTRATOR} AS can_change_huddles`;
+
+/** A room someone is in, unless it's a DM, and whether they can change it, and turn huddles on or off in it. */
+export const ROOM_TO_CHANGE = `SELECT rooms.id, rooms.kind, rooms.name, rooms.icon, rooms.huddles_allowed, ${CAN_ADMINISTER}, ${CAN_CHANGE_HUDDLES}
   FROM memberships JOIN rooms ON rooms.id = memberships.room_id JOIN users ON users.id = memberships.user_id
   WHERE memberships.room_id = ? AND memberships.user_id = ? AND rooms.kind <> 'direct'`;
 
@@ -5247,8 +5251,8 @@ export class WorkspaceStore {
     ]);
   }
 
-  /** Room `roomId`, unless it's a DM or someone isn't in it, and whether they can change it. */
-  async roomToChange(roomId: RoomId, userId: UserId): Promise<{ room: SharedRoom; canAdminister: boolean } | null> {
+  /** Room `roomId`, unless it's a DM or someone isn't in it, and whether they can change it, and turn huddles on or off in it. */
+  async roomToChange(roomId: RoomId, userId: UserId): Promise<{ room: SharedRoom; canAdminister: boolean; canChangeHuddles: boolean } | null> {
     const [row] = await this.db.all<RoomToChangeRow>(ROOM_TO_CHANGE, roomId, userId);
     return row ? roomToChange(row) : null;
   }

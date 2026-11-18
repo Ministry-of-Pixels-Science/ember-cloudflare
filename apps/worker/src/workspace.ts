@@ -5100,21 +5100,24 @@ export class Workspace extends DurableObject<Env> {
 
   /**
    * Makes `changes` to room `roomId` as the person `credentials` signs in, answering the room as it
-   * is then: "not found" as for its settings, "forbidden" unless they can change it, "blocked words" for
-   * a new name with a word Blocked words keeps out, though the name it has stays, or null without a
-   * valid session. Anyone it takes out of the room is told to reconnect, and finds it gone, and it
-   * leaves their sidebars. Everyone in it sees it as it is now in theirs, or, when only who's in it
-   * changed, the people it puts in do. A huddle going on in a room it turns huddles off in is left
-   * by each tab that hears so, and ends for whoever is in it still as the room next checks it
-   * (`huddlesIn`).
+   * is then: "not found" as for its settings, "forbidden" unless they can change it, "administrators
+   * only" for turning huddles on or off in it unless they're one, "blocked words" for a new name with
+   * a word Blocked words keeps out, though the name it has stays, or null without a valid session.
+   * Anyone it takes out of the room is told to reconnect, and finds it gone, and it leaves their
+   * sidebars. Everyone in it sees it as it is now in theirs, or, when only who's in it changed, the
+   * people it puts in do. A huddle going on in a room it turns huddles off in is left by each tab
+   * that hears so, and ends for whoever is in it still as the room next checks it (`huddlesIn`).
    */
-  async changeRoom(credentials: Credentials, roomId: RoomId, changes: RoomChanges): Promise<SharedRoom | "not found" | "forbidden" | "blocked words" | null> {
+  async changeRoom(credentials: Credentials, roomId: RoomId, changes: RoomChanges): Promise<SharedRoom | "not found" | "forbidden" | "administrators only" | "blocked words" | null> {
     const user = await this.authenticate(credentials);
     if (!user) return null;
     return this.closingSockets(async () => {
       const found = await this.store.roomToChange(roomId, user.id);
       if (!found) return "not found";
       if (!found.canAdminister) return "forbidden";
+      const allowed = found.room.huddles !== false;
+      // Huddles sent as they are turn nothing on or off, which anyone who can change the room may send.
+      if (changes.huddles !== undefined && changes.huddles !== allowed && !found.canChangeHuddles) return "administrators only";
       // Its settings send the name it has with every change.
       if (changes.name && changes.name !== found.room.name && (await this.hasBlockedWord(changes.name))) return "blocked words";
       const { huddles: _, ...room } = found.room;
@@ -5123,7 +5126,7 @@ export class Workspace extends DurableObject<Env> {
         ...(changes.name && { name: changes.name }),
         ...(changes.kind && { kind: changes.kind }),
         ...(changes.icon !== undefined && { icon: changes.icon || null }),
-        ...allowingHuddles(changes.huddles ?? found.room.huddles !== false),
+        ...allowingHuddles(changes.huddles ?? allowed),
       };
       if (!changes.name && !changes.kind && changes.icon === undefined && changes.huddles === undefined) return changed;
       const now = Date.now();

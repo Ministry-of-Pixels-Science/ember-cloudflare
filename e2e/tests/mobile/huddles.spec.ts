@@ -1,7 +1,7 @@
 import type { DirectRoom, LiveHuddle, Message, RoomSettings, ServerFrame, Sidebar, SidebarRoom, User } from "@ember/protocol";
 import type { HuddleClientFrame, HuddleServerFrame, MessageHuddle, PastHuddle, PastHuddles } from "@ember/protocol/huddles";
 import type { APIRequestContext, Locator, Page, WebSocketRoute } from "@playwright/test";
-import { changeTheWorkspace, cookieHeader, editorField, huddleTilesKeepClear, isolateRoom, listing, openRoom, ROOM_SOCKET, signInAs, type Session, type Tells, type TestRoom } from "../../fixtures";
+import { changeTheWorkspace, cookieHeader, editorField, huddleTilesKeepClear, isolateRoom, listing, makeAdministrator, openRoom, ROOM_SOCKET, signInAs, type Session, type Tells, type TestRoom } from "../../fixtures";
 import { auditScreen } from "./audits";
 import { expect, hasDrawerLayout, openKeyboard, SWITCHES, test } from "./fixtures";
 
@@ -116,7 +116,7 @@ async function standInHuddleMessage(page: Page, room: TestRoom, starter: User, h
 /** Has `room`'s settings answer the page that `members` are in the room and `others`, whom they list as well, aren't. */
 async function listRoomPeople(page: Page, room: TestRoom, members: User[], others: User[] = []): Promise<void> {
   const people = [...members.map((user) => ({ ...user, member: true })), ...others.map((user) => ({ ...user, member: false }))];
-  await page.route(`**/api/rooms/${room.id}/settings`, (route) => route.fulfill({ json: { room: { ...room, kind: "open", icon: null }, canAdminister: false, people } satisfies RoomSettings }));
+  await page.route(`**/api/rooms/${room.id}/settings`, (route) => route.fulfill({ json: { room: { ...room, kind: "open", icon: null }, canAdminister: false, canChangeHuddles: false, people } satisfies RoomSettings }));
 }
 
 /** The button Invite people opens from in the huddle `page` has opened: More, or its own where the huddle is beside the sidebar, as on the largest phone held on its side. */
@@ -904,7 +904,8 @@ test("a huddle with more people in it than the phone shows beside a shared scree
   expect(await page.evaluate(() => scrollY)).toBe(0);
 });
 
-test("a room's settings fit the phone with their Huddles switch, on and off, when it warns of the huddle going on, and so do those that tell someone who can't change the room that it has none", async ({ page, room, session, screenIsFine }) => {
+test("a room's settings fit the phone with an administrator's Huddles switch, on and off, when it warns of the huddle going on, and so do those that tell someone who can't change the room that it has none", async ({ page, request, room, session, screenIsFine }) => {
+  await makeAdministrator(request, session);
   await openRoomWithHuddlesOn(page, room, { startedAt: new Date().toISOString(), userIds: ["someone"] });
   await page.goto(`/rooms/opens/${room.id}/edit`);
   const allow = page.getByRole("switch", { name: "Allow huddles in this room" });
@@ -920,7 +921,7 @@ test("a room's settings fit the phone with their Huddles switch, on and off, whe
   await expect(allow).toBeChecked();
 
   const people = [{ id: session.user.id, name: session.user.name, member: true }];
-  await page.route(`**/api/rooms/${room.id}/settings`, (route) => route.fulfill({ json: { room: { ...room, kind: "open", icon: null, huddles: false }, canAdminister: false, people } satisfies RoomSettings }));
+  await page.route(`**/api/rooms/${room.id}/settings`, (route) => route.fulfill({ json: { room: { ...room, kind: "open", icon: null, huddles: false }, canAdminister: false, canChangeHuddles: false, people } satisfies RoomSettings }));
   await page.reload();
   const none = page.getByText("Members can't start or join huddles in this room.", { exact: true });
   await expect(none).toBeVisible();

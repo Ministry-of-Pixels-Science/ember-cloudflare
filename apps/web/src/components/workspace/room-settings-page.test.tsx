@@ -18,14 +18,17 @@ const linus = { id: "u3", name: "Linus Torvalds" };
 const design: Room = { id: "design", name: "Design", kind: "open", icon: null };
 const leads: Room = { id: "leads", name: "Leads", kind: "closed", icon: "lock" };
 
+/** Design's settings, as an administrator has them, or as someone who can't change the room does. */
 const openSettings = (canAdminister = true): RoomSettings => ({
   room: design,
   canAdminister,
+  canChangeHuddles: canAdminister,
   people: [ada, grace, linus].map((person) => ({ ...person, member: true })),
 });
 const closedSettings: RoomSettings = {
   room: leads,
   canAdminister: true,
+  canChangeHuddles: true,
   people: [
     { ...ada, member: true },
     { ...grace, member: false },
@@ -340,7 +343,7 @@ describe("Who can change a room", () => {
   });
 
   it("shows them a private room's members, then everyone else, with no Everyone row or switches", async () => {
-    serve({ ...closedSettings, canAdminister: false });
+    serve({ ...closedSettings, canAdminister: false, canChangeHuddles: false });
     showPage(leads);
     expect(await screen.findByRole("heading", { level: 2, name: "Leads" })).toBeInTheDocument();
     expect(names()).toEqual(["Ada Lovelace", "Linus Torvalds", "Grace Hopper"]);
@@ -398,6 +401,8 @@ describe("Allow huddles in a room", () => {
   /** The page where huddles are on. */
   const showWithHuddles = (room: Room, live?: Huddles["live"]) => showPage(room, undefined, huddlesOn(live));
   const withoutHuddles = (settings: RoomSettings): RoomSettings => ({ ...settings, room: { ...settings.room, huddles: false } });
+  /** The settings of whoever made the room and isn't an administrator: theirs to change, but for its huddles. */
+  const asCreator = (settings: RoomSettings): RoomSettings => ({ ...settings, canChangeHuddles: false });
   const huddlesSwitch = () => screen.findByRole("switch", { name: "Allow huddles in this room" });
   const huddle = { startedAt: "2026-11-17T09:00:00.000Z", userIds: [grace.id] };
 
@@ -484,6 +489,29 @@ describe("Allow huddles in a room", () => {
     act(() => navigate("/rooms/general"));
     expect(location.pathname).toBe("/rooms/general");
     expect(asking()).not.toBeInTheDocument();
+  });
+
+  it("has no Huddles switch for the room's creator, who isn't an administrator, and saves their changes without a word of huddles", async () => {
+    serve(asCreator(openSettings()), { saved: { ...design, name: "Design team" } });
+    const { onSaved, user } = showWithHuddles(design);
+    await user.type(await roomName(), " team");
+    expect(names()).toEqual(["Everyone", "Ada Lovelace", "Grace Hopper", "Linus Torvalds"]);
+    expect(screen.queryByRole("switch", { name: "Allow huddles in this room" })).not.toBeInTheDocument();
+    expect(screen.queryByText(HUDDLES_ALLOWED)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+    expect(sent()).toEqual({ name: "Design team", icon: "", kind: "open" });
+  });
+
+  it("tells the room's creator that it has no huddles, as it tells everyone else, and leaves that as it is when they save", async () => {
+    serve(asCreator(withoutHuddles(openSettings())), { saved: { ...design, name: "Design team", huddles: false } });
+    const { onSaved, user } = showWithHuddles(design, { design: huddle });
+    expect(await screen.findByText(HUDDLES_NOT_ALLOWED)).toBeInTheDocument();
+    expect(names()).toEqual(["Everyone", "Ada Lovelace", "Grace Hopper", "Linus Torvalds", "Huddles"]);
+    expect(screen.queryByRole("switch", { name: "Allow huddles in this room" })).not.toBeInTheDocument();
+    await user.type(await roomName(), " team{Enter}");
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+    expect(sent()).toEqual({ name: "Design team", icon: "", kind: "open" });
   });
 
   it("only tells people who can't change the room that it has no huddles, and nothing of a room that has them", async () => {
@@ -589,7 +617,7 @@ describe("Delete a room", () => {
 describe("Leave a private room", () => {
   const leaveButton = () => screen.findByRole("button", { name: "Leave Leads" });
   const confirmed = (answer: boolean) => vi.spyOn(window, "confirm").mockReturnValue(answer);
-  const asMember: RoomSettings = { ...closedSettings, canAdminister: false };
+  const asMember: RoomSettings = { ...closedSettings, canAdminister: false, canChangeHuddles: false };
 
   it("offers Leave to someone in a private room they can't change, in its own panel", async () => {
     serve(asMember);
