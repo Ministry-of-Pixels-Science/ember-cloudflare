@@ -61,13 +61,27 @@ describe("Set up single sign-on", () => {
     expect(enter).toHaveTextContent("Enter the app's details below.");
     expect(field("Client Secret")).toHaveAccessibleDescription("Stored encrypted.");
     expect(field("Issuer URL")).toHaveValue("");
-    expect(field("Client Secret")).toHaveAttribute("type", "password");
     expect(field("Button name")).toHaveAttribute("placeholder", "SSO");
     expect(field("Groups claim")).toHaveAttribute("placeholder", "groups");
     expect(field("Allowed groups").tagName).toBe("TEXTAREA");
     expect(field("Allowed groups")).toHaveAccessibleDescription(/urn:zitadel:iam:org:project:roles/);
     expect(screen.getByRole("checkbox", { name: /Link accounts by verified email/ })).not.toBeChecked();
     expect(button("Save")).toBeDisabled();
+  });
+
+  it("hides the secret as it's typed, in a field that's no password's, and keeps it out of the field's value attribute, where custom CSS could read it", async () => {
+    serve();
+    const { user } = showSetup();
+    await dialog("Set up single sign-on");
+    const input = field("Client Secret");
+    await user.type(input, CLIENT_SECRET);
+    expect(input).toHaveValue(CLIENT_SECRET);
+    expect(input).toHaveClass("[-webkit-text-security:disc]");
+    // No password manager offers to keep it, or to fill in a password it kept.
+    expect(input).toHaveProperty("type", "text");
+    expect(input).toHaveAttribute("autocomplete", "off");
+    expect(input).not.toHaveAttribute("value");
+    for (const other of ["Issuer URL", "Client ID"]) expect(field(other)).not.toHaveClass("[-webkit-text-security:disc]");
   });
 
   it("saves the provider, with the scopes apart by spaces and the groups one a line, then says it's set up", async () => {

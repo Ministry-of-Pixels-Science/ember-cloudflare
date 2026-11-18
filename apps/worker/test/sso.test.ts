@@ -141,6 +141,8 @@ function fakeProvider() {
     refreshWithoutIdToken: false,
     /** Whether signing in gives no refresh token, as Google gives one only when someone first consents. */
     signInWithoutRefreshToken: false,
+    /** What a refresh waits for before it's answered, as a slow provider's is, or null to answer at once. */
+    refreshing: null as Promise<void> | null,
     /** Whether the userinfo endpoint fails, while the rest of the provider answers. */
     userinfoDown: false,
     down: false,
@@ -211,6 +213,7 @@ function fakeProvider() {
         return verified ? tokensFor(given.sub, given.sid, given.nonce) : Response.json({ error: "invalid_grant" }, { status: 400 });
       }
       if (form.get("grant_type") === "refresh_token") {
+        await provider.refreshing;
         const given = provider.refreshTokens.get(form.get("refresh_token") ?? "");
         provider.refreshTokens.delete(form.get("refresh_token") ?? "");
         return given && !provider.revoked.has(given.sub) ? tokensFor(given.sub, given.sid, null) : Response.json({ error: "invalid_grant" }, { status: 400 });
@@ -1234,6 +1237,21 @@ describe("Checking accounts with their refresh tokens", () => {
     expect(await runDurableObjectAlarm(workspaceStub())).toBe(true);
     expect(await signsIn(session)).toBe(false);
     expect(await statusOf(administrator, session.user.id)).toBe("suspended");
+  });
+
+  it("suspends nobody by a refresh that answers once the provider it asked has been forgotten", async () => {
+    const administrator = await setUpWithSso({ allowedGroups: "staff" });
+    const session = await ssoSession(katherine);
+    provider.people.set(katherine.sub, { ...katherine, groups: ["visitors"] });
+    let answer!: () => void;
+    provider.refreshing = new Promise((resolve) => (answer = resolve));
+    await due();
+    const checking = runDurableObjectAlarm(workspaceStub());
+    await vi.waitFor(() => expect(tokenRequests().some(({ body }) => new URLSearchParams(body).get("grant_type") === "refresh_token")).toBe(true));
+    expect((await api(SSO_SETTINGS_PATH, { method: "DELETE", headers: as(administrator) })).status).toBe(200);
+    answer();
+    expect(await checking).toBe(true);
+    expect(await statusOf(administrator, session.user.id)).toBe("active");
   });
 
   it("goes by groups only when a refresh without an ID token says them, since the userinfo endpoint may leave them out", async () => {

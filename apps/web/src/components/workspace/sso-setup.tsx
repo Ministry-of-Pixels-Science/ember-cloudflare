@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode, type RefObject } from "react";
 import {
   DEFAULT_GROUPS_CLAIM,
   DEFAULT_SSO_NAME,
@@ -21,6 +21,7 @@ import { useMounted } from "@/hooks/use-mounted";
 import { ApiError, isSignedOut, saveSso } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Actions } from "./assistant-setup";
+import { HIDDEN } from "./huddles-steps";
 import { NOTE } from "./model-picker";
 import { DIALOG, DIALOG_BACKDROP, DIALOG_CLOSE, DIALOG_TITLE } from "./unsaved-changes";
 
@@ -36,7 +37,10 @@ type Step = "provider" | "done";
 
 const TITLES: Record<Step, string> = { provider: "Set up single sign-on", done: "Single sign-on is ready" };
 
-/** What each text field holds, as typed: the scopes apart by spaces, and the groups one a line. */
+/**
+ * What each text field holds, as typed: the scopes apart by spaces, and the groups one a line. The
+ * secret's holds nothing: only its field has it.
+ */
 type Typed = Record<SsoField, string>;
 
 /** Why the setup wasn't kept, said on the field it's about, or else, with no field, under them. */
@@ -77,6 +81,9 @@ export function SsoSetup({ sso, onSaved, onClose, onFailed }: Props) {
   const { customDomain } = useAccount();
   const [step, setStep] = useState<Step>("provider");
   const [typed, setTyped] = useState<Typed>(() => typedOf(sso));
+  // Uncontrolled, as passwords are, so the secret never reaches its field's `value` attribute, where custom CSS could read it.
+  const secretInput = useRef<HTMLInputElement>(null);
+  const [secretTyped, setSecretTyped] = useState(false);
   const [linksVerifiedEmails, setLinksVerifiedEmails] = useState(sso?.linksVerifiedEmails ?? false);
   const [refusal, setRefusal] = useState<Refusal | null>(null);
   // Reading the provider's discovery document holds the dialog open until it's answered.
@@ -102,14 +109,16 @@ export function SsoSetup({ sso, onSaved, onClose, onFailed }: Props) {
   const close = () => onClose(saved);
 
   const type = (field: SsoField, text: string) => {
-    setTyped((typed) => ({ ...typed, [field]: text }));
+    if (field === "clientSecret") setSecretTyped(text.trim() !== "");
+    else setTyped((typed) => ({ ...typed, [field]: text }));
     if (refusal?.field === field || refusal?.field === null) setRefusal(null);
   };
 
   const save = (event: FormEvent) => {
     event.preventDefault();
-    const { issuer, clientId, clientSecret, ...rest } = typed;
-    const setup = parseSsoSetup({ ...(secret ? {} : { issuer, clientId, clientSecret }), ...rest, linksVerifiedEmails });
+    const { issuer, clientId, name, scopes, groupsClaim, allowedGroups } = typed;
+    const app = secret ? {} : { issuer, clientId, clientSecret: secretInput.current?.value ?? "" };
+    const setup = parseSsoSetup({ ...app, name, scopes, groupsClaim, allowedGroups, linksVerifiedEmails });
     if ("error" in setup) return setRefusal(setup);
     setRefusal(null);
     setSaving(true);
@@ -131,7 +140,7 @@ export function SsoSetup({ sso, onSaved, onClose, onFailed }: Props) {
     );
   };
 
-  const needed = secret ? false : typed.issuer.trim() === "" || typed.clientId.trim() === "" || (!keepsSecret && typed.clientSecret.trim() === "");
+  const needed = secret ? false : typed.issuer.trim() === "" || typed.clientId.trim() === "" || (!keepsSecret && !secretTyped);
   const fieldProps = { typed, onType: type, refusal, disabled: saving };
 
   return (
@@ -194,7 +203,7 @@ export function SsoSetup({ sso, onSaved, onClose, onFailed }: Props) {
                     field="clientSecret"
                     id="sso_client_secret"
                     label="Client Secret"
-                    type="password"
+                    secret={secretInput}
                     maxLength={MAX_CLIENT_SECRET_LENGTH}
                     help={keepsSecret ? "Stored encrypted. Leave blank to keep the current one." : "Stored encrypted."}
                     {...fieldProps}
@@ -286,7 +295,7 @@ function TextField({
   help,
   multiline = false,
   readOnly = false,
-  type = "text",
+  secret,
   placeholder,
   maxLength,
 }: {
@@ -300,7 +309,8 @@ function TextField({
   help?: ReactNode;
   multiline?: boolean;
   readOnly?: boolean;
-  type?: "text" | "password";
+  /** A secret's field, which alone holds what's typed in it, shown as dots, in a field that's no password, so no password manager offers to keep or fill it. */
+  secret?: RefObject<HTMLInputElement | null>;
   placeholder?: string;
   maxLength?: number;
 }) {
@@ -308,7 +318,7 @@ function TextField({
   const describedBy = [help !== undefined && `${id}_help`, refused !== null && `${id}_refusal`].filter(Boolean).join(" ") || undefined;
   const shared = {
     id,
-    value: typed[field],
+    value: secret ? undefined : typed[field],
     placeholder,
     maxLength,
     readOnly,
@@ -325,7 +335,12 @@ function TextField({
         {multiline ? (
           <textarea rows={3} {...shared} onChange={(event) => onType(field, event.target.value)} className={TEXTAREA} />
         ) : (
-          <Input type={type} {...shared} onChange={(event) => onType(field, event.target.value)} className={cn(FIELD_INPUT, readOnly && "text-muted-foreground")} />
+          <Input
+            ref={secret}
+            {...shared}
+            onChange={(event) => onType(field, event.target.value)}
+            className={cn(FIELD_INPUT, secret && HIDDEN, readOnly && "text-muted-foreground")}
+          />
         )}
       </Field>
       {help !== undefined && (

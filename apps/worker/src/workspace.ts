@@ -5836,8 +5836,8 @@ export class Workspace extends DurableObject<Env> {
    * removed or signed out there, ends the sessions that account signed in, and while single sign-on alone
    * is the only way in, every session of a member it links, though it suspends nobody, since a sign-out
    * looks the same, and one it takes keeps the token it gives in its place, to ask again in an
-   * hour, and goes by what it says now of whether the account is in a group the card lets in, as a
-   * sign-in goes by it (`settleMembership`). An account it doesn't answer for is asked again in a few
+   * hour, and goes by what it says now of whether the account is in a group the card lets in by the time
+   * it answers, as a sign-in goes by it (`settleMembership`). An account it doesn't answer for is asked again in a few
    * minutes, for a day (`settleUnanswered`). Refresh tokens at any other issuer are forgotten, and all of
    * them wait while there's no provider.
    */
@@ -5879,15 +5879,19 @@ export class Workspace extends DurableObject<Env> {
           await this.settleUnanswered(provider.issuer, subject, sealedToken, given, failingSince, readAt);
           continue;
         }
-        // A refreshed ID token says the groups as signing in's did, so one without them puts its person in
-        // none, but a refresh without one has only the userinfo endpoint's word, which may leave them out,
-        // as Entra's always does, and then says nothing of them.
-        const saysGroups = provider.allowedGroups.length === 0 || answer.idToken !== null || claims[provider.groupsClaim] !== undefined;
         // One at a time with sign-ins, as ending the sessions is: one that kept its token since has the
-        // provider's word after this one.
+        // provider's word after this one. The groups go by the card as it is by then, and not at all once
+        // the provider has been forgotten or replaced while it answered, which would suspend people by
+        // the word of a provider that no longer signs anyone in, with nothing to ask again that restores them.
         await this.closingSockets(async () => {
           const settled = await this.store.settleRefresh(provider.issuer, subject, sealedToken, { sealedToken: given, dueAt: Date.now() + SSO_CHECK_MS });
-          if (settled && saysGroups) await this.applyMemberships(provider.issuer, "sso", new Map([[subject, isAllowed(provider, claims)]]), readAt);
+          const current = await this.ssoProvider();
+          if (!settled || current === null || current.issuer !== provider.issuer) return;
+          // A refreshed ID token says the groups as signing in's did, so one without them puts its person in
+          // none, but a refresh without one has only the userinfo endpoint's word, which may leave them out,
+          // as Entra's always does, and then says nothing of them.
+          const saysGroups = current.allowedGroups.length === 0 || answer.idToken !== null || claims[current.groupsClaim] !== undefined;
+          if (saysGroups) await this.applyMemberships(provider.issuer, "sso", new Map([[subject, isAllowed(current, claims)]]), readAt);
         });
       }
     }
