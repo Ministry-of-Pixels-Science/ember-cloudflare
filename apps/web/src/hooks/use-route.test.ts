@@ -391,3 +391,76 @@ describe("Unsaved changes guard", () => {
     stop();
   });
 });
+
+describe("Back and Forward", () => {
+  /** The router as a page loaded afresh has it, at the address and history entry shown, as a reload loads it. */
+  async function loaded() {
+    vi.resetModules();
+    const router = await import("./use-route");
+    const { result } = renderHook(() => ({ back: router.useCanGoBack(), forward: router.useCanGoForward() }));
+    return { navigate: router.navigate, result };
+  }
+
+  /** The router as a page first shown at `path` has it, in an entry it didn't add. */
+  function openedAt(path: string) {
+    history.replaceState(null, "", path);
+    return loaded();
+  }
+
+  it("has neither on the first page the app shows, Back once it goes on, and Forward once Back comes back", async () => {
+    const { navigate, result } = await openedAt("/rooms/general");
+    expect(result.current).toEqual({ back: false, forward: false });
+
+    act(() => navigate("/rooms/random"));
+    expect(result.current).toEqual({ back: true, forward: false });
+    act(() => history.back());
+    await waitFor(() => expect(result.current).toEqual({ back: false, forward: true }));
+    expect(location.pathname).toBe("/rooms/general");
+
+    act(() => history.forward());
+    await waitFor(() => expect(result.current).toEqual({ back: true, forward: false }));
+    expect(location.pathname).toBe("/rooms/random");
+  });
+
+  it("drops Forward once the app goes on to another page, as the browser drops the pages ahead", async () => {
+    const { navigate, result } = await openedAt("/rooms/general");
+    act(() => navigate("/rooms/random"));
+    act(() => navigate("/rooms/design"));
+    act(() => history.back());
+    await waitFor(() => expect(result.current).toEqual({ back: true, forward: true }));
+
+    act(() => navigate("/account/edit"));
+    expect(result.current).toEqual({ back: true, forward: false });
+    act(() => history.back());
+    await waitFor(() => expect(location.pathname).toBe("/rooms/random"));
+    act(() => history.forward());
+    await waitFor(() => expect(location.pathname).toBe("/account/edit"));
+    expect(result.current).toEqual({ back: true, forward: false });
+  });
+
+  it("keeps the pages ahead when a page takes another's place", async () => {
+    const { navigate, result } = await openedAt("/rooms/general");
+    act(() => navigate("/rooms/random"));
+    act(() => history.back());
+    await waitFor(() => expect(result.current.forward).toBe(true));
+
+    act(() => navigate("/rooms/design", { replace: true }));
+    expect(result.current).toEqual({ back: false, forward: true });
+    act(() => history.forward());
+    await waitFor(() => expect(location.pathname).toBe("/rooms/random"));
+  });
+
+  it("keeps both through a reload, and Forward on a page Back loads afresh after one", async () => {
+    const { navigate } = await openedAt("/rooms/general");
+    act(() => navigate("/rooms/random"));
+    act(() => navigate("/rooms/design"));
+    act(() => history.back());
+    await waitFor(() => expect(location.pathname).toBe("/rooms/random"));
+    expect((await loaded()).result.current).toEqual({ back: true, forward: true });
+
+    // After a reload, Back loads the page it goes to afresh, which the app went on from before it.
+    act(() => history.back());
+    await waitFor(() => expect(location.pathname).toBe("/rooms/general"));
+    expect((await loaded()).result.current).toEqual({ back: false, forward: true });
+  });
+});
