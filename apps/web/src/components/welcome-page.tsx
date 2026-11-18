@@ -35,9 +35,10 @@ function changesOf(profile: Profile, name: string, username: string): ProfileCha
 
 /**
  * Welcomes someone new: the avatar they have, or the photo they choose, their name and their username,
- * as their profile has them, which Continue saves, the photo last, before going on. What saved stays
- * saved when the rest is refused, so Continue sends only what's left the next time, and a photo that's
- * refused goes, saying why, so they can go on without it.
+ * as their profile has them, which Continue saves, the photo last, before going on. The name and
+ * username stay as Continue sent them until it's done, so it goes on with what they show. What saved
+ * stays saved when the rest is refused, so Continue sends only what's left the next time, and a photo
+ * that's refused goes, saying why, so they can go on without it.
  */
 export function WelcomePage({ me, workspace, onWelcomed }: Props) {
   /** Your profile as it loaded or Continue last saved it, or null until it has loaded. */
@@ -116,12 +117,13 @@ export function WelcomePage({ me, workspace, onWelcomed }: Props) {
               maxLength={MAX_USER_NAME_LENGTH}
               data-1p-ignore
               disabled={!profile}
+              readOnly={busy}
               value={name}
               onChange={(event) => setName(event.target.value)}
               className={FIELD_INPUT}
             />
           </Field>
-          <UsernameField value={username} onChange={setUsername} disabled={!profile} required />
+          <UsernameField value={username} onChange={setUsername} disabled={!profile} readOnly={busy} required />
           <SubmitButton disabled={!profile || busy}>Continue</SubmitButton>
         </form>
       </AuthCard>

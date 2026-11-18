@@ -148,6 +148,29 @@ describe("The welcome page", () => {
     expect(keepGoing()).toBeEnabled();
   });
 
+  it("keeps the name and username as Continue sent them until it's done, so it goes on with what they show", async () => {
+    let refuse = () => {};
+    serve({
+      "PATCH /api/users/me/profile": () => new Promise((resolve) => (refuse = () => resolve(Response.json({ error: USERNAME_TAKEN }, { status: 422 })))),
+    });
+    const { user, onWelcomed } = open();
+    await waitFor(() => expect(keepGoing()).toBeEnabled());
+    await user.type(usernameField(), "2");
+    await user.click(keepGoing());
+    await waitFor(() => expect(usernameField()).toHaveAttribute("readonly"));
+    expect(nameField()).toHaveAttribute("readonly");
+    await user.type(nameField(), " Jr.");
+    await user.type(usernameField(), "3");
+    expect(nameField()).toHaveValue("Katherine Johnson");
+    expect(usernameField()).toHaveValue("katherinejohnson2");
+
+    refuse();
+    expect(await screen.findByRole("alert")).toHaveTextContent(USERNAME_TAKEN);
+    expect(onWelcomed).not.toHaveBeenCalled();
+    await user.type(usernameField(), "3");
+    expect(usernameField()).toHaveValue("katherinejohnson23");
+  });
+
   it("keeps what saved when the photo is refused, which goes, saying why, so Continue goes on without it", async () => {
     const sent = serve({ [`PUT ${AVATAR_PATH}`]: () => Response.json({ error: "That photo can't be read" }, { status: 415 }) });
     const { user, onWelcomed } = open();
