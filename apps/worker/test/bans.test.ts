@@ -1,6 +1,7 @@
 import {
   CloseCode,
   ROOM_PROTOCOL,
+  uploadsPath,
   type ChangedPerson,
   type Directory,
   type DirectoryUser,
@@ -13,7 +14,9 @@ import {
   type UserId,
 } from "@ember/protocol";
 import { runInDurableObject } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { credentialsFor } from "../src/auth";
 import { banProblem } from "../src/bans";
 import { ADDRESS_HEADER, BANNED_HEADER } from "../src/chat-room";
 import type { Env } from "../src/env";
@@ -21,7 +24,7 @@ import { RECOVERY_PATH } from "../src/recovery";
 import { addressTag, sessionTag, type Revocation } from "../src/revocations";
 import { MESSAGES_BY, MESSAGES_BY_UNTIL } from "../src/store";
 import type { Workspace } from "../src/workspace";
-import { DUE_PURGES, NEXT_PURGE_DUE, ROOM_ACCESS, type WorkspaceStore } from "../src/workspace-store";
+import { DUE_PURGES, NEXT_PURGE_DUE, QUEUE_ADDRESS_REVOCATIONS, QUEUE_UNBANNED_ADDRESS_REVOCATIONS, ROOM_ACCESS, type WorkspaceStore } from "../src/workspace-store";
 import {
   api,
   apiWith,
@@ -34,6 +37,7 @@ import {
   freshDeploy,
   freshRoom,
   openWorkspaceSocket,
+  origin,
   outcome,
   post,
   reconnect,
@@ -1153,23 +1157,75 @@ describe("What a ban blocks", () => {
     expect(tags).toEqual([[hal.user.id, expect.stringMatching(`^${sessionTag("")}`)]]);
   });
 
-  it("queues closing the sockets from each address it blocks in every room, in the change that bans it, and in the one that lifts it", async () => {
-    const administrator = await setUp();
+  it("queues closing the sockets from each address it blocks in the rooms of everyone else whose sockets came from it, in the change that bans it, and in the one that lifts it", async () => {
+    await setUp();
     const member = await join(grace);
-    await freshRoom("lobby");
-    await direct(member, administrator);
-    const rooms = ((await workspaceSql("SELECT id FROM rooms ORDER BY id")) as Array<{ id: string }>).map(({ id }) => id);
-    const addresses = [banned, "2001:db8::7"];
+    // Everyone who joins has a DM with everyone, so most rooms are DMs nobody at the addresses is in.
+    const linus = await join({ name: "Linus Torvalds", emailAddress: "linus@example.com", password: "monolithic kernel" });
+    const lin = await join({ name: "Lin Clark", emailAddress: "lin@example.com", password: "code cartoons" });
+    const lobby = await freshRoom("lobby");
+    // Hal's sockets come from one of the addresses, Lin's from the other, and Linus's from elsewhere.
+    const hal = await signIn("Hal");
+    const linsDm = await direct(lin, linus);
+    for (const [room, session] of [[lobby, { ...hal, ip: banned }], [linsDm.id, { ...lin, ip: "2001:db8::7" }], [linsDm.id, { ...linus, ip: "203.0.113.8" }], [lobby, { ...member, ip: banned }]] as const) {
+      await connect(room, session);
+    }
+    const reached = async (session: Session, address: string) =>
+      (await roomsOf(session.user.id)).map((room_id) => ({ room_id, tag: addressTag(address), code: CloseCode.Reconnect, due_at: LATER }));
+    const expected = [...(await reached(hal, banned)), ...(await reached(lin, "2001:db8::7"))].sort((a, b) => a.room_id.localeCompare(b.room_id) || a.tag.localeCompare(b.tag));
     const queued = () => workspaceSql("SELECT room_id, tag, code, due_at FROM pending_revocations WHERE tag LIKE 'ip:%' ORDER BY room_id, tag");
-    const expected = rooms.flatMap((room_id) => ["ip:2001:db8::7", "ip:203.0.113.7"].map((tag) => ({ room_id, tag, code: CloseCode.Reconnect, due_at: LATER })));
     const store = (workspace: Workspace) => (workspace as unknown as { store: WorkspaceStore }).store;
+    // Grace's DMs with Ada and Linus, and Ada's with Linus.
+    const unreached = (await directRooms()).filter((room) => !expected.some(({ room_id }) => room_id === room));
+    expect(unreached).toHaveLength(3);
 
     const now = new Date().toISOString();
+    const addresses = [banned, "2001:db8::7"];
     expect(await runInDurableObject(workspaceStub(), (workspace: Workspace) => store(workspace).banPerson(member.user.id, addresses, CloseCode.Revoked, CloseCode.Reconnect, LATER, now))).toBe(true);
     expect(await queued()).toEqual(expected);
     await workspaceSql("DELETE FROM pending_revocations");
     expect(await runInDurableObject(workspaceStub(), (workspace: Workspace) => store(workspace).unbanPerson(member.user.id, CloseCode.Reconnect, LATER, now))).toBe(true);
     expect(await queued()).toEqual(expected);
+  });
+
+  it("records each address a session's sockets and uploads come from, once each, and forgets them as the session ends", async () => {
+    await setUp();
+    const lobby = await freshRoom("lobby");
+    const hal = await signIn("Hal");
+    const [{ id: sessionId }] = (await workspaceSql("SELECT id FROM sessions WHERE user_id = ?", hal.user.id)) as [{ id: string }];
+    const recorded = () => workspaceSql("SELECT ip_address FROM session_addresses WHERE session_id = ? ORDER BY ip_address", sessionId);
+    await connect(lobby, { ...hal, ip: banned });
+    await connect(lobby, { ...hal, ip: banned });
+    await connect(lobby, { ...hal, ip: "2001:db8::7" });
+    // An address longer than any IP address tags nothing, so no ban reaches anything by it.
+    await connect(lobby, { ...hal, ip: "2001:db8::".padEnd(64, "1") });
+    const upload = await api(uploadsPath(lobby), {
+      method: "POST",
+      headers: { Cookie: hal.cookie, "CF-Connecting-IP": "198.51.100.7" },
+      body: JSON.stringify({ name: "notes.txt", type: "text/plain", size: 10, clientMessageId: crypto.randomUUID() }),
+    });
+    expect(upload.status, await upload.clone().text()).toBe(201);
+    expect(await recorded()).toEqual([{ ip_address: "198.51.100.7" }, { ip_address: "2001:db8::7" }, { ip_address: banned }]);
+
+    expect((await api("/api/session", { method: "DELETE", headers: { Cookie: hal.cookie } })).status).toBe(204);
+    expect(await recorded()).toEqual([]);
+  });
+
+  it("turns away a socket from an address let in just before the address was banned, which reaches the room after, though the room is a DM", async () => {
+    const administrator = await setUp();
+    const member = await join(grace);
+    await signInAsGrace(banned);
+    const hal = await signIn("Hal");
+    const { id: dm } = await direct(administrator, hal);
+    // The Workspace lets Hal into the DM from the address, and the Worker is held up.
+    const token = hal.cookie.slice(hal.cookie.indexOf("=") + 1);
+    const request = new Request(origin, { headers: { "CF-Connecting-IP": banned } });
+    const access = await workspaceStub().roomAccess(await credentialsFor(token, request, env as unknown as Env), dm);
+    expect(access).toMatchObject({ member: true, banned: false });
+
+    await ban(administrator, member.user.id);
+    await revoked();
+    expect(await outcome(dm, { ...access!, address: banned })).toEqual({ code: CloseCode.Reconnect, reason: "Reconnect" });
   });
 
   it("turns away a socket let in from an address before the room heard it was banned, or that its ban was lifted", async () => {
@@ -1210,5 +1266,17 @@ describe("What a ban blocks", () => {
     const plan = (await workspaceSql(`EXPLAIN QUERY PLAN ${ROOM_ACCESS}`, "room", "user", banned)).map((row) => (row as { detail: string }).detail);
     expect(plan).toContain("SEARCH memberships USING COVERING INDEX sqlite_autoindex_memberships_1 (room_id=? AND user_id=?)");
     expect(plan).toContain("SEARCH bans USING COVERING INDEX index_bans_on_ip_address (ip_address=?)");
+  });
+
+  it("finds the rooms a ban's addresses reach by indexes, the sessions that came from them and then those people's rooms, however many there are", async () => {
+    const plans = [
+      await workspaceSql(`EXPLAIN QUERY PLAN ${QUEUE_ADDRESS_REVOCATIONS}`, "ip:", CloseCode.Reconnect, LATER, JSON.stringify([banned]), "user"),
+      await workspaceSql(`EXPLAIN QUERY PLAN ${QUEUE_UNBANNED_ADDRESS_REVOCATIONS}`, "ip:", CloseCode.Reconnect, LATER, "user"),
+    ];
+    for (const plan of plans.map((rows) => rows.map((row) => (row as { detail: string }).detail))) {
+      expect(plan).toContain("SEARCH session_addresses USING COVERING INDEX index_session_addresses_on_ip_address_and_session_id (ip_address=?)");
+      expect(plan).toContain("SEARCH sessions USING INDEX sqlite_autoindex_sessions_1 (id=?)");
+      expect(plan).toContain("SEARCH memberships USING COVERING INDEX index_memberships_on_user_id_and_room_id (user_id=?)");
+    }
   });
 });

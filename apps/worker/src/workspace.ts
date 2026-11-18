@@ -5493,7 +5493,9 @@ export class Workspace extends DurableObject<Env> {
 
   /**
    * Who `credentials` signs in, with their session, whether they're in room `roomId` and whether a ban
-   * blocks the IP address they come from, as of `authorizedAt`, or null without a valid session.
+   * blocks the IP address they come from, as of `authorizedAt`, or null without a valid session. The
+   * session is recorded as coming from the address the room tags its socket or upload with, so that
+   * banning the address, or lifting the ban, reaches the room.
    */
   async roomAccess(credentials: Credentials, roomId: RoomId): Promise<RoomAccess | null> {
     // Before anything is read, so that a revocation saved while this checks counts as later than it,
@@ -5502,7 +5504,7 @@ export class Workspace extends DurableObject<Env> {
     const session = await this.session(credentials);
     if (!session) return null;
     // From the database rather than what `isBanned` keeps, which a ban saving now hasn't changed yet.
-    const { member, banned } = await this.store.roomAccess(roomId, session.user.id, credentials.client.ip);
+    const { member, banned } = await this.store.roomAccess(roomId, session.user.id, credentials.client.ip, session.id);
     return { user: session.user, sessionId: session.id, member, banned, authorizedAt };
   }
 
