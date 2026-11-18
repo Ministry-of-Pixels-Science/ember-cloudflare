@@ -1,5 +1,6 @@
 import type { Card, DirectoryUser, User } from "@ember/protocol";
-import type { HandledReports, Report, ReportedMessage, Reports } from "@ember/protocol/reports";
+import { OPEN_REPORTS_LISTED, type HandledReports, type Report, type ReportedMessage, type Reports } from "@ember/protocol/reports";
+import { bodyFromPlainText } from "@ember/richtext/dom";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -27,7 +28,7 @@ const REPORTED_AT = "2026-11-17T10:05:00.000Z";
 const reportedMessage = (creator: User, changes: Partial<ReportedMessage> = {}): ReportedMessage => ({
   id: `message-of-${creator.id}`,
   creator,
-  body: "",
+  body: bodyFromPlainText("Buy my course"),
   plainText: "Buy my course",
   mentions: [],
   createdAt: "2026-11-17T10:00:00.000Z",
@@ -58,8 +59,14 @@ const handledAs = (report: Report, outcome: NonNullable<Report["handled"]>["outc
 
 const GRACES = ofMessage("r1", reportedMessage({ id: "grace", name: "Grace" }), { note: "Keeps posting this" });
 const KAYS = ofPerson("r2", { id: "kay", name: "Kay", bio: "Buy followers" });
-const CARDS: Card[] = [{ source: "blocks", parts: [] }, { source: "blocks", parts: [] }];
-const IN_A_DM = ofMessage("r3", reportedMessage(GRACE, { plainText: "", attachment: { name: "plan.pdf", contentType: "application/pdf", byteSize: 2048 }, cards: CARDS, editedAt: "2026-11-17T10:01:00.000Z" }), { reason: "spam", reporterId: "kay" }, { kind: "direct", name: null });
+const CARDS: Card[] = [
+  { source: "blocks", parts: [{ kind: "image", image: { url: "https://example.com/prize.png", alt: "A prize" } }] },
+  {
+    source: "blocks",
+    parts: [{ kind: "buttons", buttons: [{ text: "Claim it", href: "https://example.com/claim" }, { text: "Not now", action: { id: "later" } }] }],
+  },
+];
+const IN_A_DM = ofMessage("r3", reportedMessage(GRACE, { body: "", plainText: "", attachment: { name: "plan.pdf", contentType: "application/pdf", byteSize: 2048 }, cards: CARDS, editedAt: "2026-11-17T10:01:00.000Z" }), { reason: "spam", reporterId: "kay" }, { kind: "direct", name: null });
 
 /** Answers `GET /api/reports` with `reports` and a report's handling as `handle` does. */
 function serve(reports: Reports, handle: (id: string, outcome: string) => Promise<Response> = async () => Response.json({ reports: [] } satisfies HandledReports)) {
@@ -77,15 +84,16 @@ const loads = (fetched: ReturnType<typeof serve>) => fetched.mock.calls.filter((
 interface Shown {
   shown?: boolean;
   open?: number;
+  heard?: number;
   people?: People;
 }
 
 /** The Reports list, as Ada sees it in Membership. */
-function show({ shown = true, open = 1, people = PEOPLE }: Shown = {}) {
+function show({ shown = true, open = 1, heard = 1, people = PEOPLE }: Shown = {}) {
   const onFailed = vi.fn();
   const list = (now: Shown) => (
     <PeopleContext value={now.people ?? people}>
-      <ReportsList meId="ada" shown={now.shown ?? shown} open={now.open ?? open} onFailed={onFailed} />
+      <ReportsList meId="ada" shown={now.shown ?? shown} open={now.open ?? open} heard={now.heard ?? heard} onFailed={onFailed} />
     </PeopleContext>
   );
   const { rerender } = render(list({}));
@@ -127,14 +135,16 @@ describe("Reports", () => {
     expect(kays).toHaveTextContent("Buy followers");
   });
 
-  it("shows a direct message's report without naming it, with its file by name, a bot's cards, and that it was edited", async () => {
+  it("shows a direct message's report without naming it, with its file by name, a bot's cards, which can't act here, and that it was edited", async () => {
     serve({ open: [IN_A_DM, ofPerson("r4", { id: "grace", name: "Grace Hopper", bio: null })], handled: [] });
     show({ open: 2 });
     await waitFor(() => expect(openReports()).toBeInTheDocument());
     const [dm, person] = within(openReports()!).getAllByRole("listitem");
     expect(dm).toHaveTextContent("Grace Hopper in a direct message");
     expect(dm).toHaveTextContent("File: plan.pdf");
-    expect(dm).toHaveTextContent("With 2 cards from a bot");
+    expect(within(dm!).getByRole("img", { name: "A prize" })).toHaveAttribute("src", "https://example.com/prize.png");
+    expect(within(dm!).getByRole("link", { name: "Claim it" })).toHaveAttribute("href", "https://example.com/claim");
+    expect(within(dm!).getByRole("button", { name: "Not now" })).toBeDisabled();
     expect(dm).toHaveTextContent(`Written ${time("2026-11-17T10:00:00.000Z")}, edited before it was reported`);
     expect(person).toHaveTextContent("No bio");
     expect(person).not.toHaveTextContent("(now");
@@ -149,7 +159,7 @@ describe("Reports", () => {
     expect(within(section()).queryByText(/^Handled/)).not.toBeInTheDocument();
   });
 
-  it("loads only once Membership shows, and again whenever the count of open reports changes", async () => {
+  it("loads only once Membership shows, and again whenever the count of open reports comes, changed or not", async () => {
     const fetched = serve({ open: [GRACES], handled: [] });
     const { rerender } = show({ shown: false });
     expect(section()).toHaveAttribute("aria-busy", "true");
@@ -158,8 +168,25 @@ describe("Reports", () => {
     await waitFor(() => expect(openReports()).toBeInTheDocument());
     expect(section()).not.toHaveAttribute("aria-busy");
     expect(loads(fetched)).toBe(1);
-    rerender({ shown: true, open: 2 });
+    rerender({ shown: true, open: 2, heard: 2 });
     await waitFor(() => expect(loads(fetched)).toBe(2));
+    // As the sidebar loads again once the socket reconnects, though one report was made and another handled meanwhile.
+    rerender({ shown: true, open: 2, heard: 3 });
+    await waitFor(() => expect(loads(fetched)).toBe(3));
+  });
+
+  it("says how many are open past the newest the list holds, as the sidebar counts them", async () => {
+    const newest = Array.from({ length: OPEN_REPORTS_LISTED }, (_, index) => ofPerson(`r${index}`, { id: "kay", name: "Kay", bio: null }));
+    serve({ open: newest, handled: [] });
+    const { rerender } = show({ open: OPEN_REPORTS_LISTED + 42 });
+    await waitFor(() => expect(openReports()).toBeInTheDocument());
+    expect(within(section()).getByRole("heading", { name: `Reports ${OPEN_REPORTS_LISTED + 42} open` })).toBeInTheDocument();
+    expect(section()).toHaveTextContent(`Showing the newest ${OPEN_REPORTS_LISTED}. The rest come as these are handled.`);
+    // Below that, the list's own count stands, though the sidebar's hasn't caught up.
+    serve({ open: newest.slice(1), handled: [] });
+    rerender({ open: OPEN_REPORTS_LISTED + 42, heard: 2 });
+    await waitFor(() => expect(within(section()).getByRole("heading", { name: `Reports ${OPEN_REPORTS_LISTED - 1} open` })).toBeInTheDocument());
+    expect(section()).not.toHaveTextContent("Showing the newest");
   });
 
   it("offers Delete message on a message's report alone, and Remove and Ban while whoever it reports can be", async () => {

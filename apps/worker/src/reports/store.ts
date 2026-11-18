@@ -101,6 +101,14 @@ export const REPORT_PUSHES = `SELECT push_subscriptions.id, push_subscriptions.e
     AND NOT EXISTS (SELECT 1 FROM blocks WHERE blocks.user_id = users.id AND blocks.blocked_id = ?1)
   ORDER BY push_subscriptions.id`;
 
+/**
+ * Whether subscription ?1 may still have the push of a report made by ?2 as its turn comes: it's an
+ * active administrator's still, who hasn't blocked them since.
+ */
+export const REPORT_PUSHABLE = `SELECT 1 FROM push_subscriptions JOIN users ON users.id = push_subscriptions.user_id
+  WHERE push_subscriptions.id = ?1 AND users.role = ${ADMINISTRATOR} AND users.status = ${ACTIVE}
+    AND NOT EXISTS (SELECT 1 FROM blocks WHERE blocks.user_id = users.id AND blocks.blocked_id = ?2)`;
+
 /** The newest open reports, leaving out the reports of ?. */
 export const OPEN_REPORTS = `SELECT ${COLUMNS} FROM reports WHERE handled_at IS NULL AND subject_id <> ?
   ORDER BY created_at DESC, id DESC LIMIT ${OPEN_REPORTS_LISTED}`;
@@ -150,6 +158,11 @@ export class ReportStore {
       DeliveryRow[],
     ];
     return saved ? { open: open.map(openOf), deliveries: deliveries.map(deliveryOf) } : null;
+  }
+
+  /** Whether subscription `id` may still have the push of a report `reporterId` made (`REPORT_PUSHABLE`). */
+  async pushable(id: number, reporterId: UserId): Promise<boolean> {
+    return (await this.db.all(REPORT_PUSHABLE, id, reporterId)).length > 0;
   }
 
   /** The reports administrator `userId` sees: the newest open ones and the ones handled last, leaving out the reports of them. */

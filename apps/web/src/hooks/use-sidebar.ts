@@ -82,7 +82,8 @@ const isSame = (you: Me, me: Me) => you.id === me.id && you.name === me.name && 
  * did.
  *
  * Once the socket is let in, it says whether this tab is in use, and again whenever that changes
- * (`watchUse`), and keeps who's `active` in the workspace as it hears (`activeStore`).
+ * (`watchUse`), and keeps who's `active` in the workspace as it hears (`activeStore`). `reportsHeard`
+ * counts the times the count of open reports has come, with a list or from the socket.
  *
  * `onSessionChanged` hears when who the browser's session signs in changes: null once it has expired,
  * whoever another tab signed in as, or `me` as they are now, once they've been made an administrator,
@@ -104,6 +105,10 @@ export function useSidebar(
 ) {
   const [{ list, askAgain }, change] = useReducer(roomListReducer, NO_ROOM_LIST);
   const [active] = useState(activeStore);
+  // How many times the count of open reports has come, with a list or from the socket, which the Reports
+  // list loads again on: reports can be made and handled with the count left as it was, as they may have
+  // been while the socket wasn't connected.
+  const [reportsHeard, setReportsHeard] = useState(0);
   // Whether a list the server sent has come, rather than only the empty one a failed first load leaves.
   const [answered, setAnswered] = useState(false);
   // How many of the workspace socket's frames have said what became of a room or of this person's level
@@ -117,6 +122,7 @@ export function useSidebar(
       try {
         copy = await fetchSidebar(copy);
         change({ type: "loaded", list: copy.sidebar });
+        setReportsHeard((heard) => heard + 1);
         setAnswered(true);
       } catch (error) {
         change({ type: "unanswered" });
@@ -250,6 +256,7 @@ export function useSidebar(
         case "blocks.changed":
           return change({ type: "blocked", blocks: frame.blocks });
         case "reports.changed":
+          setReportsHeard((heard) => heard + 1);
           return change({ type: "reports", open: frame.open });
         case "invitation.dismissed":
           return change({ type: "invitation dismissed" });
@@ -329,5 +336,5 @@ export function useSidebar(
     };
   }, []);
 
-  return { list, answered, change, refresh, askForRoom, active };
+  return { list, answered, change, refresh, askForRoom, active, reportsHeard };
 }

@@ -1,6 +1,6 @@
-import { useContext, useEffect, useState } from "react";
+import { useContext, useEffect, useMemo, useState } from "react";
 import type { UserId } from "@ember/protocol";
-import { HANDLED_REPORTS_LISTED, REPORT_REASON_LABELS, type Report, type ReportedMessage, type ReportOutcome, type Reports } from "@ember/protocol/reports";
+import { HANDLED_REPORTS_LISTED, OPEN_REPORTS_LISTED, REPORT_REASON_LABELS, type Report, type ReportedMessage, type ReportOutcome, type Reports } from "@ember/protocol/reports";
 import { TriangleFlag } from "@/components/icons/iconoir";
 import { PageLink } from "@/components/page-link";
 import { PeopleContext, useNameOf, type People } from "@/hooks/use-directory";
@@ -9,7 +9,9 @@ import { personPath } from "@/hooks/use-route";
 import { ApiError, handleReport, isSignedOut, listReports } from "@/lib/api";
 import { dateTimeLabel } from "@/lib/messages";
 import { cn } from "@/lib/utils";
+import { BotCards } from "./bot-card";
 import { BUTTON } from "./email-settings";
+import { MessageBody, shownBody } from "./message-body";
 import { CONFIRM_REMOVE } from "./people-list";
 import { CONFIRM_BAN } from "./person-page";
 
@@ -29,8 +31,10 @@ interface Props {
   meId: UserId;
   /** Whether Membership is shown, which the list loads while it is. */
   shown: boolean;
-  /** How many reports are open, as the sidebar last heard, which loads the list again as it changes. */
+  /** How many reports are open, as the sidebar last heard, which the heading says once there are more than the list holds. */
   open: number;
+  /** How many times the sidebar has heard that count, which loads the list again each time. */
+  heard: number;
   /** Says why loading or handling failed, as the workspace's alerts do. */
   onFailed: (error: unknown) => void;
 }
@@ -38,11 +42,16 @@ interface Props {
 /** Someone by the name the people directory has for them now, or "Someone" once it has none. */
 const nameIn = (people: People, userId: UserId) => people.get(userId)?.name ?? "Someone";
 
+/** The reports listed, and whether the open ones filled the list when it loaded, as it holds only the newest. */
+type Listed = Reports & { full: boolean };
+
+const listed = (reports: Reports): Listed => ({ ...reports, full: reports.open.length >= OPEN_REPORTS_LISTED });
+
 /** `reports` once handling one closed `closed`: out of the open ones and first among the handled. */
-function withClosed(reports: Reports, closed: Report[]): Reports {
+function withClosed(reports: Listed, closed: Report[]): Listed {
   const ids = new Set(closed.map((report) => report.id));
   const left = (list: Report[]) => list.filter((report) => !ids.has(report.id));
-  return { open: left(reports.open), handled: [...closed, ...left(reports.handled)].slice(0, HANDLED_REPORTS_LISTED) };
+  return { ...reports, open: left(reports.open), handled: [...closed, ...left(reports.handled)].slice(0, HANDLED_REPORTS_LISTED) };
 }
 
 /** Whether whoever a report is of can be removed, or banned, as the people directory lists them now: not an AI agent, and not removed or banned already. */
@@ -55,27 +64,28 @@ function handlingsFor(people: People, userId: UserId): { remove: boolean; ban: b
 /** Whom a report is of. */
 const subjectId = ({ subject }: Report) => (subject.kind === "message" ? subject.message.creator.id : subject.person.id);
 
-export function ReportsList({ meId, shown, open, onFailed }: Props) {
+export function ReportsList({ meId, shown, open, heard, onFailed }: Props) {
   const people = useContext(PeopleContext);
-  const [reports, setReports] = useState<Reports | null>(null);
+  const [reports, setReports] = useState<Listed | null>(null);
   // How many times a handling another administrator got to first has loaded the list again.
   const [reloads, setReloads] = useState(0);
   // The reports being handled, whose buttons wait for the server.
   const [handling, setHandling] = useState<ReadonlySet<string>>(new Set());
   const mounted = useMounted();
 
-  // Once Membership shows, and again whenever the count changes, as reports are made or handled in any tab.
+  // Once Membership shows, and again whenever the count comes, as reports are made or handled in any tab
+  // and as the sidebar loads again, having maybe missed some.
   useEffect(() => {
     if (!shown) return;
     let stopped = false;
     listReports().then(
-      (loaded) => !stopped && setReports(loaded),
+      (loaded) => !stopped && setReports(listed(loaded)),
       (error: unknown) => {
         if (!stopped || isSignedOut(error)) onFailed(error);
       },
     );
     return () => void (stopped = true);
-  }, [shown, open, reloads, onFailed]);
+  }, [shown, heard, reloads, onFailed]);
 
   const handle = (report: Report, outcome: ReportOutcome) => {
     if (handling.has(report.id)) return;
@@ -103,13 +113,15 @@ export function ReportsList({ meId, shown, open, onFailed }: Props) {
       );
   };
 
+  // Once the newest open reports fill the list, the sidebar's count says how many there are.
+  const openCount = reports === null ? 0 : reports.full ? Math.max(open, reports.open.length) : reports.open.length;
   return (
     <section aria-labelledby="reports-heading" aria-busy={reports === null || undefined} className="flex flex-col gap-3 rounded-[10px] border bg-surface px-[2ch] py-4 text-start max-md:px-3">
       <div>
         <h2 id="reports-heading" className="flex items-center gap-2 text-base font-semibold">
           <TriangleFlag className="size-[18px] shrink-0" />
           Reports{" "}
-          {reports && reports.open.length > 0 && <span className="font-normal text-muted-foreground">{reports.open.length} open</span>}
+          {openCount > 0 && <span className="font-normal text-muted-foreground">{openCount} open</span>}
         </h2>
         <p className={NOTE}>Anyone can report someone else’s message, from its More actions, or someone, from their page. Nobody is told who reported them.</p>
       </div>
@@ -117,11 +129,14 @@ export function ReportsList({ meId, shown, open, onFailed }: Props) {
         (reports.open.length === 0 ? (
           <p>No open reports.</p>
         ) : (
-          <ul aria-label="Open reports" className="flex flex-col gap-3">
-            {reports.open.map((report) => (
-              <OpenReport key={report.id} report={report} people={people} busy={handling.has(report.id)} onHandle={(outcome) => handle(report, outcome)} />
-            ))}
-          </ul>
+          <>
+            <ul aria-label="Open reports" className="flex flex-col gap-3">
+              {reports.open.map((report) => (
+                <OpenReport key={report.id} report={report} people={people} busy={handling.has(report.id)} onHandle={(outcome) => handle(report, outcome)} />
+              ))}
+            </ul>
+            {openCount > reports.open.length && <p className={NOTE}>Showing the newest {reports.open.length}. The rest come as these are handled.</p>}
+          </>
         ))}
       {reports && reports.handled.length > 0 && (
         <details>
@@ -235,13 +250,17 @@ function Subject({ report }: { report: Report }) {
   );
 }
 
-/** A reported message's text, as it was, with its file by name and a word on a bot's cards. */
+/**
+ * A reported message as it was, as its room showed it, with its file by name, and a bot's cards, whose
+ * buttons that act are disabled here.
+ */
 function MessageText({ message }: { message: ReportedMessage }) {
+  const shown = useMemo(() => shownBody(message.body, message.plainText), [message.body, message.plainText]);
   return (
     <>
-      {message.plainText && <p className="wrap-anywhere whitespace-pre-wrap">{message.plainText}</p>}
+      {message.body !== "" && (shown ? <MessageBody nodes={shown} mentions={message.mentions} /> : <p className="wrap-anywhere whitespace-pre-wrap">{message.plainText}</p>)}
       {message.attachment && <p className={NOTE}>File: {message.attachment.name}</p>}
-      {message.cards && <p className={NOTE}>With {message.cards.length === 1 ? "a card" : `${message.cards.length} cards`} from a bot</p>}
+      {message.cards && <BotCards cards={message.cards} />}
       <p className={NOTE}>
         Written <time dateTime={message.createdAt}>{dateTimeLabel(new Date(message.createdAt))}</time>
         {message.editedAt && ", edited before it was reported"}

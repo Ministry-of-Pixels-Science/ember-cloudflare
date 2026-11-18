@@ -135,8 +135,9 @@ export function WorkspaceSettingsPage({
   onCheckForUpdates,
 }: Props) {
   const [settings, setSettings] = useState<WorkspaceSettings | null>(null);
-  // How many reports are open, as the sidebar last heard, which the Reports list loads again on.
+  // How many reports are open, as the sidebar last heard, and how many times it has heard, which the Reports list loads again on.
   const openReports = useContext(SettingsLayout)?.openReports ?? 0;
+  const reportsHeard = useContext(SettingsLayout)?.reportsHeard ?? 0;
   // What's typed in Workspace name and Tagline, or null for either while it's as the workspace has it,
   // when the field follows the workspace socket, so that saving one never puts back what another tab
   // changed in the other.
@@ -528,7 +529,7 @@ export function WorkspaceSettingsPage({
           <div className="min-w-0">
             {settings.canAdminister ? (
               <div className="flex flex-col gap-6">
-                <ReportsList meId={me.id} shown={section === "membership-settings"} open={openReports} onFailed={onFailed} />
+                <ReportsList meId={me.id} shown={section === "membership-settings"} open={openReports} heard={reportsHeard} onFailed={onFailed} />
                 <WaysToJoin
                   settings={settings}
                   saveSwitch={saveSwitch}

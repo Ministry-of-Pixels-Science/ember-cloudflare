@@ -286,7 +286,7 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onDe
   const directory = useDirectory();
   // The invitations into huddles that ring in this tab, as the workspace socket brings them and says they're answered.
   const [invitations, changeInvitations] = useReducer(invitationsReducer, NO_INVITATIONS);
-  const { list, answered, change: changeRooms, refresh, askForRoom, active } = useSidebar(me, onSessionChanged, directory, accountHeard, shownRoomGone, changeInvitations);
+  const { list, answered, change: changeRooms, refresh, askForRoom, active, reportsHeard: heard } = useSidebar(me, onSessionChanged, directory, accountHeard, shownRoomGone, changeInvitations);
   const [drawerOpen, setDrawerOpen] = useState(false);
   // New direct message, while it's open, with the link that opened it, which gets focus back, or null
   // when its address did.
@@ -302,9 +302,10 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onDe
   // On a page of community settings, the links to their sections take the conversations' place.
   const section = settingsSectionOf(route, hash);
   const administrator = me.administrator;
-  // How many reports are open, which only an administrator's sidebar says.
+  // How many reports are open, which only an administrator's sidebar says, and how many times it has said.
   const openReports = administrator ? (list?.openReports ?? 0) : 0;
-  const settings = useMemo<SettingsPlace | null>(() => section && { section, administrator, openReports }, [section, administrator, openReports]);
+  const reportsHeard = administrator ? heard : 0;
+  const settings = useMemo<SettingsPlace | null>(() => section && { section, administrator, openReports, reportsHeard }, [section, administrator, openReports, reportsHeard]);
 
   const rooms = list?.rooms ?? null;
   const invitation = list?.invitation ?? null;

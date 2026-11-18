@@ -739,6 +739,12 @@ export type JoinLink = "joins" | "off" | "memberful" | "not found";
 export type SignUpRefusal = "closed" | "full";
 
 /**
+ * What handling a report answers: the reports it closed, or why it closed none, as Remove and Ban answer
+ * when they can't, and as `Workspace.handleReport` says.
+ */
+type ReportHandling = HandledReports | BanProblem | "your address" | "handled" | "invalid" | "unremovable" | "forbidden" | "not found" | "yourself";
+
+/**
  * Why a change to the account changes nothing: Open and Memberful's Members only can't both be on
  * ("conflict"), and Email domain can't be on without a domain to let in, nor be turned on while Ember
  * can't send email, since it emails people the links they join with.
@@ -1051,6 +1057,8 @@ export class Workspace extends DurableObject<Env> {
    * and kept, in the order they were asked for (see `askForPasswordReset`).
    */
   private lastResetCode: Promise<unknown> = Promise.resolve();
+  /** The last report being handled, which the next one waits for (see `handleReport`). */
+  private lastReportHandling: Promise<unknown> = Promise.resolve();
   /** How many changes have queued revocations, which `afterQueuing` compares to see whether its change did. */
   private queuedRevocations = 0;
   /**
@@ -3361,8 +3369,9 @@ export class Workspace extends DurableObject<Env> {
 
   /**
    * Reports whoever has id `userId` as the person `credentials` signs in, for `report`'s reason, as Report
-   * on their page does, for their name, picture or bio: "not found" unless somebody they're told of has
-   * it, "yourself" for their own, or null without a valid session. The report keeps their name and bio
+   * on their page does, for their name, picture or bio: "not found" unless somebody active they're told of
+   * has it, as a person's page offers Report only for someone active, "yourself" for their own, or null
+   * without a valid session. The report keeps their name and bio
    * as they are now, and every active administrator but them hears of it (`keepReport`). Reporting someone
    * again while a report of theirs of them is open changes nothing.
    */
@@ -3371,7 +3380,7 @@ export class Workspace extends DurableObject<Env> {
     if (!user) return null;
     if (userId === user.id) return "yourself";
     const [person] = (await this.isListedTo(userId, user.id)) ? await this.store.directoryEntries([userId]) : [];
-    if (!person) return "not found";
+    if (person?.status !== "active") return "not found";
     const subject: ReportSubject = { kind: "person", person: { id: person.id, name: person.name, bio: person.bio } };
     await this.keepReport(user, { ...report, id: sortableId(), reporterId: user.id, subjectId: person.id, subject, createdAt: new Date().toISOString() }, person.name);
     return "reported";
@@ -3389,13 +3398,17 @@ export class Workspace extends DurableObject<Env> {
     this.tellOpenReports(kept.open.filter(({ userId }) => userId !== report.subjectId));
     if (kept.deliveries.length === 0) return;
     const payload = reportPayload(reporter.name, subjectName, report.subject, report.reason);
-    this.ctx.waitUntil(this.pushReport([{ payload, deliveries: kept.deliveries }]));
+    this.ctx.waitUntil(this.pushReport([{ payload, deliveries: kept.deliveries }], reporter.id));
   }
 
-  /** Sends a report's pushes, as each is still allowed when its turn comes, and forgets the subscriptions they find gone. */
-  private async pushReport(pushes: Parameters<typeof sendPushes>[1]): Promise<void> {
+  /**
+   * Sends the pushes of a report `reporterId` made, each only if its turn finds it still an active
+   * administrator's who hasn't blocked them since (`ReportStore.pushable`), and forgets the subscriptions
+   * they find gone.
+   */
+  private async pushReport(pushes: Parameters<typeof sendPushes>[1], reporterId: UserId): Promise<void> {
     try {
-      const gone = await sendPushes(this.env, pushes, (id) => this.store.pushable(id));
+      const gone = await sendPushes(this.env, pushes, (id) => this.reports.pushable(id, reporterId));
       if (gone.length > 0) await this.forgetPushSubscriptions(gone);
     } catch (error) {
       console.error("Could not push a report", error);
@@ -3423,19 +3436,25 @@ export class Workspace extends DurableObject<Env> {
    * Handles report `reportId` as the administrator `credentials` signs in, as `outcome` says: deletes
    * its message, removes or bans whoever wrote it, or whom it reports, as Remove and Ban do and answering
    * as they would when they can't, or dismisses it. Then the report is closed as theirs, with every other
-   * open report of the message deleted, or of whoever was removed or banned, and every administrator's
-   * tabs hear how many are open. Answers the reports it closed, "handled" once another administrator has,
+   * open report of the message deleted, or of whoever was removed or banned, and the tabs of every
+   * administrator but whoever it's of hear how many are open. Reports are handled one at a time, so one
+   * another administrator handled first does nothing more. Answers the reports it closed, "handled" once another administrator has,
    * "not found" unless there's such a report that isn't of them, "invalid" for deleting a person,
    * "unremovable" for removing or banning someone Remove or Ban can't, as one already removed, or an AI
    * agent, "forbidden" for anyone but an administrator, or null without a valid session.
    */
-  async handleReport(
-    credentials: Credentials,
-    reportId: string,
-    outcome: ReportOutcome,
-  ): Promise<HandledReports | BanProblem | "your address" | "handled" | "invalid" | "unremovable" | "forbidden" | "not found" | "yourself" | null> {
+  async handleReport(credentials: Credentials, reportId: string, outcome: ReportOutcome): Promise<ReportHandling | null> {
     const user = await this.authenticate(credentials);
     if (!user) return null;
+    // One at a time, so a report another administrator handled while this waited is found handled, and
+    // its message isn't deleted, nor whoever it's of removed or banned, on top.
+    const handling = this.lastReportHandling.then(() => this.handleReportAs(user, credentials, reportId, outcome));
+    this.lastReportHandling = handling.catch(() => undefined);
+    return handling;
+  }
+
+  /** Handles report `reportId` as `handleReport` says, as `user`, whom `credentials` signs in. */
+  private async handleReportAs(user: User, credentials: Credentials, reportId: string, outcome: ReportOutcome): Promise<ReportHandling | null> {
     if (!(await this.store.isAdministrator(user.id))) return "forbidden";
     const report = await this.reports.reportFor(reportId, user.id);
     if (!report) return "not found";
@@ -3450,7 +3469,8 @@ export class Workspace extends DurableObject<Env> {
       if (typeof done === "string" || done === null) return done;
     }
     const { closed, open } = await this.reports.close(report, user.id, outcome, new Date().toISOString());
-    this.tellOpenReports(open);
+    // As when it was made, whoever it's of, who sees no reports of themselves, hears nothing of it.
+    this.tellOpenReports(open.filter(({ userId }) => userId !== subjectOf(report)));
     return closed.length > 0 ? { reports: closed } : "handled";
   }
 

@@ -1,6 +1,6 @@
 import { createElement, useContext, type ComponentProps, type ReactNode } from "react";
 import { isAppPage, type User, type UserId } from "@ember/protocol";
-import type { DisplayElement, DisplayNode, DisplayPreview } from "@ember/richtext/dom";
+import { displayBody, type DisplayElement, type DisplayNode, type DisplayPreview } from "@ember/richtext/dom";
 import { PageLink } from "@/components/page-link";
 import { mentionedPerson, PeopleContext } from "@/hooks/use-directory";
 import { cn } from "@/lib/utils";
@@ -16,6 +16,19 @@ const TABLE_PARTS = new Set(["table", "thead", "tbody", "tfoot", "tr"]);
 
 /** What a mention of someone no one knows shows. */
 export const UNKNOWN_PERSON = "☒";
+
+/**
+ * What a stored body shows, or null when it can't be shown. `plainText` is the body's, which tells when a
+ * message is only the link its preview is of, and a preview can't link to the page's own host.
+ */
+export function shownBody(body: string, plainText: string): DisplayNode[] | null {
+  try {
+    return displayBody(body, plainText, location.hostname);
+  } catch (error) {
+    console.error("Could not show a message", error);
+    return null;
+  }
+}
 
 interface Props {
   /** The text, as `displayBody` says it shows. */

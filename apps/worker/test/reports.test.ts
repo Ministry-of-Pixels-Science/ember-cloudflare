@@ -18,8 +18,10 @@ import {
   KEEP_PERSON_REPORT,
   OPEN_REPORTS,
   OPEN_REPORTS_BY_ADMINISTRATOR,
+  REPORT_PUSHABLE,
   REPORT_PUSHES,
 } from "../src/reports/store";
+import { PUSHES_AT_ONCE } from "../src/at-once";
 import { OPEN_REPORTS_OF_ADMINISTRATOR } from "../src/workspace-store";
 import { api, connect, createRoom, direct, freshDeploy, openWorkspaceSocket, post, pushBrowser, roomSql, signIn, workspaceSql, type PushBrowser, type Session, type WorkspaceSocket } from "./support";
 
@@ -265,8 +267,8 @@ describe("Report a message", () => {
 });
 
 describe("Report someone", () => {
-  it("keeps their name and bio as they were when reported, but not of yourself, of nobody, or of an agent you aren't told of", async () => {
-    const [ada, grace, linus, agent] = await people("Ada", "Grace", "Linus", "Agent");
+  it("keeps their name and bio as they were when reported, but not of yourself, of nobody, of someone no longer in the community, or of an agent you aren't told of", async () => {
+    const [ada, grace, linus, agent, kay] = await people("Ada", "Grace", "Linus", "Agent", "Kay");
     await administrators(ada);
     await workspaceSql("UPDATE users SET bio = ? WHERE id = ?", "Buy my course", grace.user.id);
 
@@ -289,6 +291,11 @@ describe("Report someone", () => {
     // An AI agent kept for administrators' direct messages is nobody to anyone else.
     await workspaceSql("UPDATE users SET role = 2, agent_access = 'admin-dms' WHERE id = ?", agent.user.id);
     expect((await reportPerson(linus, agent.user.id)).status).toBe(404);
+    // Nor is anyone removed, banned or away with their membership, whose page offers no Report.
+    for (const status of [1, 2, 3]) {
+      await workspaceSql("UPDATE users SET status = ? WHERE id = ?", status, kay.user.id);
+      expect((await reportPerson(linus, kay.user.id)).status).toBe(404);
+    }
     await refused(reportPerson(linus, grace.user.id, { reason: "rude" }), 422, REPORT_REASON_REFUSED);
     expect((await api(`/api/users/${grace.user.id}/report`, { method: "POST", body: JSON.stringify(SPAM) })).status).toBe(401);
     expect(await workspaceSql("SELECT count(*) AS n FROM reports")).toEqual([{ n: 1 }]);
@@ -359,6 +366,32 @@ describe("Who hears of a report", () => {
     ]);
   });
 
+  it("pushes a report to nobody who, by the time its turn comes, is no longer an administrator or has blocked whoever made it", async () => {
+    const [ada, priya, kay, sam, grace, linus] = await people("Ada", "Priya", "Kay", "Sam", "Grace", "Linus");
+    await administrators(ada, priya, kay, sam);
+    // Ada's pushes, as many as go at once, wait for the push service, so the rest wait their turn.
+    const adas = Array.from({ length: PUSHES_AT_ONCE }, (_, index) => `ada${index}`);
+    for (const label of adas) await subscribe(ada, label);
+    for (const [label, session] of [["priya", priya], ["kay", kay], ["sam", sam]] as const) await subscribe(session, label);
+    let answer!: () => void;
+    const answered = new Promise<void>((resolve) => (answer = resolve));
+    const pushed: string[] = [];
+    const sent = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const label = (input instanceof Request ? input.url : String(input)).slice(PUSH_SERVICE.length);
+      if (label.startsWith("ada")) await answered;
+      pushed.push(label);
+      return new Response(null, { status: 201 });
+    });
+
+    await reported(reportPerson(linus, grace.user.id));
+    await vi.waitFor(() => expect(sent).toHaveBeenCalledTimes(PUSHES_AT_ONCE));
+    await workspaceSql("UPDATE users SET role = 0 WHERE id = ?", priya.user.id);
+    expect((await api(`/api/users/${linus.user.id}/block`, { method: "POST", headers: { Cookie: kay.cookie } })).status).toBe(200);
+    answer();
+    await vi.waitFor(() => expect(pushed).toContain("sam"));
+    expect(pushed.toSorted()).toEqual([...adas, "sam"]);
+  });
+
   it("forgets a subscription its push service says is gone, failing nothing for whoever reported", async () => {
     const logs = vi.spyOn(console, "log").mockImplementation(() => {});
     const pushed = pushServices((endpoint) => (endpoint.endsWith("/gone") ? 410 : 201));
@@ -421,6 +454,23 @@ describe("Handling a report", () => {
 
     await refused(handle(ed, linuss!.id, "deleted"), 409, "Another administrator has handled that report");
     expect((await reportsFor(ed)).handled).toEqual(closed);
+  });
+
+  it("handles a report two administrators handle at once only as whoever came first did", async () => {
+    const [ada, ed, grace, linus] = await people("Ada", "Ed", "Grace", "Linus");
+    await administrators(ada, ed);
+    const general = await createRoom("general");
+    const message = await written(grace, general.id, "Cheap watches");
+    await reported(reportMessage(linus, general.id, message.id));
+    const [report] = (await reportsFor(ada)).open;
+
+    // Ed dismisses it while Ada's Delete message is on its way to the room, or the other way round.
+    const answers = await Promise.all([handle(ada, report!.id, "deleted"), handle(ed, report!.id, "dismissed")]);
+    expect(answers.map(({ status }) => status).toSorted()).toEqual([200, 409]);
+    const [handled] = (await reportsFor(ada)).handled;
+    const deletedFirst = handled!.handled!.outcome === "deleted";
+    expect(handled).toEqual(handledAs(report!, deletedFirst ? ada : ed, deletedFirst ? "deleted" : "dismissed"));
+    expect(await roomSql(general.id, "SELECT count(*) AS n FROM messages WHERE id = ? AND deleted = 0", message.id)).toEqual([{ n: deletedFirst ? 0 : 1 }]);
   });
 
   it("deletes a reported message for everyone, closing every open report of it and no other", async () => {
@@ -501,6 +551,7 @@ describe("Handling a report", () => {
           [HANDLED_REPORTS, "a"],
           [CLOSE_MESSAGE_REPORTS, "room", "m", "a", "now"],
           [CLOSE_PERSON_REPORTS, "b", "a", "now", "removed"],
+          [REPORT_PUSHABLE, 1, "a"],
         ] as const
       ).map(async ([query, ...params]) => ((await workspaceSql(`EXPLAIN QUERY PLAN ${query}`, ...params)) as Array<{ detail: string }>).map(({ detail }) => detail).join("; ")),
     );
@@ -511,5 +562,6 @@ describe("Handling a report", () => {
     expect(plans[6]).toContain("index_reports_on_handled_at_and_created_at (handled_at>?)");
     expect(plans[7]).toContain("index_reports_on_message_id (message_id=?)");
     expect(plans[8]).toContain("index_reports_on_subject_id (subject_id=?)");
+    expect(plans[9]).not.toMatch(/SCAN (push_subscriptions|users|blocks)\b/);
   });
 });

@@ -1,6 +1,6 @@
 import { memo, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from "react";
 import type { CardAction, Me, Message, User } from "@ember/protocol";
-import { displayBody, isAllEmoji, type DisplayNode } from "@ember/richtext/dom";
+import { isAllEmoji } from "@ember/richtext/dom";
 import { NavArrowRight } from "@/components/icons/iconoir";
 import { PageLink } from "@/components/page-link";
 import { useAccount } from "@/hooks/use-account";
@@ -16,7 +16,7 @@ import { Attachment } from "./attachment";
 import { BotCards } from "./bot-card";
 import { HuddleShown, HuddleSummary, HuddleTile, HuddleTitle, isLive } from "./huddle-message";
 import { MessageActionsMenu, type MessageActionsHandle } from "./message-actions-menu";
-import { MessageBody } from "./message-body";
+import { MessageBody, shownBody } from "./message-body";
 import { MessageBoosts } from "./message-boosts";
 import { FixedMessageEditor, MessageEditor, type MessageEditorHandle } from "./message-editor";
 import { UploadCard } from "./upload-card";
@@ -74,19 +74,6 @@ interface Props {
   thread?: ThreadPlace;
   /** Whether the message's thread is open beside its room, which marks it there, as Slack does. */
   open?: boolean;
-}
-
-/**
- * What a stored body shows, or null when it can't be shown. `plainText` is the body's, which tells when a
- * message is only the link its preview is of, and a preview can't link to the page's own host.
- */
-function shownBody(body: string, plainText: string): DisplayNode[] | null {
-  try {
-    return displayBody(body, plainText, location.hostname);
-  } catch (error) {
-    console.error("Could not show a message", error);
-    return null;
-  }
 }
 
 /**

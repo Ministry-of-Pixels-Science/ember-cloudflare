@@ -61,12 +61,14 @@ export function settingsSectionOf(route: Route, hash: string): SettingsSection |
 
 /**
  * On a page of community settings, its section, whether whoever's looking administers the workspace, and
- * if they do, how many open reports they see, which Membership counts.
+ * if they do, how many open reports they see, which Membership counts, and how many times that count has
+ * come, which its Reports list loads again on.
  */
 export interface SettingsPlace {
   section: SettingsSection;
   administrator: boolean;
   openReports?: number;
+  reportsHeard?: number;
 }
 
 /** What says how many reports are open: Membership's count, and the rail's dot on Admin. */
