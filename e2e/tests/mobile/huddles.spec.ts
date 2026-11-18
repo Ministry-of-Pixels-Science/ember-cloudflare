@@ -1,5 +1,6 @@
 import type { DirectRoom, LiveHuddle, Message, RoomSettings, ServerFrame, Sidebar, SidebarRoom, User } from "@ember/protocol";
 import type { HuddleClientFrame, HuddleServerFrame, MessageHuddle } from "@ember/protocol/huddles";
+import { execFileSync } from "node:child_process";
 import type { APIRequestContext, Locator, Page, WebSocketRoute } from "@playwright/test";
 import { changeTheWorkspace, cookieHeader, editorField, huddleTilesKeepClear, isolateRoom, listing, openRoom, ROOM_SOCKET, signInAs, type Session, type Tells, type TestRoom } from "../../fixtures";
 import { auditScreen } from "./audits";
@@ -190,27 +191,22 @@ async function letScreenBeKeptAwake(page: Page): Promise<void> {
   await cdp.send("Browser.grantPermissions", { permissions: ["wakeLockScreen", "audioCapture", "videoCapture"], browserContextId: targetInfo.browserContextId });
 }
 
-/** Where a page keeps the connections that stand in for the SFU's, the last of which sends it the screens it watches, and the picture they show. */
-type SentScreens = Window & { screensSent?: RTCPeerConnection[]; screenPicture?: MediaStreamTrack };
+/** Where a page keeps the connection that stands in for the SFU's, which sends it the screens it watches. */
+type SentScreens = Window & { screensSent?: RTCPeerConnection; screenSize?: [number, number] };
 
 /**
  * In the page: a connection of its own that sends it `count` screens, as the SFU's would, each the
  * picture of its made-up camera, as wide as a screen is. Answers its offer of them, which names an
- * address of its own, as the SFU's does, and the media section each is on. The connection before it is
- * closed, as the SFU's would be, and each sends copies of one picture. The page keeps the picture, and
- * every connection, closed or not: in WebKit, collecting a closed connection that sent copies of a
- * picture stopped every copy of it, and the screens showed blank when the huddle opened again.
+ * address of its own, as the SFU's does, and the media section each is on.
  */
 async function offerScreens(count: number): Promise<{ sdp: string; mids: string[] }> {
-  const sending = window as SentScreens;
-  const made = (sending.screensSent ??= []);
-  made.at(-1)?.close();
-  sending.screenPicture ??= (await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } })).getVideoTracks()[0]!;
+  const [width, height] = (window as SentScreens).screenSize ?? [1280, 720];
+  const picture = await navigator.mediaDevices.getUserMedia({ video: { width, height } });
   const connection = new RTCPeerConnection();
-  const sent = Array.from({ length: count }, () => connection.addTransceiver(sending.screenPicture!.clone(), { direction: "sendonly" }));
+  const sent = Array.from({ length: count }, () => connection.addTransceiver(picture.getVideoTracks()[0]!.clone(), { direction: "sendonly" }));
   await connection.setLocalDescription(await connection.createOffer());
   if (!connection.localDescription!.sdp.includes("a=candidate:")) await new Promise((resolve) => connection.addEventListener("icecandidate", resolve, { once: true }));
-  made.push(connection);
+  (window as SentScreens).screensSent = connection;
   return { sdp: connection.localDescription!.sdp, mids: sent.map(({ mid }) => mid!) };
 }
 
@@ -231,7 +227,7 @@ async function standInHuddleWithScreens(page: Page, you: User, sharing: User[], 
         const { sdp, mids } = await page.evaluate(offerScreens, sharing.length);
         say({ type: "huddle.offer", kind: "screen", sdp, tracks: sharing.map(({ id }, index) => ({ mid: mids[index]!, kind: "screen", userId: id })) });
       } else if (frame.type === "huddle.answer" && frame.kind === "screen") {
-        await page.evaluate((sdp) => (window as SentScreens).screensSent!.at(-1)!.setRemoteDescription({ type: "answer", sdp }), frame.sdp);
+        await page.evaluate((sdp) => (window as SentScreens).screensSent!.setRemoteDescription({ type: "answer", sdp }), frame.sdp);
         say({ type: "huddle.listening", kind: "screen" });
       } else if (frame.type === "huddle.listen" && frame.kind === "screen") {
         say({ type: "huddle.listening", kind: "screen" });
@@ -788,126 +784,71 @@ test("Invite people, with more people to invite than it lists at once, has a sea
   await expect.poll(() => invitationsSent(said)).toEqual([{ type: "huddle.invite", userIds: ["invite-42"] }]);
 });
 
-// TEMPORARY, to find why WebKit's screens show blank: their frames arrive and are decoded, but the
-// video stays paused, with nothing loaded, and given its stream again it plays. Here the app as it is,
-// with each video given its stream only once its track unmutes, and with each video that has loaded
-// nothing a second after given its stream again, six times each on each phone.
-type Diagnosed = Window & { connectionsSeen?: WeakRef<RTCPeerConnection>[]; reattached?: number };
-
-/** TEMPORARY. In the page, before it loads: notes each connection, weakly. */
-function noteConnections(): void {
-  const seen: WeakRef<RTCPeerConnection>[] = ((window as Diagnosed).connectionsSeen = []);
-  const noted = new WeakSet<RTCPeerConnection>();
-  for (const method of ["setLocalDescription", "setRemoteDescription"] as const) {
-    const original = RTCPeerConnection.prototype[method] as (...args: unknown[]) => Promise<void>;
-    (RTCPeerConnection.prototype as unknown as Record<string, unknown>)[method] = function (this: RTCPeerConnection, ...args: unknown[]) {
-      if (!noted.has(this)) {
-        noted.add(this);
-        seen.push(new WeakRef(this));
-      }
-      return original.apply(this, args);
-    };
-  }
-}
-
-/** TEMPORARY. In the page, before it loads: gives each video its stream the `way` named, in place of at once. */
-function attachStreams(way: string): void {
-  const property = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "srcObject")!;
-  const given = new WeakMap<HTMLMediaElement, MediaProvider | null>();
-  const attach = (video: HTMLMediaElement, stream: MediaProvider | null) => property.set!.call(video, stream);
-  const diagnosed = window as Diagnosed;
-  diagnosed.reattached = 0;
-  Object.defineProperty(HTMLMediaElement.prototype, "srcObject", {
-    ...property,
-    get(this: HTMLMediaElement) {
-      return given.has(this) ? given.get(this) : property.get!.call(this);
-    },
-    set(this: HTMLMediaElement, stream: MediaProvider | null) {
-      given.set(this, stream);
-      const track = stream instanceof MediaStream ? stream.getVideoTracks()[0] : undefined;
-      if (!track || !(this instanceof HTMLVideoElement)) return attach(this, stream);
-      const still = () => given.get(this) === stream && track.readyState === "live";
-      if (way === "on unmute") {
-        if (!track.muted) return attach(this, stream);
-        attach(this, null);
-        track.addEventListener("unmute", () => still() && attach(this, stream), { once: true });
-        return;
-      }
-      attach(this, stream);
-      let wait = 1_000;
-      const check = () => {
-        if (!still() || this.readyState > 0) return;
-        if (!track.muted) {
-          attach(this, null);
-          attach(this, stream);
-          diagnosed.reattached! += 1;
-        }
-        wait *= 2;
-        setTimeout(check, wait);
-      };
-      setTimeout(check, wait);
-    },
-  });
-}
+// TEMPORARY, to find why WebKit's page freezes as a huddle's shared screens start: the test with the
+// stand-in's screens as large as a laptop's, and smaller, six times each on each phone, and when the
+// page freezes, where each of WebKit's page processes is stuck, from gdb.
 
 /** TEMPORARY. Whether `evaluating` settles within 5 seconds, which a page that's frozen doesn't. */
 async function settles<T>(evaluating: Promise<T>): Promise<T | "FROZEN"> {
   return Promise.race([evaluating, new Promise<"FROZEN">((resolve) => setTimeout(() => resolve("FROZEN"), 5_000))]);
 }
 
-/** TEMPORARY. In the page: what each video in the huddle, and each connection receiving, is doing. */
-async function screensState(): Promise<unknown> {
-  const videos = [...document.querySelectorAll<HTMLVideoElement>("#huddle video")].map((video) => {
-    const track = (video.srcObject as MediaStream | null)?.getVideoTracks()[0];
-    return `${video.getAttribute("aria-label")}: ${video.paused ? "paused" : "playing"} ready ${video.readyState} ${video.videoWidth}x${video.videoHeight} at ${video.currentTime.toFixed(2)} track ${track ? `${track.id.slice(0, 8)} ${track.readyState}${track.muted ? " muted" : ""}` : "none"}`;
-  });
-  const receiving = await Promise.all(
-    ((window as Diagnosed).connectionsSeen ?? []).map(async (seen) => {
-      const connection = seen.deref();
-      if (!connection || connection.connectionState === "closed" || !connection.getTransceivers().some(({ direction }) => direction === "recvonly")) return null;
-      const inbound: string[] = [];
-      try {
-        (await connection.getStats()).forEach((stat: Record<string, unknown>) => {
-          if (stat.type === "inbound-rtp" && stat.kind === "video") inbound.push(`${stat.mid}: ${stat.framesDecoded} decoded ${stat.frameWidth}x${stat.frameHeight}`);
-        });
-      } catch (error) {
-        inbound.push(String(error));
-      }
-      const tracks = connection.getTransceivers().map(({ mid, receiver }) => `${mid}: ${receiver.track.id.slice(0, 8)}`);
-      return `${connection.connectionState} [${tracks.join(", ")}] [${inbound.join(", ")}]`;
-    }),
-  );
-  return { at: Math.round(performance.now()), reattached: (window as Diagnosed).reattached, videos, receiving: receiving.filter(Boolean) };
-}
-
-/** TEMPORARY. In the page: plays each paused video in the huddle, and says how that went within 3 seconds. */
-async function playPausedVideos(): Promise<string[]> {
-  const paused = [...document.querySelectorAll<HTMLVideoElement>("#huddle video")].filter((video) => video.paused);
-  return Promise.all(
-    paused.map(async (video) => {
-      const result = await Promise.race([video.play().then(() => "played", (error: Error) => error.name), new Promise<string>((resolve) => setTimeout(() => resolve("still pending"), 3_000))]);
-      return `${video.getAttribute("aria-label")}: ${result}`;
-    }),
-  );
-}
-
-/** TEMPORARY. In the page: gives each video in the huddle that has loaded nothing its stream again. */
-function reattachEmptyVideos(): void {
-  for (const video of document.querySelectorAll<HTMLVideoElement>("#huddle video")) {
-    if (video.readyState > 0) continue;
-    const stream = video.srcObject;
-    video.srcObject = null;
-    video.srcObject = stream;
+/** TEMPORARY. Each of WebKit's page processes, and its threads' stacks, from gdb, which CI installs for this. */
+function webProcessStacks(): string {
+  let pids: string[];
+  try {
+    pids = execFileSync("pgrep", ["-f", "WebProcess"], { encoding: "utf8" }).trim().split("\n").filter(Boolean);
+  } catch (error) {
+    return `no page process: ${String(error)}`;
   }
+  return pids
+    .map((pid) => {
+      try {
+        const command = execFileSync("ps", ["-o", "args=", "-p", pid], { encoding: "utf8" }).trim();
+        const stacks = execFileSync("sudo", ["-n", "gdb", "-p", pid, "-batch", "-nx", "-ex", "set pagination off", "-ex", "thread apply all bt 40"], { encoding: "utf8", timeout: 90_000, maxBuffer: 64 * 1024 * 1024 });
+        return `=== ${pid} ${command}\n${stacks}`;
+      } catch (error) {
+        return `=== ${pid}: ${String(error).slice(0, 2_000)}`;
+      }
+    })
+    .join("\n");
 }
 
-for (const way of ["as is", "on unmute", "watchdog"] as const)
+/** TEMPORARY. The stacks of each process's main thread, which gdb names Thread 1, out of `stacks`. */
+function mainThreads(stacks: string): string {
+  return stacks
+    .split(/^(?==== )/m)
+    .map((process) => {
+      const [heading] = process.split("\n");
+      const main = /^Thread 1 [^\n]*\n(?:#[^\n]*\n?)*/m.exec(process)?.[0] ?? "(no Thread 1)";
+      return `${heading}\n${main}`;
+    })
+    .join("\n");
+}
+
+for (const way of ["720p", "360p"] as const)
 for (const round of [1, 2, 3, 4, 5, 6])
 test(`[diag ${way} ${round}] the screens people share in the huddle you're in fit the phone, one large and the other among the huddle's tiles, under it or beside it`, async ({ page, room, session, participant, screenIsFine }, testInfo) => {
-  test.setTimeout(120_000);
-  await page.addInitScript(noteConnections);
-  if (way !== "as is") await page.addInitScript(attachStreams, way);
+  test.setTimeout(180_000);
+  if (way === "360p") await page.addInitScript(() => ((window as SentScreens).screenSize = [640, 360]));
   const name = `DIAG ${testInfo.project.name} ${way} ${round}`;
+  /** TEMPORARY. Waits for `shown`, and when it doesn't come, says whether the page froze, and where. */
+  const waitFor = async (step: string, shown: () => Promise<unknown>) => {
+    try {
+      await shown();
+      console.log(`${name} ${step}: shown`);
+    } catch (error) {
+      const alive = await settles(page.evaluate(() => document.readyState));
+      if (alive !== "FROZEN") {
+        console.log(`${name} ${step}: BLANK`);
+        throw error;
+      }
+      const stacks = webProcessStacks();
+      await testInfo.attach("stacks", { body: stacks, contentType: "text/plain" });
+      console.log(`${name} ${step}: FROZEN\n${mainThreads(stacks)}\n${name} end of stacks`);
+      throw error;
+    }
+  };
   const sharing = await Promise.all(["Ada", "Grace"].map(async (name) => (await participant(name)).session.user));
   await standInHuddleWithScreens(page, session.user, sharing);
   await openRoomWithHuddlesOn(page, room);
@@ -916,32 +857,11 @@ test(`[diag ${way} ${round}] the screens people share in the huddle you're in fi
   const opened = page.locator("#huddle");
   /** Whether the huddle shows the screen it labels `label`, whose picture plays and has a size, which a frame gives it. */
   const shows = (label: string) => opened.getByLabel(label, { exact: true }).evaluate((video: HTMLVideoElement) => !video.paused && video.videoWidth > 0 && video.currentTime > 0);
-  /** TEMPORARY. Waits for the huddle to show `label`'s screen, and when it doesn't, notes why, and what plays it. */
-  const waitToShow = async (label: string, step: string) => {
-    try {
-      await expect.poll(() => shows(label), { timeout: 15_000 }).toBe(true);
-      console.log(`${name} ${step}: shown${way === "watchdog" ? ` after ${await page.evaluate(() => (window as Diagnosed).reattached)} reattached` : ""}`);
-    } catch (error) {
-      const blank = await settles(page.evaluate(screensState));
-      if (blank === "FROZEN") {
-        console.log(`${name} ${step}: FROZEN`);
-        throw error;
-      }
-      const played = await page.evaluate(playPausedVideos);
-      await page.waitForTimeout(1_000);
-      const afterPlay = await page.evaluate(screensState);
-      await page.evaluate(reattachEmptyVideos);
-      await page.waitForTimeout(3_000);
-      const afterReattach = await page.evaluate(screensState);
-      console.log(`${name} ${step}: BLANK\n${name} blank ${JSON.stringify(blank)}\n${name} play() ${JSON.stringify(played)} then ${JSON.stringify(afterPlay)}\n${name} reattached ${JSON.stringify(afterReattach)}`);
-      throw error;
-    }
-  };
 
   // Ada's, who joined first, shows large, all of it on the screen, under whose it is.
   const stage = opened.getByRole("figure");
   await expect(stage).toContainText("Ada's screen");
-  await waitToShow("Ada's screen", "opened");
+  await waitFor("opened", () => expect.poll(() => shows("Ada's screen"), { timeout: 15_000 }).toBe(true));
   await expect(stage).toBeInViewport({ ratio: 1 });
   // The tiles are under it on a phone held upright, and beside it on one held on its side, clear of one another. Grace's screen is the first of them.
   const list = opened.getByRole("list", { name: "In the huddle" });
@@ -963,7 +883,7 @@ test(`[diag ${way} ${round}] the screens people share in the huddle you're in fi
   await tiles.first().getByRole("button", { name: "Show Grace's screen larger" }).tap();
   await expect(stage).toContainText("Grace's screen");
   await expect(tiles.first()).toHaveText("Ada's screen");
-  await waitToShow("Grace's screen", "larger");
+  await waitFor("larger", () => expect.poll(() => shows("Grace's screen"), { timeout: 15_000 }).toBe(true));
   await screenIsFine();
 
   // Minimized, the huddle's bar says who's sharing, and opened again it shows the screens again.
@@ -972,7 +892,7 @@ test(`[diag ${way} ${round}] the screens people share in the huddle you're in fi
   await expect(bar).toContainText("Ada and Grace are sharing screens");
   await screenIsFine();
   await bar.getByTitle("Open huddle").first().tap();
-  await waitToShow("Ada's screen", "reopened");
+  await waitFor("reopened", () => expect.poll(() => shows("Ada's screen"), { timeout: 15_000 }).toBe(true));
   await expect(tiles).toHaveCount(4);
 });
 
