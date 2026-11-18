@@ -88,9 +88,10 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @ember/e2e exec playwright install --with-deps webkit
-      - run: pnpm test:e2e
+      # TEMPORARY: the screens test alone, each way three times, to find why its screens showed blank.
+      - run: pnpm --filter @ember/e2e exec playwright test tests/mobile/huddles.spec.ts --project "mobile iPhone SE" --project "mobile iPhone 17" --grep "\[diag" --reporter=list,html
       - uses: actions/upload-artifact@v6
-        if: failure()
+        if: always()
         with:
           name: playwright-report-webkit
           path: e2e/playwright-report/
