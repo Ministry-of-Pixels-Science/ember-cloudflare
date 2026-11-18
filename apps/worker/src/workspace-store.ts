@@ -605,10 +605,14 @@ const blocksChange = (blocked: BlockedRow[], counted: { version: number } | unde
   direct: direct[0] ? { roomId: direct[0].room_id, involvement: direct[0].involvement } : null,
 });
 
-/** What deleting an account did: whether it queued revocations or purges, and whom everyone who had blocked them has blocked now. */
+/**
+ * What deleting an account did: whether it queued revocations or purges, whom everyone who had blocked
+ * them has blocked now, and whether it cleared any report of them, which administrators' Reports lists show.
+ */
 export interface DeletedAccount {
   queued: boolean;
   blockers: Array<{ userId: UserId; blocks: Blocks }>;
+  reportsCleared: boolean;
 }
 
 /** What became of a room's report of its huddle. */
@@ -2802,6 +2806,18 @@ const DELETE_ACCOUNT = `UPDATE users SET name = ?1, status = ${DEACTIVATED}, rol
   avatar_key = NULL, avatar_variant = NULL, assistant_thinking = NULL, assistant_answer_length = NULL, assistant_model = NULL,
   huddle_music = 1, huddle_chimes = 1, huddle_ring = 1, invitation_dismissed_at = NULL, deleted_at = ?2, updated_at = ?2 WHERE id = ?3`;
 
+/**
+ * Takes what the reports of someone, ?2, kept of them (reports/store.ts) once they've deleted their
+ * account: a message's text, the people it mentions, its file and cards, or their bio, and their name,
+ * calling them ?1 as `DELETE_ACCOUNT` does. Who reported it, why, when, and how it was handled stay.
+ */
+export const CLEAR_REPORTS_OF = `UPDATE reports SET subject = CASE WHEN message_id IS NULL
+    THEN json_set(subject, '$.person.name', ?1, '$.person.bio', NULL, '$.person.accountDeleted', json('true'))
+    ELSE json_set(json_remove(subject, '$.message.attachment', '$.message.cards'), '$.message.creator.name', ?1, '$.message.body', '',
+      '$.message.plainText', '', '$.message.mentions', json('[]'), '$.message.accountDeleted', json('true'))
+  END
+  WHERE subject_id = ?2 RETURNING id`;
+
 /** Someone as the directory lists them, whatever their status. */
 const PERSON = `SELECT ${DIRECTORY_COLUMNS} FROM users WHERE id = ?`;
 
@@ -3872,19 +3888,21 @@ export class WorkspaceStore {
    * their messages and boosts in every room they can have written in, all due at `dueAt`, then forgets
    * everything of theirs that removing them does, and the rooms they starred, the people they blocked and
    * who blocked them, the accounts elsewhere they connected, the sign-ins they were making to apps and any
-   * code they were emailed to reset their password, and queues R2 deleting their avatar, `avatar`, if they
-   * have one, due then too. Their row stays, as `DELETE_ACCOUNT` leaves it, recording when, `now`, and so
-   * do their DMs, which name them. Answers whether it queued any revocations or purges, and whom everyone
-   * who had blocked them has blocked now.
+   * code they were emailed to reset their password, and what the reports of them kept of them, and queues
+   * R2 deleting their avatar, `avatar`, if they have one, due then too. Their row stays, as `DELETE_ACCOUNT`
+   * leaves it, recording when, `now`, and so do their DMs, which name them, and the reports of them, as
+   * `CLEAR_REPORTS_OF` leaves them. Answers whether it queued any revocations or purges, whom everyone
+   * who had blocked them has blocked now, and whether any report was of them.
    */
   async deleteAccount(userId: UserId, avatar: string | null, code: CloseCode, dueAt: number, now: string): Promise<DeletedAccount> {
-    const [revocations, purges, counted, blocked] = (await this.db.batch([
+    const [revocations, purges, counted, blocked, cleared] = (await this.db.batch([
       // Before they leave the rooms, which it finds their sockets in.
       statement(QUEUE_PERSON_REVOCATIONS, code, dueAt, userId),
       statement(QUEUE_PURGES, userId, dueAt),
       // Before the blocks go, which it finds who blocked them by.
       statement(COUNT_BLOCKERS_CHANGE, userId),
       statement(BLOCKED_BY_BLOCKERS, userId),
+      statement(CLEAR_REPORTS_OF, DELETED_PERSON_NAME, userId),
       statement(LEAVE_SHARED_ROOMS, userId),
       statement(`DELETE FROM sessions WHERE user_id = ?`, userId),
       ...forgettingSearches(userId),
@@ -3900,11 +3918,12 @@ export class WorkspaceStore {
       statement(`DELETE FROM outside_connections WHERE user_id = ?`, userId),
       ...(avatar ? [statement(QUEUE_PICTURE_DELETION, avatar, dueAt)] : []),
       statement(DELETE_ACCOUNT, DELETED_PERSON_NAME, now, userId),
-    ])) as [unknown[], unknown[], Array<{ id: UserId; version: number }>, Array<BlockedRow & { user_id: UserId }>, ...unknown[][]];
+    ])) as [unknown[], unknown[], Array<{ id: UserId; version: number }>, Array<BlockedRow & { user_id: UserId }>, unknown[], ...unknown[][]];
     const blockedBy = Map.groupBy(blocked, (row) => row.user_id);
     return {
       queued: revocations.length > 0 || purges.length > 0,
       blockers: counted.map(({ id, version }) => ({ userId: id, blocks: { userIds: (blockedBy.get(id) ?? []).map((row) => row.blocked_id), version } })),
+      reportsCleared: cleared.length > 0,
     };
   }
 

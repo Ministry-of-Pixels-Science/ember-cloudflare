@@ -1,4 +1,4 @@
-import type { Message, RoomId, Sidebar, UserId } from "@ember/protocol";
+import { DELETED_PERSON_NAME, type Message, type RoomId, type Sidebar, type UserId } from "@ember/protocol";
 import {
   MAX_REPORT_NOTE_LENGTH,
   REPORT_NOTE_REFUSED,
@@ -9,6 +9,7 @@ import {
   type ReportOutcome,
   type Reports,
 } from "@ember/protocol/reports";
+import { MENTION_CONTENT_TYPE, mentionSgid } from "@ember/richtext";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   CLOSE_MESSAGE_REPORTS,
@@ -22,8 +23,9 @@ import {
   REPORT_PUSHES,
 } from "../src/reports/store";
 import { PUSHES_AT_ONCE } from "../src/at-once";
-import { OPEN_REPORTS_OF_ADMINISTRATOR } from "../src/workspace-store";
-import { api, connect, createRoom, direct, freshDeploy, openWorkspaceSocket, post, pushBrowser, roomSql, signIn, workspaceSql, type PushBrowser, type Session, type WorkspaceSocket } from "./support";
+import { MIGRATIONS } from "../src/migrations";
+import { CLEAR_REPORTS_OF, OPEN_REPORTS_OF_ADMINISTRATOR } from "../src/workspace-store";
+import { api, connect, createRoom, direct, freshDeploy, openWorkspaceSocket, post, pushBrowser, roomSql, signIn, upload, workspaceSql, type PushBrowser, type Session, type WorkspaceSocket } from "./support";
 
 // Report a message, in its More actions, or someone, on their page, which Apple asks of every app where
 // people post: the workspace's administrators hear of it, see what was reported as it was then, and delete
@@ -148,6 +150,15 @@ function pushServices(status: (endpoint: string) => number = () => 201) {
   });
   return pushed;
 }
+
+/** Has `session`'s person delete their account, as Delete my account does for someone without a password, by typing their name. */
+async function deleteAccountOf(session: Session): Promise<void> {
+  const response = await api("/api/users/me", { method: "DELETE", headers: { Cookie: session.cookie }, body: JSON.stringify({ name: session.user.name }) });
+  expect(response.status, await response.clone().text()).toBe(204);
+}
+
+/** A mention of `session`'s person, as the composer writes one. */
+const mention = ({ user }: Session) => `<action-text-attachment sgid="${mentionSgid(user.id)}" content-type="${MENTION_CONTENT_TYPE}"></action-text-attachment>`;
 
 /** How many of the rooms `session`'s person is in are marked unread for them. */
 const unreadFor = async (session: Session) =>
@@ -299,6 +310,91 @@ describe("Report someone", () => {
     await refused(reportPerson(linus, grace.user.id, { reason: "rude" }), 422, REPORT_REASON_REFUSED);
     expect((await api(`/api/users/${grace.user.id}/report`, { method: "POST", body: JSON.stringify(SPAM) })).status).toBe(401);
     expect(await workspaceSql("SELECT count(*) AS n FROM reports")).toEqual([{ n: 1 }]);
+  });
+});
+
+describe("Reports of someone who deletes their account", () => {
+  it("keep nothing they wrote, nor their name or bio, but who reported them, why, when and how it was handled", async () => {
+    const [ada, grace, linus] = await people("Ada", "Grace", "Linus");
+    await administrators(ada);
+    await workspaceSql("UPDATE users SET bio = ? WHERE id = ?", "Buy my course", grace.user.id);
+    const general = await createRoom("general");
+    const watches = await written(grace, general.id, `<p>Cheap watches, ask ${mention(linus)}</p>`);
+    const prices = await upload(grace, general.id, "prices.pdf", new TextEncoder().encode("Price list"), "application/pdf");
+    const linuss = await written(linus, general.id, "Not again");
+    await reported(reportMessage(linus, general.id, watches.id, { reason: "spam", note: "The third time today" }));
+    await reported(reportMessage(linus, general.id, prices.id, { reason: "spam", note: "And a file" }));
+    await reported(reportPerson(linus, grace.user.id, { reason: "harassment", note: "Her bio" }));
+    // A report she made is of someone else's message, and why she made it is the record's.
+    await reported(reportMessage(grace, general.id, linuss.id, { reason: "other", note: "Rude" }));
+    const [byGrace, ofGrace, ofHerFile, ofHerMessage] = (await reportsFor(ada)).open;
+    expect(ofHerMessage!.subject).toMatchObject({ message: { plainText: "Cheap watches, ask @Linus", mentions: [{ id: linus.user.id, name: "Linus" }] } });
+    expect(ofHerFile!.subject).toMatchObject({ message: { attachment: { name: "prices.pdf" } } });
+    const [dismissed] = await closedBy(handle(ada, ofGrace!.id, "dismissed"));
+
+    await deleteAccountOf(grace);
+
+    const left = ({ id, createdAt }: Pick<Message, "id" | "createdAt">) => ({ id, creator: { id: grace.user.id, name: DELETED_PERSON_NAME }, body: "", plainText: "", mentions: [], createdAt, editedAt: null, accountDeleted: true });
+    const where = { kind: "message", roomId: general.id, room: { kind: "open", name: "general" } } as const;
+    expect(await reportsFor(ada)).toEqual({
+      open: [byGrace, { ...ofHerFile, subject: { ...where, message: left(prices) } }, { ...ofHerMessage, subject: { ...where, message: left(watches) } }],
+      handled: [{ ...dismissed, subject: { kind: "person", person: { id: grace.user.id, name: DELETED_PERSON_NAME, bio: null, accountDeleted: true } } }],
+    });
+  });
+
+  it("keep no new one, refusing a report of a message of theirs every room has yet to delete, or of them", async () => {
+    const [ada, grace, linus, joan] = await people("Ada", "Grace", "Linus", "Joan");
+    await administrators(ada);
+    const general = await createRoom("general");
+    const graces = await written(grace, general.id, "Cheap watches");
+    // As in the minutes after Grace deletes her account, before every room has deleted her messages, and
+    // as she deletes it just when Linus reports her, after her page offered Report.
+    await workspaceSql("UPDATE users SET deleted_at = ? WHERE id = ?", new Date().toISOString(), grace.user.id);
+    expect((await reportMessage(linus, general.id, graces.id)).status).toBe(404);
+    expect((await reportPerson(linus, grace.user.id)).status).toBe(404);
+
+    const joans = await written(joan, general.id, "Cheap rings");
+    await deleteAccountOf(joan);
+    expect((await reportMessage(linus, general.id, joans.id)).status).toBe(404);
+    expect((await reportPerson(linus, joan.user.id)).status).toBe(404);
+    expect(await workspaceSql("SELECT count(*) AS n FROM reports")).toEqual([{ n: 0 }]);
+  });
+
+  it("tell every active administrator's tabs how many are open, as many as before, for an open Reports list to show them again", async () => {
+    const [ada, grace, linus, joan] = await people("Ada", "Grace", "Linus", "Joan");
+    await administrators(ada);
+    await reported(reportPerson(linus, grace.user.id));
+    const tab = await openWorkspaceSocket(ada);
+
+    // Nothing to show again when no report is of whoever deletes their account.
+    await deleteAccountOf(joan);
+    await heardNoCount(tab);
+    await deleteAccountOf(grace);
+    expect(await nextOpenReports(tab)).toBe(1);
+  });
+
+  it("are cleared by migration 0078 as deleting it clears them now, when it was deleted before, as 0.5 beta 8 deleted accounts", async () => {
+    const [grace, linus] = await people("Grace", "Linus");
+    await workspaceSql("UPDATE users SET bio = ? WHERE id = ?", "Buy my course", grace.user.id);
+    const general = await createRoom("general");
+    const watches = await written(grace, general.id, `<p>Cheap watches, ask ${mention(linus)}</p>`);
+    const prices = await upload(grace, general.id, "prices.pdf", new TextEncoder().encode("Price list"), "application/pdf");
+    const linuss = await written(linus, general.id, "Not again");
+    for (const { id } of [watches, prices]) await reported(reportMessage(linus, general.id, id));
+    await reported(reportPerson(linus, grace.user.id));
+    await reported(reportMessage(grace, general.id, linuss.id));
+    // As beta 8 left her deleted account, with the reports of her as they were.
+    await workspaceSql("UPDATE users SET deleted_at = ? WHERE id = ?", new Date().toISOString(), grace.user.id);
+    const subjects = async () => (await workspaceSql("SELECT id, subject FROM reports ORDER BY id")) as Array<{ id: string; subject: string }>;
+    const kept = await subjects();
+
+    await workspaceSql(MIGRATIONS.find(({ name }) => name === "0078_cleared_reports.sql")!.sql);
+    const cleared = await subjects();
+    for (const { id, subject } of kept) await workspaceSql("UPDATE reports SET subject = ? WHERE id = ?", subject, id);
+    await workspaceSql(CLEAR_REPORTS_OF, DELETED_PERSON_NAME, grace.user.id);
+    expect(cleared).toEqual(await subjects());
+    // The three reports of her, and not the one she made.
+    expect(cleared.filter(({ subject }, i) => subject !== kept[i]!.subject)).toHaveLength(3);
   });
 });
 
@@ -552,6 +648,7 @@ describe("Handling a report", () => {
           [CLOSE_MESSAGE_REPORTS, "room", "m", "a", "now"],
           [CLOSE_PERSON_REPORTS, "b", "a", "now", "removed"],
           [REPORT_PUSHABLE, 1, "a"],
+          [CLEAR_REPORTS_OF, "Deleted person", "b"],
         ] as const
       ).map(async ([query, ...params]) => ((await workspaceSql(`EXPLAIN QUERY PLAN ${query}`, ...params)) as Array<{ detail: string }>).map(({ detail }) => detail).join("; ")),
     );
@@ -563,5 +660,6 @@ describe("Handling a report", () => {
     expect(plans[7]).toContain("index_reports_on_message_id (message_id=?)");
     expect(plans[8]).toContain("index_reports_on_subject_id (subject_id=?)");
     expect(plans[9]).not.toMatch(/SCAN (push_subscriptions|users|blocks)\b/);
+    expect(plans[10]).toContain("index_reports_on_subject_id (subject_id=?)");
   });
 });

@@ -16,7 +16,8 @@ import { ACTIVE, ADMINISTRATOR, deliveryOf, type DeliveryRow, type PushDelivery 
 // What the Workspace keeps of reports (migrations/0073_reports.sql): who reported whom, for which of
 // their messages or for themselves, why, and the message or the person as they were then, until an
 // administrator handles it. Every list and count of them leaves out the reports of whoever it's for, so
-// an administrator never learns who reported them.
+// an administrator never learns who reported them. Once someone deletes their account, the reports of
+// them keep nothing they wrote, nor their name or bio (`CLEAR_REPORTS_OF`), and no new one is kept.
 
 /** A report to keep: its id, who made it, of whom, as Report asked, and when. A message's names its room and itself. */
 export interface ReportToKeep extends NewReport {
@@ -73,17 +74,26 @@ const reportOf = (row: ReportRow): Report => ({
 const ROOM_OF_MEMBER = `SELECT rooms.kind, rooms.name FROM rooms JOIN memberships ON memberships.room_id = rooms.id
   WHERE rooms.id = ?1 AND memberships.user_id = ?2`;
 
-/** Keeps a report of message ?5 in room ?4, unless whoever made it, ?2, has an open one of it already, answering it if it did. */
+/**
+ * Whether whoever a report would be of, ?3, still has their account: no report is kept of someone who
+ * deleted theirs, as one of their messages can be reported in the minutes it takes every room to delete it.
+ */
+const ACCOUNT_KEPT = `NOT EXISTS (SELECT 1 FROM users WHERE id = ?3 AND deleted_at IS NOT NULL)`;
+
+/** Keeps a report of message ?5 in room ?4, by ?3, unless whoever made it, ?2, has an open one of it already, answering it if it did. */
 export const KEEP_MESSAGE_REPORT = `INSERT INTO reports (id, reporter_id, subject_id, room_id, message_id, subject, reason, note, created_at)
   SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9
-  WHERE NOT EXISTS (SELECT 1 FROM reports WHERE message_id = ?5 AND room_id = ?4 AND reporter_id = ?2 AND handled_at IS NULL)
+  WHERE NOT EXISTS (SELECT 1 FROM reports WHERE message_id = ?5 AND room_id = ?4 AND reporter_id = ?2 AND handled_at IS NULL) AND ${ACCOUNT_KEPT}
   RETURNING id`;
 
 /** Keeps a report of someone, ?3, unless whoever made it, ?2, has an open one of them already, answering it if it did. */
 export const KEEP_PERSON_REPORT = `INSERT INTO reports (id, reporter_id, subject_id, subject, reason, note, created_at)
   SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7
-  WHERE NOT EXISTS (SELECT 1 FROM reports WHERE subject_id = ?3 AND message_id IS NULL AND reporter_id = ?2 AND handled_at IS NULL)
+  WHERE NOT EXISTS (SELECT 1 FROM reports WHERE subject_id = ?3 AND message_id IS NULL AND reporter_id = ?2 AND handled_at IS NULL) AND ${ACCOUNT_KEPT}
   RETURNING id`;
+
+/** Whether ? has deleted their account. */
+const DELETED_ACCOUNT = `SELECT 1 FROM users WHERE id = ? AND deleted_at IS NOT NULL`;
 
 /** Each active administrator, and how many open reports they see, which leave out the reports of them. */
 export const OPEN_REPORTS_BY_ADMINISTRATOR = `SELECT id AS user_id, (SELECT count(*) FROM reports WHERE handled_at IS NULL AND subject_id <> users.id) AS open
@@ -143,8 +153,8 @@ export class ReportStore {
 
   /**
    * Keeps `report`, in one transaction, unless whoever made it has an open report of the same message, or
-   * person, already: answers null then, or else each active administrator's open reports and where the
-   * report's pushes go.
+   * person, already, or whoever it's of has deleted their account: answers null then, or else each active
+   * administrator's open reports and where the report's pushes go.
    */
   async keep(report: ReportToKeep): Promise<KeptReport | null> {
     const { id, reporterId, subjectId, subject, reason, note, createdAt } = report;
@@ -158,6 +168,11 @@ export class ReportStore {
       DeliveryRow[],
     ];
     return saved ? { open: open.map(openOf), deliveries: deliveries.map(deliveryOf) } : null;
+  }
+
+  /** Whether `userId` has deleted their account, whose reports keep nothing of them, as a new one can't be kept. */
+  async isDeletedAccount(userId: UserId): Promise<boolean> {
+    return (await this.db.all(DELETED_ACCOUNT, userId)).length > 0;
   }
 
   /** Whether subscription `id` may still have the push of a report `reporterId` made (`REPORT_PUSHABLE`). */
@@ -194,6 +209,11 @@ export class ReportStore {
           : statement(CLOSE_PERSON_REPORTS, subjectOf(report), handlerId, now, outcome);
     const [closed, open] = (await this.db.batch([closing, statement(OPEN_REPORTS_BY_ADMINISTRATOR)])) as [ReportRow[], Array<{ user_id: UserId; open: number }>];
     return { closed: closed.map(reportOf), open: open.map(openOf) };
+  }
+
+  /** Each active administrator's open reports, which leave out the reports of them. */
+  async openByAdministrator(): Promise<OpenReports[]> {
+    return (await this.db.all<{ user_id: UserId; open: number }>(OPEN_REPORTS_BY_ADMINISTRATOR)).map(openOf);
   }
 }
 

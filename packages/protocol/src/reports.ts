@@ -47,7 +47,8 @@ export function parseNewReport(data: unknown): NewReport | { error: string } {
 
 /**
  * A message as it was when reported, which its report shows whatever becomes of it: who wrote it, its
- * text, the people it mentions, its file, by name, and a bot's cards.
+ * text, the people it mentions, its file, by name, and a bot's cards. Once whoever wrote it deletes their
+ * account, the report keeps none of those but who, named as deleted accounts are.
  */
 export interface ReportedMessage {
   id: string;
@@ -61,13 +62,17 @@ export interface ReportedMessage {
   cards?: Card[];
   /** A reply's: the message it replies to in its thread. */
   parentId?: string;
+  /** Set once whoever wrote it deleted their account, which took its text, mentions, file and cards from the report. */
+  accountDeleted?: true;
 }
 
-/** Someone as they were when reported: their name and bio. */
+/** Someone as they were when reported: their name and bio, until they delete their account, which takes both from the report. */
 export interface ReportedPerson {
   id: UserId;
   name: string;
   bio: string | null;
+  /** Set once they deleted their account. */
+  accountDeleted?: true;
 }
 
 /**
@@ -97,6 +102,9 @@ export interface Report {
   /** Whoever handled it, when, and how, or null while it's open. */
   handled: { by: UserId; at: string; outcome: ReportOutcome } | null;
 }
+
+/** Whether whoever a report is of has deleted their account, so it keeps nothing of what they wrote, nor their name or bio. */
+export const isOfDeletedAccount = ({ subject }: Report): boolean => (subject.kind === "message" ? subject.message : subject.person).accountDeleted === true;
 
 /** How many reports `GET /api/reports` lists: the newest open ones, and the ones handled last. */
 export const OPEN_REPORTS_LISTED = 100;
