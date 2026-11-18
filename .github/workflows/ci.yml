@@ -88,8 +88,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @ember/e2e exec playwright install --with-deps webkit
-      # TEMPORARY, to come out again: the ways the screens stand-in could send, each in a huddle opened five times, to see which stall, and where.
-      - run: pnpm --filter @ember/e2e exec playwright test tests/mobile/huddles.spec.ts --project "mobile iPhone SE" --project "mobile iPhone 17" --grep "\[trial\]" --repeat-each 6 --reporter=list
+      - run: pnpm test:e2e
       - uses: actions/upload-artifact@v6
         if: failure()
         with:
