@@ -17,6 +17,8 @@ describe("wordsOf", () => {
   it("reads runs of letters and numbers, lowercased and without accents", () => {
     expect(wordsOf("Café crème, s'il vous plaît!")).toEqual(["cafe", "creme", "s", "il", "vous", "plait"]);
     expect(wordsOf("Việt Nam 2026 İstanbul")).toEqual(["viet", "nam", "2026", "istanbul"]);
+    // As Unicode folds case: a final sigma is any sigma, and ß the "SS" capitals write.
+    expect(wordsOf("ΣΟΣ σοσ σος Straße STRASSE STRAẞE")).toEqual(["σοσ", "σοσ", "σοσ", "strasse", "strasse", "strasse"]);
   });
 
   it("reads letters drawn another way as the letters they are, and sees past what's invisible", () => {

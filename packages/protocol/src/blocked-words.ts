@@ -40,13 +40,14 @@ const OWN_WORD = String.raw`[\p{Extended_Pictographic}\p{Script=Han}\p{Script=Hi
 const WORD = new RegExp(String.raw`${OWN_WORD}\p{M}*|(?:(?!${OWN_WORD})[\p{L}\p{N}\p{M}])+`, "gu");
 
 /**
- * The words of `text` as blocked words match them: lowercased, without accents, compatibility forms,
- * such as fullwidth or mathematical letters, read as their letters, and with nothing invisible.
+ * The words of `text` as blocked words match them: lowercased, a final sigma read as any sigma and ß as
+ * the "ss" capitals write it, without accents, compatibility forms, such as fullwidth or mathematical
+ * letters, read as their letters, and with nothing invisible.
  */
 export function wordsOf(text: string): string[] {
   // Lowercased once read as letters, since a mathematical or squared capital has no lowercase of its own.
-  const folded = text.normalize("NFKD").toLowerCase().replace(IGNORED_MARKS, "").replace(INVISIBLE, "").normalize("NFC");
-  return folded.match(WORD) ?? [];
+  const lower = text.normalize("NFKD").toLowerCase().replaceAll("ς", "σ").replaceAll("ß", "ss");
+  return lower.replace(IGNORED_MARKS, "").replace(INVISIBLE, "").normalize("NFC").match(WORD) ?? [];
 }
 
 /** A blocked word or phrase as it's kept: trimmed, with single spaces. */
