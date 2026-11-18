@@ -4,7 +4,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { ASSISTANT_ID, CloseCode, startingInvolvement, type Account, type Bot, type DirectoryUser, type DirectRoom, type Me, type Message, type Room, type RoomId, type RoomSettings, type SharedRoom, type SidebarRoom, type TimelinePage, type WorkspaceServerFrame, type WorkspaceSettings } from "@ember/protocol";
 import type { AgentSettings, AvailableAgent } from "@ember/protocol/agents";
 import { THINKING_LEVELS, type AssistantSettings } from "@ember/protocol/assistant";
-import { ALL_HUDDLE_SOUNDS, CAMERAS_OFF, SCREENS_OFF, type HuddleSoundsChanged } from "@ember/protocol/huddles";
+import { ALL_HUDDLE_SOUNDS, CAMERAS_OFF, SCREENS_OFF, type HuddleSoundsChanged, type PastHuddle } from "@ember/protocol/huddles";
 import { FlashProvider } from "@/components/flash";
 import { AccountContext } from "@/hooks/use-account";
 import { SHIPPED_MODELS } from "@/hooks/use-offered-models";
@@ -3326,6 +3326,113 @@ describe("Huddles", () => {
       expect(invitation()).not.toBeInTheDocument();
       showAccount(HUDDLES_ON);
       expect(invitation()).not.toBeInTheDocument();
+    });
+  });
+
+  describe("Their page", () => {
+    /** A huddle in general that's over, which Ada and Grace were in, whose thread has two replies. */
+    const OVER: PastHuddle = { roomId: "general", messageId: "m7", startedAt: "2026-11-10T09:00:00.000Z", endedAt: "2026-11-10T09:24:00.000Z", userIds: ["u1", "u2"], replies: 2 };
+    /** A huddle Grace is in, as the sidebar hears of it. */
+    const GOING = { startedAt: "2026-11-10T10:00:00.000Z", userIds: ["u2"] };
+    /** What the server answers with the huddles that are over `huddles`. */
+    const listing = (...huddles: PastHuddle[]) => () => Response.json({ huddles });
+    /** Serves the huddles that are over as `over` answers each time they're asked for, and `sidebar` as this person's rooms. */
+    const serveHuddles = (over: () => Response, sidebar: object = roomList(rooms)) => serveRooms(sidebar, { "GET /api/huddles": over });
+    /** How many times the huddles that are over were asked for. */
+    const huddlesRequests = () => vi.mocked(fetch).mock.calls.filter(([input]) => String(input) === "/api/huddles").length;
+    /** Huddles, over the rooms in the sidebar. */
+    const huddlesRow = () => within(screen.getByRole("complementary", { name: "Conversations" })).queryByRole("link", { name: /^Huddles/ });
+    const pageHeading = () => screen.findByRole("heading", { level: 1, name: "Huddles" });
+    /** Where each row of the huddles that are over goes, in order. */
+    const recent = () =>
+      within(screen.getByRole("region", { name: "Recent huddles" }))
+        .queryAllByRole("link")
+        .map((row) => row.getAttribute("href"));
+    /** The rooms of the huddles going on, in order. */
+    const goingOn = () => {
+      const region = screen.queryByRole("region", { name: "Happening now" });
+      return region ? within(region).getAllByRole("link").map((room) => room.textContent) : [];
+    };
+
+    it("opens from Huddles, over the rooms in the sidebar, which is marked in place of a room while it shows, as Home is on the rail", async () => {
+      serveHuddles(listing(OVER));
+      const { user } = showWorkspace("/rooms/general", ada, HUDDLES_ON);
+      await roomHeading();
+      expect(huddlesRow()).not.toHaveAttribute("aria-current");
+      expect(huddlesRequests()).toBe(0);
+
+      await user.click(huddlesRow()!);
+      expect(await pageHeading()).toBeInTheDocument();
+      expect(location.pathname).toBe("/huddles");
+      expect(document.title).toBe("Huddles");
+      expect(huddlesRow()).toHaveAttribute("aria-current", "page");
+      expect(within(screen.getByRole("region", { name: "Rooms" })).queryAllByRole("link", { current: "page" })).toEqual([]);
+      expect(railCurrent()).toEqual(["Home"]);
+      await waitFor(() => expect(recent()).toEqual(["/rooms/general/threads/m7"]));
+
+      // A row goes to its huddle's thread, beside its room.
+      await user.click(within(screen.getByRole("region", { name: "Recent huddles" })).getByRole("link"));
+      expect(location.pathname).toBe("/rooms/general/threads/m7");
+      expect(await screen.findByRole("complementary", { name: "Thread" })).toBeInTheDocument();
+      expect(await roomHeading()).toHaveTextContent("general");
+      expect(huddlesRow()).not.toHaveAttribute("aria-current");
+    });
+
+    it("shows at its address as the workspace opens, and asks for its huddles again as the workspace socket says they've changed", async () => {
+      let over = [OVER];
+      serveHuddles(() => Response.json({ huddles: over }));
+      showWorkspace("/huddles", ada, HUDDLES_ON);
+      expect(await pageHeading()).toBeInTheDocument();
+      await waitFor(() => expect(recent()).toEqual(["/rooms/general/threads/m7"]));
+      expect(huddlesRow()).toHaveAttribute("aria-current", "page");
+
+      over = [{ ...OVER, roomId: "random", messageId: "m9" }, OVER];
+      await workspaceSends({ type: "room.unread", roomId: "random", at: NOON });
+      const asked = huddlesRequests();
+      await workspaceSends({ type: "huddles.changed" });
+      await waitFor(() => expect(recent()).toEqual(["/rooms/random/threads/m9", "/rooms/general/threads/m7"]));
+      expect(huddlesRequests()).toBe(asked + 1);
+    });
+
+    it("lists the huddles going on as the sidebar hears of them, which Huddles in the sidebar counts, each with Join, which opens that huddle's preview", async () => {
+      serveHuddles(listing(), { ...roomList(rooms), huddles: { random: GOING } });
+      const { user } = showWorkspace("/huddles", ada, HUDDLES_ON);
+      await pageHeading();
+      await waitFor(() => expect(goingOn()).toEqual(["random"]));
+      expect(huddlesRow()).toHaveAccessibleName("Huddles, 1 happening now");
+
+      await workspaceSends({ type: "room.huddle", roomId: "general", huddle: { ...GOING, startedAt: "2026-11-10T10:05:00.000Z" } });
+      await waitFor(() => expect(goingOn()).toEqual(["general", "random"]));
+      expect(huddlesRow()).toHaveAccessibleName("Huddles, 2 happening now");
+      await workspaceSends({ type: "room.huddle", roomId: "random", huddle: null });
+      await waitFor(() => expect(goingOn()).toEqual(["general"]));
+      expect(huddlesRow()).toHaveAccessibleName("Huddles, 1 happening now");
+
+      await user.click(screen.getByRole("button", { name: "Join the huddle in general" }));
+      expect(await screen.findByRole("dialog", { name: "Join the huddle in general" })).toHaveAccessibleDescription("1 person is in it now.");
+      expect(location.pathname).toBe("/huddles");
+    });
+
+    it("has no Huddles in the sidebar while huddles are off, nor any huddle going on, though its address still lists the ones that are over", async () => {
+      serveHuddles(listing(OVER), { ...roomList(rooms), huddles: { random: GOING } });
+      showWorkspace("/huddles");
+      await pageHeading();
+      await waitFor(() => expect(recent()).toEqual(["/rooms/general/threads/m7"]));
+      expect(huddlesRow()).toBeNull();
+      expect(goingOn()).toEqual([]);
+    });
+
+    it("goes to sign in when the session has ended by the time it asks for its huddles", async () => {
+      serveHuddles(() => Response.json({ error: "Not signed in" }, { status: 401 }));
+      const { onSessionChanged } = showWorkspace("/huddles", ada, HUDDLES_ON);
+      await waitFor(() => expect(onSessionChanged).toHaveBeenCalledWith(null));
+    });
+
+    it("says why its huddles didn't load", async () => {
+      serveHuddles(() => Response.json({ error: "Something went wrong" }, { status: 500 }));
+      showWorkspace("/huddles", ada, HUDDLES_ON);
+      expect(await screen.findByRole("alert")).toHaveTextContent("Something went wrong");
+      expect(await pageHeading()).toBeInTheDocument();
     });
   });
 });

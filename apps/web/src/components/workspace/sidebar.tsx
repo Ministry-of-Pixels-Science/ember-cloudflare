@@ -2,11 +2,13 @@ import { useContext, useId, useMemo, type MouseEvent } from "react";
 import type { Favorites, LiveHuddle, Me, RoomId, SidebarRoom, UserId } from "@ember/protocol";
 import { ChatPlusIn, Headset, NavArrowRight, StarSolid } from "@/components/icons/iconoir";
 import { RoomIcon } from "@/components/icons/room-icon";
+import { PageLink } from "@/components/page-link";
 import { useAccount } from "@/hooks/use-account";
 import { PeopleContext, useNameOf, usePresenceOf, type Presence } from "@/hooks/use-directory";
-import { NEW_DIRECT_PATH, roomPath } from "@/hooks/use-route";
+import { HUDDLES_PATH, NEW_DIRECT_PATH, roomPath } from "@/hooks/use-route";
 import { useStarOrder } from "@/hooks/use-star-order";
 import { membersShown } from "@/lib/directs";
+import { huddlesGoingOn } from "@/lib/huddle-list";
 import { inItsHuddle } from "@/lib/huddle-people";
 import { apart, inDirectOrder, inSidebarOrder, isQuietWelcome, markedUnread, type DirectSidebarRoom } from "@/lib/room-list";
 import { cn } from "@/lib/utils";
@@ -39,6 +41,8 @@ interface Props {
   sharedOrder: RoomId[];
   /** The huddles going on in their rooms, by room, whose rows say who's in them. */
   huddles: Record<RoomId, LiveHuddle>;
+  /** Whether the Huddles page is the one showing, which Huddles, over the rooms, goes to. */
+  onHuddles: boolean;
   currentRoomId: string | null;
   /** Whether Activity is on, which shows only the rows marked unread. */
   unreadOnly: boolean;
@@ -59,7 +63,9 @@ interface Props {
 
 /**
  * The conversation list: rooms, then DMs, under the workspace name, and under that in small type the
- * tagline an administrator gave it, if it has one. The starred rooms come first, then the ones the
+ * tagline an administrator gave it, if it has one. Where huddles are on, Huddles comes over the rooms, as
+ * in Slack's sidebar: it goes to the Huddles page, and counts the huddles going on in the rooms and DMs
+ * they haven't hidden. The starred rooms come first, then the ones the
  * shared order ranks, in its order, then the rest in the order they were put in them, so a new room
  * comes last, and a starred room's row ends with a star, with no grip, both as the project's owner
  * chose: held, the row can be dragged among the other starred rows, or moved with Alt and an arrow
@@ -73,7 +79,7 @@ interface Props {
  * With Activity on, only the unread rows show, and with none it says everything's read; with it off and
  * nothing to list, it says it found nothing. Under them all, Available Agents says how many AI agents
  * this person can ask, and opens the list of them, as the project's owner chose (2026-11-15), unless
- * there are none, or Activity is on.
+ * there are none, or Activity is on, which leaves Huddles out too.
  */
 export function Sidebar({
   workspaceName,
@@ -83,6 +89,7 @@ export function Sidebar({
   favorites,
   sharedOrder,
   huddles,
+  onHuddles,
   currentRoomId,
   unreadOnly,
   agents,
@@ -93,7 +100,8 @@ export function Sidebar({
   onStarred,
   onSessionChanged,
 }: Props) {
-  const { tagline } = useAccount();
+  const { tagline, huddles: huddlesOn } = useAccount();
+  const goingOn = useMemo(() => huddlesGoingOn(rooms, huddles).length, [rooms, huddles]);
   const { shared, directs } = useMemo(() => apart(unreadOnly ? rooms.filter((room) => markedUnread(room, currentRoomId)) : rooms), [rooms, unreadOnly, currentRoomId]);
   const shown = useMemo(() => new Set(shared.map((room) => room.id)), [shared]);
   const nameOf = (roomId: RoomId) => {
@@ -127,6 +135,8 @@ export function Sidebar({
         <h2 className="flex min-h-7 items-center gap-2 text-[17px] leading-6 font-[650] wrap-anywhere">{workspaceName}</h2>
         {tagline && <p className="text-[13px] leading-[18px] text-muted-foreground wrap-anywhere">{tagline}</p>}
       </hgroup>
+
+      {huddlesOn && !unreadOnly && <HuddlesRow current={onHuddles} goingOn={goingOn} />}
 
       <section aria-label="Rooms" className="flex flex-col">
         <p id={helpId} className="sr-only">
@@ -209,6 +219,33 @@ export function Sidebar({
       )}
       {agents > 0 && !unreadOnly && <AgentsRow count={agents} open={agentsOpen} onOpen={onOpenAgents} />}
     </div>
+  );
+}
+
+/**
+ * Huddles: a row as a room's is, with the headphones, which goes to the Huddles page, and ends with how
+ * many huddles are going on, on green, as a DM's unread messages are counted, while any are.
+ */
+function HuddlesRow({ current, goingOn }: { current: boolean; goingOn: number }) {
+  return (
+    <PageLink
+      href={HUDDLES_PATH}
+      aria-current={current ? "page" : undefined}
+      // Named in one piece with its count, which is hidden, since a number alone says nothing of what it counts.
+      aria-label={goingOn > 0 ? `Huddles, ${goingOn} happening now` : undefined}
+      className={ROW}
+    >
+      <Headset className="w-[18px] shrink-0 text-muted-foreground" />
+      <span className="truncate">Huddles</span>
+      {goingOn > 0 && (
+        <span
+          aria-hidden="true"
+          className="ml-auto inline-flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-full bg-positive px-[5px] text-[11px] leading-none font-semibold tabular-nums text-white"
+        >
+          {goingOn > 99 ? "99+" : goingOn}
+        </span>
+      )}
+    </PageLink>
   );
 }
 

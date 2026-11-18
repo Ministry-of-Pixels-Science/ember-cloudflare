@@ -5,7 +5,7 @@
 // service, which relays what the browser sends and receives, by a TURN key in the same account, whose
 // ID and API token administrators give in Set up the relay, through `/api/account/huddles/relay`.
 
-import type { User, UserId } from "./index.ts";
+import type { RoomId, User, UserId } from "./index.ts";
 import { MAX_ID_LENGTH } from "./pages.ts";
 
 /**
@@ -248,6 +248,29 @@ export interface MessageHuddle {
   startedAt: string;
   endedAt?: string;
   people?: User[];
+}
+
+/**
+ * A huddle that's over, as the Huddles page lists it for everyone in its room: the room, the huddle's
+ * message there, whose thread is the huddle's, when it started and ended, everyone who was in it, by
+ * their ids in the order they first joined, and how many replies its thread has. One that nobody else
+ * joined is listed only while its thread has a reply, as Slack lists none it kept no message of.
+ */
+export interface PastHuddle {
+  roomId: RoomId;
+  messageId: string;
+  startedAt: string;
+  endedAt: string;
+  userIds: UserId[];
+  replies: number;
+}
+
+/** How many huddles the Huddles page lists at most: the latest to have started in someone's rooms. */
+export const PAST_HUDDLES_LISTED = 50;
+
+/** What `GET /api/huddles` answers: the huddles that are over in the rooms someone is in and hasn't hidden from their sidebar, the latest to have started first. */
+export interface PastHuddles {
+  huddles: PastHuddle[];
 }
 
 /**

@@ -66,7 +66,9 @@ export type WorkspacePage =
   /** Someone's page, at `/users/<id>`, whatever their status. */
   | { page: "person"; userId: UserId }
   /** Search, at `/searches`, whose query string holds what's searched for. */
-  | { page: "search" };
+  | { page: "search" }
+  /** Huddles, at `/huddles`: the huddles going on in someone's rooms, and the recent ones. */
+  | { page: "huddles" };
 
 /** Rails' names for each kind of room's controller. */
 export const KIND_SEGMENTS = { open: "opens", closed: "closeds", direct: "directs" } as const satisfies Record<RoomKind, string>;
@@ -84,6 +86,7 @@ export const NEW_DIRECT_PATH = "/rooms/directs/new";
 export const PROFILE_PATH = "/users/me/profile";
 export const PUSH_SUBSCRIPTIONS_PATH = "/users/me/push_subscriptions";
 export const SEARCHES_PATH = "/searches";
+export const HUDDLES_PATH = "/huddles";
 
 /**
  * A message's thread, which opens beside its room, or a reply's permalink there, which opens the thread at
@@ -129,6 +132,7 @@ export function workspacePageOf(pathname: string): WorkspacePage | null {
   const appId = app && decoded(app[1]!);
   if (appId) return { page: "app-settings", appId };
   if (pathname === SEARCHES_PATH) return { page: "search" };
+  if (pathname === HUDDLES_PATH) return { page: "huddles" };
   if (/^\/users\/[^/]+\/profile$/.test(pathname)) return { page: "profile" };
   if (/^\/users\/[^/]+\/push_subscriptions$/.test(pathname)) return { page: "push-subscriptions" };
   const person = pathname.match(/^\/users\/([^/]+)$/);

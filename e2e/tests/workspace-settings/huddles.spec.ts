@@ -415,6 +415,13 @@ async function ringing(pages: Page[]): Promise<Page[]> {
 /** The huddle's own sounds `page` has started to play, in order, whether or not its browser let it. */
 const soundsStarted = (page: Page) => page.evaluate(() => (window as unknown as KeepsSounds).huddleSoundsPlayed.map((audio) => audio.dataset.huddleSound));
 
+/** The sidebar's Huddles row on `page`, which goes to the Huddles page, and is named with how many huddles are going on while any are. */
+const huddlesRow = (page: Page) => page.getByRole("link", { name: /^Huddles(, \d+ happening now)?$/ });
+
+/** The Huddles page's lists on `page`: the cards of the huddles going on, and the rows of the recent ones that are over. */
+const happeningNow = (page: Page) => page.getByRole("region", { name: "Happening now", exact: true }).getByRole("listitem");
+const recentHuddles = (page: Page) => page.getByRole("region", { name: "Recent huddles", exact: true }).getByRole("listitem");
+
 /** A room of the test's own, which everyone is in. */
 async function roomOfItsOwn(request: APIRequestContext): Promise<TestRoom> {
   const created = await request.post("/api/rooms", { data: { kind: "open", name: `Standup ${crypto.randomUUID().slice(0, 8)}` }, headers: await asAdministrator(request) });
@@ -1847,6 +1854,104 @@ test.describe("A huddle", () => {
     await expect(adasHuddle).toHaveCount(0);
     for (const tab of tabs) await expect(invitationFrom(tab, administrator.user.name)).toHaveCount(0);
     await expect.poll(sessionsLeftOpen).toEqual([]);
+    await context.close();
+  });
+
+  test("the sidebar's Huddles row opens the Huddles page, which has a huddle to join while it goes on, counted on the row, and lists it among the recent ones once it's over, with who was in it and its thread's replies as they're written, where it goes to its thread", async ({ page, browser, baseURL, request }) => {
+    const headers = await asAdministrator(request);
+    const saved = await request.put("/api/account/huddles", { data: SFU_APP, headers });
+    expect(saved.status(), await saved.text()).toBe(200);
+    const room = await roomOfItsOwn(request);
+    /** The room's huddle on the Huddles page `of` shows: its card while it goes on, and its row once it's over. */
+    const card = (of: Page) => happeningNow(of).filter({ hasText: room.name });
+    const row = (of: Page) => recentHuddles(of).filter({ hasText: room.name });
+    const joinFrom = (of: Page) => card(of).getByRole("button", { name: `Join the huddle in ${room.name}`, exact: true });
+
+    // Grace, who joins Ember with the join link, opens the Huddles page from her sidebar's row, which is
+    // marked as the page she's on. No huddle is going on, and none of the room's is over.
+    const { context } = await newcomer(browser, baseURL, request, "Grace");
+    const grace = await context.newPage();
+    await useOwnAddress(grace);
+    await grace.goto(`/rooms/${room.id}`);
+    await expect(huddlesRow(grace)).toHaveAccessibleName("Huddles");
+    await huddlesRow(grace).click();
+    await expect(grace).toHaveURL(`${baseURL}/huddles`);
+    await expect(grace.getByRole("heading", { level: 1 })).toHaveText("Huddles");
+    await expect(huddlesRow(grace)).toHaveAttribute("aria-current", "page");
+    await expect(grace.getByRole("main")).not.toHaveAttribute("aria-busy");
+    await expect(happeningNow(grace)).toHaveCount(0);
+    await expect(row(grace)).toHaveCount(0);
+
+    // Ada starts a huddle in the room, which Grace's page has as happening now, with Ada in it, to go to
+    // its room by or join, and her sidebar's row counts.
+    await useOwnAddress(page);
+    await page.goto(`/rooms/${room.id}`);
+    await signInAsAdministrator(page);
+    await page.getByRole("button", { name: "Start huddle", exact: true }).click();
+    await page.getByRole("dialog", { name: `Start a huddle in ${room.name}` }).getByRole("button", { name: "Start Huddle" }).click();
+    const adasHuddle = huddleOpened(page, room);
+    await expect(adasHuddle).toContainText("1 person");
+    await expect(card(grace)).toContainText("LIVE");
+    await expect(card(grace)).toContainText(/Ada is in the huddle · started \d{1,2}:\d{2}\s[AP]M/);
+    await expect(card(grace).getByRole("link", { name: room.name, exact: true })).toHaveAttribute("href", `/rooms/${room.id}`);
+    await expect(huddlesRow(grace)).toHaveAccessibleName("Huddles, 1 happening now");
+
+    // She joins it from the page, by the preview. Behind her huddle, the page names them both, with their
+    // faces and nothing to join.
+    await joinFrom(grace).click();
+    await grace.getByRole("dialog", { name: `Join the huddle in ${room.name}` }).getByRole("button", { name: "Join Huddle" }).click();
+    const gracesHuddle = huddleOpened(grace, room);
+    await expect(gracesHuddle).toContainText("2 people");
+    await gracesHuddle.getByRole("button", { name: "Minimize huddle" }).filter({ visible: true }).click();
+    await expect(grace).toHaveURL(`${baseURL}/huddles`);
+    await expect(card(grace)).toContainText("Ada and you are in the huddle");
+    await expect(card(grace).locator("img")).toHaveCount(2);
+    await expect(joinFrom(grace)).toHaveCount(0);
+
+    // Grace leaves, from her huddle's bar, and can join again from the page. Then Ada does, which ends the
+    // huddle: it goes from Happening now, and from the row's count, and is the first of the recent ones,
+    // which says when it started, how long it went on and who was in it, with their faces. Its thread has
+    // no replies yet.
+    await huddleBar(grace, room).getByRole("button", { name: "Leave", exact: true }).click();
+    await expect(card(grace)).toContainText("Ada is in the huddle");
+    await expect(joinFrom(grace)).toBeVisible();
+    await adasHuddle.getByRole("button", { name: "Leave", exact: true }).click();
+    await expect(adasHuddle).toHaveCount(0);
+    await expect(happeningNow(grace)).toHaveCount(0);
+    await expect(huddlesRow(grace)).toHaveAccessibleName("Huddles");
+    await expect(recentHuddles(grace).first()).toContainText(room.name);
+    await expect(row(grace)).toHaveCount(1);
+    await expect(row(grace)).toContainText(/(Today|Yesterday) at \d{1,2}:\d{2}\s[AP]M · (less than a minute|1 minute)/);
+    await expect(row(grace)).toContainText("Ada and you were in the huddle");
+    await expect(row(grace).locator("img")).toHaveCount(2);
+    await expect(row(grace)).not.toContainText(/repl/);
+
+    // Ada opens the page from her sidebar's row, where the huddle is listed for her too. Grace's row goes to
+    // its thread, beside the room, where she writes a reply, which Ada's page counts as it's written, and
+    // Grace's once she's back on it.
+    await huddlesRow(page).click();
+    await expect(row(page)).toContainText("Grace and you were in the huddle");
+    await expect(row(page)).not.toContainText(/repl/);
+    await row(grace).getByRole("link").click();
+    await expect(grace).toHaveURL(new RegExp(`/rooms/${room.id}/threads/[^/]+$`));
+    const thread = grace.getByRole("complementary", { name: "Thread" });
+    await expect(thread.getByRole("article").first()).toContainText("A huddle happened");
+    await editorField(thread, "Write a reply").fill("Notes from the huddle");
+    await editorField(thread, "Write a reply").press("Enter");
+    await expect(thread.getByRole("article").filter({ hasText: "Notes from the huddle" })).toBeVisible();
+    await expect(row(page)).toContainText("· 1 reply");
+    await grace.goBack();
+    await expect(grace).toHaveURL(`${baseURL}/huddles`);
+    await expect(row(grace)).toContainText("· 1 reply");
+    await expect.poll(sessionsLeftOpen).toEqual([]);
+
+    // Turning huddles off takes the row from their sidebars. The page they have open still lists the huddle.
+    const forgotten = await request.delete("/api/account/huddles", { headers });
+    expect(forgotten.status(), await forgotten.text()).toBe(200);
+    for (const of of [page, grace]) {
+      await expect(huddlesRow(of)).toHaveCount(0);
+      await expect(row(of)).toContainText("· 1 reply");
+    }
     await context.close();
   });
 });

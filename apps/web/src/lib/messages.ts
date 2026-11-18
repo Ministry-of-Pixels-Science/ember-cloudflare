@@ -34,19 +34,34 @@ export const dateLabel = (date: Date) => dateFormat.format(date);
 /** What a time or a separator's date shows on hover: "10/12/26, 3:04 PM". */
 export const dateTimeLabel = (date: Date) => dateTimeFormat.format(date);
 
+/** The day `date` falls on, as of `now`: today, yesterday, or its date, "Oct 12", or "Oct 12, 2025" in another year. */
+function dayAsOf(date: Date, now: Date): { near: "today" | "yesterday" } | { on: string } {
+  const day = dayFormat.format(date);
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (day === dayFormat.format(now)) return { near: "today" };
+  if (day === dayFormat.format(yesterday)) return { near: "yesterday" };
+  return { on: (yearFormat.format(date) === yearFormat.format(now) ? monthDayFormat : shortDateFormat).format(date) };
+}
+
 /**
  * When a thread's newest reply came, as the thread's summary says it, as of `now`: "today at 3:04 PM",
  * "yesterday at 3:04 PM", "on Oct 12", or "on Oct 12, 2025" in another year. A narrow summary, as on a
  * phone, says it `short`: today's time, or "yesterday".
  */
 export function lastReplyLabel(date: Date, now = new Date()): { long: string; short: string } {
-  const day = dayFormat.format(date);
-  const yesterday = new Date(now);
-  yesterday.setDate(now.getDate() - 1);
-  if (day === dayFormat.format(now)) return { long: `today at ${timeLabel(date)}`, short: timeLabel(date) };
-  if (day === dayFormat.format(yesterday)) return { long: `yesterday at ${timeLabel(date)}`, short: "yesterday" };
-  const on = `on ${(yearFormat.format(date) === yearFormat.format(now) ? monthDayFormat : shortDateFormat).format(date)}`;
-  return { long: on, short: on };
+  const day = dayAsOf(date, now);
+  if ("on" in day) return { long: `on ${day.on}`, short: `on ${day.on}` };
+  return { long: `${day.near} at ${timeLabel(date)}`, short: day.near === "today" ? timeLabel(date) : "yesterday" };
+}
+
+/**
+ * When a huddle started, as the Huddles page says it, as of `now`: "Today at 3:04 PM", "Yesterday at
+ * 3:04 PM", "Oct 12", or "Oct 12, 2025" in another year.
+ */
+export function huddleStartedLabel(date: Date, now = new Date()): string {
+  const day = dayAsOf(date, now);
+  return "on" in day ? day.on : `${day.near === "today" ? "Today" : "Yesterday"} at ${timeLabel(date)}`;
 }
 
 /** Whether two ISO times fall on the same day in the reader's time zone, as a timeline's separators tell days apart. */

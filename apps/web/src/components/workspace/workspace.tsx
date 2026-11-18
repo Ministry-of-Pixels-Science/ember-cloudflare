@@ -80,6 +80,7 @@ const RARE_PAGES = new Set<Route["page"]>([
   "push-subscriptions",
   "person",
   "search",
+  "huddles",
 ]);
 
 /**
@@ -91,11 +92,11 @@ export function loadPageAhead(pathname: string): Promise<unknown> {
 }
 
 /**
- * What the rail marks on each page: the logo and Home at home, Home on a room's page and the pages that
- * go on to one, Search on search, Admin or Workspace on every page of community settings (a room's
- * forms, the bot and agent pages and the Custom CSS page among them), your avatar on your profile, and nothing on
- * a DM's settings or your push subscriptions, whose addresses none of its links have, nor on New direct
- * message's, which goes on to the last room visited at once.
+ * What the rail marks on each page: the logo and Home at home, Home on a room's page, the pages that
+ * go on to one and the Huddles page, Search on search, Admin or Workspace on every page of community
+ * settings (a room's forms, the bot and agent pages and the Custom CSS page among them), your avatar on
+ * your profile, and nothing on a DM's settings or your push subscriptions, whose addresses none of its
+ * links have, nor on New direct message's, which goes on to the last room visited at once.
  */
 const RAIL_PAGES = {
   home: "home",
@@ -121,6 +122,7 @@ const RAIL_PAGES = {
   "push-subscriptions": null,
   person: null,
   search: "search",
+  huddles: "room",
 } as const satisfies Record<Route["page"], RailPage>;
 
 /** Loads the page shown again, for the Worker to answer it with Campfire's 404 page, as it does for someone nobody is. */
@@ -286,7 +288,7 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onDe
   const directory = useDirectory();
   // The invitations into huddles that ring in this tab, as the workspace socket brings them and says they're answered.
   const [invitations, changeInvitations] = useReducer(invitationsReducer, NO_INVITATIONS);
-  const { list, answered, change: changeRooms, refresh, askForRoom, askForHuddleSounds, active, reportsHeard: heard } = useSidebar(me, onSessionChanged, directory, accountHeard, shownRoomGone, changeInvitations);
+  const { list, answered, change: changeRooms, refresh, askForRoom, askForHuddleSounds, active, huddleChanges, reportsHeard: heard } = useSidebar(me, onSessionChanged, directory, accountHeard, shownRoomGone, changeInvitations);
   const [drawerOpen, setDrawerOpen] = useState(false);
   // New direct message, while it's open, with the link that opened it, which gets focus back, or null
   // when its address did.
@@ -764,6 +766,7 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onDe
       favorites={favorites}
       sharedOrder={sharedOrder}
       huddles={huddlesOn ? liveHuddles : NO_HUDDLES}
+      onHuddles={route.page === "huddles"}
       currentRoomId={currentRoomId}
       unreadOnly={unreadOnly}
       agents={agents}
@@ -859,6 +862,8 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onDe
         return rarePage(({ PushSubscriptionsPage }) => <PushSubscriptionsPage back={back} onFailed={failed} />);
       case "search":
         return rarePage(({ SearchPage }) => <SearchPage me={me} rooms={rooms ?? NO_ROOMS} back={back} onFailed={failed} />);
+      case "huddles":
+        return rarePage(({ HuddlesPage }) => <HuddlesPage me={me} rooms={rooms} changes={huddleChanges} onFailed={failed} />);
       case "person":
         return rarePage(({ PersonPage }) => (
           <PersonPage

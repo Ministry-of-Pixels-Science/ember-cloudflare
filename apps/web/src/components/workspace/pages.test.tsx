@@ -20,6 +20,7 @@ const ANSWERS: Record<string, () => Response> = {
   "GET /api/users": () => Response.json({ users: [] }),
   "GET /api/searches?q=": () => Response.json({ search: null, matches: [], next: null, rooms: [], recent: [] }),
   "GET /api/users/me/profile": () => Response.json({ profile: adasProfile }),
+  "GET /api/huddles": () => Response.json({ huddles: [] }),
 };
 
 /** A socket that never connects: these tests are about the pages around the rooms. */
@@ -111,6 +112,14 @@ describe("Workspace layout", () => {
     await loadPageAhead("/searches");
     show("/searches");
     expect(searchHeading()).toBeInTheDocument();
+  });
+
+  it("loads the Huddles page ahead at its address too", async () => {
+    const { show, loadPageAhead } = await freshWorkspace();
+    await loadPageAhead("/huddles");
+    show("/huddles");
+    expect(screen.getByRole("heading", { level: 1, name: "Huddles" })).toBeInTheDocument();
+    expect(screen.queryByText("Loading…")).not.toBeInTheDocument();
   });
 
   it("loads nothing ahead for a room's address", async () => {

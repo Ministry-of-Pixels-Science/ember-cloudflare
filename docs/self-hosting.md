@@ -1365,6 +1365,22 @@ someone with Ember behind another tab may get both. So may someone looking at a 
 since before Ember was updated to do this: such a tab doesn't say whether it's shown, so it
 doesn't count until it's reloaded.
 
+While huddles are on, the sidebar has a Huddles row over the rooms, as Slack's has, which opens the
+Huddles page. Happening now lists the huddles going on in your rooms and direct messages, the
+latest to start first: each with its room, LIVE, who's in it and when it started, their faces, and
+Join, which opens the preview, unless this tab is in that huddle. The rest of its card goes to the
+room. The row ends with how many of them there are, on green. Under them, Recent huddles lists the
+latest 50 that are over, as Slack's page does: each with its room, when it started, how long it
+went on, how many replies its thread has, and the faces of the first who were in it, whom a pointer
+names. A row goes to the huddle's thread, beside its room. Everyone in a room has its huddles
+there, whether they were in them or not, and the huddles from before Ember had the page are listed
+once someone next opens their room. A huddle nobody else joined is listed only while its thread has
+a reply, as Slack lists none that left nothing behind. One whose message is deleted goes from the
+list, as a deleted room's do, and the rooms you've hidden from your sidebar are left out of both
+lists and of the row's count. The page keeps up by itself: a huddle shows as it starts, moves to
+the recent ones as it ends, and counts its thread's replies as they're written. With huddles
+turned off the row goes from the sidebar, and the page, at `/huddles`, still lists the recent ones.
+
 An administrator turns huddles on under Huddles in community settings, with the switch on its card.
 Huddles run through Cloudflare's [Realtime SFU](https://developers.cloudflare.com/realtime/sfu/),
 which carries what each person in a huddle says and shows to the others, by an SFU app in your Cloudflare

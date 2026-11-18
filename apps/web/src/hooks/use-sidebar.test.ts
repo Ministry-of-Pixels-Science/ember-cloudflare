@@ -630,6 +630,56 @@ describe("Huddle sounds, which each person turns on or off for themselves", () =
   });
 });
 
+describe("The huddles that are over, which the Huddles page lists", () => {
+  it("counts a change each time the workspace socket says they've changed, and at nothing else it says", async () => {
+    const { result } = await showSidebar();
+    socket().connect();
+    await settle();
+    const before = result.current.huddleChanges;
+    socket().receive({ type: "huddles.changed" });
+    expect(result.current.huddleChanges).toBe(before + 1);
+    socket().receive({ type: "huddles.changed" });
+    expect(result.current.huddleChanges).toBe(before + 2);
+
+    socket().receive({ type: "room.unread", roomId: design.id, at: NOON });
+    // Nor at a huddle starting or ending, which says so of its room's own.
+    socket().receive({ type: "room.huddle", roomId: design.id, huddle: { startedAt: NOON, userIds: [grace.id] } });
+    expect(result.current.list?.huddles).toEqual({ [design.id]: { startedAt: NOON, userIds: [grace.id] } });
+    socket().receive({ type: "room.huddle", roomId: design.id, huddle: null });
+    expect(result.current.huddleChanges).toBe(before + 2);
+    // The page asks for them itself: the sidebar's list isn't loaded again for it, however long that's waited for.
+    await wait(RELOAD_SPREAD_MS);
+    await settle();
+    expect(sidebarRequests()).toHaveLength(2);
+  });
+
+  it("counts one each time it loads everything again, as they may have changed unheard: as its socket connects, the first time included, and once the tab is shown after more than a minute hidden", async () => {
+    const { result } = await showSidebar();
+    const atFirst = result.current.huddleChanges;
+    socket().connect();
+    await settle();
+    expect(result.current.huddleChanges).toBe(atFirst + 1);
+
+    socket().drop();
+    await wait(500);
+    socket().connect();
+    await settle();
+    expect(result.current.huddleChanges).toBe(atFirst + 2);
+
+    await visibility("hidden");
+    await wait(RELOAD_AFTER_HIDDEN_MS + 1);
+    await visibility("visible");
+    await settle();
+    expect(result.current.huddleChanges).toBe(atFirst + 3);
+    // A shorter while hidden loads nothing again, so counts nothing.
+    await visibility("hidden");
+    await wait(RELOAD_AFTER_HIDDEN_MS);
+    await visibility("visible");
+    await settle();
+    expect(result.current.huddleChanges).toBe(atFirst + 3);
+  });
+});
+
 describe("Make or revoke administrators", () => {
   /** Ada's sidebar, connected, telling `onSessionChanged` and the directory's `reload`, `update` and `remove`. */
   async function connected() {

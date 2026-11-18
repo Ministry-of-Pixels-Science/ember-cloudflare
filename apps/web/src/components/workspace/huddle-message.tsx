@@ -35,9 +35,14 @@ export function HuddleTitle({ huddle }: { huddle: MessageHuddle }) {
   return (
     <>
       <strong className="truncate font-bold text-message-ink">{isLive(huddle) ? "A huddle is happening" : "A huddle happened"}</strong>
-      {isLive(huddle) && <span className="self-center rounded-[4px] bg-positive px-1.5 text-[11px] leading-[18px] font-bold tracking-[0.04em] text-white">LIVE</span>}
+      {isLive(huddle) && <LiveBadge className="self-center" />}
     </>
   );
+}
+
+/** LIVE, on green, which marks a huddle that's going on. */
+export function LiveBadge({ className }: { className?: string }) {
+  return <span className={cn("rounded-[4px] bg-positive px-1.5 text-[11px] leading-[18px] font-bold tracking-[0.04em] text-white", className)}>LIVE</span>;
 }
 
 interface SummaryProps {
@@ -70,7 +75,7 @@ const ROW = "mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1.5 touch:pr-8";
 const WORDS = "text-[15px] leading-[22px] wrap-anywhere text-message-ink";
 
 /** The first faces of the people in a huddle, overlapping, each ringed in the page's color, which parts it from the face it overlaps. */
-function Faces({ people }: { people: User[] }) {
+export function Faces({ people }: { people: User[] }) {
   return (
     <span aria-hidden className="flex shrink-0 -space-x-1.5">
       {people.slice(0, MAX_FACES).map((person) => (
@@ -80,14 +85,29 @@ function Faces({ people }: { people: User[] }) {
   );
 }
 
+/** Join, on green, which opens the preview a room's huddle is joined from, named by `label` where its room isn't plain from what's around it. */
+export function JoinHuddle({ roomId, label }: { roomId: RoomId; label?: string }) {
+  const { preview } = useContext(HuddlesContext);
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      onClick={() => preview(roomId)}
+      className="inline-flex min-h-8 shrink-0 cursor-pointer items-center gap-1.5 rounded-lg bg-positive px-3 text-sm font-semibold text-white hover:brightness-95 touch:min-h-11"
+    >
+      <Headset className="size-4" />
+      Join
+    </button>
+  );
+}
+
 /**
  * Of a huddle that's going on: the faces of the first people in it and who they all are, as the sidebar
  * last heard of the room's huddle, while that's the one that started when the message says, and Join,
- * which opens the preview a huddle is joined from, unless this tab is in the room's huddle. Nothing where
- * there's neither to show.
+ * unless this tab is in the room's huddle. Nothing where there's neither to show.
  */
 function GoingOn({ startedAt, roomId, meId }: { startedAt: string; roomId: RoomId; meId: UserId }) {
-  const { live, preview } = useContext(HuddlesContext);
+  const { live } = useContext(HuddlesContext);
   const people = useContext(PeopleContext);
   const here = useHuddle()?.roomId === roomId;
   const joinable = useAccount().huddles && !here;
@@ -103,16 +123,7 @@ function GoingOn({ startedAt, roomId, meId }: { startedAt: string; roomId: RoomI
           <span className={WORDS}>{inItsHuddle(others.flatMap((userId) => people.get(userId)?.name ?? []), others.length, others.length < inIt.length)}</span>
         </>
       )}
-      {joinable && (
-        <button
-          type="button"
-          onClick={() => preview(roomId)}
-          className="inline-flex min-h-8 cursor-pointer items-center gap-1.5 rounded-lg bg-positive px-3 text-sm font-semibold text-white hover:brightness-95 touch:min-h-11"
-        >
-          <Headset className="size-4" />
-          Join
-        </button>
-      )}
+      {joinable && <JoinHuddle roomId={roomId} />}
     </div>
   );
 }

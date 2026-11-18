@@ -94,6 +94,8 @@ export type {
   HuddlesSetup,
   LiveHuddle,
   MessageHuddle,
+  PastHuddle,
+  PastHuddles,
 } from "./huddles.ts";
 export {
   FILE_NAME_NOT_KEPT,
@@ -125,6 +127,7 @@ export {
   EMAIL_SIGN_UP_PATH,
   emailSignUpLink,
   huddlePath,
+  HUDDLES_PATH,
   INVITATION_PATH,
   invitationLink,
   isAppPage,
@@ -1860,6 +1863,12 @@ export type WorkspaceServerFrame =
   | { type: "huddle.answered"; roomId: RoomId }
   /** They've turned one of a huddle's sounds on or off on their profile, in this tab or another: the ones they hear now. */
   | { type: "huddle.sounds"; sounds: HuddleSounds }
+  /**
+   * The huddles the Huddles page lists for a room of theirs have changed: one is over, or one that was
+   * goes on after all, has gained or lost a reply, or has had its message deleted. It names none, so the
+   * page loads its list again. Sent to everyone in the room.
+   */
+  | { type: "huddles.changed" }
   /** They've starred or unstarred a room, in this tab or another: their stars as they are now. */
   | { type: "favorites.changed"; favorites: Favorites }
   /** They've blocked or unblocked someone, in this tab or another: whom they've blocked now. */
