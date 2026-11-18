@@ -14,6 +14,16 @@ const prompt = (member: Member) => member.page.getByRole("listbox");
 /** The people the @ prompt lists, in order. */
 const offered = (member: Member) => prompt(member).getByRole("option");
 
+/**
+ * Waits for the @ prompt's list to close and for Lexxy to listen for the next @, which it starts again a
+ * frame after closing the list: sooner than anyone types one, but not always sooner than a test does,
+ * whose @ it would miss.
+ */
+async function listClosed(member: Member): Promise<void> {
+  await expect(prompt(member)).toBeHidden();
+  await member.page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+}
+
 /** The mention of `name` in `scope`: their avatar, then their name. */
 const mention = (scope: Locator, name: string) => scope.getByText(name, { exact: true });
 
@@ -82,7 +92,7 @@ test.describe("@-mention people", () => {
       await typeMention(zed.composer(), tag);
       await expect(offered(zed)).toHaveText([`Bea ${tag}`, `Zed ${tag}`]);
       await zed.composer().press(key);
-      await expect(prompt(zed)).toBeHidden();
+      await listClosed(zed);
     }
     await expect(mention(zed.composer(), `Bea ${tag}`)).toHaveCount(3);
     await expect(zed.composer()).toContainText(",");
@@ -102,7 +112,7 @@ test.describe("@-mention people", () => {
       await zed.composer().pressSequentially(`@${tag}`);
       await expect(offered(zed), `the ${time} time`).toHaveText([`Bea ${tag}`, `Zed ${tag}`]);
       await zed.composer().press("Tab");
-      await expect(prompt(zed)).toBeHidden();
+      await listClosed(zed);
     }
     await expect(mention(zed.composer(), `Bea ${tag}`)).toHaveCount(2);
   });
