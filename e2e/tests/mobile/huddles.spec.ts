@@ -212,20 +212,12 @@ function endScreens(): boolean {
   return true;
 }
 
-// TEMPORARY, to come out again: for the run on CI that confirms the hook below, each test tells how
-// long it took, and SCREENS_TRIAL=crash leaves the screens being sent as the page closes.
-const crashing = process.env.SCREENS_TRIAL === "crash";
-test.afterEach(async ({}, info) => {
-  console.log(`trial ${crashing ? "crash" : "end"} ${info.project.name} :${info.line} ${info.status} ${info.duration}ms at ${new Date().toISOString().slice(11, 23)} r${info.repeatEachIndex}`);
-});
-
 // A page that closes while its stand-in still sends it screens crashes CI's WebKit on Linux more often
 // than not, in its video encoder, and that machine then spends half a minute writing the crashed
 // process's memory to its disk. Whatever waits on the disk meanwhile is slow, the test server's
 // database among it, so the tests that ran then timed out. So the screens end, and the page leaves the
 // app, before a test's page closes, whether the test passed or not.
 test.afterEach(async ({ page }) => {
-  if (crashing) return;
   const sent = await page.evaluate(endScreens).catch(() => false);
   if (sent) await page.goto("about:blank").catch(() => {});
 });
