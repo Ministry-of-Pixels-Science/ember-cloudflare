@@ -9,6 +9,7 @@ import {
   TRANSFER_PATH,
   WELCOME_PATH,
   type Account,
+  type AccountDeletion,
   type Bootstrap,
   type Me,
   type NewWorkspace,
@@ -24,6 +25,7 @@ import { SetupPage } from "@/components/setup-page";
 import { SignInPage } from "@/components/sign-in-page";
 import { TransferPage } from "@/components/transfer-page";
 import { WelcomePage } from "@/components/welcome-page";
+import { ACCOUNT_DELETED } from "@/components/workspace/delete-account";
 import { Workspace, loadPageAhead } from "@/components/workspace/workspace";
 import { AccountContext } from "@/hooks/use-account";
 import { useAccountLogo } from "@/hooks/use-account-logo";
@@ -32,7 +34,7 @@ import { PushProvider } from "@/hooks/use-push";
 import { openRoomSocketAhead } from "@/hooks/use-room";
 import { joinCodeFromPath, navigate, useIsAt, useJoinRoute } from "@/hooks/use-route";
 import { useSelectOnEntry } from "@/hooks/use-select-on-entry";
-import { dropWorkspacePreloads, fetchBootstrap, forgetStoredSession, signOut } from "@/lib/api";
+import { deleteAccount, dropWorkspacePreloads, fetchBootstrap, forgetStoredSession, signOut } from "@/lib/api";
 import { followAppearance } from "@/lib/appearance";
 import { moveTo, movesTo } from "@/lib/custom-domain";
 import { replaceInstallPromptsFor } from "@/lib/install-prompt";
@@ -173,6 +175,23 @@ export function App() {
       },
     );
   }, []);
+  // Deleting your account signs this browser out as signing out does, once the server has deleted it,
+  // and the sign-in page says so. A refusal fails with why, for the profile to say.
+  const deleteAccountHere = useCallback((deletion: AccountDeletion) => {
+    signingOut.current = true;
+    return deleteAccount(deletion).then(
+      async () => {
+        // The server forgot this browser's push subscription with the rest of yours.
+        await unsubscribeFromPush();
+        forgetReturnPath();
+        loadPage(SIGN_IN_PATH, { kind: "notice", text: ACCOUNT_DELETED });
+      },
+      (error: unknown) => {
+        signingOut.current = false;
+        throw error;
+      },
+    );
+  }, []);
   // Someone who joins goes home, signed in.
   const joined = useCallback((user: Me) => {
     navigate("/", { replace: true });
@@ -214,6 +233,7 @@ export function App() {
             workspaceName={workspace.account.name}
             onAccountChanged={accountChanged}
             onSignOut={signOutHere}
+            onDeleteAccount={deleteAccountHere}
             onSessionChanged={sessionChanged}
           />
         </PushProvider>

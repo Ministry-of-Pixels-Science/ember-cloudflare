@@ -3,6 +3,8 @@ import {
   CloseCode,
   CURRENT_PASSWORD_NEEDED,
   CURRENT_PASSWORD_WRONG,
+  DELETION_NAME_NEEDED,
+  DELETION_PASSWORD_NEEDED,
   EMAIL_DOMAIN_NEEDS_EMAIL,
   EMAIL_SIGN_UP_PATH,
   INVITATION_PATH,
@@ -22,6 +24,7 @@ import {
   MEMBERFUL_WEBHOOK_PATH,
   NAME_RESERVED,
   NO_EMAIL_DOMAINS,
+  ONLY_ADMINISTRATOR,
   PASSWORD_RESET_PATH,
   PASSWORD_WITH_MEMBERFUL,
   isPasswordTooLong,
@@ -29,6 +32,7 @@ import {
   isRoomId,
   OPEN_WITH_MEMBERFUL,
   parseAccountChanges,
+  parseAccountDeletion,
   parseCustomDomainCheck,
   parseCustomStyles,
   parseFavoriteOrder,
@@ -699,6 +703,36 @@ async function changeProfile(request: Request, env: Env): Promise<Response> {
 }
 
 /**
+ * Delete my account, on your profile: once you've said you mean it, with your password while you have
+ * one, which checking counts against sign-in's limit, or else by typing your name, deletes your account,
+ * as `Workspace.deleteAccount` does, and signs this browser out. 401 without a valid session; 409 for the
+ * only administrator; 422 without your password, or your name, or with one that isn't yours; and 429
+ * past sign-in's limit.
+ */
+async function deleteAccount(request: Request, env: Env): Promise<Response> {
+  const credentials = await credentialsOf(request, env);
+  if (!credentials) return problem(401, "Not signed in");
+  const deletion = parseAccountDeletion(await jsonBodyOf(request));
+  if (typeof deletion === "string") return problem(422, deletion);
+  const { currentPassword, name } = deletion;
+  const check = await workspace(env).accountDeletionCheck(credentials, request.headers.get("CF-Connecting-IP") ?? "unknown");
+  if (!check) return problem(401, "Not signed in");
+  if (check === "limited") return problem(429, SIGN_IN_LIMITED);
+  if (check === "only administrator") return problem(409, ONLY_ADMINISTRATOR);
+  if (check.passwordDigest !== null) {
+    if (!currentPassword) return problem(422, DELETION_PASSWORD_NEEDED);
+    // One longer than the form takes is nobody's, as at sign-in.
+    if (isPasswordTooLong(currentPassword) || !(await passwordHasher(env).verify(currentPassword, check.passwordDigest)).matches) return problem(422, CURRENT_PASSWORD_WRONG);
+  }
+  const deleted = await workspace(env).deleteAccount(credentials, check.passwordDigest, name);
+  if (!deleted) return problem(401, "Not signed in");
+  if (deleted === "password needed") return problem(422, currentPassword ? CURRENT_PASSWORD_WRONG : DELETION_PASSWORD_NEEDED);
+  if (deleted === "name needed") return problem(422, DELETION_NAME_NEEDED);
+  if (deleted === "only administrator") return problem(409, ONLY_ADMINISTRATOR);
+  return new Response(null, { status: 204, headers: { "Set-Cookie": expiredSessionCookie(request) } });
+}
+
+/**
  * Connect Memberful on your profile: once your password checks out, while you have one, so that holding
  * your session isn't enough to add a way into your account, as for changing your email address or
  * password, answers where to sign in at the Memberful site to connect your account there to yours, with
@@ -1203,6 +1237,7 @@ function apiAction(request: Request, env: Env, pathname: string): (() => Respons
   if (pathname === "/api/sidebar/order" && request.method === "PUT") return () => setFavoriteOrder(request, env);
   if (pathname === "/api/users/me/profile" && request.method === "GET") return () => profile(request, env);
   if (pathname === "/api/users/me/profile" && request.method === "PATCH") return () => changeProfile(request, env);
+  if (pathname === "/api/users/me" && request.method === "DELETE") return () => deleteAccount(request, env);
   if (pathname === "/api/users/me/assistant" && request.method === "PATCH") return () => changeYourAssistant(request, env);
   const ownAppSignIn = pathname.match(/^\/api\/users\/me\/apps\/([^/]+)\/sign-in$/);
   if (ownAppSignIn && request.method === "POST") return () => beginOwnAppSignIn(request, env, ownAppSignIn[1]!);

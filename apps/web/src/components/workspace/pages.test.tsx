@@ -46,7 +46,7 @@ async function freshWorkspace() {
     render(
       <PushContext value={PUSH_ON}>
         <FlashProvider workspace>
-          <Workspace me={ada} workspaceName="Analytical Engines" onAccountChanged={vi.fn()} onSignOut={vi.fn()} onSessionChanged={vi.fn()} />
+          <Workspace me={ada} workspaceName="Analytical Engines" onAccountChanged={vi.fn()} onSignOut={vi.fn()} onDeleteAccount={vi.fn()} onSessionChanged={vi.fn()} />
         </FlashProvider>
       </PushContext>,
     );

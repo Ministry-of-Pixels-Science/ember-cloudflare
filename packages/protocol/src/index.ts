@@ -1349,6 +1349,16 @@ export interface MemberfulDisconnection {
 }
 
 /**
+ * What Delete my account on your profile sends (`DELETE /api/users/me`), saying you mean it: your
+ * password while you have one, as changing your email address takes it, or else your name, typed as
+ * your profile has it.
+ */
+export interface AccountDeletion {
+  currentPassword?: string;
+  name?: string;
+}
+
+/**
  * Where to sign in at the Memberful site, within ten minutes, to connect the account you sign in to there
  * to yours here: what connecting from your profile answers, and what signing in with a password answers a
  * member whose password checks out while Memberful is members only, until they've connected one.
@@ -1500,6 +1510,15 @@ export const CURRENT_PASSWORD_WRONG = "That isn't your current password.";
  * a password that whoever holds their session could set would be another.
  */
 export const PASSWORD_WITH_MEMBERFUL = "You sign in with Memberful, so there's no password to set.";
+
+/** What a deleted account is called from then on, wherever anything still names it. */
+export const DELETED_PERSON_NAME = "Deleted person";
+/** Why Delete my account is refused without your password, while you have one. */
+export const DELETION_PASSWORD_NEEDED = "Enter your password to delete your account.";
+/** Why it's refused to someone without a password who hasn't typed their name as their profile has it. */
+export const DELETION_NAME_NEEDED = "Type your name as your profile has it to delete your account.";
+/** Why it's refused to the only administrator, so that there's always one. */
+export const ONLY_ADMINISTRATOR = "You're the only administrator. Make someone else an administrator before you delete your account.";
 
 export interface Boost {
   id: string;
@@ -2552,6 +2571,19 @@ export function parseMemberfulDisconnection(data: unknown): MemberfulDisconnecti
     return `Endpoint can't be longer than ${MAX_PUSH_ENDPOINT_LENGTH} characters`;
   }
   return { ...(currentPassword === undefined ? {} : { currentPassword }), ...(pushSubscriptionEndpoint === undefined ? {} : { pushSubscriptionEndpoint }) };
+}
+
+/**
+ * Parses an untrusted Delete my account. Returns why it's refused instead. Whether what's typed is your
+ * password, or your name, the server checks once it knows who's asking.
+ */
+export function parseAccountDeletion(data: unknown): AccountDeletion | string {
+  if (!isJsonObject(data)) return "Expected a JSON object";
+  const { currentPassword, name } = data;
+  if (currentPassword !== undefined && typeof currentPassword !== "string") return "Current password must be text";
+  if (name !== undefined && typeof name !== "string") return "Name must be text";
+  if (name !== undefined && name.length > MAX_USER_NAME_LENGTH) return NAME_TOO_LONG;
+  return { ...(currentPassword === undefined ? {} : { currentPassword }), ...(name === undefined ? {} : { name }) };
 }
 
 /**

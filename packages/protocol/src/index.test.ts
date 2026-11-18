@@ -62,6 +62,7 @@ import {
   onlyAddressesAt,
   othersAfterMove,
   parseAccountChanges,
+  parseAccountDeletion,
   parseClientFrame,
   parseCustomDomainCheck,
   parseCustomStyles,
@@ -1152,6 +1153,24 @@ describe("Disconnect Memberful", () => {
     ["an endpoint longer than a subscription's", { pushSubscriptionEndpoint: "x".repeat(MAX_PUSH_ENDPOINT_LENGTH + 1) }, "Endpoint can't be longer than 2048 characters"],
   ])("refuses %s and says why", (_, body, error) => {
     expect(parseMemberfulDisconnection(body)).toBe(error);
+  });
+});
+
+describe("Delete my account", () => {
+  it("takes your password or your name as typed, leaving out what isn't sent", () => {
+    expect(parseAccountDeletion({ currentPassword: " compiler " })).toEqual({ currentPassword: " compiler " });
+    expect(parseAccountDeletion({ name: "Grace Hopper", pushSubscriptionEndpoint: "https://push.example" })).toEqual({ name: "Grace Hopper" });
+    expect(parseAccountDeletion({})).toEqual({});
+  });
+
+  it.each([
+    ["no body", null, "Expected a JSON object"],
+    ["a list", [{ name: "Grace Hopper" }], "Expected a JSON object"],
+    ["a password that isn't text", { currentPassword: 12345678 }, "Current password must be text"],
+    ["a name that isn't text", { name: ["Grace"] }, "Name must be text"],
+    ["a name longer than anyone's", { name: "x".repeat(MAX_USER_NAME_LENGTH + 1) }, "Name must be at most 100 characters"],
+  ])("refuses %s and says why", (_, body, error) => {
+    expect(parseAccountDeletion(body)).toBe(error);
   });
 });
 

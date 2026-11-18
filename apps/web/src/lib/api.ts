@@ -8,6 +8,7 @@ import {
   workspaceSocketQuery,
   type Account,
   type AccountChanges,
+  type AccountDeletion,
   type AssistantChanged,
   type AssistantChanges,
   type AssistantForgotten,
@@ -315,6 +316,15 @@ export async function signInAsGuest(name: string): Promise<Me> {
 export async function signInWithLink(transferId: string): Promise<Me> {
   const body: LinkSignIn = { transferId };
   return (await request<{ user: Me }>("/api/session/transfers", { method: "POST", body: JSON.stringify(body) })).user;
+}
+
+/**
+ * Deletes your account, as Delete my account on your profile does, saying you mean it with your password
+ * while you have one, or else your name, and signs this browser out. Fails with a 409 ApiError for the
+ * only administrator, a 422 when what's typed isn't yours, and a 429 past sign-in's limit.
+ */
+export async function deleteAccount(deletion: AccountDeletion): Promise<void> {
+  await request("/api/users/me", { method: "DELETE", body: JSON.stringify(deletion) });
 }
 
 /**
