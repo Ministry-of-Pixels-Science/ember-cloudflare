@@ -39,6 +39,7 @@ import { AgentList } from "./agent-list";
 import { AppList } from "./app-list";
 import { AssistantSettings } from "./assistant-settings";
 import { AssistantSetup } from "./assistant-setup";
+import { BlockedWordsSettings } from "./blocked-words-settings";
 import { CustomDomainSettings } from "./custom-domain-settings";
 import { EmberVersion } from "./ember-version";
 import { EmailSettings, sendsEmail } from "./email-settings";
@@ -319,6 +320,22 @@ export function WorkspaceSettingsPage({
       },
     );
   };
+  /** Saves the words and phrases Blocked words keeps out, flashing a notice once they're saved. */
+  const saveBlockedWords = (blockedWords: string[], settled: (saved: boolean) => void) => {
+    changeAccount({ blockedWords }).then(
+      () => {
+        if (!mounted.current) return;
+        setSettings((settings) => settings && { ...settings, blockedWords });
+        settled(true);
+        flash("notice", CHANGES_SAVED);
+      },
+      (error: unknown) => {
+        if (!mounted.current && !isSignedOut(error)) return;
+        settled(false);
+        onFailed(error);
+      },
+    );
+  };
   const switchRoomCreation = (restrict: boolean) => {
     if (restrictingCreation !== null) return;
     setRestrictingCreation(restrict);
@@ -530,6 +547,7 @@ export function WorkspaceSettingsPage({
             {settings.canAdminister ? (
               <div className="flex flex-col gap-6">
                 <ReportsList meId={me.id} shown={section === "membership-settings"} open={openReports} heard={reportsHeard} onFailed={onFailed} />
+                <BlockedWordsSettings words={settings.blockedWords} saveWords={saveBlockedWords} />
                 <WaysToJoin
                   settings={settings}
                   saveSwitch={saveSwitch}

@@ -390,8 +390,9 @@ export function useRoom(roomId: string, me: User, onSessionChanged: (me: Me | nu
   const messageActions = useMemo(() => messageActionsOf(frames, warn), [frames, warn]);
 
   const dismissNotice = useCallback(() => dispatch({ type: "dismiss-notice" }), []);
+  const givenBack = useCallback((clientMessageId: string, taken: boolean) => dispatch({ type: "given-back", clientMessageId, taken }), []);
 
-  return { state, frames, postMessage, postFiles, typing, loadOlder, loadNewer, jump, messageActions, dismissNotice };
+  return { state, frames, postMessage, postFiles, typing, loadOlder, loadNewer, jump, messageActions, dismissNotice, givenBack };
 }
 
 /** A message `me` is sending to `roomId` as `clientMessageId`, as the timeline shows it until the room has it. */

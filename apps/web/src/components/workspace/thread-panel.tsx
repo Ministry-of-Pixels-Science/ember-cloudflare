@@ -3,6 +3,7 @@ import type { Me, Message, Room } from "@ember/protocol";
 import { ArrowLeft, ChatBubbleEmpty, Xmark } from "@/components/icons/iconoir";
 import { RoomIcon } from "@/components/icons/room-icon";
 import { PageLink } from "@/components/page-link";
+import { useGivingBack } from "@/hooks/use-giving-back";
 import { useMessageEditors } from "@/hooks/use-message-editors";
 import type { RoomFrames } from "@/hooks/use-room";
 import { roomPath, useVisit } from "@/hooks/use-route";
@@ -132,6 +133,7 @@ export function ThreadReplies({ room, name, me, thread, offline, deleted, roomNo
   const direct = room.kind === "direct";
   const composer = useRef<ComposerHandle>(null);
   const { editing, editors } = useMessageEditors(composer);
+  useGivingBack(replies.messages, composer, thread.givenBack);
   const actions = deleted ? null : thread.messageActions;
 
   // Up Arrow edits your newest reply, as the room's composer edits your newest message.

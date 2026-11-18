@@ -149,6 +149,7 @@ export function useThread(roomId: string, frames: RoomFrames, status: Connection
 
   const messageActions = useMemo(() => messageActionsOf(frames, warn), [frames, warn]);
   const dismissNotice = useCallback(() => dispatch({ type: "dismiss-notice" }), []);
+  const givenBack = useCallback((clientMessageId: string, taken: boolean) => dispatch({ type: "given-back", clientMessageId, taken }), []);
 
-  return { state, postReply, postFiles, loadOlder, jump, messageActions, dismissNotice };
+  return { state, postReply, postFiles, loadOlder, jump, messageActions, dismissNotice, givenBack };
 }
