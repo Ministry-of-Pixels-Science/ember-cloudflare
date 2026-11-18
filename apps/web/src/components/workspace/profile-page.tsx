@@ -16,6 +16,7 @@ import {
   type ProfileChanges,
   type SidebarRoom,
 } from "@ember/protocol";
+import type { HuddleSounds } from "@ember/protocol/huddles";
 import { AUTH_FORM } from "@/components/auth-page";
 import { FIELD_INPUT, Field, SubmitButton } from "@/components/field";
 import { useFlash } from "@/components/flash";
@@ -36,6 +37,7 @@ import { AnswerLevels } from "./answer-levels";
 import { BlockedPeople } from "./blocked-people";
 import { ConversationNotifications } from "./conversation-notifications";
 import { DeleteAccount } from "./delete-account";
+import { HuddleSoundSwitches } from "./huddle-sound-switches";
 import { MemberfulConnection } from "./memberful-connection";
 import { InstallInstructions } from "./notification-help";
 import { HEADER_TEXT_BUTTON } from "./page-header";
@@ -52,6 +54,10 @@ interface Props {
   rooms: SidebarRoom[] | null;
   /** Called as a bell saves your level in a room, with what gives the room the level the server answers. */
   askForRoom: () => (answer: RoomAnswer) => void;
+  /** Which of a huddle's sounds you hear, as the sidebar's list has them, or null while huddles are off, and until the list has loaded. */
+  huddleSounds: HuddleSounds | null;
+  /** Called as a switch saves one of a huddle's sounds, with what keeps the sounds the server answers. */
+  askForHuddleSounds: () => (sounds: HuddleSounds) => void;
   /** Signs out, settling with whether it did. */
   onSignOut: () => Promise<boolean>;
   /** Deletes your account and goes to sign in, settling once it's deleted, or failing with why not. */
@@ -114,12 +120,13 @@ function settled(typed: Fields, sent: Fields, saved: Fields): Fields {
  * bio, which Save changes saves with the notice "✓", keeping the page, then, while members sign in with
  * Memberful, connecting your Memberful account, or the one you've connected, which Disconnect Memberful
  * unlinks with the notice "Your Memberful account is disconnected.", then, while Ember AI is on, how much @ember thinks and
- * how long it answers you, then your notification level in each of your rooms and DMs, then a sign-in
+ * how long it answers you, then, while huddles are on, which of a huddle's sounds you hear, then your
+ * notification level in each of your rooms and DMs, then a sign-in
  * link for you, a new one each time the page loads or saves, then Delete my account, and Log out in
  * the top bar. Go Back returns to the page it was opened from. Your avatar, name, username and bio
  * reach everyone's open pages at once, through the workspace socket, as they reach the rail.
  */
-export function ProfilePage({ me, rooms, askForRoom, onSignOut, onDeleteAccount, onFailed }: Props) {
+export function ProfilePage({ me, rooms, askForRoom, huddleSounds, askForHuddleSounds, onSignOut, onDeleteAccount, onFailed }: Props) {
   const [fields, setFields] = useState<Fields | null>(null);
   /** The profile as the page last loaded or saved it. */
   const saved = useRef<Fields | null>(null);
@@ -405,6 +412,7 @@ export function ProfilePage({ me, rooms, askForRoom, onSignOut, onDeleteAccount,
         {assistant && <AnswerLevels assistant={assistant} onChanged={setAssistant} onFailed={onFailed} />}
         {apps.length > 0 && <YourApps apps={apps} onChanged={setApps} onFailed={onFailed} />}
         {outsideAi && <YourOutsideAi connections={outsideAi} onChanged={setOutsideAi} onFailed={onFailed} />}
+        {huddleSounds && <HuddleSoundSwitches sounds={huddleSounds} askForSounds={askForHuddleSounds} onFailed={onFailed} />}
         {rooms && <ConversationNotifications me={me} rooms={rooms} askForRoom={askForRoom} onFailed={onFailed} />}
         <BlockedPeople />
         {transferId && <SignInLink transferId={transferId} mine />}

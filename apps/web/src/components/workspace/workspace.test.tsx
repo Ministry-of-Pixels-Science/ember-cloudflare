@@ -4,7 +4,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { ASSISTANT_ID, CloseCode, startingInvolvement, type Account, type Bot, type DirectoryUser, type DirectRoom, type Me, type Message, type Room, type RoomId, type RoomSettings, type SharedRoom, type SidebarRoom, type TimelinePage, type WorkspaceServerFrame, type WorkspaceSettings } from "@ember/protocol";
 import type { AgentSettings, AvailableAgent } from "@ember/protocol/agents";
 import { THINKING_LEVELS, type AssistantSettings } from "@ember/protocol/assistant";
-import { CAMERAS_OFF, SCREENS_OFF } from "@ember/protocol/huddles";
+import { ALL_HUDDLE_SOUNDS, CAMERAS_OFF, SCREENS_OFF, type HuddleSoundsChanged } from "@ember/protocol/huddles";
 import { FlashProvider } from "@/components/flash";
 import { AccountContext } from "@/hooks/use-account";
 import { SHIPPED_MODELS } from "@/hooks/use-offered-models";
@@ -13,7 +13,7 @@ import { navigate } from "@/hooks/use-route";
 import { joinHuddle } from "@/lib/huddle";
 import { INVITATION_RINGS_MS } from "@/lib/huddle-invitations";
 import { ringForHuddle } from "@/lib/huddle-ring";
-import { endHuddle, joinedHuddle, showHuddle, tellOfHuddle, type HuddleControls } from "@/lib/huddle-store";
+import { endHuddle, heardSounds, joinedHuddle, showHuddle, tellOfHuddle, type HuddleControls } from "@/lib/huddle-store";
 import { loadPage } from "@/lib/page";
 import { badgeTheApp } from "@/test-badge";
 import { PUSH_ON } from "@/test-push";
@@ -3026,6 +3026,73 @@ describe("Huddles", () => {
     expect(controls.leave).toHaveBeenCalledTimes(1);
   });
 
+  describe("Its sounds, which each person turns on or off on their profile", () => {
+    const NO_MUSIC = { ...ALL_HUDDLE_SOUNDS, music: false };
+    const profile = { "GET /api/users/me/profile": () => Response.json({ profile: { name: "Ada", emailAddress: "ada@example.com", bio: null, apps: [], outsideAi: null } }) };
+    const sounds = () => screen.queryByRole("region", { name: "Huddle sounds" });
+    /** Whether each of the profile's three switches is on: the music, the sounds of joining and leaving, and the ring. */
+    const switched = () => within(sounds()!).getAllByRole("switch").map((each) => each.getAttribute("aria-checked") === "true");
+
+    it("has the tab's huddle play those this person hears, all of them until their rooms say otherwise, and as any of their tabs changes them", async () => {
+      serveRooms({ ...roomList(rooms), huddleSounds: NO_MUSIC });
+      showWorkspace("/rooms/general", ada, HUDDLES_ON);
+      expect(heardSounds()).toEqual(ALL_HUDDLE_SOUNDS);
+      await roomHeading();
+      expect(heardSounds()).toEqual(NO_MUSIC);
+      await workspaceSends({ type: "huddle.sounds", sounds: { ...NO_MUSIC, chimes: false } });
+      expect(heardSounds()).toEqual({ music: false, chimes: false, ring: true });
+      await workspaceSends({ type: "huddle.sounds", sounds: ALL_HUDDLE_SOUNDS });
+      expect(heardSounds()).toEqual(ALL_HUDDLE_SOUNDS);
+    });
+
+    it("starts the next person signed in here with them all, whatever the last had turned off", async () => {
+      serveRooms({ ...roomList(rooms), huddleSounds: NO_MUSIC });
+      const { unmount } = showWorkspace("/rooms/general", ada, HUDDLES_ON);
+      await roomHeading();
+      expect(heardSounds()).toEqual(NO_MUSIC);
+      unmount();
+      serveRooms();
+      showWorkspace("/rooms/general", { id: "u2", name: "Grace", administrator: false }, HUDDLES_ON);
+      expect(heardSounds()).toEqual(ALL_HUDDLE_SOUNDS);
+    });
+
+    it("shows a switch for each on Your profile once their rooms have come, as any of their tabs leaves them, while huddles are on", async () => {
+      serveRooms({ ...roomList(rooms), huddleSounds: NO_MUSIC }, profile);
+      const { showAccount } = showWorkspace("/users/me/profile", ada, HUDDLES_ON);
+      await waitFor(() => expect(sounds()).toBeInTheDocument());
+      expect(switched()).toEqual([false, true, true]);
+      await workspaceSends({ type: "huddle.sounds", sounds: { ...NO_MUSIC, ring: false } });
+      expect(switched()).toEqual([false, true, false]);
+      await workspaceSends({ type: "huddle.sounds", sounds: ALL_HUDDLE_SOUNDS });
+      expect(switched()).toEqual([true, true, true]);
+
+      showAccount(workspaceSettings.account);
+      expect(sounds()).not.toBeInTheDocument();
+    });
+
+    it("shows none on Your profile until their rooms have come, which say which they hear", async () => {
+      let answer!: (response: Response) => void;
+      serveRooms(undefined, { ...profile, "GET /api/sidebar": () => new Promise<Response>((resolve) => (answer = resolve)) });
+      showWorkspace("/users/me/profile", ada, HUDDLES_ON);
+      expect(await screen.findByRole("heading", { level: 1, name: "Your profile" })).toBeVisible();
+      expect(sounds()).not.toBeInTheDocument();
+      await act(async () => answer(Response.json({ ...roomList(rooms), huddleSounds: NO_MUSIC })));
+      await waitFor(() => expect(sounds()).toBeInTheDocument());
+      expect(switched()).toEqual([false, true, true]);
+    });
+
+    it("keeps the sounds a switch saves, for the page and the tab's huddle to go by, before the workspace socket brings them", async () => {
+      serveRooms(roomList(rooms), { ...profile, "PATCH /api/users/me/huddle-sounds": () => Response.json({ sounds: { ...ALL_HUDDLE_SOUNDS, chimes: false } } satisfies HuddleSoundsChanged) });
+      const { user } = showWorkspace("/users/me/profile", ada, HUDDLES_ON);
+      await waitFor(() => expect(sounds()).toBeInTheDocument());
+      await waitFor(() => expect(roomListRequests()).toBe(2));
+      await user.click(within(sounds()!).getByRole("switch", { name: "Play a sound when someone joins or leaves" }));
+      await waitFor(() => expect(heardSounds()).toEqual({ music: true, chimes: false, ring: true }));
+      expect(switched()).toEqual([true, false, true]);
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    });
+  });
+
   describe("An invitation into one", () => {
     /** The huddle Grace has started in her DM with Ada. */
     const GOING = { startedAt: "2026-11-16T09:00:00.000Z", userIds: ["u2"] };
@@ -3207,6 +3274,39 @@ describe("Huddles", () => {
       await workspaceSends({ type: "room.huddle", roomId: "general", huddle: null });
       expect(invitation()).toBeInTheDocument();
       expect(ringForHuddle).toHaveBeenCalledTimes(1);
+    });
+
+    it("shows without its ring to someone who has turned the ring off, rings once they turn it on, in any of their tabs, and stops as they turn it off", async () => {
+      serveRooms({ ...roomList([...rooms, withGrace]), huddleSounds: { ...ALL_HUDDLE_SOUNDS, ring: false } });
+      showWorkspace("/rooms/general", ada, HUDDLES_ON);
+      await roomHeading();
+      const stop = vi.fn();
+      vi.mocked(ringForHuddle).mockReturnValueOnce(stop);
+      await workspaceSends(INVITED);
+      expect(await screen.findByRole("group", { name: "Grace invites you to a huddle" })).toBeVisible();
+      expect(ringForHuddle).not.toHaveBeenCalled();
+
+      await workspaceSends({ type: "huddle.sounds", sounds: ALL_HUDDLE_SOUNDS });
+      expect(ringForHuddle).toHaveBeenCalledTimes(1);
+      // The music and the sounds of joining and leaving are other sounds, which leave it ringing.
+      await workspaceSends({ type: "huddle.sounds", sounds: { music: false, chimes: false, ring: true } });
+      expect(stop).not.toHaveBeenCalled();
+      await workspaceSends({ type: "huddle.sounds", sounds: { music: false, chimes: false, ring: false } });
+      expect(stop).toHaveBeenCalledOnce();
+      expect(ringForHuddle).toHaveBeenCalledTimes(1);
+      expect(invitation()).toBeInTheDocument();
+    });
+
+    it("rings only once this person's rooms have come, which say whether they hear the ring", async () => {
+      let answer!: (response: Response) => void;
+      serveRooms(undefined, { "GET /api/sidebar": () => new Promise<Response>((resolve) => (answer = resolve)) });
+      showWorkspace("/rooms/general", ada, HUDDLES_ON);
+      await waitFor(() => expect(roomListRequests()).toBe(1));
+      act(() => WorkspaceSocket.last!.onmessage?.({ data: JSON.stringify(INVITED) }));
+      await waitFor(() => expect(invitation()).toBeInTheDocument());
+      expect(ringForHuddle).not.toHaveBeenCalled();
+      await act(async () => answer(Response.json(roomList([...rooms, withGrace]))));
+      await waitFor(() => expect(ringForHuddle).toHaveBeenCalledTimes(1));
     });
 
     it("shows nothing while huddles are off, and keeps nothing for when they're on again", async () => {

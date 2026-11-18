@@ -115,6 +115,7 @@ import {
   type YourApp,
   type YourAppSignedOut,
 } from "@ember/protocol/apps";
+import { hearsAllHuddleSounds, type HuddleSoundChanges, type HuddleSounds } from "@ember/protocol/huddles";
 import type { MemberfulKeysChange, MemberfulSaved } from "@ember/protocol/memberful";
 import type { Gateway } from "./assistant/gateway";
 import { modelsFileUrlOf, type KeptModelsFile, type KeptWorkersAiModels } from "./assistant/offered";
@@ -3212,16 +3213,32 @@ export class Workspace extends DurableObject<Env> {
   /**
    * The sidebar of the person `credentials` signs in: the rooms they're in, the ones they've starred and
    * the shared order of the rest, with the welcome card's invitation if they're an administrator in the
-   * workspace's first room who hasn't dismissed the card, and the huddles going on in their rooms. Null
-   * without a valid session.
+   * workspace's first room who hasn't dismissed the card, the huddles going on in their rooms, and
+   * which of a huddle's sounds they hear, once they've turned one off. Null without a valid session.
    */
   async sidebar(credentials: Credentials): Promise<Sidebar | null> {
     const user = await this.authenticate(credentials);
     if (!user) return null;
-    const [{ rooms, favorites, sharedOrder, huddles, blocks, invitationRoomId }, account] = await Promise.all([this.store.roomsFor(user.id), this.joinableAccount()]);
+    const [{ rooms, favorites, sharedOrder, huddles, blocks, huddleSounds, invitationRoomId }, account] = await Promise.all([this.store.roomsFor(user.id), this.joinableAccount()]);
     const invited = invitationRoomId !== null && rooms.some((room) => room.id === invitationRoomId);
     const invitation = account && invited ? { roomId: invitationRoomId, joinCode: account.joinCode } : null;
-    return { rooms, favorites, sharedOrder, invitation, huddles, blocks };
+    return { rooms, favorites, sharedOrder, invitation, huddles, blocks, ...(!hearsAllHuddleSounds(huddleSounds) && { huddleSounds }) };
+  }
+
+  /**
+   * Turns each of a huddle's sounds that `changes` names on or off for the person `credentials` signs
+   * in, the rest staying as they are, answering which they hear then, or null without a valid session.
+   * Every tab of theirs hears which, wherever they're signed in. It's one change at a time, so that the
+   * last a tab hears of is the last kept: on D1 a later change could otherwise be answered first.
+   */
+  async setHuddleSounds(credentials: Credentials, changes: HuddleSoundChanges): Promise<HuddleSounds | null> {
+    const user = await this.authenticate(credentials);
+    if (!user) return null;
+    return this.oneAtATime(async () => {
+      const sounds = await this.store.setHuddleSounds(user.id, changes);
+      if (sounds) this.tell([user.id], { type: "huddle.sounds", sounds });
+      return sounds;
+    });
   }
 
   /**

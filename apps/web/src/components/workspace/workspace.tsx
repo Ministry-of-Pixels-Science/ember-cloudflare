@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useReducer, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { ASSISTANT_ID, searchOfQuery, startingInvolvement, type Account, type AccountDeletion, type Blocks, type DirectRoom, type Favorites, type Me, type Room, type RoomId, type SidebarRoom, type User, type UserId } from "@ember/protocol";
-import { CAMERAS_OFF, SCREENS_OFF } from "@ember/protocol/huddles";
+import { ALL_HUDDLE_SOUNDS, CAMERAS_OFF, SCREENS_OFF } from "@ember/protocol/huddles";
 import { useFlash } from "@/components/flash";
 import { Xmark } from "@/components/icons/iconoir";
 import { MainContent, SkipLink } from "@/components/main-content";
@@ -18,7 +18,7 @@ import { agentsToAsk } from "@/lib/agents";
 import { answerHuddleInvitation, ApiError, changeBlock, dismissInvitation, isSignedOut, startDirect } from "@/lib/api";
 import { invitationsReducer, NO_INVITATIONS } from "@/lib/huddle-invitations";
 import { hasHuddles } from "@/lib/huddle-people";
-import { hearHuddle, leaveHuddle, muteHuddle, OPEN_HUDDLE, openHuddle, shareHuddleScreen, showHuddleCamera } from "@/lib/huddle-store";
+import { hearHuddle, hearSounds, leaveHuddle, muteHuddle, OPEN_HUDDLE, openHuddle, shareHuddleScreen, showHuddleCamera } from "@/lib/huddle-store";
 import { whenIdle } from "@/lib/idle";
 import { opensFind, opensShortcuts, togglesHuddle, togglesMute } from "@/lib/keyboard";
 import { lastRoomVisited } from "@/lib/last-room";
@@ -285,7 +285,7 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onDe
   const directory = useDirectory();
   // The invitations into huddles that ring in this tab, as the workspace socket brings them and says they're answered.
   const [invitations, changeInvitations] = useReducer(invitationsReducer, NO_INVITATIONS);
-  const { list, answered, change: changeRooms, refresh, askForRoom, active } = useSidebar(me, onSessionChanged, directory, accountHeard, shownRoomGone, changeInvitations);
+  const { list, answered, change: changeRooms, refresh, askForRoom, askForHuddleSounds, active } = useSidebar(me, onSessionChanged, directory, accountHeard, shownRoomGone, changeInvitations);
   const [drawerOpen, setDrawerOpen] = useState(false);
   // New direct message, while it's open, with the link that opened it, which gets focus back, or null
   // when its address did.
@@ -389,6 +389,12 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onDe
   }, [invitations, huddlesOn, me.id, roomIds, liveHuddles, joinedRoomId]);
   // Someone in a huddle already, in this tab or anywhere else, is shown an invitation without its ring.
   const inAHuddle = huddle !== null || Object.values(liveHuddles).some(({ userIds }) => userIds.includes(me.id));
+  // Which of a huddle's own sounds this person hears, as the switches on their profile leave them, in
+  // any of their tabs: the huddle this tab is in, and the next it joins, plays only those.
+  const soundsHeard = list?.huddleSounds ?? ALL_HUDDLE_SOUNDS;
+  useEffect(() => hearSounds(soundsHeard), [soundsHeard]);
+  // An invitation's ring is one of them, which waits for the server's list to say they hear it.
+  const ringless = inAHuddle || !answered || !soundsHeard.ring;
 
   const flash = useFlash();
   const mounted = useMounted();
@@ -819,7 +825,18 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onDe
       case "app-signed-in":
         return rarePage(({ AppSignedInPage }) => <AppSignedInPage me={me} onFailed={failed} />);
       case "profile":
-        return rarePage(({ ProfilePage }) => <ProfilePage me={me} rooms={rooms} askForRoom={askForRoom} onSignOut={onSignOut} onDeleteAccount={onDeleteAccount} onFailed={failed} />);
+        return rarePage(({ ProfilePage }) => (
+          <ProfilePage
+            me={me}
+            rooms={rooms}
+            askForRoom={askForRoom}
+            huddleSounds={huddlesOn && answered ? soundsHeard : null}
+            askForHuddleSounds={askForHuddleSounds}
+            onSignOut={onSignOut}
+            onDeleteAccount={onDeleteAccount}
+            onFailed={failed}
+          />
+        ));
       case "push-subscriptions":
         return rarePage(({ PushSubscriptionsPage }) => <PushSubscriptionsPage back={back} onFailed={failed} />);
       case "search":
@@ -979,7 +996,7 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onDe
                 <HuddleInvitations
                   invitations={invitations}
                   rooms={rooms ?? NO_ROOMS}
-                  quiet={inAHuddle}
+                  quiet={ringless}
                   onJoin={joinInvited}
                   onDecline={answerInvitation}
                   onUnanswered={invitationOver}
