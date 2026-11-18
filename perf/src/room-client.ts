@@ -26,18 +26,33 @@ const write = (baseUrl: string, body: unknown, cookie?: string): RequestInit => 
   body: JSON.stringify(body),
 });
 
-/** Sets up a new deployment's workspace, as its first visitor would, so the app opens to sign-in rather than Set up Ember. */
-export async function setUp(baseUrl: string): Promise<void> {
+/** The session an answer signs its browser in with: who it's for, and the cookie that carries it. */
+async function sessionIn(response: Response): Promise<Session> {
+  const { user } = (await response.json()) as { user: User };
+  return { user, cookie: response.headers.getSetCookie()[0]!.split(";")[0]! };
+}
+
+/**
+ * Sets up a new deployment's workspace, as its first visitor would, so the app opens to sign-in rather
+ * than Set up Ember, and answers that visitor's session: its first administrator's.
+ */
+export async function setUp(baseUrl: string): Promise<Session> {
   const administrator = { name: "Perf Admin", emailAddress: "admin@perf.test", password: "perf-only-password" };
   const response = await fetch(new URL("/api/first_run", baseUrl), write(baseUrl, administrator));
   if (response.status !== 201) throw new Error(`Setup failed (${response.status}): ${await response.text()}`);
+  return sessionIn(response);
 }
 
 export async function signIn(baseUrl: string, name: string): Promise<Session> {
   const response = await fetch(new URL("/api/session", baseUrl), write(baseUrl, { name }));
   if (response.status !== 201) throw new Error(`Sign-in failed (${response.status}): ${await response.text()}`);
-  const { user } = (await response.json()) as { user: User };
-  return { user, cookie: response.headers.getSetCookie()[0]!.split(";")[0]! };
+  return sessionIn(response);
+}
+
+/** Turns huddles on as `administrator`, through the SFU app whose keys `app` has, as Set up huddles does. */
+export async function turnHuddlesOn(baseUrl: string, administrator: Session, app: { appId: string; appSecret: string }): Promise<void> {
+  const response = await fetch(new URL("/api/account/huddles", baseUrl), { ...write(baseUrl, app, administrator.cookie), method: "PUT" });
+  if (!response.ok) throw new Error(`Turning huddles on failed (${response.status}): ${await response.text()}`);
 }
 
 /** Creates an open room as `session`'s person and answers its id. Everyone who signs in afterwards is in it. */

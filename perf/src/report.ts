@@ -239,6 +239,44 @@ function backendSection(backend: Results["backend"]): string[] {
       ),
     );
   }
+
+  const huddles = runs.filter(([, r]) => r.huddle);
+  if (huddles.length) {
+    const { reactions, rate } = huddles[0]![1].huddle!;
+    out.push(
+      "",
+      "### Huddles",
+      "",
+      `One huddle grown a person at a time, each joining with their voice once the last is heard by everyone. The SFU is a stand-in on this machine that answers at once, so the times are the room's own: nothing anyone says passes through Ember. Welcome is opening the huddle's socket to the room's welcome. Hears all is from someone's welcome to the room saying that they receive everyone who was in the huddle, and heard by all to the last of those receiving them. SFU requests are what the room asked of the SFU for the last of them to join. Then ${reactions} reactions, ${rate} a second, from the people in turn: reaction is one reaching each person in the huddle.`,
+      "",
+    );
+    out.push(
+      table(
+        ["Storage", "People", "Welcome p50", "p95", "Hears all p50", "p95", "Heard by all p50", "p95", "SFU requests", "Reaction p50", "p95", "Lost", "Busiest process CPU"],
+        huddles.flatMap(([storage, { huddle: r }]) =>
+          r!.steps.map((step) => [
+            STORAGE_NAMES[storage],
+            num(step.people),
+            p(step.welcome, "p50"),
+            p(step.welcome, "p95"),
+            p(step.hearsAll, "p50"),
+            p(step.hearsAll, "p95"),
+            p(step.heardByAll, "p50"),
+            p(step.heardByAll, "p95"),
+            num(step.sfuRequestsForLastJoin),
+            p(step.reaction, "p50"),
+            p(step.reaction, "p95"),
+            num(step.lost),
+            pct(step.window.busiestProcessCpuPercent),
+          ]),
+        ),
+      ),
+    );
+    for (const [storage, { huddle: r }] of huddles) {
+      if (r!.stopped) out.push("", `${STORAGE_NAMES[storage]} stopped: ${r!.stopped}.`);
+      if (r!.errors) out.push("", `${STORAGE_NAMES[storage]}: the room told its tabs of ${num(r!.errors)} errors.`);
+    }
+  }
   return out;
 }
 

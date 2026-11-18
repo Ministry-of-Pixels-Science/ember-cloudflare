@@ -3,7 +3,8 @@ import type { Results } from "./report.ts";
 // Compares the headline numbers of two runs of the same profile, ideally from the same machine: a
 // baseline from main and a run from a branch, say. A metric only counts as changed when it moves by
 // more than its noise floor and by more than it moves between two runs of the same commit, except
-// counts of lost messages and errors, where every one counts.
+// counts of lost messages and errors, and of what every run of the same commit does alike, where
+// every one counts.
 
 interface Metric {
   name: string;
@@ -13,7 +14,7 @@ interface Metric {
   floor: number;
   /** How far, in percent either way, the metric moves between two runs of the same commit. */
   noise: number;
-  /** Counts what shouldn't happen at all, so a change of `floor` counts whatever its percentage. */
+  /** Counts what shouldn't happen at all, or what every run of a commit does alike, so a change of `floor` counts whatever its percentage. */
   anyChange: boolean;
 }
 
@@ -104,6 +105,28 @@ function collect({ backend, web }: Results): Map<string, Metric> {
       add(`${storage} search: common p50 ms`, r.search.common?.p50, { floor: 3, noise: 25 });
       add(`${storage} search: rare p50 ms`, r.search.rare?.p50, { floor: 3, ...SWINGY });
       add(`${storage} search: none p50 ms`, r.search.none?.p50, { floor: 2, noise: 25 });
+    }
+    if (r.huddle) {
+      for (const step of r.huddle.steps) {
+        const huddle = `${storage} huddle of ${step.people}`;
+        // Ten joins make a thin median: runs of the scenario, nineteen on DO SQLite and eighteen on D1, put
+        // the first ten's welcome anywhere from 6.96 to 12.17 ms on D1, and everyone hearing them from 10.54
+        // to 17.89 ms on DO SQLite.
+        add(`${huddle}: welcome p50 ms`, step.welcome?.p50, { floor: 6, ...SWINGY });
+        // A newcomer hears everyone over one round of their own, which those runs put anywhere from 10.25 to
+        // 17.42 ms in a huddle of 25, and from 30.79 to 45.76 ms in one of 50.
+        add(`${huddle}: hears all p50 ms`, step.hearsAll?.p50, { floor: 10, noise: 60 });
+        // Everyone hears them over a round each. A huddle of 25 keeps its room about as busy as it gets, where
+        // those runs put it anywhere from 31.92 to 48.84 ms.
+        add(`${huddle}: heard by all p50 ms`, step.heardByAll?.p50, { floor: 10, noise: 60 });
+        // The room asks the same of the SFU for someone to join on every run, so one request more or fewer is the code's.
+        add(`${huddle}: SFU requests for the last to join`, step.sfuRequestsForLastJoin, { anyChange: true });
+        // A reaction takes a few milliseconds, which those runs moved by up to 1.29 ms, and its tail by up to 3.12.
+        add(`${huddle}: reaction p50 ms`, step.reaction?.p50, { floor: 2, ...SWINGY });
+        add(`${huddle}: reaction p95 ms`, step.reaction?.p95, { floor: 4, ...SWINGY });
+        add(`${huddle}: lost`, step.lost, NEVER);
+      }
+      add(`${storage} huddle: errors`, r.huddle.errors, NEVER);
     }
   }
 
@@ -204,7 +227,7 @@ export function compare(before: Results, after: Results, threshold: number): num
   console.log(["", "| Metric | Before | After | Change | |", "| --- | --: | --: | --: | --- |", ...lines].join("\n"));
   console.log(
     `\n${worse} metric${worse === 1 ? "" : "s"} worse${missing ? ` and ${missing} missing from the second run` : ""}. ` +
-      `A metric counts as changed once it moves by more than ${threshold}% and its usual run-to-run noise; lost messages and errors count from the first.`,
+      `A metric counts as changed once it moves by more than ${threshold}% and its usual run-to-run noise; lost messages, errors and requests to the SFU count from the first.`,
   );
   return worse + missing;
 }
