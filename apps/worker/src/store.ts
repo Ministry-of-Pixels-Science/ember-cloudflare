@@ -328,6 +328,8 @@ export const LATEST_CHANGE = `SELECT MAX(
 export const MESSAGES_CHANGED_SINCE = `${SELECT_MESSAGES} WHERE room_id = ? AND change_seq > ? AND in_room = 1 ORDER BY change_seq`;
 /** The messages deleted after a change. */
 export const MESSAGES_DELETED_SINCE = `SELECT message_id FROM message_deletions WHERE room_id = ? AND seq > ? ORDER BY seq`;
+/** The deletion of a message, which its room finds among the few it keeps: `CHANGES_KEPT` at most. */
+export const DELETION_OF = `SELECT seq FROM message_deletions WHERE room_id = ? AND message_id = ?`;
 
 /** The messages whose ids a JSON array lists. */
 const MESSAGES_WITH_IDS = `${SELECT_MESSAGES} WHERE room_id = ? AND id IN (SELECT value FROM json_each(?))`;
@@ -534,6 +536,16 @@ export class MessageStore {
   async find(id: string): Promise<Message | null> {
     const [row] = await this.db.all<MessageRow>(`${SELECT_MESSAGES} WHERE room_id = ? AND id = ?`, this.roomId, id);
     return row ? (await this.messagesOf([row]))[0]! : null;
+  }
+
+  /**
+   * The number of the change that deleted the message `id` names, or null when the room keeps no
+   * deletion of it: a later deletion drops those that have fallen out of its latest `CHANGES_KEPT`
+   * changes.
+   */
+  async deletionOf(id: string): Promise<number | null> {
+    const [deletion] = await this.db.all<{ seq: number }>(DELETION_OF, this.roomId, id);
+    return deletion?.seq ?? null;
   }
 
   /**

@@ -77,6 +77,15 @@ function savedUnanswered(): void {
   });
 }
 
+/** Has a deletion of messages fail once, though it's saved, as a write to D1 can whose answer is lost. */
+function deletedUnanswered(): void {
+  const deleting = MessageStore.prototype.delete;
+  vi.spyOn(MessageStore.prototype, "delete").mockImplementationOnce(async function (this: MessageStore, ...given) {
+    await deleting.apply(this, given);
+    throw unreachable();
+  });
+}
+
 /** Has a huddle's message be unable to say that its huddle goes on, for as long as it does: it can still say that it's over. */
 function sayingOnlyThatItsOver(): void {
   const update = MessageStore.prototype.updateHuddle;
@@ -675,6 +684,32 @@ describe("A huddle's message in its room", () => {
     await evictDurableObject(roomStub(room));
     await ring(room);
     expect(await watching.next("message.deleted")).toMatchObject({ messageId: message.id });
+    expect([failures(), await alarmOf(room), await kept(room, "huddleMessage")]).toEqual([1, null, undefined]);
+  });
+
+  it("tells the room that it's gone with a later check when its deletion failed and was saved all the same, and has the search index hear of it", async () => {
+    const { ada } = await huddlesOn();
+    const linus = await signIn("Linus");
+    const room = await freshRoom("standup");
+    const watching = await connect(room, linus);
+    await sentItsFirstLog(room);
+    const found = async () => ((await (await api("/api/searches?q=huddle", { headers: { Cookie: linus.cookie } })).json()) as SearchResults).matches.map(({ message }) => message);
+    const failures = countFailures();
+    const { socket: adas, message, seq } = await started(room, ada, watching);
+    await indexed(room);
+    deletedUnanswered();
+
+    await left(adas);
+    // The message is gone, with nobody told and the search index's log unsent, so the alarm comes back.
+    await settle(watching);
+    expect(watching.pending("message.deleted")).toEqual([]);
+    expect(await roomSql(room, "SELECT id FROM messages WHERE room_id = ?", room)).toEqual([]);
+    expect(await found()).toEqual([message]);
+    expect([failures(), await alarmOf(room)]).toEqual([1, expect.any(Number)]);
+    await ring(room);
+    expect(await watching.next("message.deleted")).toEqual({ type: "message.deleted", messageId: message.id, seq: seq + 1 });
+    await indexed(room);
+    expect(await found()).toEqual([]);
     expect([failures(), await alarmOf(room), await kept(room, "huddleMessage")]).toEqual([1, null, undefined]);
   });
 

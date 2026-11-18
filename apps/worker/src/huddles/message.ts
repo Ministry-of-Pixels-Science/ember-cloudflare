@@ -66,8 +66,8 @@ interface Kept {
   invited?: true;
 }
 
-/** What the room tells everyone of a huddle's message: that it's there, or what it says now. */
-export type HuddleMessageFrame = Extract<ServerFrame, { type: "message.created" | "message.updated" }>;
+/** What the room tells everyone of a huddle's message: that it's there, what it says now, or that it's gone. */
+export type HuddleMessageFrame = Extract<ServerFrame, { type: "message.created" | "message.updated" | "message.deleted" }>;
 
 /** Takes a huddle's message from the room, telling everyone there, as the room deletes a message. */
 export type RemoveMessage = (message: Message) => Promise<void>;
@@ -188,7 +188,8 @@ export class HuddleMessage {
    */
   private async end(store: MessageStore, { resumed, ...kept }: Kept, remove: RemoveMessage): Promise<HuddleMessageFrame[]> {
     if (kept.endedAt !== undefined && !resumed) return [];
-    if (await this.takeBack(store, kept, remove)) return [];
+    const takenBack = await this.takeBack(store, kept, remove);
+    if (takenBack) return takenBack;
     const endedAt = new Date().toISOString();
     const over = { startedAt: kept.startedAt, endedAt, people: kept.people };
     const told = kept.posted ? await this.say(store, kept.messageId, over) : await this.write(store, kept, over);
@@ -201,15 +202,28 @@ export class HuddleMessage {
    * whoever started it was in it, nobody was invited into it, and its message has no reply in its
    * thread and no boost. `remove` takes the message from the room, where the room has it, as it has one
    * that a failed write saved, and nothing is kept of the huddle, which is then nobody's to go on
-   * with. Answers whether it did.
+   * with. Answers what's left for everyone to be told of, or null when the message stays.
    */
-  private async takeBack(store: MessageStore, kept: Kept, remove: RemoveMessage): Promise<boolean> {
-    if (kept.people.length > 1 || kept.invited) return false;
+  private async takeBack(store: MessageStore, kept: Kept, remove: RemoveMessage): Promise<HuddleMessageFrame[] | null> {
+    if (kept.people.length > 1 || kept.invited) return null;
     const message = await store.find(kept.messageId);
-    if (message && (message.thread || message.boosts.length > 0)) return false;
+    if (message && (message.thread || message.boosts.length > 0)) return null;
     if (message) await remove(message);
+    const untold = message || !kept.posted ? [] : await this.gone(store, kept.messageId);
     await this.forget();
-    return true;
+    return untold;
+  }
+
+  /**
+   * What tells everyone that the message `messageId` names is gone, which they were told of as it was
+   * written: its deletion, by the number the room keeps for it, or nothing once the room keeps none. A
+   * deletion that failed may have been saved all the same, as D1's can be, with nobody told, and
+   * whoever has heard of it, as when someone deleted the message themselves, loses nothing by hearing
+   * it again.
+   */
+  private async gone(store: MessageStore, messageId: string): Promise<HuddleMessageFrame[]> {
+    const seq = await store.deletionOf(messageId);
+    return seq === null ? [] : [{ type: "message.deleted", messageId, seq }];
   }
 
   /** Has the message say `huddle` of its huddle, and answers it as it is then for everyone to be told. A message deleted since says nothing more, nor does one kept for its thread's replies. */
