@@ -212,6 +212,36 @@ function endScreens(): boolean {
   return true;
 }
 
+// TEMPORARY, to come out again: for the trial on CI of a picture that's given its stream again, a page
+// notes what each of its pictures is given and what it says of it, and each test tells of them as it ends.
+type NotedPictures = Window & { pictures?: string[] };
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => {
+    const noted: string[] = ((window as NotedPictures).pictures = []);
+    const known = new WeakMap<HTMLMediaElement, number>();
+    let pictures = 0;
+    const note = (picture: HTMLMediaElement, what: string) => noted.push(`${Math.round(performance.now())} ${known.get(picture)} ${picture.getAttribute("aria-label")}: ${what}`);
+    const given = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "srcObject")!;
+    Object.defineProperty(HTMLMediaElement.prototype, "srcObject", {
+      ...given,
+      set(this: HTMLMediaElement, stream: MediaProvider | null) {
+        if (this instanceof HTMLVideoElement) {
+          if (!known.has(this)) {
+            known.set(this, pictures++);
+            for (const said of ["loadedmetadata", "playing", "error", "stalled"]) this.addEventListener(said, () => note(this, said));
+          }
+          note(this, stream ? "given" : "taken");
+        }
+        given.set!.call(this, stream);
+      },
+    });
+  });
+});
+test.afterEach(async ({ page }, info) => {
+  const noted = await page.evaluate(() => (window as NotedPictures).pictures ?? []).catch(() => ["the page didn't answer"]);
+  console.log(`trial ${info.project.name} :${info.line} ${info.status} ${info.duration}ms r${info.repeatEachIndex} ${JSON.stringify(noted)}`);
+});
+
 // A page that closes while its stand-in still sends it screens crashes CI's WebKit on Linux more often
 // than not, in its video encoder. So the screens end, and the page leaves the app, before a test's page
 // closes, whether the test passed or not.
