@@ -1315,6 +1315,12 @@ administrator, which leaves the huddle going with no message. Someone who was in
 the room's again within half a minute of its end goes on with that huddle, under the same message,
 so the last person's lost connection doesn't leave the room two of them. Anyone else starts another.
 
+A huddle that nobody joined leaves no message, as Slack's leaves none: once whoever started it has
+left, its message goes from the room, as a deleted message does. It stays where it's someone's to
+come back to: for whoever was invited into the huddle, as the others in a direct message are, so
+that a huddle nobody answered still shows there, and for a reply in its thread or a reaction.
+Whoever comes back to a huddle that left no message starts another.
+
 The huddle shows that thread itself, beside the people in it, where Slack's huddle window has it:
 under Thread, it says what a huddle's thread is for, then what's been written in it, over a composer
 to reply in, with files and links as in any thread. What you send there, everyone in the huddle

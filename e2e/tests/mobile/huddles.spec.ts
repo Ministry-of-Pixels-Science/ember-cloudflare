@@ -202,6 +202,24 @@ async function letScreenBeKeptAwake(page: Page): Promise<void> {
 /** Where a page keeps the connection that stands in for the SFU's, which sends it the screens it watches, and the made-up camera they're pictures of. */
 type SentScreens = Window & { screensSent?: RTCPeerConnection; screensPictured?: MediaStream };
 
+/** In the page: ends what the connection that stands in for the SFU's sends it, and answers whether it had one. */
+function endScreens(): boolean {
+  const standIn = window as SentScreens;
+  if (!standIn.screensSent) return false;
+  standIn.screensSent.getSenders().forEach((sender) => sender.track?.stop());
+  standIn.screensSent.close();
+  standIn.screensPictured?.getTracks().forEach((track) => track.stop());
+  return true;
+}
+
+// A page that closes while its stand-in still sends it screens crashes CI's WebKit on Linux more often
+// than not, in its video encoder. So the screens end, and the page leaves the app, before a test's page
+// closes, whether the test passed or not.
+test.afterEach(async ({ page }) => {
+  const sent = await page.evaluate(endScreens).catch(() => false);
+  if (sent) await page.goto("about:blank").catch(() => {});
+});
+
 /**
  * In the page: a connection of its own that sends it `count` screens, as the SFU's would, each the
  * picture of its made-up camera. Answers its offer of them, which names an address of its own, as the

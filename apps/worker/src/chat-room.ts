@@ -78,7 +78,7 @@ import { attachedFile, Blobs, objectKey, previewKey, type Identified, type RoomB
 import type { ImageSize } from "./files/images";
 import { storeArriving, withPreview, type ArrivingFile, type StreamedFile } from "./files/streamed";
 import { NO_STORAGE, type Uploader } from "./files/uploads";
-import { HuddleMessage, type HuddleNow } from "./huddles/message";
+import { HuddleMessage, type HuddleMessageFrame, type HuddleNow } from "./huddles/message";
 import { Huddle, HUDDLE_CHECK_MS, HUDDLE_TAG } from "./huddles/room";
 import { base36, sortableId } from "./ids";
 import { sendPushes } from "./push/delivery";
@@ -2252,8 +2252,9 @@ export class ChatRoom extends DurableObject<Env> {
    * log and the Workspace the huddles': the message as a huddle starts, and what it says once the
    * huddle is over. The huddle has this done whenever who's in it changes, with the huddle as that left
    * it, since someone can have left again by the time the room gets to it, and the alarm with each
-   * check of the huddle. Answers whether it could: the alarm comes back when not. A room deleted by
-   * then has forgotten the message of its last huddle, and gets no other.
+   * check of the huddle. The message of a huddle that nobody joined is deleted instead, once the huddle
+   * is over, as the room deletes any. Answers whether it could: the alarm comes back when not. A room
+   * deleted by then has forgotten the message of its last huddle, and gets no other.
    */
   private async keepHuddleMessage(huddle: HuddleNow | null): Promise<boolean> {
     try {
@@ -2261,13 +2262,14 @@ export class ChatRoom extends DurableObject<Env> {
       const roomId = huddle?.roomId ?? (await this.huddleMessage.roomId());
       // No huddle here has had a message.
       if (roomId === undefined) return true;
-      const couriers = this.couriersFor(roomId);
-      await this.huddleMessage.keepUp(this.storeFor(roomId), huddle, (frames) => {
+      const [store, couriers] = [this.storeFor(roomId), this.couriersFor(roomId)];
+      const tell = (frames: HuddleMessageFrame[]) => {
         for (const frame of frames) this.broadcast(frame);
         if (frames.length === 0) return;
         couriers.index.deliver();
         couriers.huddles.deliver();
-      });
+      };
+      await this.huddleMessage.keepUp(store, huddle, tell, (message) => this.deleteMessage(store, message));
       return true;
     } catch (error) {
       console.error("Keeping the message of the room's huddle failed:", error instanceof Error ? error.name : "unknown error");
