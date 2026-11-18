@@ -4,7 +4,7 @@ import { prepareBody, writtenBody, type PreparedBody } from "./body";
 import { displayBody, displayMarkup, type DisplayNode, type DisplayPreview } from "./display";
 import { editableBody, mentionSgid } from "./mentions";
 import { parseHtml } from "./parse";
-import { MAX_PREVIEW_COPIES_LENGTH, normalizeTweetUrl, previewContent } from "./previews";
+import { hasPreview, MAX_PREVIEW_COPIES_LENGTH, normalizeTweetUrl, previewContent } from "./previews";
 import { htmlEscape } from "./ruby";
 import { innerHtml, toHtml } from "./serialize";
 import { corpus, corpusUser, RailsError } from "./testing/corpus";
@@ -288,6 +288,15 @@ describe("Link previews in messages", () => {
     it("with the link's text, which goes as the message shows", () => {
       const body = `<p><a href="https://basecamp.com/">https://basecamp.com/</a></p>${preview({ href: "https://basecamp.com/", filename: "B" })}`;
       expect(stored(body).html).toBe(body);
+    });
+
+    it("tells a body with one from a body without, by its content type alone", () => {
+      const link = `<p><a href="https://basecamp.com/">https://basecamp.com/</a></p>`;
+      expect(hasPreview(parseHtml, `${link}${preview({ href: "https://basecamp.com/", filename: "B" })}`)).toBe(true);
+      expect(hasPreview(parseHtml, `<div>${trixPreview("https://basecamp.com/", "B")}</div>`)).toBe(true);
+      expect(hasPreview(parseHtml, link)).toBe(false);
+      expect(hasPreview(parseHtml, `<p>${OPENGRAPH_EMBED_CONTENT_TYPE}</p>`)).toBe(false);
+      expect(hasPreview(parseHtml, `<action-text-attachment content-type="${OPENGRAPH_EMBED_CONTENT_TYPE}; x=1"></action-text-attachment>`)).toBe(false);
     });
 
     it("but not one that raises as Rails reads it", () => {
