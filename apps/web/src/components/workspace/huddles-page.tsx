@@ -13,6 +13,7 @@ import { fetchHuddles, isSignedOut } from "@/lib/api";
 import { membersShown, roomName } from "@/lib/directs";
 import { huddlesGoingOn, recentHuddles, type HuddleGoingOn, type HuddleOver } from "@/lib/huddle-list";
 import { huddleLasted, huddlePlace, inItsHuddle, wereInItsHuddle } from "@/lib/huddle-people";
+import { isHidden } from "@/lib/involvement";
 import { dateTimeLabel, huddleStartedLabel, timeLabel } from "@/lib/messages";
 import { cn } from "@/lib/utils";
 import { HuddlesContext, NO_HUDDLES } from "./huddle-button";
@@ -50,8 +51,9 @@ interface Props {
  * it started, how long it went on, how many replies its thread has, and the faces of who was in it, and
  * each goes to its thread. A huddle nobody else joined is listed only while its thread has a reply, and
  * those of a room you've hidden from your sidebar aren't listed. The list is asked for once your rooms
- * have come, and again as the sidebar hears a huddle is over or its thread has changed, and as you're put
- * in a room or leave one. Once it has come, one that can't be loaded again leaves the page as it was.
+ * have come, and again as the sidebar hears a huddle is over or its thread has changed, as you're put in
+ * a room or leave one, and as you hide one or show it again. Once it has come, one that can't be loaded
+ * again leaves the page as it was.
  */
 export function HuddlesPage({ me, rooms, changes, onFailed }: Props) {
   const huddlesOn = useAccount().huddles;
@@ -59,8 +61,8 @@ export function HuddlesPage({ me, rooms, changes, onFailed }: Props) {
   const live = huddlesOn ? heard : NO_HUDDLES;
   const [past, setPast] = useState<PastHuddle[] | null>(null);
   const loaded = useRef(false);
-  // The rooms someone is in, whichever order the sidebar has them in, or null until they've come.
-  const roomIds = useMemo(() => rooms && rooms.map((room) => room.id).sort().join(" "), [rooms]);
+  // The rooms whose huddles the server lists, whichever order the sidebar has them in, or null until they've come.
+  const roomIds = useMemo(() => rooms && rooms.filter((room) => !isHidden(room)).map((room) => room.id).sort().join(" "), [rooms]);
   useTitle("Huddles");
 
   useEffect(() => {

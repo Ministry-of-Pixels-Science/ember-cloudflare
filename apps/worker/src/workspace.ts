@@ -1905,8 +1905,8 @@ export class Workspace extends DurableObject<Env> {
   }
 
   /**
-   * The huddles that are over in the rooms of the person `credentials` signs in, the latest to have
-   * started first, as many as the Huddles page lists, or null without a valid session.
+   * The huddles that are over in the rooms the person `credentials` signs in is in and hasn't hidden, the
+   * latest to have started first, as many as the Huddles page lists, or null without a valid session.
    */
   async pastHuddles(credentials: Credentials): Promise<PastHuddle[] | null> {
     const user = await this.authenticate(credentials);

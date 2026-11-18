@@ -907,8 +907,8 @@ async function changeHuddleSounds(request: Request, env: Env): Promise<Response>
 }
 
 /**
- * `GET /api/huddles`: the huddles that are over in the rooms the signed-in person is in, the latest to
- * have started first, which the Huddles page lists.
+ * `GET /api/huddles`: the huddles that are over in the rooms the signed-in person is in and hasn't
+ * hidden, the latest to have started first, which the Huddles page lists.
  */
 async function pastHuddles(request: Request, env: Env): Promise<Response> {
   const credentials = await credentialsOf(request, env);

@@ -403,9 +403,11 @@ Objects, D1 or speed call for something else.
   the room's members are read, to be told on their workspace sockets that the list changed, when it
   did, so a call made twice tells nobody twice. The frame names no huddle, since each tab on the
   page asks for the list again, and the others do nothing with it. A deleted room's rows go with it
-  (`ON DELETE CASCADE`). The page's statement goes through someone's memberships and reads each
-  room's latest 50 from the end of `index_past_huddles_on_room_id_and_message_id`, keeping the
-  latest 50 of them all, so a room's older huddles are never read, however many it has had.
+  (`ON DELETE CASCADE`). The page's statement goes through someone's memberships, but for those of
+  the rooms they've hidden from their sidebar, whose huddles the page leaves out and which would
+  otherwise crowd the others' off it, and reads each room's latest 50 from the end of
+  `index_past_huddles_on_room_id_and_message_id`, keeping the latest 50 of them all, so a room's
+  older huddles are never read, however many it has had.
   Migration 0075 logs the huddles there were before it, so each is listed once its room is next
   opened.
 - **Rooms are named by their ids, and some have no creator.** A room's id names its Durable Object

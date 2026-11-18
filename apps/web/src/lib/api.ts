@@ -983,8 +983,9 @@ export async function answerHuddleInvitation(roomId: RoomId): Promise<void> {
 }
 
 /**
- * The latest huddles that are over in this person's rooms and DMs, the latest first, as the Huddles page
- * lists them: those someone else joined, and those whose threads have a reply.
+ * The latest huddles that are over in this person's rooms and DMs, but for the ones they've hidden, the
+ * latest first, as the Huddles page lists them: those someone else joined, and those whose threads have
+ * a reply.
  */
 export async function fetchHuddles(): Promise<PastHuddle[]> {
   return (await request<PastHuddles>("/api/huddles")).huddles;

@@ -1,4 +1,4 @@
-import type { Message, RoomId, ServerFrame } from "@ember/protocol";
+import type { Involvement, Message, RoomId, ServerFrame } from "@ember/protocol";
 import { PAST_HUDDLES_LISTED, type PastHuddle, type PastHuddles } from "@ember/protocol/huddles";
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -104,6 +104,12 @@ const overOf = (message: Message, people: Session[]): NonNullable<HuddleChange["
 
 /** A huddle that's over as the page lists it: `message`'s, in `room`, which `people` were in. */
 const past = (room: RoomId, message: Message, people: Session[], replies = 0): PastHuddle => ({ roomId: room, messageId: message.id, ...overOf(message, people), replies });
+
+/** Gives `session`'s person `involvement` in room `roomId`, as their bell does. */
+async function involve(session: Session, roomId: RoomId, involvement: Involvement): Promise<void> {
+  const response = await api(`/api/rooms/${roomId}/involvement`, { method: "PUT", headers: { Cookie: session.cookie }, body: JSON.stringify({ involvement }) });
+  expect(response.status).toBe(200);
+}
 
 /** Waits until `tab` hears that the list of huddles changed, past whatever else it hears first. */
 async function heardChange(tab: WorkspaceSocket): Promise<void> {
@@ -292,6 +298,27 @@ describe("The huddles that are over", () => {
     const latestFirst = [...numbers].reverse();
     expect(await listFor(ada)).toEqual(latestFirst.slice(0, PAST_HUDDLES_LISTED).map(listed));
     expect(await listFor(grace)).toEqual([...later.reverse(), ...latestFirst].slice(0, PAST_HUDDLES_LISTED).map(listed));
+  });
+
+  it("leave out those of a room someone has hidden from their sidebar, however many it has had, so their other rooms' are listed, and have them again once it's shown, if only muted", async () => {
+    const [ada, grace] = [await signIn("Ada"), await signIn("Grace")];
+    const [busy, quiet] = [await freshRoom("busy"), await freshRoom("quiet")];
+    const change = (n: number): HuddleChange => ({ messageId: `m${String(n).padStart(3, "0")}`, over: { startedAt: minute(n), endedAt: minute(n + 1), userIds: [ada.user.id, grace.user.id] }, replies: 0 });
+    // The quiet room's two came first, and the busy room has had as many since as the page lists.
+    const numbers = Array.from({ length: PAST_HUDDLES_LISTED + 2 }, (_, index) => index + 1);
+    const roomOf = (n: number) => (n > 2 ? busy : quiet);
+    await workspaceStub().applyHuddleChanges(quiet, numbers.filter((n) => roomOf(n) === quiet).map(change));
+    await workspaceStub().applyHuddleChanges(busy, numbers.filter((n) => roomOf(n) === busy).map(change));
+    const listed = (n: number): PastHuddle => ({ roomId: roomOf(n), messageId: change(n).messageId, ...change(n).over!, replies: 0 });
+    const busys = [...numbers].reverse().slice(0, PAST_HUDDLES_LISTED).map(listed);
+    expect(await listFor(ada)).toEqual(busys);
+
+    await involve(ada, busy, "invisible");
+    expect(await listFor(ada)).toEqual([2, 1].map(listed));
+    expect(await listFor(grace)).toEqual(busys);
+
+    await involve(ada, busy, "nothing");
+    expect(await listFor(ada)).toEqual(busys);
   });
 
   it("tell everyone in the room that they changed, on each of their tabs, and nobody when the room says again what it said", async () => {

@@ -269,7 +269,7 @@ describe("The Huddles page", () => {
     expect(main()).not.toHaveAttribute("aria-busy");
   });
 
-  it("asks for them again as you're put in a room and as you leave one, but not as your rooms change in any other way", async () => {
+  it("asks for them again as you're put in a room and as you leave one, but not as your rooms are renamed, read, muted or put in another order", async () => {
     const { show } = showPage();
     await recent(3);
     // General renamed, read and muted, Design marked unread, and the three in another order: the same rooms.
@@ -283,6 +283,21 @@ describe("The Huddles page", () => {
     expect(asked()).toBe(3);
     // Design's huddle goes with it, before the answer comes.
     expect((await recent(2)).map(named)).toEqual(["General", "General"]);
+  });
+
+  it("asks for them again as you hide a room from your sidebar and as you show one again, since the server lists none of a hidden room's", async () => {
+    const { show } = showPage();
+    await recent(3);
+    serve(answering(standUp, kickOff));
+    show({ rooms: [general, { ...design, involvement: "invisible" }, withGrace] });
+    expect(asked()).toBe(2);
+    // Design's huddle goes as it's hidden, before the answer comes.
+    expect((await recent(2)).map(named)).toEqual(["General", "General"]);
+
+    serve(answering(standUp, review, kickOff));
+    show({ rooms: [general, design, withGrace] });
+    expect(asked()).toBe(3);
+    expect((await recent(3)).map(named)).toEqual(["General", "Design", "General"]);
   });
 
   it("shows what its latest asking answers, even where an earlier one answers after it", async () => {

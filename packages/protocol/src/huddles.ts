@@ -268,7 +268,7 @@ export interface PastHuddle {
 /** How many huddles the Huddles page lists at most: the latest to have started in someone's rooms. */
 export const PAST_HUDDLES_LISTED = 50;
 
-/** What `GET /api/huddles` answers: the huddles that are over in the rooms someone is in, the latest to have started first. */
+/** What `GET /api/huddles` answers: the huddles that are over in the rooms someone is in and hasn't hidden from their sidebar, the latest to have started first. */
 export interface PastHuddles {
   huddles: PastHuddle[];
 }

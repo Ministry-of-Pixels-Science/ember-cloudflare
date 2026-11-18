@@ -1730,14 +1730,15 @@ const LIST_HUDDLES = `INSERT INTO past_huddles (message_id, room_id, started_at,
 const UNLIST_HUDDLES = `DELETE FROM past_huddles WHERE room_id = ?1 AND message_id IN (SELECT value FROM json_each(?2)) RETURNING message_id`;
 
 /**
- * The huddles that are over in the rooms user ?1 is in, the latest to have started first, up to ?2 of
- * them. Only each room's latest ?2 are read, from the index's end, so a room's older huddles cost
- * nothing, however many it has had.
+ * The huddles that are over in the rooms user ?1 is in and hasn't hidden from their sidebar, the latest
+ * to have started first, up to ?2 of them. A hidden room's are left out here, before the latest are
+ * taken, or they'd crowd the other rooms' off a page that shows none of them. Only each room's latest
+ * ?2 are read, from the index's end, so a room's older huddles cost nothing, however many it has had.
  */
 const PAST_HUDDLES_FOR_USER = `SELECT past_huddles.room_id AS roomId, past_huddles.message_id AS messageId, past_huddles.started_at AS startedAt, past_huddles.ended_at AS endedAt,
     past_huddles.user_ids AS userIds, past_huddles.replies
   FROM memberships CROSS JOIN past_huddles
-  WHERE memberships.user_id = ?1 AND past_huddles.room_id = memberships.room_id
+  WHERE memberships.user_id = ?1 AND memberships.involvement <> 'invisible' AND past_huddles.room_id = memberships.room_id
     AND past_huddles.message_id >= coalesce((
       SELECT oldest.message_id FROM past_huddles AS oldest WHERE oldest.room_id = memberships.room_id ORDER BY oldest.message_id DESC LIMIT 1 OFFSET ?2 - 1
     ), '')
@@ -4274,7 +4275,7 @@ export class WorkspaceStore {
     return added.length + removed.length > 0 ? userIdsOf(members) : null;
   }
 
-  /** The huddles that are over in the rooms someone is in, the latest to have started first, as many as the Huddles page lists. */
+  /** The huddles that are over in the rooms someone is in and hasn't hidden, the latest to have started first, as many as the Huddles page lists. */
   async pastHuddles(userId: UserId): Promise<PastHuddle[]> {
     const rows = await this.db.all<PastHuddleRow>(PAST_HUDDLES_FOR_USER, userId, PAST_HUDDLES_LISTED);
     return rows.map((row) => ({ ...row, userIds: JSON.parse(row.userIds) as UserId[] }));
