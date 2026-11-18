@@ -88,7 +88,21 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @ember/e2e exec playwright install --with-deps webkit
-      - run: pnpm test:e2e
+      # TEMPORARY, to come out again: a trial of what the phone suite's shared-screens tests leave this
+      # machine doing, which slows the tests that run after them. Each repeat of them sends the screens
+      # another way (e2e/tests/mobile/huddles.spec.ts), beside a line every two seconds of what the
+      # machine is busy with (e2e/trial-load.mjs). Then the way they're sent now, with no trace recorded.
+      - name: Trial of the shared-screens tests
+        run: |
+          trial() { pnpm --filter @ember/e2e exec playwright test tests/mobile/huddles.spec.ts --project "mobile iPhone SE" --project "mobile iPhone 17" --grep "Invite people, with more people|the screens people share|a huddle with more people|a room.s settings fit|Huddle sounds, on your profile|the sidebar.s Huddles row|the Huddles page fits" --reporter=list "$@" || true; }
+          nproc; free -m; cat /proc/sys/kernel/core_pattern; ulimit -c
+          node e2e/trial-load.mjs & LOAD=$!
+          trial --repeat-each 12
+          echo "trial: as sent now, with no trace recorded"
+          SCREENS_TRIAL=now trial --repeat-each 2 --trace off
+          kill $LOAD || true
+          sudo dmesg | tail -n 80 || true
+          ls -la /var/crash 2>/dev/null || true
       - uses: actions/upload-artifact@v6
         if: failure()
         with:
