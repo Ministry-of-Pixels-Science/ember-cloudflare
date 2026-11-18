@@ -63,6 +63,7 @@ import outsideAi from "../migrations/0062_outside_ai.sql";
 import agentAccess from "../migrations/0063_agent_access.sql";
 import sessionTransfers from "../migrations/0064_session_transfers.sql";
 import huddleMessages from "../migrations/0066_huddle_messages.sql";
+import roomHuddles from "../migrations/0067_room_huddles.sql";
 import deletedAccounts from "../migrations/0068_deleted_accounts.sql";
 import boostsByBooster from "../migrations/0069_boosts_by_booster.sql";
 import searchIndex from "../search-migrations/0001_search_index.sql";
@@ -155,6 +156,7 @@ export const MIGRATIONS: Migration[] = [
   { name: "0063_agent_access.sql", scope: "workspace", sql: agentAccess },
   { name: "0064_session_transfers.sql", scope: "workspace", sql: sessionTransfers },
   { name: "0066_huddle_messages.sql", scope: "room", sql: huddleMessages },
+  { name: "0067_room_huddles.sql", scope: "workspace", sql: roomHuddles },
   { name: "0068_deleted_accounts.sql", scope: "workspace", sql: deletedAccounts },
   { name: "0069_boosts_by_booster.sql", scope: "room", sql: boostsByBooster },
 ];

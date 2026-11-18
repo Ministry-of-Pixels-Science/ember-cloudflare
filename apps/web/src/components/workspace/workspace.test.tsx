@@ -2918,6 +2918,80 @@ describe("Huddles", () => {
     expect(preview()).not.toBeInTheDocument();
   });
 
+  describe("In a room whose settings don't allow them", () => {
+    /** Random, once its settings don't allow huddles. */
+    const QUIET: SharedRoom = { ...rooms[1]!, huddles: false };
+    const toggle = () => fireEvent.keyDown(document.body, { key: "H", code: "KeyH", ctrlKey: true, altKey: true, shiftKey: true });
+
+    it("has no huddle button, and leaves the huddle's keys alone, while the other rooms keep theirs", async () => {
+      serveRooms(roomList([rooms[0]!, QUIET]));
+      showWorkspace("/rooms/random", ada, HUDDLES_ON);
+      expect(await roomHeading()).toHaveTextContent("random");
+      expect(screen.queryByRole("button", { name: /huddle/i })).not.toBeInTheDocument();
+      expect(toggle()).toBe(true);
+      expect(preview()).not.toBeInTheDocument();
+
+      act(() => navigate("/rooms/general"));
+      expect(await screen.findByRole("button", { name: "Start huddle" })).toBeInTheDocument();
+    });
+
+    it("shows the room at its huddle's link, and says so", async () => {
+      serveRooms(roomList([rooms[0]!, QUIET]));
+      showWorkspace("/rooms/random/huddle", ada, HUDDLES_ON);
+      expect(await screen.findByRole("alert")).toHaveTextContent("Huddles are turned off in this room.");
+      expect(await roomHeading()).toHaveTextContent("random");
+      expect(location.pathname).toBe("/rooms/random");
+      expect(preview()).not.toBeInTheDocument();
+    });
+
+    it("takes the huddle button from the room's header, and closes its preview, once its settings are saved without huddles, and gives the button back once they allow them again", async () => {
+      const { user } = showWorkspace("/rooms/random", ada, HUDDLES_ON);
+      await roomHeading();
+      await user.click(screen.getByRole("button", { name: "Start huddle" }));
+      expect(await screen.findByRole("dialog", { name: "Start a huddle in random" })).toBeVisible();
+      await workspaceSends({ type: "room.saved", room: QUIET });
+      await waitFor(() => expect(preview()).not.toBeInTheDocument());
+      expect(screen.queryByRole("button", { name: /huddle/i })).not.toBeInTheDocument();
+      expect(toggle()).toBe(true);
+
+      await workspaceSends({ type: "room.saved", room: rooms[1]! });
+      expect(await screen.findByRole("button", { name: "Start huddle" })).toBeInTheDocument();
+      expect(preview()).not.toBeInTheDocument();
+    });
+
+    it("leaves the huddle the tab is in there, and says why, once the room's settings are saved without huddles", async () => {
+      showWorkspace("/rooms/general", ada, HUDDLES_ON);
+      await roomHeading();
+      join("random");
+      act(() => controls.setOpen(false));
+      // Another room's settings leave it be.
+      await workspaceSends({ type: "room.saved", room: { ...rooms[0]!, huddles: false } });
+      await waitFor(() => expect(screen.queryByRole("button", { name: "Start huddle" })).not.toBeInTheDocument());
+      expect(bar()).toHaveAccessibleName("Huddle in random");
+      expect(controls.leave).not.toHaveBeenCalled();
+
+      await workspaceSends({ type: "room.saved", room: QUIET });
+      expect(await screen.findByRole("alert")).toHaveTextContent("Huddles have been turned off in this room.");
+      expect(controls.leave).toHaveBeenCalledTimes(1);
+      expect(shown()).not.toBeInTheDocument();
+    });
+
+    it("stays in a huddle whose room is saved with huddles allowed, or in a direct message's", async () => {
+      serveRooms(roomList([...rooms, withGrace]));
+      showWorkspace("/rooms/general", ada, HUDDLES_ON);
+      await roomHeading();
+      join("random");
+      await workspaceSends({ type: "room.saved", room: { ...rooms[1]!, name: "banter" } });
+      await waitFor(() => expect(opened()).toHaveAccessibleName("Huddle in banter"));
+      act(() => controls.leave());
+      join("d1");
+      await workspaceSends({ type: "room.saved", room: withGrace });
+      expect(opened()).toHaveAccessibleName("Huddle with Grace");
+      expect(controls.leave).toHaveBeenCalledTimes(1);
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    });
+  });
+
   it("leaves the huddle as the workspace goes, as when someone else signs in", async () => {
     const { unmount } = showWorkspace("/rooms/general", ada, HUDDLES_ON);
     await roomHeading();

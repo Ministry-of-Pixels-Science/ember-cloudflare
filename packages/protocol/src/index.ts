@@ -244,6 +244,11 @@ export interface SharedRoom {
   name: string;
   /** Null for the default `#`. */
   icon: RoomIconName | null;
+  /**
+   * False while the room's settings don't allow huddles in it, as a Slack channel's can: nobody starts or
+   * joins one there, where huddles are on. Left out otherwise, which is how every room starts.
+   */
+  huddles?: false;
 }
 
 /**
@@ -359,10 +364,11 @@ export interface RoomSettings {
 }
 
 /**
- * What `PATCH /api/rooms/<id>` changes in a room, as its settings save it: its name, its icon, and who
- * it's for, everyone or just the people `memberIds` names, which takes anyone else out of it.
+ * What `PATCH /api/rooms/<id>` changes in a room, as its settings save it: its name, its icon, whether
+ * huddles are allowed in it, and who it's for, everyone or just the people `memberIds` names, which
+ * takes anyone else out of it.
  */
-export type RoomChanges = { name?: string; icon?: RoomIconChoice } & ({ kind?: "open" } | { kind: "closed"; memberIds: UserId[] });
+export type RoomChanges = { name?: string; icon?: RoomIconChoice; huddles?: boolean } & ({ kind?: "open" } | { kind: "closed"; memberIds: UserId[] });
 
 /**
  * The rail's buttons and the appearance modes, whose icons an administrator can choose in Community
@@ -2111,7 +2117,9 @@ export function parseRoomChanges(data: unknown): RoomChanges | string {
   if (name === null) return `Name must be 1 to ${MAX_ROOM_NAME_LENGTH} characters`;
   const icon = iconChoice(r.icon);
   if (icon === null) return ICON_REFUSED;
-  const changes = { name, icon };
+  const { huddles } = r;
+  if (huddles !== undefined && typeof huddles !== "boolean") return "Huddles must be true or false";
+  const changes = { name, icon, huddles };
   if (r.kind === undefined) return changes;
   if (r.kind === "open") return { ...changes, kind: r.kind };
   if (r.kind !== "closed") return 'Kind must be "open" or "closed"';
