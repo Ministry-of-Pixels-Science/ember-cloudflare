@@ -12,6 +12,7 @@ beforeEach(freshDeploy);
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 /** Has `session`'s person block whoever has `userId`, or unblock them. */
@@ -102,17 +103,28 @@ describe("Block someone", () => {
     expect((await answered(block(ada, grace.user.id, "DELETE"))).direct).toBeNull();
   });
 
-  it("leaves be a DM you've shown again since, and one started after blocking", async () => {
+  it("leaves be a DM you've shown again since, and one started after blocking, though you block them again", async () => {
+    // The Workspace runs in this isolate, so it sees the faked clock too, which each block here is a second later on.
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() });
+    const blockLater = (session: Session, userId: string) => {
+      vi.setSystemTime(Date.now() + 1000);
+      return answered(block(session, userId));
+    };
     const [ada, grace, linus] = await people("Ada", "Grace", "Linus");
     const theirs = await direct(ada, grace);
-    await block(ada, grace.user.id);
+    await blockLater(ada, grace.user.id);
     // As the bell on your profile shows it again.
     await involve(ada, theirs.id, "everything");
+    // As a tab that hadn't heard of blocking her asks again.
+    expect((await blockLater(ada, grace.user.id)).direct).toBeNull();
+    expect(await levelIn(ada, theirs.id)).toBe("everything");
     expect((await answered(block(ada, grace.user.id, "DELETE"))).direct).toBeNull();
     expect(await levelIn(ada, theirs.id)).toBe("everything");
 
-    await block(ada, linus.user.id);
+    await blockLater(ada, linus.user.id);
     const started = await direct(ada, linus);
+    expect(await levelIn(ada, started.id)).toBe("everything");
+    expect((await blockLater(ada, linus.user.id)).direct).toBeNull();
     expect(await levelIn(ada, started.id)).toBe("everything");
     expect((await answered(block(ada, linus.user.id, "DELETE"))).direct).toBeNull();
     expect(await levelIn(ada, started.id)).toBe("everything");
@@ -247,6 +259,27 @@ describe("Deleting an account", () => {
     expect(deleted.status, await deleted.clone().text()).toBe(204);
     expect(await workspaceSql("SELECT user_id, blocked_id FROM blocks")).toEqual([{ user_id: linus.user.id, blocked_id: ada.user.id }]);
     expect((await sidebarOf(ada)).blocks.userIds).toEqual([]);
+  });
+
+  it("tells every tab of whoever blocked its person whom they've blocked now, before saying who's gone", async () => {
+    const [ada, grace, linus] = await people("Ada", "Grace", "Linus");
+    await block(ada, linus.user.id);
+    await block(ada, grace.user.id);
+    await block(grace, linus.user.id);
+    const adasTabs = [await openWorkspaceSocket(ada), await openWorkspaceSocket(ada)];
+    const linusTab = await openWorkspaceSocket(linus);
+
+    const deleted = await api("/api/users/me", { method: "DELETE", headers: { Cookie: grace.cookie }, body: JSON.stringify({ name: "Grace" }) });
+    expect(deleted.status, await deleted.clone().text()).toBe(204);
+    const blocks = { userIds: [linus.user.id], version: 3 };
+    for (const tab of adasTabs) {
+      expect(await tab.next()).toEqual({ type: "blocks.changed", blocks });
+      expect(await tab.next()).toMatchObject({ type: "user.updated", user: { id: grace.user.id } });
+    }
+    expect((await sidebarOf(ada)).blocks).toEqual(blocks);
+    // Linus, whom she had blocked, hears only that she's gone.
+    expect(await linusTab.next()).toMatchObject({ type: "user.updated", user: { id: grace.user.id } });
+    expect(await linusTab.answers()).toBe(true);
   });
 });
 

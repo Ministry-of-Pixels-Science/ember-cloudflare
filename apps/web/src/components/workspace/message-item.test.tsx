@@ -1071,6 +1071,16 @@ describe("Messages from someone you've blocked", () => {
     block([]);
     expect(screen.getByRole("article")).toHaveTextContent("Hello");
   });
+
+  it("stays shown while its author stays blocked, but collapses again once they're unblocked and blocked again", async () => {
+    const { block, user } = show(message(), { me: grace, blocked: [ada.id] });
+    await user.click(screen.getByRole("button", { name: BLOCKED_MESSAGE }));
+    block([ada.id, "u3"]);
+    expect(screen.getByRole("article")).toHaveTextContent("Hello");
+    block([]);
+    block([ada.id]);
+    expect(screen.getByRole("article")).toHaveTextContent(BLOCKED_MESSAGE);
+  });
 });
 
 describe("Threads", () => {

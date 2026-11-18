@@ -171,6 +171,7 @@ import {
   type Client,
   type Connecting,
   type AssistantPicks,
+  type DeletedAccount,
   type DirectoryEntry,
   type Disconnection,
   type InvitationPush,
@@ -3557,7 +3558,8 @@ export class Workspace extends DurableObject<Env> {
    * (`deactivate`), and their name, email address, password, bio and avatar go, as do the rooms they
    * starred and the accounts elsewhere they connected. Their row stays, named as deleted accounts are,
    * since their DMs name them. The outbox has every room they can have written in delete their messages
-   * and boosts, and R2 their avatar. Everyone's workspace sockets hear of it.
+   * and boosts, and R2 their avatar. Everyone's workspace sockets hear of it, and the tabs of whoever had
+   * blocked them whom they've blocked now.
    */
   async deleteAccount(
     credentials: Credentials,
@@ -3581,18 +3583,19 @@ export class Workspace extends DurableObject<Env> {
         if (tooSoon) return tooSoon;
         const deletedAt = new Date(now).toISOString();
         // As when removing someone, until the database says it queued nothing.
-        let queued = true;
+        let deletion: DeletedAccount = { queued: true, blockers: [] };
         try {
-          queued = await this.sessions.change(
+          deletion = await this.sessions.change(
             (session) => session.user.id === person.id,
             () => this.store.deleteAccount(person.id, person.avatar?.key ?? null, CloseCode.Revoked, now, deletedAt),
           );
         } finally {
           this.closeSockets(person.id, CloseCode.Revoked);
-          if (queued) await this.revocationsQueued(now);
+          if (deletion.queued) await this.revocationsQueued(now);
           else if (person.avatar) await this.wakeAt(now);
         }
         if (person.accounts.length > 0) await this.forgetUnlinked();
+        for (const { userId, blocks } of deletion.blockers) this.tell([userId], { type: "blocks.changed", blocks });
         const deleted = { id: person.id, name: DELETED_PERSON_NAME, bio: null, role: "member", status: "deactivated", updatedAt: deletedAt, agent: false, keptFor: null } as const;
         this.broadcast({ type: "user.updated", user: await this.directoryUser(deleted) });
         return "deleted";

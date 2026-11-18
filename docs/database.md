@@ -314,8 +314,10 @@ Objects, D1 or speed call for something else.
   of that key, and starting a DM refuses a writer someone in it has blocked in the same `INSERT`, so
   none of them binds a list of who's blocked whom. Blocking hides the DM between the two from the
   blocker's sidebar by making their membership `invisible`, keeping the level it had in
-  `blocks.direct_involvement`, which unblocking gives back. `index_blocks_on_blocked_id` finds the
-  blocks of someone whose account is deleted, which go with it, as theirs do.
+  `blocks.direct_involvement`, which unblocking gives back; only the block a request writes hides it,
+  found by its `created_at`, so blocking again leaves be a DM shown since. `index_blocks_on_blocked_id`
+  finds the blocks of someone whose account is deleted, which go with it, as theirs do, bumping the
+  `blocks_version` of each person who had blocked them.
 - **A room's place in the shared order is a column of the room**, `rooms.shared_position` (workspace
   migration 0020), so the sidebar's statement reads each room's place with the room, and listing the
   order costs nothing more, nor reads the places of rooms someone isn't in. Saving it reads the

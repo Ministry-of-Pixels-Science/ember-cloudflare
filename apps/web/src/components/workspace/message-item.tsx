@@ -263,6 +263,8 @@ export const MessageItem = memo(function MessageItem({ message, me, threaded: fo
   const blocking = useContext(BlockingContext);
   const blocked = !mine && blocking.blocked.has(message.creator.id);
   const [shownAnyway, setShownAnyway] = useState(false);
+  // Blocking them again collapses it again.
+  if (shownAnyway && !blocked) setShownAnyway(false);
   const created = new Date(message.createdAt);
   // Any message that mentions you, yours too, as Campfire's message_formatter.js means to mark them,
   // though it looks for an avatar address that mentions don't have, so it never does.

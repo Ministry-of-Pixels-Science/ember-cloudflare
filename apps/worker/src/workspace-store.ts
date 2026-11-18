@@ -586,6 +586,12 @@ const blocksChange = (blocked: BlockedRow[], counted: { version: number } | unde
   direct: direct[0] ? { roomId: direct[0].room_id, involvement: direct[0].involvement } : null,
 });
 
+/** What deleting an account did: whether it queued revocations or purges, and whom everyone who had blocked them has blocked now. */
+export interface DeletedAccount {
+  queued: boolean;
+  blockers: Array<{ userId: UserId; blocks: Blocks }>;
+}
+
 /** What became of a room's report of its huddle. */
 export interface ReportedHuddle {
   /** Who's in the room, to hear of the huddle, when the report changed the huddle kept, or else null. */
@@ -2167,10 +2173,13 @@ const BLOCK = `INSERT INTO blocks (user_id, blocked_id, created_at, direct_invol
   FROM users WHERE users.id = ?2 AND users.id <> ?1
   ON CONFLICT DO NOTHING`;
 
-/** Hides from ?1's sidebar the DM that key ?2 names, theirs with ?3 alone, while they've blocked ?3, answering it if it did. */
+/**
+ * Hides from ?1's sidebar the DM that key ?2 names, theirs with ?3 alone, when they blocked ?3 at ?4,
+ * answering it if it did. Blocking them again leaves be a DM they've shown since or started after.
+ */
 const HIDE_BLOCKED_DIRECT = `UPDATE memberships SET involvement = 'invisible'
   WHERE user_id = ?1 AND room_id = (SELECT id FROM rooms WHERE direct_key = ?2) AND involvement <> 'invisible'
-    AND EXISTS (SELECT 1 FROM blocks WHERE user_id = ?1 AND blocked_id = ?3)
+    AND EXISTS (SELECT 1 FROM blocks WHERE user_id = ?1 AND blocked_id = ?3 AND created_at = ?4)
   RETURNING room_id, involvement`;
 
 /**
@@ -2187,6 +2196,15 @@ const COUNT_BLOCKS_CHANGE = `UPDATE users SET blocks_version = blocks_version + 
 
 /** Whom ? has blocked, in the order they blocked them. */
 export const BLOCKED_BY_USER = `SELECT blocked_id FROM blocks WHERE user_id = ? ORDER BY created_at, blocked_id`;
+
+/** Counts a change to the blocks of everyone who has blocked ?, answering each. */
+const COUNT_BLOCKERS_CHANGE = `UPDATE users SET blocks_version = blocks_version + 1
+  WHERE id IN (SELECT user_id FROM blocks WHERE blocked_id = ?) RETURNING id, blocks_version AS version`;
+
+/** Whom everyone who has blocked ?1 has blocked but them, each in the order they blocked them. */
+const BLOCKED_BY_BLOCKERS = `SELECT user_id, blocked_id FROM blocks
+  WHERE user_id IN (SELECT user_id FROM blocks WHERE blocked_id = ?1) AND blocked_id <> ?1
+  ORDER BY user_id, created_at, blocked_id`;
 
 /**
  * The names of the people a JSON array ?2 names who have blocked ?1, by name, for refusing a DM ?1 starts
@@ -3565,13 +3583,17 @@ export class WorkspaceStore {
    * who blocked them, the accounts elsewhere they connected, the sign-ins they were making to apps and any
    * code they were emailed to reset their password, and queues R2 deleting their avatar, `avatar`, if they
    * have one, due then too. Their row stays, as `DELETE_ACCOUNT` leaves it, recording when, `now`, and so
-   * do their DMs, which name them. Answers whether it queued any revocations or purges.
+   * do their DMs, which name them. Answers whether it queued any revocations or purges, and whom everyone
+   * who had blocked them has blocked now.
    */
-  async deleteAccount(userId: UserId, avatar: string | null, code: CloseCode, dueAt: number, now: string): Promise<boolean> {
-    const [revocations, purges] = (await this.db.batch([
+  async deleteAccount(userId: UserId, avatar: string | null, code: CloseCode, dueAt: number, now: string): Promise<DeletedAccount> {
+    const [revocations, purges, counted, blocked] = (await this.db.batch([
       // Before they leave the rooms, which it finds their sockets in.
       statement(QUEUE_PERSON_REVOCATIONS, code, dueAt, userId),
       statement(QUEUE_PURGES, userId, dueAt),
+      // Before the blocks go, which it finds who blocked them by.
+      statement(COUNT_BLOCKERS_CHANGE, userId),
+      statement(BLOCKED_BY_BLOCKERS, userId),
       statement(LEAVE_SHARED_ROOMS, userId),
       statement(`DELETE FROM sessions WHERE user_id = ?`, userId),
       ...forgettingSearches(userId),
@@ -3587,8 +3609,12 @@ export class WorkspaceStore {
       statement(`DELETE FROM outside_connections WHERE user_id = ?`, userId),
       ...(avatar ? [statement(QUEUE_PICTURE_DELETION, avatar, dueAt)] : []),
       statement(DELETE_ACCOUNT, DELETED_PERSON_NAME, now, userId),
-    ])) as unknown[][];
-    return revocations!.length > 0 || purges!.length > 0;
+    ])) as [unknown[], unknown[], Array<{ id: UserId; version: number }>, Array<BlockedRow & { user_id: UserId }>, ...unknown[][]];
+    const blockedBy = Map.groupBy(blocked, (row) => row.user_id);
+    return {
+      queued: revocations.length > 0 || purges.length > 0,
+      blockers: counted.map(({ id, version }) => ({ userId: id, blocks: { userIds: (blockedBy.get(id) ?? []).map((row) => row.blocked_id), version } })),
+    };
   }
 
   /**
@@ -3947,7 +3973,7 @@ export class WorkspaceStore {
     const key = directKey([userId, blockedId]);
     const [, hidden, [counted], blocked] = (await this.db.batch([
       statement(BLOCK, userId, blockedId, key, now),
-      statement(HIDE_BLOCKED_DIRECT, userId, key, blockedId),
+      statement(HIDE_BLOCKED_DIRECT, userId, key, blockedId, now),
       statement(COUNT_BLOCKS_CHANGE, userId),
       statement(BLOCKED_BY_USER, userId),
     ])) as [unknown[], DirectLevelRow[], Array<{ version: number }>, BlockedRow[]];
