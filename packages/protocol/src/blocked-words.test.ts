@@ -55,6 +55,13 @@ describe("blockedWordsCheck", () => {
     expect(blocks("ship")).toBe(false);
   });
 
+  it("finds a phrase's words with emoji between them, and a phrase with an emoji in it as it's written", () => {
+    for (const text of ["darn 🖕 it", "darn🔥🔥it", "Darn ©️ it!"]) expect(blocks(text)).toBe(true);
+    const emojiPhrases = blockedWordsCheck(["🖕 you", "go 🔥"]);
+    for (const text of ["🖕 you", "🖕🏻you", "let's go 🔥🔥"]) expect(emojiPhrases(text)).toBe(true);
+    for (const text of ["🖕 😀 you", "go 😀 🔥", "go away 🔥"]) expect(emojiPhrases(text)).toBe(false);
+  });
+
   it("finds an emoji, whatever its skin tone, and a word of a script written without spaces inside a sentence", () => {
     expect(blocks("ok 🖕🏽")).toBe(true);
     expect(blocks("你是笨蛋吗")).toBe(true);

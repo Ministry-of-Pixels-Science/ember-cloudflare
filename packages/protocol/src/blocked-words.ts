@@ -95,16 +95,30 @@ export function parseBlockedWords(value: unknown): string[] | { error: string } 
 /** Whether a text has a blocked word or phrase in it. */
 export type BlockedWordsCheck = (text: string) => boolean;
 
-/** What checks a text for the words and phrases `blocked` lists, which it finds whole, in order, as `wordsOf` reads them. */
+/** Whether a word, as `wordsOf` reads it, is an emoji. */
+const isEmoji = (word: string) => /^\p{Extended_Pictographic}/u.test(word);
+
+/**
+ * What checks a text for the words and phrases `blocked` lists, which it finds whole, in order, as
+ * `wordsOf` reads them. Emoji, which aren't letters or numbers, don't part a phrase's words, but one
+ * with an emoji in it is found as it's written.
+ */
 export function blockedWordsCheck(blocked: readonly string[]): BlockedWordsCheck {
-  // The words of each, by its first.
-  const byFirst = new Map<string, string[][]>();
-  for (const words of blocked.map(wordsOf)) {
-    if (words.length > 0) byFirst.set(words[0]!, [...(byFirst.get(words[0]!) ?? []), words]);
-  }
-  if (byFirst.size === 0) return () => false;
+  const phrases = blocked.map(wordsOf).filter((words) => words.length > 0);
+  if (phrases.length === 0) return () => false;
+  const asWritten = phraseFinder(phrases.filter((words) => words.some(isEmoji)));
+  const pastEmoji = phraseFinder(phrases.filter((words) => !words.some(isEmoji)));
   return (text) => {
     const words = wordsOf(text);
-    return words.some((first, at) => byFirst.get(first)?.some((phrase) => phrase.every((word, offset) => words[at + offset] === word)));
+    return asWritten(words) || pastEmoji(words.filter((word) => !isEmoji(word)));
   };
+}
+
+/** What finds any of `phrases`, each a list of words, among a text's words: each whole, in order, with nothing between. */
+function phraseFinder(phrases: readonly string[][]): (words: readonly string[]) => boolean {
+  // The words of each, by its first.
+  const byFirst = new Map<string, string[][]>();
+  for (const words of phrases) byFirst.set(words[0]!, [...(byFirst.get(words[0]!) ?? []), words]);
+  if (byFirst.size === 0) return () => false;
+  return (words) => words.some((first, at) => byFirst.get(first)?.some((phrase) => phrase.every((word, offset) => words[at + offset] === word)));
 }
