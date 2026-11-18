@@ -5,6 +5,7 @@ import {
   DELETED_PERSON_NAME,
   HISTORY_PAGE_SIZE,
   isMessageTooLong,
+  LATE_PREVIEW_MS,
   MAX_BOOST_LENGTH,
   MAX_MESSAGE_HTML_LENGTH,
   MESSAGE_TOO_LONG,
@@ -26,7 +27,7 @@ import {
 } from "@ember/protocol";
 import { BLOCKED_WORDS_REFUSED } from "@ember/protocol/blocked-words";
 import { parseHuddleSocketParams } from "@ember/protocol/huddles";
-import { prepareBody, userIdFromSgid, userIdsIn, type PreparedBody } from "@ember/richtext";
+import { hasPreview, prepareBody, userIdFromSgid, userIdsIn, type PreparedBody } from "@ember/richtext";
 import {
   AGENT_NOTES,
   AnswerError,
@@ -166,9 +167,19 @@ const OUTDATED = "Ember has been updated. Reload the page to keep chatting.";
  */
 const BANNED = "Request failed (429)";
 /** The frames that change something, which a banned address's sockets can't send. */
-const CHANGES = new Set<ClientFrame["type"]>(["message.create", "message.update", "message.delete", "boost.create", "boost.delete", "card.click"]);
+const CHANGES = new Set<ClientFrame["type"]>(["message.create", "message.update", "message.preview", "message.delete", "boost.create", "boost.delete", "card.click"]);
 /** Whether `ws`'s tab runs an app older than the room protocol. */
 const isOutdated = (ws: WebSocket) => ((ws.deserializeAttachment() as Attachment).protocol ?? 1) < ROOM_PROTOCOL;
+
+/**
+ * Whether `message` can still take the preview of its link that its sender's tab had once it had gone
+ * (`message.preview`): it's text, not edited since it was sent, with no preview yet, and sent within
+ * `LATE_PREVIEW_MS` of `now`.
+ */
+function takesLatePreview(message: Message, now: string): boolean {
+  if (message.deleted || message.editedAt !== null || message.attachment || message.cards || message.huddle) return false;
+  return Date.parse(now) - Date.parse(message.createdAt) <= LATE_PREVIEW_MS && !hasPreview(message.body);
+}
 
 /** Keeps in `ws`'s attachment whether its tab is typing, writing it only when that changes. */
 function markTyping(ws: WebSocket, typing: boolean): void {
@@ -1095,6 +1106,15 @@ export class ChatRoom extends DurableObject<Env> {
         await this.edit(store, message, body, now);
         return;
       }
+      case "message.preview": {
+        // The tab sends it of its own accord, so a message that can't take it any more takes nothing, without a word.
+        const message = await store.findSent(user, frame.clientMessageId);
+        if (!message || !takesLatePreview(message, now)) return;
+        const markup = `${message.body}${previewAttachment(frame.preview)}`;
+        const body = markup.length > MAX_MESSAGE_HTML_LENGTH ? null : await this.prepare(markup);
+        if (body && typeof body !== "string") await this.addPreview(store, message, body, now);
+        return;
+      }
       case "message.delete": {
         const message = await this.findUndeleted(store, frame.messageId);
         if (!message || !(await this.canAdminister(user, message))) return this.refuse(ws, "You can only delete your own messages");
@@ -1256,6 +1276,17 @@ export class ChatRoom extends DurableObject<Env> {
     this.broadcast({ type: "message.updated", message: edited, seq });
     this.couriersFor(store.roomId).index.deliver();
     return edited;
+  }
+
+  /**
+   * Gives `message` the text `body`, its own with the preview of its link below it, which its sender's tab
+   * had once the message had gone, telling everyone in the room, as Slack shows a link's preview a moment
+   * after its message, and sending the search index its log. It isn't marked edited.
+   */
+  private async addPreview(store: MessageStore, message: Message, body: StoredBody, now: string): Promise<void> {
+    const { message: previewed, seq } = await store.addPreview(message, body, now);
+    this.broadcast({ type: "message.updated", message: previewed, seq });
+    this.couriersFor(store.roomId).index.deliver();
   }
 
   /**

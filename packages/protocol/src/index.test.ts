@@ -160,6 +160,32 @@ describe("Send a message", () => {
   });
 });
 
+describe("Link previews after sending", () => {
+  const preview = { title: "Digg", url: "https://digg.com/tech/1", image: null, description: "News" };
+
+  it("sends the preview of a link in a message the tab sent, by the id it gave the message", () => {
+    expect(parse({ type: "message.preview", clientMessageId: "c1", preview })).toEqual({ type: "message.preview", clientMessageId: "c1", preview });
+    const pictured = { ...preview, image: "https://digg.com/card.png", description: "" };
+    expect(parse({ type: "message.preview", clientMessageId: "c1", preview: { ...pictured, extra: 1 } })).toEqual({ type: "message.preview", clientMessageId: "c1", preview: pictured });
+  });
+
+  it("refuses a preview without a title or an address, with fields that aren't text, or longer than a message's markup", () => {
+    for (const bad of [
+      null,
+      "Digg",
+      { ...preview, title: " " },
+      { ...preview, url: "" },
+      { ...preview, image: undefined },
+      { ...preview, image: 7 },
+      { ...preview, description: null },
+      { ...preview, description: "x".repeat(MAX_MESSAGE_HTML_LENGTH + 1) },
+    ]) {
+      expect(parse({ type: "message.preview", clientMessageId: "c1", preview: bad }), JSON.stringify(bad)).toBeNull();
+    }
+    expect(parse({ type: "message.preview", clientMessageId: "", preview })).toBeNull();
+  });
+});
+
 describe("Threads", () => {
   it("sends a reply to a message's thread, and to the room too only when it says so", () => {
     const reply = { type: "message.create", clientMessageId: "c1", body: "<p>hi</p>", parentId: "m1" };

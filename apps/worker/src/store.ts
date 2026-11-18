@@ -667,6 +667,12 @@ export class MessageStore {
     return { message: { ...message, huddle, updatedAt: now }, seq };
   }
 
+  /** The message `creator`'s tab sent as `clientMessageId`, or null when the room has none. */
+  async findSent(creator: User, clientMessageId: string): Promise<Message | null> {
+    const [row] = await this.db.all<MessageRow>(`${SELECT_MESSAGES} WHERE room_id = ? AND creator_id = ? AND client_message_id = ?`, this.roomId, creator.id, clientMessageId);
+    return row ? (await this.messagesOf([row]))[0]! : null;
+  }
+
   /** Which of `clientMessageIds` the room has stored from `creator`. */
   async storedClientMessageIds(creator: User, clientMessageIds: string[]): Promise<string[]> {
     const rows = await this.db.all<Pick<MessageRow, "client_message_id">>(
@@ -694,7 +700,20 @@ export class MessageStore {
    * thread's replies if what they show of it changes, and answers the message as it is now with the
    * change's number, as the methods below that change a message answer theirs.
    */
-  async updateBody(message: Message, body: StoredBody, now: string): Promise<{ message: Message; seq: number }> {
+  updateBody(message: Message, body: StoredBody, now: string): Promise<{ message: Message; seq: number }> {
+    return this.replaceBody(message, body, now, now);
+  }
+
+  /**
+   * Gives `message` the text `body`, its own with the preview of its link below it, which its sender's tab
+   * had once the message had gone, as `updateBody` does, but without marking it edited, as a preview that
+   * comes in time doesn't.
+   */
+  addPreview(message: Message, body: StoredBody, now: string): Promise<{ message: Message; seq: number }> {
+    return this.replaceBody(message, body, now, message.editedAt);
+  }
+
+  private async replaceBody(message: Message, body: StoredBody, now: string, editedAt: string | null): Promise<{ message: Message; seq: number }> {
     const seq = await this.change((seq) => [
       statement(
         `UPDATE messages SET body = ?, plain_text = ?, mentions = ?, updated_at = ?, edited_at = ?, change_seq = ?, cards = ? WHERE room_id = ? AND id = ?`,
@@ -702,7 +721,7 @@ export class MessageStore {
         body.plainText,
         JSON.stringify(body.mentions),
         now,
-        now,
+        editedAt,
         seq,
         body.cards ? JSON.stringify(body.cards) : null,
         this.roomId,
@@ -712,8 +731,8 @@ export class MessageStore {
       ...logIndexingRepliesTo(this.roomId, message, body.plainText),
     ]);
     const { cards: _, ...rest } = message;
-    const edited = { ...rest, body: body.html, plainText: body.plainText, mentions: body.mentions, updatedAt: now, editedAt: now };
-    return { message: body.cards ? { ...edited, cards: body.cards } : edited, seq };
+    const replaced = { ...rest, body: body.html, plainText: body.plainText, mentions: body.mentions, updatedAt: now, editedAt };
+    return { message: body.cards ? { ...replaced, cards: body.cards } : replaced, seq };
   }
 
   /**

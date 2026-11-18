@@ -1,5 +1,5 @@
 import { bodyFromPlainText, writtenBody } from "@ember/richtext/dom";
-import { createElement, useEffect, useEffectEvent, useImperativeHandle, useLayoutEffect, useRef, useState, type ComponentProps } from "react";
+import { createElement, Fragment, useEffect, useEffectEvent, useImperativeHandle, useLayoutEffect, useRef, useState, type ComponentProps } from "react";
 import { PLAIN_TEXT, type FormattingCommand, type TextFormat } from "@/lib/formatting";
 import type Editor from "../rich-text-editor";
 
@@ -42,9 +42,10 @@ const attachmentMarkup = ({ contentType, html }: Attachment) =>
  * Lexxy's stand-in in unit tests, which test-setup.ts swaps in because Lexxy doesn't keep what's
  * written under jsdom: a text box whose lines are one paragraph of Lexxy's markup, which tells of
  * changes and keys as the editor does, and of addresses pasted in it, below which it shows what's
- * added. Formatting changes only the formatting it tells of, and a link only the text, which it
- * marks `data-linked` with the address. It lists nobody for an @, and is marked `data-mentions-above`
- * where the list is to show above the text. The browser tests in e2e/ write in Lexxy itself.
+ * added, each with Lexxy's Remove button. Formatting changes only the formatting it tells of, and a
+ * link only the text, which it marks `data-linked` with the address. It lists nobody for an @, and is
+ * marked `data-mentions-above` where the list is to show above the text. The browser tests in e2e/
+ * write in Lexxy itself.
  */
 export default function RichTextEditor({ label, placeholder, rows, initialValue, mentionsAbove, autoFocus, onChange, onFormatChange, onKeyDown, onLinkPasted, onReady, ref }: ComponentProps<typeof Editor>) {
   const box = useRef<HTMLTextAreaElement>(null);
@@ -128,6 +129,11 @@ export default function RichTextEditor({ label, placeholder, rows, initialValue,
     text.setSelectionRange(text.value.length, text.value.length);
   }, []);
 
+  const remove = (removed: Attachment) => {
+    attach(attachments.current.filter((attachment) => attachment !== removed));
+    onChange?.();
+  };
+
   const pasted = (text: string) => {
     const url = text.trim();
     if (!ADDRESS.test(url)) return;
@@ -152,9 +158,12 @@ export default function RichTextEditor({ label, placeholder, rows, initialValue,
         onChange={() => onChange?.()}
         onPaste={(event) => pasted(event.clipboardData.getData("text/plain"))}
       />
-      {shown.map(({ contentType, html }, index) =>
-        createElement("action-text-attachment", { key: index, "content-type": contentType, dangerouslySetInnerHTML: { __html: html } }),
-      )}
+      {shown.map((attachment, index) => (
+        <Fragment key={index}>
+          {createElement("action-text-attachment", { "content-type": attachment.contentType, dangerouslySetInnerHTML: { __html: attachment.html } })}
+          <button type="button" aria-label="Remove" onClick={() => remove(attachment)} />
+        </Fragment>
+      ))}
     </>
   );
 }
