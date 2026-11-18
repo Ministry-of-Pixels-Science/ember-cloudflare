@@ -194,6 +194,7 @@ export function PersonPage({ userId, me, onStartDirect, onPersonChanged, reloadP
                 {/* Campfire's `.gap` with a third of its block space between rows. */}
                 <div className="flex flex-col gap-x-[1ch] gap-y-[calc(1rem/3)]">
                   <h1 className="text-[23px] leading-[1.2] font-bold">{person.name}</h1>
+                  {person.username && <div className="text-muted-foreground">@{person.username}</div>}
                   {/* Campfire's link, left out for someone with no address. */}
                   {person.emailAddress !== undefined && (
                     <div>

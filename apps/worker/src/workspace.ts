@@ -26,6 +26,7 @@ import {
   SIGN_UPS_PER_HOUR,
   signsUpOpenly,
   signsUpWithEmailDomain,
+  usernameFrom,
   withNavigationIcons,
   type Account,
   type AccountChanges,
@@ -2692,7 +2693,8 @@ export class Workspace extends DurableObject<Env> {
    * Signs in `member`, who signed in to the Memberful site `issuer`, with the session their cookie's
    * token opens: as the person their Memberful account is linked to, whether Memberful is on or not, or
    * else, while it's on, as someone new, a member in every open room, linked to it, as joining adds
-   * someone, called by the first of their names that isn't an agent's, else "Member" (`namelessMember`).
+   * someone, called by the first of their names that isn't an agent's, else "Member" (`namelessMember`),
+   * with a username made from it (`firstFreeUsername`), which answers "joined".
    * Accounts are linked by the site and the member's id there, never matched by email address.
    * What Memberful said of their membership, as of `readAt`, is gone by as a check's is
    * (`settleMembership`), unless the Workspace has gone by a newer read: a member whose membership has
@@ -2703,7 +2705,7 @@ export class Workspace extends DurableObject<Env> {
    * creates nothing, and "failed" once keys for another site have taken the place of the ones they signed
    * in with (`memberfulSiteReplaced`). Everyone's workspace sockets hear of someone new.
    */
-  async signInWithMemberful(issuer: string, member: MemberfulMember, readAt: number, tokenDigest: string, client: Client): Promise<Me | MemberfulRefusal> {
+  async signInWithMemberful(issuer: string, member: MemberfulMember, readAt: number, tokenDigest: string, client: Client): Promise<Me | "joined" | MemberfulRefusal> {
     // One at a time, so that two sign-ins of someone new can't both add them, none can overlap turning
     // Memberful off, giving it another site's keys, or a check of the same membership, and a suspension
     // closes the sockets it ends before answering.
@@ -2727,7 +2729,7 @@ export class Workspace extends DurableObject<Env> {
       const free = (name: string) => !agents.some((agent) => sameName(agent.name, name));
       const name = member.names.find(free) ?? namelessMember(free);
       const session: StoredSession = { id: sortableId(), user: { id: sortableId(), name }, administrator: false, guest: false, lastActiveAt: Date.now() };
-      const person = { ...session.user, emailAddress: member.emailAddress };
+      const person = { ...session.user, username: await this.firstFreeUsername(name, free), emailAddress: member.emailAddress };
       try {
         await this.store.createLinkedMember(person, linkedAccountOf(issuer, member), readAt, session.id, tokenDigest, client, new Date(session.lastActiveAt).toISOString());
       } catch (error) {
@@ -2738,8 +2740,23 @@ export class Workspace extends DurableObject<Env> {
       await this.keepCatchingUp(Date.now() + MEMBERSHIP_CATCH_UP_MS);
       this.sessions.remember(tokenDigest, session);
       await this.publishPerson(session.user.id);
-      return meOf(session);
+      return "joined";
     });
+  }
+
+  /**
+   * The username someone new called `name` starts with: `usernameFrom` it, or that with the first number
+   * from 2 that makes it nobody's, nor @ember's name or one that `free` says is an agent's, or null if
+   * no number to 9999 does.
+   */
+  private async firstFreeUsername(name: string, free: (name: string) => boolean): Promise<string | null> {
+    const start = usernameFrom(name);
+    const taken = new Set(await this.store.usernamesStartingWith(start));
+    for (let number = 1; number < 10_000; number++) {
+      const username = number === 1 ? start : `${start}${number}`;
+      if (!taken.has(username) && !isReservedName(username) && free(username)) return username;
+    }
+    return null;
   }
 
   /**
@@ -3524,10 +3541,10 @@ export class Workspace extends DurableObject<Env> {
    * their sessions end, and their sockets close for good: here at once, and in every room they're in
    * through the outbox. Everyone's workspace sockets hear of it.
    */
-  private async deactivate({ id, name, bio, role, agent, keptFor }: DirectoryEntry): Promise<DirectoryUser> {
+  private async deactivate({ id, name, username, bio, role, agent, keptFor }: DirectoryEntry): Promise<DirectoryUser> {
     const now = Date.now();
     const removedAt = new Date(now).toISOString();
-    const removed = await this.directoryUser({ id, name, bio, role, status: "deactivated", updatedAt: removedAt, agent, keptFor });
+    const removed = await this.directoryUser({ id, name, username, bio, role, status: "deactivated", updatedAt: removedAt, agent, keptFor });
     // As when resetting a password, until the database says it queued nothing.
     let queued = true;
     try {
@@ -3607,7 +3624,7 @@ export class Workspace extends DurableObject<Env> {
         }
         if (person.accounts.length > 0) await this.forgetUnlinked();
         for (const { userId, blocks } of deletion.blockers) this.tell([userId], { type: "blocks.changed", blocks });
-        const deleted = { id: person.id, name: DELETED_PERSON_NAME, bio: null, role: "member", status: "deactivated", updatedAt: deletedAt, agent: false, keptFor: null } as const;
+        const deleted = { id: person.id, name: DELETED_PERSON_NAME, username: null, bio: null, role: "member", status: "deactivated", updatedAt: deletedAt, agent: false, keptFor: null } as const;
         this.broadcast({ type: "user.updated", user: await this.directoryUser(deleted) });
         return "deleted";
       }),
@@ -4532,6 +4549,15 @@ export class Workspace extends DurableObject<Env> {
   }
 
   /**
+   * Whether `username` is anyone's but `userId`'s, whatever their status, or @ember's name or an agent's,
+   * as typing @ finds them by their names.
+   */
+  private async usernameTaken(username: string, userId: UserId): Promise<boolean> {
+    if (isReservedName(username) || (await this.takesAgentsName(null, username))) return true;
+    return this.store.hasUsername(username, userId);
+  }
+
+  /**
    * Whether someone or a bot called `name`, or someone new, for null, takes an agent's name by being
    * called `rename`, which nobody can, whether Ember AI is on or off, unless it was theirs already.
    */
@@ -4638,8 +4664,8 @@ export class Workspace extends DurableObject<Env> {
    * Someone as the people directory lists them, with their avatar's address, and nothing else known of
    * them, such as their email address, whatever `person` brings.
    */
-  private async directoryUser({ id, name, bio, role, status, updatedAt, agent, keptFor }: DirectoryEntry): Promise<DirectoryUser> {
-    return (await directoryOf([{ id, name, bio, role, status, updatedAt, agent, keptFor }], this.env.SESSION_SECRET))[0]!;
+  private async directoryUser({ id, name, username, bio, role, status, updatedAt, agent, keptFor }: DirectoryEntry): Promise<DirectoryUser> {
+    return (await directoryOf([{ id, name, username, bio, role, status, updatedAt, agent, keptFor }], this.env.SESSION_SECRET))[0]!;
   }
 
   /** The profile of the person `credentials` signs in, or null without a valid session. */
@@ -4652,13 +4678,13 @@ export class Workspace extends DurableObject<Env> {
 
   /** `person`'s profile, as their own profile page shows it to their `session`. */
   private async yourProfile(person: OwnProfileEntry, session: StoredSession): Promise<YourProfile> {
-    const { name, emailAddress, bio, avatar, password, membershipNeeded } = person;
+    const { name, username, emailAddress, bio, avatar, password, membershipNeeded } = person;
     const [{ avatarUrl }, account] = await Promise.all([this.directoryUser(person), this.joinableAccount()]);
     const memberful = session.guest ? null : { membersOnly: account?.memberfulSignIn ?? false, accounts: person.accounts };
     const [apps, outsideAi] = await Promise.all([this.yourApps(person.id, session.guest, account), this.yourOutsideAi(person.id, session.guest, account)]);
     return {
       transfer: { userId: person.id, sessionId: session.id, shownAt: Date.now() },
-      profile: { name, emailAddress, bio, avatarUrl, avatar: avatar !== null, password, membershipNeeded, assistant: yourAssistantOf(account, person.picks), apps, outsideAi },
+      profile: { name, username, emailAddress, bio, avatarUrl, avatar: avatar !== null, password, membershipNeeded, assistant: yourAssistantOf(account, person.picks), apps, outsideAi },
       memberful,
     };
   }
@@ -4702,18 +4728,19 @@ export class Workspace extends DurableObject<Env> {
    * in every room they're in through the outbox, and their push subscriptions are forgotten but this
    * browser's, at `pushEndpoint`, and a password that replaces one they had unlinks the accounts
    * elsewhere they connected with it. Any new password ends the sign-in links this session showed until
-   * now, too. Everyone's workspace sockets hear of a new name or bio, which the people directory lists.
-   * A new name can't be @ember's ("name reserved"), or an agent's ("agent's name"), unless it was theirs
-   * before.
+   * now, too. Everyone's workspace sockets hear of a new name, username or bio, which the people
+   * directory lists. A new name can't be @ember's ("name reserved"), or an agent's ("agent's name"),
+   * unless it was theirs before, and a blank username is saved as none, while one that's someone
+   * else's, whatever their status, or @ember's or an agent's name, is "username taken".
    */
   async changeProfile(
     credentials: Credentials,
-    changes: Pick<ProfileChanges, "name" | "emailAddress" | "bio">,
+    changes: Pick<ProfileChanges, "name" | "username" | "emailAddress" | "bio">,
     passwordDigest: string | null,
     checked: string | null,
     pushEndpoint: string | null,
     memberfulSite: string | null,
-  ): Promise<YourProfile | "email address taken" | "password needed" | "memberful" | "name reserved" | "agent's name" | null> {
+  ): Promise<YourProfile | "email address taken" | "password needed" | "memberful" | "name reserved" | "agent's name" | "username taken" | null> {
     return this.closingSockets(async () => {
       // Checked in line, unlike most changes: a password reset ahead of it ends their sessions, and a
       // save whose session was still valid before then mustn't put back a password of its own.
@@ -4724,13 +4751,15 @@ export class Workspace extends DurableObject<Env> {
       if (!person) return null;
       const profile = {
         name: changes.name ?? person.name,
+        username: changes.username === undefined ? person.username : changes.username || null,
         emailAddress: changes.emailAddress === undefined ? person.emailAddress : changes.emailAddress || null,
         bio: changes.bio === undefined ? person.bio : changes.bio || null,
       };
-      const listed = profile.name !== person.name || profile.bio !== person.bio;
+      const listed = profile.name !== person.name || profile.username !== person.username || profile.bio !== person.bio;
       if (!listed && profile.emailAddress === person.emailAddress && passwordDigest === null) return this.yourProfile(person, session);
       if (takesReservedName(person.name, profile.name)) return "name reserved";
       if (await this.takesAgentsName(person.name, profile.name)) return "agent's name";
+      if (profile.username !== person.username && profile.username !== null && (await this.usernameTaken(profile.username, user.id))) return "username taken";
       // Read again here, since a reset ahead of this in line, or another change, can have replaced the password checked.
       if (person.password && changesSignIn(person, changes.emailAddress, passwordDigest !== null) && (await this.store.signInOf(user.id))?.passwordDigest !== checked) {
         return "password needed";

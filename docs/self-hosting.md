@@ -437,8 +437,9 @@ environment has them, so the Preview workflow passes repository secrets of the s
 
 While it's on, the sign-in page offers Member? Sign in with Memberful under its form. Someone with an
 active subscription, or the all access pass, signs in as the person their Memberful account is
-linked to, or else joins as a new member, in every open room, and everyone else joins and signs in
-as before. Accounts are linked by the Memberful site and the member's id there, never by email
+linked to, or else joins as a new member, in every open room, and goes on from a welcome page where
+they choose their photo, name and username, which starts as their name in lowercase letters and
+numbers. Everyone else joins and signs in as before. Accounts are linked by the Memberful site and the member's id there, never by email
 address, since Memberful lets anyone register an address without proving it's theirs: someone new
 whose Memberful email address someone here has already is turned away, and asked to sign in with
 their password. At another address, even the same site's, every member would be someone new, so

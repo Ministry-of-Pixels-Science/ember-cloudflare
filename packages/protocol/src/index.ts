@@ -120,19 +120,24 @@ export {
   NEW_APP_PATH,
   NEW_BOT_PATH,
   NEW_DIRECT_PATH,
+  pageAfterWelcome,
   PASSWORD_RESET_PATH,
   PROFILE_PATH,
   PUSH_SUBSCRIPTIONS_PATH,
   SEARCHES_PATH,
+  signInReturnPathIn,
   SIGN_UP_PATH,
   threadPath,
   TRANSFER_PATH,
   transferLink,
   TURNSTILE_CHECK_PATH,
+  WELCOME_PATH,
+  welcomePath,
   withEmailAddress,
   WORKSPACE_PRELOADS,
   WORKSPACE_SETTINGS_PATH,
   workspacePageOf,
+  workspacePathIn,
   type RoomAccess,
   type WorkspacePage,
 } from "./pages.ts";
@@ -200,6 +205,8 @@ export type UserStatus = "active" | "deactivated" | "banned" | "suspended";
 
 /** Someone as the people directory lists them. */
 export interface DirectoryUser extends User {
+  /** The username they picked, which typing @ finds them by too, as `usernameOf` keeps one. Left out while they have none. */
+  username?: string;
   /** What they say about themselves, or null when they haven't said. */
   bio: string | null;
   role: Role;
@@ -956,6 +963,8 @@ export interface PersonAnswer {
 /** You, as your profile shows you. */
 export interface Profile {
   name: string;
+  /** The username you picked, which typing @ finds you by too, or null while you have none. */
+  username: string | null;
   /** Null for someone who signed in with just a name, or who took theirs out. */
   emailAddress: string | null;
   /** What you say about yourself, or null when you haven't said. */
@@ -999,6 +1008,8 @@ export interface ProfileAnswer {
  */
 export interface ProfileChanges {
   name?: string;
+  /** Your username, as typed, which is kept as `usernameOf` keeps one, or a blank one to have none. */
+  username?: string;
   emailAddress?: string;
   password?: string;
   bio?: string;
@@ -1983,6 +1994,32 @@ function nameAsShown(name: string): string {
   return name.normalize("NFKC").replace(/\p{Cf}/gu, "").replace(/^[\s@]+|\s+$/g, "").toLowerCase();
 }
 
+/** The most characters a username can have. */
+export const MAX_USERNAME_LENGTH = 21;
+/** What a username can be: lowercase letters, numbers, periods, hyphens and underscores, starting with a letter or number. */
+const USERNAME = /^[a-z0-9][a-z0-9._-]*$/;
+export const USERNAME_REFUSED = `Usernames have up to ${MAX_USERNAME_LENGTH} lowercase letters, numbers, periods, hyphens and underscores, and start with a letter or number.`;
+export const USERNAME_TAKEN = "That username is taken. Choose another.";
+
+/**
+ * `typed` as Ember keeps a username: in Unicode's compatible forms, as fullwidth letters become ASCII,
+ * without spaces or the @ before it, in lowercase. Whether it can be one is `isUsername`'s to say.
+ */
+export const usernameOf = (typed: string) => typed.normalize("NFKC").replace(/\s/g, "").replace(/^@+/, "").toLowerCase();
+
+/** Whether `username`, as `usernameOf` keeps it, can be someone's. */
+export const isUsername = (username: string) => username.length <= MAX_USERNAME_LENGTH && USERNAME.test(username);
+
+/**
+ * The username someone called `name` starts with, before a number makes it nobody else's: its letters
+ * and numbers, without their accents, in lowercase, leaving room for four digits after them, or "member"
+ * for a name with none, as one in another script has.
+ */
+export function usernameFrom(name: string): string {
+  const letters = name.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  return letters.slice(0, MAX_USERNAME_LENGTH - 4) || "member";
+}
+
 export const EMAIL_ADDRESS_TOO_LONG = `Email address must be at most ${MAX_EMAIL_ADDRESS_LENGTH} characters`;
 
 /** The reactions: the first three are quick reactions, the rest sit in the tray. */
@@ -2519,6 +2556,7 @@ export function parseInvolvementChange(data: unknown): Involvement | null {
 
 const PROFILE_FIELDS = {
   name: "Name",
+  username: "Username",
   emailAddress: "Email address",
   password: "Password",
   bio: "Bio",
@@ -2528,7 +2566,8 @@ const PROFILE_FIELDS = {
 
 /**
  * Parses an untrusted change to your profile. Returns why it's refused instead. Each field is saved as
- * typed, even a blank name. The server keeps the form's limits too: a new password from the 8 characters
+ * typed, even a blank name, but a username, which is kept as `usernameOf` keeps one, and refused unless
+ * it's blank or can be one. The server keeps the form's limits too: a new password from the 8 characters
  * first run takes, to the 72 sign-in can take, and a 200-character bio.
  */
 export function parseProfileChanges(data: unknown): ProfileChanges | string {
@@ -2541,6 +2580,10 @@ export function parseProfileChanges(data: unknown): ProfileChanges | string {
     changes[field] = value;
   }
   if (changes.name !== undefined && changes.name.length > MAX_USER_NAME_LENGTH) return NAME_TOO_LONG;
+  if (changes.username !== undefined) {
+    changes.username = usernameOf(changes.username);
+    if (changes.username !== "" && !isUsername(changes.username)) return USERNAME_REFUSED;
+  }
   if (changes.emailAddress !== undefined && changes.emailAddress.length > MAX_EMAIL_ADDRESS_LENGTH) return EMAIL_ADDRESS_TOO_LONG;
   if (changes.password !== undefined && isPasswordTooLong(changes.password)) return PASSWORD_TOO_LONG;
   // A blank one keeps the password you have.
