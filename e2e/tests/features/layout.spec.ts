@@ -278,7 +278,8 @@ test.describe("Conversations drawer on phones", () => {
     await ada.page.getByRole("button", { name: "Open conversations" }).click();
     const drawer = ada.page.getByRole("dialog", { name: "Conversations" });
     await expect(drawer).toBeVisible();
-    const controls = await drawer.locator("a, button").all();
+    // Back and Forward stay in the drawer's rail, hidden for fingers, so only what it shows is measured.
+    const controls = await drawer.locator("a, button").filter({ visible: true }).all();
     expect(controls.length).toBeGreaterThan(0);
     for (const control of controls) {
       const name = (await control.getAttribute("aria-label")) ?? (await control.innerText());
