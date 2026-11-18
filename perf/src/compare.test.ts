@@ -7,7 +7,7 @@ import type { Summary } from "./stats.ts";
 
 const summary = (p50: number): Summary => ({ count: 100, mean: p50, p50, p90: p50 * 1.4, p95: p50 * 1.5, p99: p50 * 2, max: p50 * 3 });
 const step = (members: number, joinP50: number) => ({ members, connect: summary(joinP50), presenceKbPerJoin: members * 2 }) as ConnectionsStep;
-const huddleOf = (people: number) => ({ people, welcome: summary(8), heardByAll: summary(people * 1.5), sfuRequestsForLastJoin: 2 * people + 3, reaction: summary(3), lost: 0 }) as HuddleStep;
+const huddleOf = (people: number) => ({ people, welcome: summary(8), hearsAll: summary(people), heardByAll: summary(people * 1.5), sfuRequestsForLastJoin: 2 * people + 3, reaction: summary(3), lost: 0 }) as HuddleStep;
 
 /** A run with one of everything compare looks at, and nothing else. */
 function baseline(): Results {
@@ -46,12 +46,14 @@ describe("compareResults", () => {
     after.backend["do-sqlite"]!.connections!.steps[1] = step(200, 160);
     after.backend["do-sqlite"]!.history!.welcome = summary(8);
     before.backend["do-sqlite"]!.huddle!.steps = [
-      { ...huddleOf(10), welcome: summary(6.96), heardByAll: summary(10.54) },
-      { ...huddleOf(25), heardByAll: summary(32.81), reaction: { ...summary(2.95), p95: 4.26 } },
+      { ...huddleOf(10), welcome: summary(6.96), hearsAll: summary(5.86), heardByAll: summary(10.54) },
+      { ...huddleOf(25), hearsAll: summary(10.25), heardByAll: summary(31.92), reaction: { ...summary(2.95), p95: 4.26 } },
+      { ...huddleOf(50), hearsAll: summary(30.79) },
     ];
     after.backend["do-sqlite"]!.huddle!.steps = [
-      { ...huddleOf(10), welcome: summary(12.17), heardByAll: summary(17.89) },
-      { ...huddleOf(25), heardByAll: summary(48.12), reaction: { ...summary(4.24), p95: 7.38 } },
+      { ...huddleOf(10), welcome: summary(12.17), hearsAll: summary(10.42), heardByAll: summary(17.89) },
+      { ...huddleOf(25), hearsAll: summary(17.42), heardByAll: summary(48.84), reaction: { ...summary(4.24), p95: 7.38 } },
+      { ...huddleOf(50), hearsAll: summary(45.76) },
     ];
     after.web!.lighthouse[0]!.lcpMs = 1995;
     after.web!.lighthouse[0]!.tbtMs = 265;
@@ -107,6 +109,12 @@ describe("compareResults", () => {
     expect(verdicts(after, baseline())).toEqual({ "do-sqlite huddle of 25: SFU requests for the last to join": "better" });
   });
 
+  it("counts a newcomer taking twice as long to hear a huddle, though the huddle hears them as soon", () => {
+    const after = baseline();
+    after.backend["do-sqlite"]!.huddle!.steps[1]!.hearsAll = summary(50);
+    expect(verdicts(baseline(), after)).toEqual({ "do-sqlite huddle of 25: hears all p50 ms": "worse" });
+  });
+
   it("counts a reaction's tail that doubles in a huddle, though its median stays", () => {
     const before = baseline();
     before.backend["do-sqlite"]!.huddle!.steps[1]!.reaction = { ...summary(3), p95: 5 };
@@ -137,6 +145,7 @@ describe("compareResults", () => {
       "do-sqlite room of 200: join p50 ms": "missing",
       "do-sqlite room of 200: presence KB per join": "missing",
       "do-sqlite huddle of 25: welcome p50 ms": "missing",
+      "do-sqlite huddle of 25: hears all p50 ms": "missing",
       "do-sqlite huddle of 25: heard by all p50 ms": "missing",
       "do-sqlite huddle of 25: SFU requests for the last to join": "missing",
       "do-sqlite huddle of 25: reaction p50 ms": "missing",

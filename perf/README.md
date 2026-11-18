@@ -34,9 +34,9 @@ count as worse, a metric has to move by more than `--threshold` percent (10 by d
 than its floor (1 ms for most latencies, 4 ms for fan-out tails, one frame for paint timings, 200 ms
 for Lighthouse's Total Blocking Time), and by more than it moved between runs of the same commit,
 which `src/compare.ts` records per metric: 10 to 25% for most, 40% for tail latencies, history reads
-and joins into a saturated room, and 50% for a huddle hearing someone who joins. Lost or missing
-messages and errors count from the first one, as does one request more or fewer to the SFU for
-someone to join a huddle, which every run of the same code counts alike.
+and joins into a saturated room, and 60% for a huddle and someone who joins it hearing each other.
+Lost or missing messages and errors count from the first one, as does one request more or fewer to
+the SFU for someone to join a huddle, which every run of the same code counts alike.
 
 On a pull request, adding the `perf` label runs the quick suite in CI on every push. The report
 shows in the run's summary and both files are attached to the run. Running the Performance workflow

@@ -109,11 +109,16 @@ function collect({ backend, web }: Results): Map<string, Metric> {
     if (r.huddle) {
       for (const step of r.huddle.steps) {
         const huddle = `${storage} huddle of ${step.people}`;
-        // Ten joins make a thin median: fourteen runs of the scenario put the first ten's welcome anywhere
-        // from 6.96 to 12.17 ms on D1, and everyone hearing them from 10.54 to 17.89 ms on DO SQLite.
+        // Ten joins make a thin median: runs of the scenario, nineteen on DO SQLite and eighteen on D1, put
+        // the first ten's welcome anywhere from 6.96 to 12.17 ms on D1, and everyone hearing them from 10.54
+        // to 17.89 ms on DO SQLite.
         add(`${huddle}: welcome p50 ms`, step.welcome?.p50, { floor: 6, ...SWINGY });
-        // A huddle of 25 keeps its room about as busy as it gets, where those runs put everyone hearing a newcomer anywhere from 32.81 to 48.12 ms.
-        add(`${huddle}: heard by all p50 ms`, step.heardByAll?.p50, { floor: 10, noise: 50 });
+        // A newcomer hears everyone over one round of their own, which those runs put anywhere from 10.25 to
+        // 17.42 ms in a huddle of 25, and from 30.79 to 45.76 ms in one of 50.
+        add(`${huddle}: hears all p50 ms`, step.hearsAll?.p50, { floor: 10, noise: 60 });
+        // Everyone hears them over a round each. A huddle of 25 keeps its room about as busy as it gets, where
+        // those runs put it anywhere from 31.92 to 48.84 ms.
+        add(`${huddle}: heard by all p50 ms`, step.heardByAll?.p50, { floor: 10, noise: 60 });
         // The room asks the same of the SFU for someone to join on every run, so one request more or fewer is the code's.
         add(`${huddle}: SFU requests for the last to join`, step.sfuRequestsForLastJoin, { anyChange: true });
         // A reaction takes a few milliseconds, which those runs moved by up to 1.29 ms, and its tail by up to 3.12.
