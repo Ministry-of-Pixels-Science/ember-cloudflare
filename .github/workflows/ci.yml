@@ -89,8 +89,9 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @ember/e2e exec playwright install --with-deps webkit
       # GitHub's machine hands the memory of a process that crashes to a program that writes it to the
-      # disk. A crashed page's 600 MB kept the disk busy for half a minute, and the tests that waited on
-      # it meanwhile timed out. So no core dump is written, and a crash costs the tests beside it nothing.
+      # disk. A crashed page's 600 to 800 MB kept the disk busy for about 16 seconds, and for 34 to 71
+      # where two crashed close together, and the tests that waited on it meanwhile timed out. So no
+      # core dump is written, and a crash costs the tests beside it nothing.
       - run: ulimit -c 0 && pnpm test:e2e
       - uses: actions/upload-artifact@v6
         if: failure()
