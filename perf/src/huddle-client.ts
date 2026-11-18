@@ -11,6 +11,8 @@ import { sessionDescription } from "./sfu.ts";
 const NodeWebSocket = WebSocket as unknown as new (url: string, init: { headers: Record<string, string> }) => WebSocket;
 
 const CONNECT_TIMEOUT_MS = 30_000;
+/** How often a tab pings its huddle's socket, which the runtime answers for the room: the room takes out of a huddle whoever's socket it hasn't heard from in 90 seconds. */
+const HEARTBEAT_MS = 25_000;
 
 type Welcome = Extract<HuddleServerFrame, { type: "huddle.welcome" }>;
 
@@ -41,6 +43,8 @@ export class HuddleClient {
   private round: UserId[] | null = null;
   /** Whether the tab has a receiving connection, which its first offer makes. */
   private receiving = false;
+  /** The tab's pings, from the room's welcome until its socket closes. */
+  private heartbeat: ReturnType<typeof setInterval> | undefined;
 
   private constructor(session: Session, ws: WebSocket) {
     this.session = session;
@@ -69,8 +73,10 @@ export class HuddleClient {
         const frame = JSON.parse(event.data as string) as HuddleServerFrame;
         if (frame.type !== "huddle.welcome") return;
         clearTimeout(timer);
-        ws.onerror = ws.onclose = null;
+        ws.onerror = null;
+        ws.onclose = () => clearInterval(client.heartbeat);
         ws.onmessage = (next) => client.receive(next.data as string);
+        client.heartbeat = setInterval(() => ws.send('{"type":"ping"}'), HEARTBEAT_MS);
         client.welcomed(frame);
         resolve({ client, ms: performance.now() - started });
       };
@@ -90,6 +96,7 @@ export class HuddleClient {
 
   /** Starts closing without waiting for the handshake; nothing here needs to see it finish. */
   close(): void {
+    clearInterval(this.heartbeat);
     this.ws.close(1000);
   }
 
