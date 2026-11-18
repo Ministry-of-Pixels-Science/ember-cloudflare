@@ -12,6 +12,7 @@ import {
   type StoredFile,
   type UserId,
 } from "@ember/protocol";
+import { BLOCKED_WORDS_REFUSED } from "@ember/protocol/blocked-words";
 import { directoryOf } from "../avatar-tokens";
 import { bodyUpTo } from "../bodies";
 import { BLANK, EMPTY, FORBIDDEN, NOT_FOUND, type BotPage } from "../chat-room";
@@ -392,7 +393,7 @@ async function withForm(request: Request, answer: (form: FormReader) => Promise<
  * R2 keeping it as it arrives, a part at a time, as a browser's upload is, since a form can bring more
  * than a Worker can hold. Answers the message, why the room took nothing, as `finishBotUpload` says, or
  * what the request answers otherwise: 413 for a file larger than a browser can upload, and 422 for a name
- * too long to keep. Without an R2 bucket bound as FILES, it answers 503, as a browser's upload does.
+ * too long to keep, or with a word Blocked words keeps out. Without an R2 bucket bound as FILES, it answers 503, as a browser's upload does.
  */
 async function postFile(
   env: Env,
@@ -412,6 +413,7 @@ async function postFile(
   const file = { filename, declaredType, limit: MAX_FILE_SIZE, read: () => form.read() };
   const room = env.CHAT_ROOM.getByName(roomId);
   const started = await room.startBotUpload(roomId, access, file, messageId);
+  if (started === BLOCKED_WORDS_REFUSED) return unprocessable(started);
   if (typeof started === "string") return started;
   const stored = await storeArriving(files, objectKey(started.key), file);
   if (!stored) return exception(413);
