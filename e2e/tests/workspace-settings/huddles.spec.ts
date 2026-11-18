@@ -1702,7 +1702,7 @@ test.describe("A huddle", () => {
     await context.close();
   });
 
-  test("whoever can change a room turns huddles off in its settings, which ends the huddle going on there and takes the room's huddle button from everyone, until they turn them on again", async ({ page, browser, baseURL, request }) => {
+  test("an administrator turns huddles off in a room's settings, which ends the huddle going on there and takes the room's huddle button from everyone, until they turn them on again, and whoever made a room and isn't one has no switch for it", async ({ page, browser, baseURL, request }) => {
     const saved = await request.put("/api/account/huddles", { data: SFU_APP, headers: await asAdministrator(request) });
     expect(saved.status(), await saved.text()).toBe(200);
     const room = await roomOfItsOwn(request);
@@ -1722,7 +1722,7 @@ test.describe("A huddle", () => {
     await expect(page.getByRole("button", { name: "Join huddle, 1 in it" })).toBeVisible();
     await expect(page.getByText("A huddle is happening")).toBeVisible();
 
-    // The room's settings have a Huddles switch, which is on, and warns Ada of the huddle as she turns it off.
+    // The room's settings have a Huddles switch for Ada, an administrator, which is on, and warns her of the huddle as she turns it off.
     await page.goto(`/rooms/opens/${room.id}/edit`);
     const allow = page.getByRole("switch", { name: "Allow huddles in this room" });
     await expect(allow).toBeChecked();
@@ -1754,6 +1754,17 @@ test.describe("A huddle", () => {
     await grace.goto(`/rooms/opens/${room.id}/edit`);
     await expect(grace.getByText("Members can't start or join huddles in this room.")).toBeVisible();
     await expect(grace.getByRole("switch")).toHaveCount(0);
+    // A room she made is hers to change, but for its huddles: its settings have no Huddles switch, and Ember turns none off for her.
+    const made = await context.request.post("/api/rooms", { data: { kind: "open", name: `Retro ${crypto.randomUUID().slice(0, 8)}` }, headers: SAME_ORIGIN });
+    expect(made.status(), await made.text()).toBe(201);
+    const { room: hers } = (await made.json()) as { room: TestRoom };
+    await grace.goto(`/rooms/opens/${hers.id}/edit`);
+    await expect(grace.getByRole("textbox", { name: "Room name" })).toHaveValue(hers.name);
+    await expect(grace.getByRole("switch", { name: "Give only some access to this room" })).toBeVisible();
+    await expect(grace.getByRole("switch", { name: "Allow huddles in this room" })).toHaveCount(0);
+    const refused = await context.request.patch(`/api/rooms/${hers.id}`, { data: { huddles: false }, headers: SAME_ORIGIN });
+    expect(refused.status(), await refused.text()).toBe(403);
+    expect(await refused.json()).toEqual({ error: "Only administrators can turn huddles on or off in a room" });
     await grace.goto(`/rooms/${room.id}`);
     await expect(grace.getByRole("heading", { level: 1, name: room.name })).toBeVisible();
 

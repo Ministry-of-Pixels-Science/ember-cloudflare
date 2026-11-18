@@ -50,7 +50,7 @@ const roomList = (listed: Room[], favorites: RoomId[] = [], sharedOrder: RoomId[
   huddles: {},
   blocks: { userIds: [], version: 0 },
 });
-const generalSettings: RoomSettings = { room: rooms[0]!, canAdminister: true, people: [{ ...ada, member: true }] };
+const generalSettings: RoomSettings = { room: rooms[0]!, canAdminister: true, canChangeHuddles: true, people: [{ ...ada, member: true }] };
 const workspaceSettings: WorkspaceSettings = {
   account: { name: "Analytical Engines", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true },
   joinCode: "aB3d-Ef5h-iJ7k",

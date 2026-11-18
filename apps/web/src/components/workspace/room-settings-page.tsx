@@ -50,12 +50,13 @@ interface Props {
 /**
  * A room's settings. Whoever can change the room renames it, and with the Everyone switch, which swaps
  * one form for the other in place, opens it to everyone or makes it private to the people whose switches
- * are on; where huddles are on, the Huddles switch says whether the room allows them, as a Slack
- * channel's settings do; under the form, they can delete it. Leaving with changes asks first. Everyone
- * else sees its name and people, in the form for the room's kind, that it has no huddles when it
- * doesn't, and can leave a private room. The server refuses the last of its people who could open it,
- * saying why: the page can't tell who they are, as it lists active people, bots among them, and none
- * who are suspended.
+ * are on; under the form, they can delete it. Leaving with changes asks first. Where huddles are on,
+ * an administrator's form has the Huddles switch, which says whether the room allows them, as a Slack
+ * channel's settings do for its workspace's owners and admins. Everyone else sees the room's name and
+ * people, in the form for its kind, and can leave a private room, and whoever has no Huddles switch,
+ * the room's creator among them, reads that it has no huddles when it doesn't. The server refuses the
+ * last of its people who could open it, saying why: the page can't tell who they are, as it lists
+ * active people, bots among them, and none who are suspended.
  */
 export function RoomSettingsPage({ roomId, access, me, askForRoom, onMissing, onFailed }: Props) {
   const [settings, setSettings] = useState<RoomSettings | null>(null);
@@ -119,8 +120,8 @@ export function RoomSettingsPage({ roomId, access, me, askForRoom, onMissing, on
    * this person, settling with whether it was. The form is then compared with what's saved.
    */
   const send = () => {
-    // The switch is sent only where it shows, so saving a room while huddles are off leaves its own setting alone.
-    const kept = { name, icon: icon ?? "", ...(huddlesOn && { huddles }) } satisfies RoomChanges;
+    // The switch is sent only where it shows, so saving a room while huddles are off, or as anyone but an administrator, leaves its own setting alone.
+    const kept = { name, icon: icon ?? "", ...(huddlesOn && settings?.canChangeHuddles && { huddles }) } satisfies RoomChanges;
     const changes: RoomChanges = access === "open" ? { ...kept, kind: access } : { ...kept, kind: access, memberIds: [...chosen] };
     const leaving = access === "closed" && !chosen.has(me.id);
     const answered = askForRoom();
@@ -163,9 +164,9 @@ export function RoomSettingsPage({ roomId, access, me, askForRoom, onMissing, on
     !!settings?.canAdminister &&
     !busy &&
     (name !== settings.room.name || icon !== settings.room.icon || access !== opened || (huddlesOn && huddles !== allowsHuddles(settings)) || (!open && !sameMembers(chosen, membersOf(settings))));
-  // The Huddles row is there while huddles are on: with its switch for whoever can change the room, and
-  // for anyone else only where the room has none, to say so.
-  const huddlesRow = !huddlesOn || !settings ? null : settings.canAdminister ? { allowed: huddles, onChange: setHuddles, live } : allowsHuddles(settings) ? null : { allowed: false };
+  // The Huddles row is there while huddles are on: with its switch for an administrator, and for anyone
+  // else, the room's creator too, only where the room has none, to say so.
+  const huddlesRow = !huddlesOn || !settings ? null : settings.canChangeHuddles ? { allowed: huddles, onChange: setHuddles, live } : allowsHuddles(settings) ? null : { allowed: false };
   // The Everyone switch moves between the room's two forms, keeping the draft.
   const stays = useCallback((path: string) => path === roomSettingsPath("open", roomId) || path === roomSettingsPath("closed", roomId), [roomId]);
   return (

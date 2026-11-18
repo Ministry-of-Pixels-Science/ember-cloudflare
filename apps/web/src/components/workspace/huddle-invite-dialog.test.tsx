@@ -47,6 +47,7 @@ const huddleWith = (...others: User[]): JoinedHuddle => ({
 const settingsWith = (members: User[], others: User[] = []): RoomSettings => ({
   room: general,
   canAdminister: false,
+  canChangeHuddles: false,
   people: [...members.map((person) => ({ ...person, member: true })), ...others.map((person) => ({ ...person, member: false }))],
 });
 /** Answers a room's settings with `settings`, or refuses them. */

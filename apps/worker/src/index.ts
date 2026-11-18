@@ -1105,7 +1105,8 @@ async function roomSettings(request: Request, env: Env, roomId: RoomId): Promise
 
 /**
  * Changes a room, as its settings page saves it. Someone who can't change it hears so before anything
- * they sent is checked.
+ * they sent is checked, and whoever would turn huddles on or off in it hears that only an administrator
+ * can, unless they're one.
  */
 async function changeRoom(request: Request, env: Env, roomId: RoomId): Promise<Response> {
   const credentials = await credentialsOf(request, env);
@@ -1116,6 +1117,7 @@ async function changeRoom(request: Request, env: Env, roomId: RoomId): Promise<R
   if (!room) return problem(401, "Not signed in");
   if (room === "not found") return problem(404, ROOM_NOT_FOUND);
   if (room === "forbidden") return problem(403, "Only administrators and the room's creator can change it");
+  if (room === "administrators only") return problem(403, "Only administrators can turn huddles on or off in a room");
   if (room === "blocked words") return problem(422, BLOCKED_WORDS_REFUSED);
   return typeof changes === "string" ? problem(422, changes) : json({ room });
 }
