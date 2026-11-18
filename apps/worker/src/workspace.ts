@@ -171,7 +171,7 @@ import type { PickedTool } from "./apps/tools";
 import { seal, unseal } from "./sealed";
 import { isToken } from "./secrets";
 import { SessionCache } from "./session-cache";
-import { claimsOf, isAllowed, ssoProviderOf, ssoSettingsOf, toldAlike, type MemberElsewhere, type SsoProvider } from "./sso-provider";
+import { claimsOf, isAllowed, sameGroupRules, ssoProviderOf, ssoSettingsOf, toldAlike, type MemberElsewhere, type SsoProvider } from "./sso-provider";
 import { CLOSE_REASONS, closeTooLarge, isTooLarge, MAX_WORKSPACE_FRAME_SIZE, RESERVED_CLOSE_CODES } from "./sockets";
 import type { Transfer } from "./transfers";
 import type { TurnstileKeys } from "./turnstile";
@@ -1969,13 +1969,16 @@ export class Workspace extends DurableObject<Env> {
   }
 
   /**
-   * Whether what `via` signs in with has changed since the Worker signed someone in at `issuer` with it:
+   * Whether what `via` signs in with has changed since the Worker signed `member` in at `issuer` with it:
    * another Memberful site's keys (`memberfulSiteReplaced`), or another single sign-on provider, or none,
-   * in place of the one it asked. Asked one change at a time with setting either up, so one goes first.
+   * in place of the one it asked, or a card that lets in other people than the one whether `member` is
+   * let in went by. Asked one change at a time with setting either up, so one goes first.
    */
-  private async issuerReplaced(via: SignInElsewhere, issuer: string): Promise<boolean> {
+  private async signInOutdated(via: SignInElsewhere, issuer: string, member: MemberElsewhere): Promise<boolean> {
     if (via === "memberful") return this.memberfulSiteReplaced(issuer);
-    return (await this.ssoProvider())?.issuer !== issuer;
+    const provider = await this.ssoProvider();
+    if (provider?.issuer !== issuer) return true;
+    return member.letInBy !== undefined && !sameGroupRules(provider, member.letInBy);
   }
 
   /**
@@ -2958,7 +2961,8 @@ export class Workspace extends DurableObject<Env> {
    * or banned, "membership" for anyone but an administrator, or someone they invited, without an active
    * membership, "taken" when someone here has the email address someone new would have, which creates
    * nothing, and "failed" once another site's keys, or another provider, have taken the place of those
-   * they signed in with (`issuerReplaced`). Everyone's workspace sockets hear of someone new.
+   * they signed in with, or the card lets in other people than it did (`signInOutdated`). Everyone's
+   * workspace sockets hear of someone new.
    */
   async signInElsewhere(
     via: SignInElsewhere,
@@ -2977,7 +2981,7 @@ export class Workspace extends DurableObject<Env> {
       const { joins, closed } = rulesOf(account, via);
       // As a sign-in started before the other way was made the only one finds it.
       if (closed) return "off";
-      if (await this.issuerReplaced(via, issuer)) return "failed";
+      if (await this.signInOutdated(via, issuer, member)) return "failed";
       const otherWays = await this.otherWays(account);
       // Only an account that lets its person in is linked by email address, lest linking it suspend them.
       const byEmail = joins && member.subscribed;
@@ -3136,8 +3140,8 @@ export class Workspace extends DurableObject<Env> {
    * administrator, or someone they invited, doesn't, and an account connected to them already signs them
    * in as signing in with it does, going by what Memberful said of its membership as of `readAt`
    * (`settleMembership`). Answers "unneeded" unless `via` is the only way in, "failed" once another
-   * site's keys, or another provider, have taken the place of those it signed in with
-   * (`issuerReplaced`), "claimed" for an account connected to someone else, "another" when they're
+   * site's keys, or another provider, have taken the place of those it signed in with, or the card lets
+   * in other people than it did (`signInOutdated`), "claimed" for an account connected to someone else, "another" when they're
    * connected to another account there, "membership" for a member without an active membership, and
    * "refused" when they've been removed or banned, or their password has changed.
    */
@@ -3156,7 +3160,7 @@ export class Workspace extends DurableObject<Env> {
     return this.closingSockets(async () => {
       const account = await this.joinableAccount();
       if (!rulesOf(account, via).only) return "unneeded";
-      if (await this.issuerReplaced(via, issuer)) return "failed";
+      if (await this.signInOutdated(via, issuer, member)) return "failed";
       const linked = await this.store.linkedPerson(issuer, member.id, await this.otherWays(account));
       if (linked && linked.userId !== userId) return "claimed";
       if (linked) {

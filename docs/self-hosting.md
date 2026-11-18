@@ -552,7 +552,8 @@ own, since whoever controls an address there gets the account here.
 The card's Allowed groups keep Ember to the people in at least one of them, as the claim the card
 names lists them: `groups` unless it says otherwise, as a list of names or an object keyed by them.
 With none listed, anyone the provider signs in is let in. Administrators, and the people they invite,
-need no group, as with Memberful. Extra scopes go in the card's Scopes, beside `openid`, `profile`,
+need no group, as with Memberful. A sign-in under way as the card's groups or claim change is turned
+back, to be tried again by the card as it is then. Extra scopes go in the card's Scopes, beside `openid`, `profile`,
 `email` and `offline_access`, which Ember always asks for, the last while the provider offers it.
 
 The provider keeps having its say after sign-in. Each sign-in keeps the refresh token the provider

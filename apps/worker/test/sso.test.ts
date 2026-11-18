@@ -124,7 +124,8 @@ interface SentToProvider {
  * each code once, with the app's secret, the redirect URI and the PKCE verifier it was given for, and
  * gives an ID token signed with `provider.signWith`, with `provider.idToken`'s claims over its own, and a
  * refresh token, but to a sign-in while `provider.signInWithoutRefreshToken`, which it takes once, for
- * whoever it was given to, unless they're in `provider.revoked`.
+ * whoever it was given to, unless they're in `provider.revoked`, each grant once what
+ * `provider.exchanging` or `provider.refreshing` waits for is done.
  * Its userinfo endpoint describes whoever an access token is for, as `provider.people` has them now.
  * While `provider.down`, nothing answers.
  */
@@ -146,6 +147,8 @@ function fakeProvider() {
     signInWithoutRefreshToken: false,
     /** What a refresh waits for before it's answered, as a slow provider's is, or null to answer at once. */
     refreshing: null as Promise<void> | null,
+    /** What exchanging a sign-in's code waits for, as `refreshing` is for a refresh. */
+    exchanging: null as Promise<void> | null,
     /** Whether the userinfo endpoint fails, while the rest of the provider answers. */
     userinfoDown: false,
     down: false,
@@ -210,6 +213,7 @@ function fakeProvider() {
       if (request.headers.get("Authorization") !== `Basic ${btoa(`${CLIENT_ID}:${CLIENT_SECRET}`)}`) return Response.json({ error: "invalid_client" }, { status: 401 });
       const form = new URLSearchParams(body);
       if (form.get("grant_type") === "authorization_code") {
+        await provider.exchanging;
         const given = provider.codes.get(form.get("code") ?? "");
         provider.codes.delete(form.get("code") ?? "");
         const verified = given && given.redirectUri === form.get("redirect_uri") && given.challenge === (await challengeOf(form.get("code_verifier") ?? ""));
@@ -589,6 +593,22 @@ describe("Sign in with SSO", () => {
     expect(locationOf(await signInWithSso(dorothy))).toBe(backToSignIn("membership"));
     expect(await count("identities")).toBe(0);
     await signedInAs(await signInWithSso(katherine));
+  });
+
+  it("signs nobody in by groups the card no longer goes by, once they change while the provider answers", async () => {
+    const administrator = await setUpWithSso();
+    let answer!: () => void;
+    provider.exchanging = new Promise((resolve) => (answer = resolve));
+    provider.signingIn = dorothy;
+    const { params, cookie } = await startAndAuthorize();
+    const signingIn = callback(params, cookie);
+    await vi.waitFor(() => expect(tokenRequests()).toHaveLength(1));
+    expect((await saveSso(administrator, { allowedGroups: "staff" })).status).toBe(200);
+    answer();
+    expect(locationOf(await signingIn)).toBe(backToSignIn("failed"));
+    expect(await count("identities")).toBe(0);
+    // Signing in again goes by the card as it is.
+    expect(locationOf(await signInWithSso(dorothy))).toBe(backToSignIn("membership"));
   });
 
   it("reads groups from a claim the card names, as an object of Zitadel's roles", async () => {

@@ -13,12 +13,15 @@ import type { SavedSso } from "./workspace-store";
 /** The provider, with its app's secret opened, and where its issuer and app come from. */
 export interface SsoProvider extends OidcClient, Omit<SsoSettings, "issuer" | "clientId"> {}
 
+/** What the Single sign-on card says of whom it lets in, which `isAllowed` goes by. */
+export type GroupRules = Pick<SsoProvider, "allowedGroups" | "groupsClaim">;
+
 /**
  * Someone who signed in at an account elsewhere, as Memberful's member API or a single sign-on provider
  * describes them: the id of their account there, which accounts here are linked by, their name there,
  * the names someone new could be called here, the one they'd rather first, their email address, whether
  * the provider verified it, and whether that account lets them in: an active Memberful membership, or a
- * group the Single sign-on card lets in.
+ * group the Single sign-on card lets in, by the card's rules as they were then, `letInBy`.
  */
 export interface MemberElsewhere {
   id: string;
@@ -27,7 +30,13 @@ export interface MemberElsewhere {
   emailAddress: string | null;
   emailVerified?: boolean;
   subscribed: boolean;
+  letInBy?: GroupRules;
 }
+
+/** Whether `a` and `b` let in the same people: everyone, or those in the same groups at the same claim. */
+export const sameGroupRules = (a: GroupRules, b: GroupRules) =>
+  (a.allowedGroups.length === 0 && b.allowedGroups.length === 0) ||
+  (a.groupsClaim === b.groupsClaim && a.allowedGroups.every((group) => b.allowedGroups.includes(group)) && b.allowedGroups.every((group) => a.allowedGroups.includes(group)));
 
 /** The deployment's issuer and app, from `SSO_ISSUER`, `SSO_CLIENT_ID` and `SSO_CLIENT_SECRET`, or null without all three. */
 export function ssoSecretsOf(env: Env): OidcClient | null {
@@ -140,7 +149,7 @@ const text = (claims: Claims, name: string) => (typeof claims[name] === "string"
  * name, or else their given and family names together, the names someone new could be called here, their
  * name, then their preferred username and their email address's local part, passing over blank ones and
  * @ember's, their email address, if it's one Ember keeps, whether the provider verified it, and whether
- * the provider lets them in (`isAllowed`).
+ * the provider lets them in (`isAllowed`), by the card's rules for it.
  */
 export function memberOf(provider: SsoProvider, claims: Claims): MemberElsewhere {
   const given = text(claims, "email").trim();
@@ -155,5 +164,6 @@ export function memberOf(provider: SsoProvider, claims: Claims): MemberElsewhere
     // Some providers send it as text.
     emailVerified: emailAddress !== null && (claims.email_verified === true || claims.email_verified === "true"),
     subscribed: isAllowed(provider, claims),
+    letInBy: { allowedGroups: provider.allowedGroups, groupsClaim: provider.groupsClaim },
   };
 }
