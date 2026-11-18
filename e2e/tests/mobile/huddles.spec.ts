@@ -789,10 +789,10 @@ test("Invite people, with more people to invite than it lists at once, has a sea
 });
 
 // TEMPORARY, to find why WebKit's screens show blank: their frames arrive and are decoded, but the
-// video stays paused, with nothing loaded. The test as the app is, and with each video told to play as
-// it's given its stream, six times each; on a blank screen, what its videos do, then after play(), then
-// after their stream is given to them again.
-type Diagnosed = Window & { connectionsSeen?: WeakRef<RTCPeerConnection>[] };
+// video stays paused, with nothing loaded, and given its stream again it plays. Here the app as it is,
+// with each video given its stream only once its track unmutes, and with each video that has loaded
+// nothing a second after given its stream again, six times each on each phone.
+type Diagnosed = Window & { connectionsSeen?: WeakRef<RTCPeerConnection>[]; reattached?: number };
 
 /** TEMPORARY. In the page, before it loads: notes each connection, weakly. */
 function noteConnections(): void {
@@ -810,16 +810,49 @@ function noteConnections(): void {
   }
 }
 
-/** TEMPORARY. In the page, before it loads: has each video play as it's given a stream, as well as by `autoplay`. */
-function playOnStream(): void {
+/** TEMPORARY. In the page, before it loads: gives each video its stream the `way` named, in place of at once. */
+function attachStreams(way: string): void {
   const property = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "srcObject")!;
+  const given = new WeakMap<HTMLMediaElement, MediaProvider | null>();
+  const attach = (video: HTMLMediaElement, stream: MediaProvider | null) => property.set!.call(video, stream);
+  const diagnosed = window as Diagnosed;
+  diagnosed.reattached = 0;
   Object.defineProperty(HTMLMediaElement.prototype, "srcObject", {
     ...property,
+    get(this: HTMLMediaElement) {
+      return given.has(this) ? given.get(this) : property.get!.call(this);
+    },
     set(this: HTMLMediaElement, stream: MediaProvider | null) {
-      property.set!.call(this, stream);
-      if (stream && this instanceof HTMLVideoElement) void this.play().catch(() => {});
+      given.set(this, stream);
+      const track = stream instanceof MediaStream ? stream.getVideoTracks()[0] : undefined;
+      if (!track || !(this instanceof HTMLVideoElement)) return attach(this, stream);
+      const still = () => given.get(this) === stream && track.readyState === "live";
+      if (way === "on unmute") {
+        if (!track.muted) return attach(this, stream);
+        attach(this, null);
+        track.addEventListener("unmute", () => still() && attach(this, stream), { once: true });
+        return;
+      }
+      attach(this, stream);
+      let wait = 1_000;
+      const check = () => {
+        if (!still() || this.readyState > 0) return;
+        if (!track.muted) {
+          attach(this, null);
+          attach(this, stream);
+          diagnosed.reattached! += 1;
+        }
+        wait *= 2;
+        setTimeout(check, wait);
+      };
+      setTimeout(check, wait);
     },
   });
+}
+
+/** TEMPORARY. Whether `evaluating` settles within 5 seconds, which a page that's frozen doesn't. */
+async function settles<T>(evaluating: Promise<T>): Promise<T | "FROZEN"> {
+  return Promise.race([evaluating, new Promise<"FROZEN">((resolve) => setTimeout(() => resolve("FROZEN"), 5_000))]);
 }
 
 /** TEMPORARY. In the page: what each video in the huddle, and each connection receiving, is doing. */
@@ -844,7 +877,7 @@ async function screensState(): Promise<unknown> {
       return `${connection.connectionState} [${tracks.join(", ")}] [${inbound.join(", ")}]`;
     }),
   );
-  return { at: Math.round(performance.now()), videos, receiving: receiving.filter(Boolean) };
+  return { at: Math.round(performance.now()), reattached: (window as Diagnosed).reattached, videos, receiving: receiving.filter(Boolean) };
 }
 
 /** TEMPORARY. In the page: plays each paused video in the huddle, and says how that went within 3 seconds. */
@@ -868,12 +901,12 @@ function reattachEmptyVideos(): void {
   }
 }
 
-for (const way of ["as is", "play"] as const)
+for (const way of ["as is", "on unmute", "watchdog"] as const)
 for (const round of [1, 2, 3, 4, 5, 6])
 test(`[diag ${way} ${round}] the screens people share in the huddle you're in fit the phone, one large and the other among the huddle's tiles, under it or beside it`, async ({ page, room, session, participant, screenIsFine }, testInfo) => {
   test.setTimeout(120_000);
   await page.addInitScript(noteConnections);
-  if (way === "play") await page.addInitScript(playOnStream);
+  if (way !== "as is") await page.addInitScript(attachStreams, way);
   const name = `DIAG ${testInfo.project.name} ${way} ${round}`;
   const sharing = await Promise.all(["Ada", "Grace"].map(async (name) => (await participant(name)).session.user));
   await standInHuddleWithScreens(page, session.user, sharing);
@@ -887,9 +920,13 @@ test(`[diag ${way} ${round}] the screens people share in the huddle you're in fi
   const waitToShow = async (label: string, step: string) => {
     try {
       await expect.poll(() => shows(label), { timeout: 15_000 }).toBe(true);
-      console.log(`${name} ${step}: shown`);
+      console.log(`${name} ${step}: shown${way === "watchdog" ? ` after ${await page.evaluate(() => (window as Diagnosed).reattached)} reattached` : ""}`);
     } catch (error) {
-      const blank = await page.evaluate(screensState);
+      const blank = await settles(page.evaluate(screensState));
+      if (blank === "FROZEN") {
+        console.log(`${name} ${step}: FROZEN`);
+        throw error;
+      }
       const played = await page.evaluate(playPausedVideos);
       await page.waitForTimeout(1_000);
       const afterPlay = await page.evaluate(screensState);
