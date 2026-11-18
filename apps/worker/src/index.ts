@@ -181,7 +181,7 @@ import { showQrCode } from "./qr-code";
 import { RECOVERY_PATH, resetPassword } from "./recovery";
 import { releaseCheck } from "./releases";
 import { urlOf } from "./request-url";
-import { MAX_ADDRESS_LENGTH } from "./revocations";
+import { taggedAddress } from "./revocations";
 import { clearSearches, recordSearch, searchMessages } from "./searches";
 import { isOnboardedToEmailSending } from "./sending-domain";
 import { checkSetup, firstRun, isSetupPath, setupAccessOf, setupPage, setupPlaceholdersOf } from "./setup";
@@ -1255,9 +1255,8 @@ async function connectToRoom(request: Request, env: Env, roomId: RoomId, huddle 
   headers.set(BANNED_HEADER, String(access.banned));
   // Set either way, so that only the address a socket asks at says which it is.
   headers.set(HUDDLE_HEADER, String(huddle));
-  // An address longer than any IP address isn't one a ban can hold, and would make too long a tag.
-  const { ip } = clientOf(request);
-  if (ip !== null && ip.length <= MAX_ADDRESS_LENGTH) headers.set(ADDRESS_HEADER, ip);
+  const address = taggedAddress(clientOf(request).ip);
+  if (address !== null) headers.set(ADDRESS_HEADER, address);
   else headers.delete(ADDRESS_HEADER);
   return env.CHAT_ROOM.getByName(roomId).fetch(new Request(request, { headers }));
 }

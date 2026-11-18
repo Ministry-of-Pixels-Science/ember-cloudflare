@@ -73,6 +73,7 @@ import usernames from "../migrations/0072_usernames.sql";
 import reports from "../migrations/0073_reports.sql";
 import pastHuddles from "../migrations/0074_past_huddles.sql";
 import changedHuddles from "../migrations/0075_changed_huddles.sql";
+import sessionAddresses from "../migrations/0076_session_addresses.sql";
 import searchIndex from "../search-migrations/0001_search_index.sql";
 import searchResults from "../search-migrations/0002_search_results.sql";
 import searchFilters from "../search-migrations/0003_search_filters.sql";
@@ -173,6 +174,7 @@ export const MIGRATIONS: Migration[] = [
   { name: "0073_reports.sql", scope: "workspace", sql: reports },
   { name: "0074_past_huddles.sql", scope: "workspace", sql: pastHuddles },
   { name: "0075_changed_huddles.sql", scope: "room", sql: changedHuddles },
+  { name: "0076_session_addresses.sql", scope: "workspace", sql: sessionAddresses },
 ];
 
 /**

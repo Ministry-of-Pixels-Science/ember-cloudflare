@@ -68,7 +68,7 @@ import { ALL_HUDDLE_SOUNDS, PAST_HUDDLES_LISTED, type HuddleSoundChanges, type H
 import { statement, type Db, type Statement } from "./db";
 import type { StoredPicture } from "./files/pictures";
 import { INVITATION_TTL_SECONDS, invitationPayload, messagePayload, type PushPayload } from "./push/payload";
-import { ADDRESS_TAG_PREFIX, EVERYONE, OPEN_ROOMS_ONLY, SESSION_TAG_PREFIX, type Revocation } from "./revocations";
+import { ADDRESS_TAG_PREFIX, EVERYONE, OPEN_ROOMS_ONLY, SESSION_TAG_PREFIX, taggedAddress, type Revocation } from "./revocations";
 import type { HuddleChange, RoomEvent } from "./room-log";
 
 // The account, its people, their sessions and their rooms, kept by the Workspace in its own SQLite
@@ -1926,17 +1926,33 @@ const QUEUE_PURGES = `INSERT INTO pending_purges (room_id, user_id, due_at)
   SELECT id, ?1, ?2 FROM rooms WHERE kind <> 'direct' OR id IN (SELECT room_id FROM memberships WHERE user_id = ?1) RETURNING id`;
 
 /**
- * Queues having every room close the sockets from each address in a JSON list, telling them to connect
- * again, answering a row for each room and address: banning an address, or lifting the ban, changes
- * what they may do, which the Workspace checks as they connect.
+ * Records that a session's sockets come from an IP address, unless the session has ended since it was
+ * checked, so that banning the address, or lifting the ban, finds the rooms that can hold them.
  */
-const QUEUE_ADDRESS_REVOCATIONS = `INSERT INTO pending_revocations (room_id, tag, code, due_at)
-  SELECT rooms.id, ?1 || addresses.value, ?2, ?3 FROM rooms, json_each(?4) AS addresses RETURNING id`;
+const RECORD_SESSION_ADDRESS = `INSERT INTO session_addresses (session_id, ip_address) SELECT id, ?2 FROM sessions WHERE id = ?1
+  ON CONFLICT DO NOTHING`;
 
-/** The same for the addresses someone's ban blocks, which lifting it unblocks. */
-const QUEUE_UNBANNED_ADDRESS_REVOCATIONS = `INSERT INTO pending_revocations (room_id, tag, code, due_at)
-  SELECT rooms.id, ?1 || addresses.ip_address, ?2, ?3 FROM rooms, (SELECT DISTINCT ip_address FROM bans WHERE user_id = ?4) AS addresses
-  RETURNING id`;
+/**
+ * Each room that can hold a socket from an address, with the tag on the sockets from it, once each, of
+ * the addresses `addresses` names: a room lets in only its members, so the rooms of the people whose
+ * sessions came from it (`RECORD_SESSION_ADDRESS`).
+ */
+const roomsReachedFrom = (addresses: string) => `SELECT DISTINCT memberships.room_id, ?1 || session_addresses.ip_address, ?2, ?3
+  FROM session_addresses JOIN sessions ON sessions.id = session_addresses.session_id JOIN memberships ON memberships.user_id = sessions.user_id
+  WHERE session_addresses.ip_address IN (${addresses})`;
+
+/**
+ * Queues having the rooms that can hold a socket from an address in the JSON list ?4 close those
+ * sockets, telling them to connect again, answering a row for each room and address: banning an
+ * address changes what they may do, which the Workspace checks as they connect. Those of the person
+ * ?5, whose ban it is, are left out, since their sessions' sockets close for good.
+ */
+export const QUEUE_ADDRESS_REVOCATIONS = `INSERT INTO pending_revocations (room_id, tag, code, due_at)
+  ${roomsReachedFrom("SELECT value FROM json_each(?4)")} AND sessions.user_id <> ?5 RETURNING id`;
+
+/** The same for the addresses the ban on the person ?4 blocks, which lifting it unblocks. */
+export const QUEUE_UNBANNED_ADDRESS_REVOCATIONS = `INSERT INTO pending_revocations (room_id, tag, code, due_at)
+  ${roomsReachedFrom("SELECT ip_address FROM bans WHERE user_id = ?4")} RETURNING id`;
 
 /**
  * The purges a room can take: none while it has sockets left to close, which may be the banned person's,
@@ -3857,17 +3873,17 @@ export class WorkspaceStore {
    * Bans someone, in one transaction: queues closing each of their sessions' sockets with `code` in
    * every room they're in, due at `dueAt`, blocks each of `ipAddresses`, ends their sessions, marks them
    * banned, recording when, unless they were already, and queues deleting their messages in every room
-   * they can have written in, due then too. It queues having every room tell the sockets from those
-   * addresses to reconnect, due then as well, so they come back able only to read, and forgets the
-   * sign-ins they made to apps and the AI apps connected as them. Their memberships, role and avatar
-   * stay. Answers whether it queued anything.
+   * they can have written in, due then too. It queues having the rooms that can hold anyone else's
+   * sockets from those addresses tell them to reconnect, due then as well, so they come back able only
+   * to read, and forgets the sign-ins they made to apps and the AI apps connected as them. Their
+   * memberships, role and avatar stay. Answers whether it queued anything.
    */
   async banPerson(userId: UserId, ipAddresses: string[], code: CloseCode, reconnect: CloseCode, dueAt: number, now: string): Promise<boolean> {
     const [revocations, , reconnections, , , purges] = (await this.db.batch([
       // Before their sessions go, which it finds their sockets by.
       statement(QUEUE_PERSON_SESSION_REVOCATIONS, SESSION_TAG_PREFIX, code, dueAt, userId),
       statement(`INSERT INTO bans (user_id, ip_address, created_at, updated_at) SELECT ?, value, ?, ? FROM json_each(?)`, userId, now, now, JSON.stringify(ipAddresses)),
-      statement(QUEUE_ADDRESS_REVOCATIONS, ADDRESS_TAG_PREFIX, reconnect, dueAt, JSON.stringify(ipAddresses)),
+      statement(QUEUE_ADDRESS_REVOCATIONS, ADDRESS_TAG_PREFIX, reconnect, dueAt, JSON.stringify(ipAddresses), userId),
       statement(`DELETE FROM sessions WHERE user_id = ?`, userId),
       statement(`UPDATE users SET status = ${BANNED}, updated_at = ? WHERE id = ? AND status <> ${BANNED}`, now, userId),
       statement(QUEUE_PURGES, userId, dueAt),
@@ -3882,9 +3898,9 @@ export class WorkspaceStore {
    * Lifts someone's ban: unblocks their IP addresses and makes them active, recording when, unless they
    * were already, whatever their status was, and puts them in every open room, as joining does, those
    * made or opened while they were banned among them. The rooms yet to delete their messages delete
-   * only those written by then, at once. It queues having every room tell the sockets from those
-   * addresses to reconnect, due at `dueAt`, so they come back able to change things again, unless
-   * another ban blocks them too. Answers whether it queued anything.
+   * only those written by then, at once. It queues having the rooms that can hold sockets from those
+   * addresses tell them to reconnect, due at `dueAt`, so they come back able to change things again,
+   * unless another ban blocks them too. Answers whether it queued anything.
    */
   async unbanPerson(userId: UserId, reconnect: CloseCode, dueAt: number, now: string): Promise<boolean> {
     const [reconnections] = (await this.db.batch([
@@ -4478,9 +4494,16 @@ export class WorkspaceStore {
     return (await this.db.all(BETWEEN, roomId, userId, otherId)).length > 0;
   }
 
-  /** Whether `userId` is in room `roomId`, and whether a ban blocks `ipAddress`, if there is one. */
-  async roomAccess(roomId: RoomId, userId: UserId, ipAddress: string | null): Promise<{ member: boolean; banned: boolean }> {
-    const [row] = await this.db.all<{ member: number; banned: number }>(ROOM_ACCESS, roomId, userId, ipAddress);
+  /**
+   * Whether `userId` is in room `roomId`, and whether a ban blocks `ipAddress`, if there is one. Asked
+   * for their session `sessionId`, it first records that the session comes from the address, if the
+   * room tags what it lets in with it (`taggedAddress`), in the same transaction, so that a ban of the
+   * address saved once this has read finds the session's rooms.
+   */
+  async roomAccess(roomId: RoomId, userId: UserId, ipAddress: string | null, sessionId: string | null = null): Promise<{ member: boolean; banned: boolean }> {
+    const tagged = taggedAddress(ipAddress);
+    const recording = sessionId !== null && tagged !== null ? [statement(RECORD_SESSION_ADDRESS, sessionId, tagged)] : [];
+    const [row] = (await this.db.batch([...recording, statement(ROOM_ACCESS, roomId, userId, ipAddress)])).at(-1) as Array<{ member: number; banned: number }>;
     return { member: row!.member === 1, banned: row!.banned === 1 };
   }
 
