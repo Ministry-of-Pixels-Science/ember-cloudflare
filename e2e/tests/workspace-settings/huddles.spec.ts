@@ -1814,10 +1814,10 @@ test.describe("A huddle", () => {
     expect(await switches(grace).evaluateAll((all) => all.map((each) => each.getAttribute("aria-checked")))).toEqual(["true", "false", "false"]);
     expect(await soundsStarted(grace)).toEqual([]);
 
-    // Ada starts a huddle in a direct message with her, which invites her. Both of her tabs show the
-    // invitation, and neither rings.
+    // Ada starts a huddle in her direct message with her, which started as she joined, to welcome her,
+    // and that invites her. Both of her tabs show the invitation, and neither rings.
     const started = await request.post("/api/directs", { data: { userIds: [her.id] }, headers });
-    expect(started.status(), await started.text()).toBe(201);
+    expect(started.status(), await started.text()).toBe(200);
     const direct = ((await started.json()) as { room: { id: string } }).room;
     await useOwnAddress(page);
     await page.goto(`/rooms/${direct.id}`);
