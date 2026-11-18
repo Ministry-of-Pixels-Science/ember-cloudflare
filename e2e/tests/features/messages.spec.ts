@@ -590,6 +590,23 @@ test.describe("Message action bar", () => {
     expect(more.x + more.width + 5).toBe(Math.min(trigger.x + trigger.width, 320 - 8));
   });
 
+  test("keeps the bar's rows clear of the avatars on a narrow phone, each ending at its right edge", async ({ members, participant }) => {
+    await (await participant("Grace")).say("Ten actions on a narrow phone");
+    const ada = await members.signIn("Ada", { administrator: true, context: { ...phone, viewport: { width: 320, height: 620 } } });
+    const message = ada.message("Ten actions on a narrow phone");
+    await message.getByRole("button", { name: "Message options" }).tap();
+    // An administrator has six buttons after the reactions on someone else's message, of which five fit
+    // right of the avatars' column, so Edit starts a third row, under Report.
+    const more = await box(bar(message).getByRole("button", { name: "More reactions" }));
+    const thread = await box(bar(message).getByRole("link", { name: "Reply in thread" }));
+    const report = await box(bar(message).getByRole("button", { name: "Report message" }));
+    const edit = await box(bar(message).getByRole("button", { name: "Edit" }));
+    expect(thread).toMatchObject({ x: more.x - 4 * 44, y: more.y + 44 });
+    expect(report).toMatchObject({ x: more.x, y: thread.y });
+    expect(edit).toMatchObject({ x: more.x, y: thread.y + 44 });
+    expect((await box(bar(message))).x).toBeGreaterThanOrEqual((await box(message.getByText("Grace", { exact: true }))).x);
+  });
+
   test("opens the bar below Message options on touch screens where there's room", async ({ members, participant }) => {
     await (await participant("Grace")).say("Room below me");
     const ada = await members.signIn("Ada", { context: phone });

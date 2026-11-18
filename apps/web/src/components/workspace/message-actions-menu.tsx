@@ -687,15 +687,28 @@ interface Placed {
 }
 
 /**
- * How many columns a bar for fingers has in two rows: the quick reactions and More reactions over the
- * rest, so four, or as many as the rest are while they fit in `width`.
+ * How many columns a bar for fingers has in rows: the quick reactions and More reactions over the
+ * `rest` of its buttons, so four, or as many as the rest are while they fit in `width`.
  */
-function columnsOf(bar: HTMLElement, width: number): number {
+function columnsOf(bar: HTMLElement, rest: number, width: number): number {
   const style = getComputedStyle(bar);
   const frame = bar.offsetWidth - bar.clientWidth + parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
-  const rest = bar.querySelectorAll("button, a").length - QUICK_REACTION_COUNT - 1;
   const fit = Math.floor((width - frame) / (bar.lastElementChild as HTMLElement).offsetWidth);
   return Math.max(QUICK_REACTION_COUNT + 1, Math.min(rest, fit));
+}
+
+/**
+ * Lays a bar for fingers out in rows as wide as fit in `width` (`columnsOf`), the quick reactions and
+ * More reactions over the rest, every row ending at the bar's right edge: the first, and the rest's
+ * last, where it has fewer buttons than the others, start that far in.
+ */
+function layOutRows(bar: HTMLElement, width: number) {
+  const rest = (Array.from(bar.children) as HTMLElement[]).slice(2).filter((button) => getComputedStyle(button).display !== "none");
+  const columns = columnsOf(bar, rest.length, width);
+  bar.style.setProperty("--bar-columns", String(columns));
+  (bar.firstElementChild as HTMLElement).style.gridColumnStart = String(columns - QUICK_REACTION_COUNT);
+  const short = rest.length % columns;
+  rest.forEach((button, index) => (button.style.gridColumnStart = short > 0 && index === rest.length - short ? String(columns - short + 1) : ""));
 }
 
 /** Where a message's row starts what it says, past its avatar's column, which a bar for fingers keeps clear of. */
@@ -711,7 +724,7 @@ function contentLeft(row: HTMLElement): number {
  * with Message options pinned as its last button, and the tray or More actions opens below it, or above
  * when there's more room there. For fingers, it opens 6px below its anchor, lined up with its right
  * edge, or above when it doesn't fit, or beside it when it fits neither, so it doesn't cover what opened
- * it, nor Message options. Its buttons then go in two rows, the reactions over the rest (`columnsOf`),
+ * it, nor Message options. Its buttons then go in rows, the reactions over the rest (`layOutRows`),
  * where a row of them would wrap, reach over the message's avatar or not fit beside its anchor. Answers
  * false, placing nothing, once the row is out of the timeline's sight, when the bar should close.
  */
@@ -780,10 +793,8 @@ function placeMenu({ row, container, trigger, anchor, menu, bar, panel, overlapp
     const [first, last] = [bar.firstElementChild as HTMLElement, bar.lastElementChild as HTMLElement];
     const reachesAvatar = Math.min(spot.right, bounds.right) - menuBox.width < contentLeft(row);
     if (!spot.fits || last.offsetTop > first.offsetTop || reachesAvatar) {
-      const columns = columnsOf(bar, bounds.right - bounds.left);
-      bar.style.setProperty("--bar-columns", String(columns));
-      // The quick reactions and More reactions end the first row at the bar's right edge, as the second row does.
-      first.style.gridColumnStart = String(columns - QUICK_REACTION_COUNT);
+      // As wide as fits right of the avatars' column, so lined up with Message options it keeps clear of them.
+      layOutRows(bar, bounds.right - contentLeft(row));
       menu.setAttribute("data-two-rows", "");
       menuBox = menu.getBoundingClientRect();
       spot = spotFor(menuBox);
