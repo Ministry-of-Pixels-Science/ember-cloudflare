@@ -209,14 +209,14 @@ export class HuddleMessage {
     const message = await store.find(kept.messageId);
     if (message && (message.thread || message.boosts.length > 0)) return null;
     if (message) await remove(message);
-    const untold = message || !kept.posted ? [] : await this.gone(store, kept.messageId);
+    const untold = message ? [] : await this.gone(store, kept.messageId);
     await this.forget();
     return untold;
   }
 
   /**
-   * What tells everyone that the message `messageId` names is gone, which they were told of as it was
-   * written: its deletion, by the number the room keeps for it, or nothing once the room keeps none. A
+   * What tells everyone that the message `messageId` names is gone: its deletion, by the number the
+   * room keeps for it, or nothing where the room keeps none, as of a message that was never written. A
    * deletion that failed may have been saved all the same, as D1's can be, with nobody told, and
    * whoever has heard of it, as when someone deleted the message themselves, loses nothing by hearing
    * it again.

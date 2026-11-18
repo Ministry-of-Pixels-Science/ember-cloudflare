@@ -713,6 +713,28 @@ describe("A huddle's message in its room", () => {
     expect([failures(), await alarmOf(room), await kept(room, "huddleMessage")]).toEqual([1, null, undefined]);
   });
 
+  it("tells whoever found it meanwhile that it's gone, with a later check, when its write and its deletion both failed and were saved all the same", async () => {
+    const { ada } = await huddlesOn();
+    const linus = await signIn("Linus");
+    const room = await freshRoom("standup");
+    const failures = countFailures();
+    savedUnanswered();
+    const adas = await joinHuddle(room, ada);
+    await adas.next("huddle.welcome");
+    // Nobody was told of the message, which Linus finds as he opens the room.
+    const linuses = await connect(room, linus);
+    const [saved] = linuses.welcome.messages;
+    deletedUnanswered();
+
+    await left(adas);
+    await settle(linuses);
+    expect(linuses.pending("message.deleted")).toEqual([]);
+    expect([failures(), await alarmOf(room)]).toEqual([2, expect.any(Number)]);
+    await ring(room);
+    expect(await linuses.next("message.deleted")).toEqual({ type: "message.deleted", messageId: saved!.id, seq: linuses.welcome.seq + 1 });
+    expect([failures(), await alarmOf(room), await kept(room, "huddleMessage")]).toEqual([2, null, undefined]);
+  });
+
   it("tells the room that a huddle is over though the message of the one going on can't be written then", async () => {
     const { ada } = await huddlesOn();
     const [grace, linus] = [await signIn("Grace"), await signIn("Linus")];
