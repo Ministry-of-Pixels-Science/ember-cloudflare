@@ -313,10 +313,20 @@ export interface Favorites {
 }
 
 /**
+ * The people someone has blocked, in the order they blocked them. Their messages collapse for them, and
+ * their DM with one of them alone leaves the sidebar. `version` counts the changes to them, so of two
+ * lists, the newer is the one with the larger version, whichever arrives last.
+ */
+export interface Blocks {
+  userIds: UserId[];
+  version: number;
+}
+
+/**
  * What `GET /api/sidebar` answers: the rooms someone is in, in the order they were made, the ones
  * they've starred, the invitation, when they're an administrator in its room who hasn't dismissed the
- * card, and the huddles going on in their rooms. It comes with an ETag, and a request whose
- * If-None-Match names it gets 304 Not Modified instead.
+ * card, the huddles going on in their rooms, and the people they've blocked. It comes with an ETag, and
+ * a request whose If-None-Match names it gets 304 Not Modified instead.
  */
 export interface Sidebar {
   rooms: SidebarRoom[];
@@ -330,6 +340,8 @@ export interface Sidebar {
   invitation: Invitation | null;
   /** The huddle going on in each of `rooms` that has one, by the room's id. `room.huddle` frames keep it current. */
   huddles: Record<RoomId, LiveHuddle>;
+  /** Whom they've blocked, which `blocks.changed` frames keep current. */
+  blocks: Blocks;
 }
 
 /**
@@ -359,6 +371,21 @@ export interface NewDirect {
 /** What `POST /api/directs` answers: the DM, 201 Created when it's new and 200 OK when the group had one. */
 export interface StartedDirect {
   room: DirectRoom;
+}
+
+/**
+ * Why `POST /api/directs` refuses a new DM with someone, `name`, who has blocked whoever starts it, in
+ * words that don't say so. A DM they have already opens as ever.
+ */
+export const notTakingDirects = (name: string) => `${name} isn't taking direct messages.`;
+
+/**
+ * What `POST` and `DELETE /api/users/<id>/block` answer, which block someone and unblock them: whom you've
+ * blocked now, and your level in your DM with them alone, when blocking hid it or unblocking showed it again.
+ */
+export interface ChangedBlocks {
+  blocks: Blocks;
+  direct: { roomId: RoomId; involvement: Involvement } | null;
 }
 
 /** What `GET /api/rooms/<id>/settings` answers for a room's settings page. DMs have none. */
@@ -1788,6 +1815,8 @@ export type WorkspaceServerFrame =
   | { type: "huddle.answered"; roomId: RoomId }
   /** They've starred or unstarred a room, in this tab or another: their stars as they are now. */
   | { type: "favorites.changed"; favorites: Favorites }
+  /** They've blocked or unblocked someone, in this tab or another: whom they've blocked now. */
+  | { type: "blocks.changed"; blocks: Blocks }
   /** They've given a room of theirs another notification level, in this tab or another. */
   | { type: "room.involvement"; roomId: RoomId; involvement: Involvement }
   /** They've dismissed the welcome card, in this tab or another, so their sidebar has no invitation from now on. */

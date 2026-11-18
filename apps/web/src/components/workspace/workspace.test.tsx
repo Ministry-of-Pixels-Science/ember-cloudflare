@@ -48,6 +48,7 @@ const roomList = (listed: Room[], favorites: RoomId[] = [], sharedOrder: RoomId[
   sharedOrder,
   invitation: null,
   huddles: {},
+  blocks: { userIds: [], version: 0 },
 });
 const generalSettings: RoomSettings = { room: rooms[0]!, canAdminister: true, people: [{ ...ada, member: true }] };
 const workspaceSettings: WorkspaceSettings = {

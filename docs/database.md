@@ -32,7 +32,7 @@ So far rooms keep `messages`, `boosts`, `revocations`, `room_events`, `unindexed
 `message_deletions`, `blobs` and `waiting_calls`, the Workspace keeps `accounts`, `users`, `sessions`, `identities`,
 `pending_identities`, `membership_checks`, `membership_catch_ups`, `push_subscriptions`, `webhooks`,
 `bans`, `email_links`, `email_link_requests`, `password_resets`, `searches`, `recent_searches`, `rooms`,
-`memberships`, `favorites`, `pending_revocations`, `pending_purges`, `pending_reindexes`,
+`memberships`, `favorites`, `blocks`, `pending_revocations`, `pending_purges`, `pending_reindexes`,
 `deleted_rooms`, `apps`, `app_sign_ins`, `own_app_sign_ins`, `agent_tools`, `outside_clients`, `outside_connections` and `outside_spent_tokens`, and the search index keeps `search_messages`, `search_mentions`, `search_rooms` and the
 FTS5 table `search_index`. A room's id also
 names its Durable Object, and the Worker asks the Workspace whether someone is a member before it
@@ -317,6 +317,17 @@ Objects, D1 or speed call for something else.
   values however many stars there are, and changes nothing unless the order holds exactly their
   stars. A star outlives its person's membership: it's left out while they can't star the room, and
   dropped at their next star, unstar or reorder.
+- **Blocks are rows of their own**, a `blocks` row for each person someone has blocked (workspace
+  migration 0070), keyed by the two of them, so a block or unblock writes its row and bumps
+  `users.blocks_version`, as stars bump theirs, in one batch. The statements that mark rooms unread,
+  push messages and invite people to huddles each skip whoever has blocked the writer with a probe
+  of that key, and starting a DM refuses a writer someone in it has blocked in the same `INSERT`, so
+  none of them binds a list of who's blocked whom. Blocking hides the DM between the two from the
+  blocker's sidebar by making their membership `invisible`, keeping the level it had in
+  `blocks.direct_involvement`, which unblocking gives back; only the block a request writes hides it,
+  found by its `created_at`, so blocking again leaves be a DM shown since. `index_blocks_on_blocked_id`
+  finds the blocks of someone whose account is deleted, which go with it, as theirs do, bumping the
+  `blocks_version` of each person who had blocked them.
 - **A room's place in the shared order is a column of the room**, `rooms.shared_position` (workspace
   migration 0020), so the sidebar's statement reads each room's place with the room, and listing the
   order costs nothing more, nor reads the places of rooms someone isn't in. Saving it reads the
