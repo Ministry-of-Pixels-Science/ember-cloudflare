@@ -901,6 +901,76 @@ test("the screens people share in the huddle you're in fit the phone, one large 
   await expect(tiles).toHaveCount(4);
 });
 
+/** TEMPORARY, in the page: a picture as it is now. */
+function pictureNow(video: HTMLVideoElement) {
+  const track = (video.srcObject as MediaStream | null)?.getVideoTracks()[0];
+  return {
+    playing: !video.paused && video.videoWidth > 0 && video.currentTime > 0,
+    at: video.currentTime,
+    drawn: video.getVideoPlaybackQuality?.().totalVideoFrames ?? -1,
+    ready: video.readyState,
+    network: video.networkState,
+    failed: video.error?.code ?? 0,
+    track: track ? `${track.muted ? "muted" : "unmuted"} ${track.readyState}` : "none",
+  };
+}
+
+// TEMPORARY, to come out again, and run only by the trial's step of CI's WebKit job: the steps of the
+// test above five times over in one huddle, which is where CI's WebKit left a picture showing nothing.
+// Each time the huddle is opened, and each time its screens have changed places, it notes how soon both
+// screens play, whether they then play on, and what a picture that doesn't says of itself. A picture
+// that's given its stream again three times has had them all within twelve seconds.
+(process.env.PICTURE_TRIAL ? test : test.skip)("[trial] screens in a huddle opened again and again", async ({ page, room, session, participant }, info) => {
+  test.setTimeout(150_000);
+  const labels = ["Ada's screen", "Grace's screen"];
+  const sharing = await Promise.all(["Ada", "Grace"].map(async (name) => (await participant(name)).session.user));
+  await standInHuddleWithScreens(page, session.user, sharing);
+  await openRoomWithHuddlesOn(page, room);
+  await header(page).getByRole("button", { name: "Start huddle", exact: true }).tap();
+  await page.getByRole("dialog", { name: `Start a huddle in ${room.name}` }).getByRole("button", { name: "Start Huddle" }).tap();
+  const opened = page.locator("#huddle");
+  const bar = page.getByRole("region", { name: `Huddle in ${room.name}` });
+  const tiles = opened.getByRole("list", { name: "In the huddle" }).getByRole("listitem");
+  const pictures = () => Promise.all(labels.map((label) => opened.getByLabel(label, { exact: true }).evaluate(pictureNow, undefined, { timeout: 2000 }).catch(() => null)));
+  const seen = { looks: [] as string[], still: [] as unknown[], failed: "" };
+  const look = async (step: string, round: number) => {
+    const began = Date.now();
+    const played = await expect
+      .poll(async () => (await pictures()).every((picture) => picture?.playing), { timeout: 12_000 })
+      .toBe(true)
+      .then(
+        () => true,
+        () => false,
+      );
+    const ms = Date.now() - began;
+    const then = await pictures();
+    await page.waitForTimeout(1500);
+    const now = await pictures();
+    const going = now.map((picture, index) => {
+      const before = then[index];
+      return Boolean(picture?.playing && before && picture.at > before.at && (picture.drawn < 0 || picture.drawn > before.drawn));
+    });
+    seen.looks.push(`${round} ${step} ${!played ? "never played" : going.every(Boolean) ? "played on" : "stopped"} ${ms}`);
+    if (!played || !going.every(Boolean)) seen.still.push({ round, step, ms, then, now });
+  };
+  try {
+    for (let round = 0; round < 5; round++) {
+      if (round > 0) await bar.getByTitle("Open huddle").first().tap();
+      await look("opened", round);
+      await tiles
+        .first()
+        .getByRole("button", { name: /^Show (Ada|Grace)'s screen larger$/ })
+        .tap();
+      await look("swapped", round);
+      await opened.getByRole("button", { name: "Minimize huddle" }).tap();
+      await expect(bar).toContainText("Ada and Grace are sharing screens");
+    }
+  } catch (error) {
+    seen.failed = String(error).slice(0, 200);
+  }
+  console.log(`[trial] ${JSON.stringify({ project: info.project.name, repeat: info.repeatEachIndex, ...seen })}`);
+});
+
 test("a huddle with more people in it than the phone shows beside a shared screen, or under it, scrolls its tiles by themselves", async ({ page, room, session, participant, screenIsFine }) => {
   const ada = (await participant("Ada")).session.user;
   const others = Array.from({ length: 9 }, (_, index) => ({ id: `someone-${index}`, name: `Someone ${index + 1}` }));

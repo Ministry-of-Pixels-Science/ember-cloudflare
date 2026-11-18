@@ -89,13 +89,15 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @ember/e2e exec playwright install --with-deps webkit
       # TEMPORARY, to come out again: a trial of a huddle's picture that's given its stream again where it
-      # shows nothing (apps/web/src/components/workspace/huddle-picture.tsx). The phone suite's two tests
-      # with shared screens run sixty times over on each phone, and each tells what its pictures were
-      # given and what they said of it (e2e/tests/mobile/huddles.spec.ts).
+      # shows nothing (apps/web/src/components/workspace/huddle-picture.tsx). A test that only this step
+      # runs goes through the steps of the phone suite's test of shared screens five times over in one
+      # huddle, thirty times on each phone, and tells what its pictures were given and what they said of
+      # it (e2e/tests/mobile/huddles.spec.ts). The phone suite's two tests with shared screens, sixty
+      # times over on each phone, had no picture that showed nothing.
       - name: Trial of a picture given its stream again
         run: |
           ulimit -c 0
-          pnpm --filter @ember/e2e exec playwright test tests/mobile/huddles.spec.ts --project "mobile iPhone SE" --project "mobile iPhone 17" --grep "the screens people share|a huddle with more people" --repeat-each 60 --reporter=list || true
+          PICTURE_TRIAL=1 pnpm --filter @ember/e2e exec playwright test tests/mobile/huddles.spec.ts --project "mobile iPhone SE" --project "mobile iPhone 17" --grep "\[trial\]" --repeat-each 30 --reporter=list || true
           sudo dmesg | grep -i segfault || true
       # GitHub's machine hands the memory of a process that crashes to a program that writes it to the
       # disk. A crashed page's 600 MB kept the disk busy for half a minute, and the tests that waited on
