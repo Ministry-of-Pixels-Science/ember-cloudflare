@@ -748,6 +748,27 @@ describe("SSO only", () => {
     expect(((await disconnected.json()) as ProfileAnswer).profile.sso).toEqual({ name: "Acme", ssoOnly: true, connected: null });
     expect(await count("identities")).toBe(0);
   });
+
+  it("keeps the latest refresh token once a second connection, started alongside, finds the account connected", async () => {
+    const administrator = await setUpWithSso();
+    const member = await joinAsGrace();
+    await turn(administrator, { ssoSignIn: true });
+    const start = () => api(SSO_CONNECTIONS_PATH, { method: "POST", headers: as(member), body: JSON.stringify({ currentPassword: grace.password }) });
+    const [first, second] = [await start(), await start()];
+    provider.signingIn = gracesAccount;
+    const finish = async (started: Response) => {
+      const { ssoConnection } = (await started.json()) as SsoConnection;
+      const state = new URL(ssoConnection).searchParams.get("state")!;
+      return locationOf(await callback({ code: provider.authorize(ssoConnection), state, iss: ISSUER }, `${cookieOf(started)}; ${member.cookie}`));
+    };
+    expect(await finish(first)).toBe(`${origin}/users/me/profile?sso=connected`);
+    expect(await finish(second)).toBe(`${origin}/users/me/profile?sso=connected`);
+    const latest = [...provider.refreshTokens.keys()].at(-1);
+    await workspaceSql("UPDATE identities SET refresh_due_at = ?", Date.now() - 1);
+    expect(await runDurableObjectAlarm(workspaceStub())).toBe(true);
+    const refreshes = tokenRequests().map(({ body }) => new URLSearchParams(body)).filter((form) => form.get("grant_type") === "refresh_token");
+    expect(refreshes.map((form) => form.get("refresh_token"))).toEqual([latest]);
+  });
 });
 
 describe("A first password", () => {

@@ -3747,6 +3747,14 @@ export class WorkspaceStore {
     return row ? storedSession(row) : null;
   }
 
+  /**
+   * Keeps what `account`, an account elsewhere linked already, says of itself now, and the refresh token
+   * `kept` has, if it has one, as starting a session with it does, for a sign-in that starts none.
+   */
+  async keepLinkedAccount(account: LinkedAccount, kept: SignInKept, now: string): Promise<void> {
+    await this.db.batch([statement(REFRESH_IDENTITY, account.issuer, account.subject, account.name, account.emailAddress, now), ...this.keepingRefresh(account, kept)]);
+  }
+
   /** The statement that keeps the refresh token `kept` has for `account`, if it has one, to ask the provider with when it's due. */
   private keepingRefresh(account: LinkedAccount, kept: SignInKept): Statement[] {
     return kept.refresh ? [statement(KEEP_REFRESH_TOKEN, account.issuer, account.subject, kept.refresh.sealedToken, kept.refresh.dueAt)] : [];

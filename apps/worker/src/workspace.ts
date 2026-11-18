@@ -3177,7 +3177,12 @@ export class Workspace extends DurableObject<Env> {
         this.linkedSites.add(issuer);
       }
       await this.keepChecking(via, kept);
-      if (tokenDigest === null) return "connected";
+      if (tokenDigest === null) {
+        // An account connected meanwhile, as by another connection started alongside, keeps this, the
+        // provider's latest word, as a session started with it would.
+        if (linked) await this.store.keepLinkedAccount(linkedAccountOf(issuer, member), kept, new Date().toISOString());
+        return "connected";
+      }
       // On D1 a role change can overlap it, so it's remembered only if none did.
       const session = await this.sessions.keep(tokenDigest, () =>
         this.store.startLinkedSession(userId, sortableId(), tokenDigest, client, new Date().toISOString(), linkedAccountOf(issuer, member), kept),
