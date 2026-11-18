@@ -380,8 +380,12 @@ export class ChatRoom extends DurableObject<Env> {
   private readonly calling = new Set<string>();
   /** How many jobs each bot is typing for, by its id and the thread it's typing in, if it's in one. */
   private readonly typists = new Map<string, number>();
-  /** What each bot that's typing is doing meanwhile, as `typists` names them, if it's more than writing: the call of one of its tools it's making. */
-  private readonly doings = new Map<string, string>();
+  /**
+   * What each bot that's typing is doing meanwhile, as `typists` names them, if it's more than writing:
+   * the calls of its tools it's making, for each of its answers there, in the order they began, the room
+   * told of the latest.
+   */
+  private readonly doings = new Map<string, string[]>();
   /**
    * Who has read the room since its latest message, as far as this object has seen. Only a new message
    * in the room marks it unread, so until one comes another read of theirs would change nothing, and
@@ -2184,11 +2188,8 @@ export class ChatRoom extends DurableObject<Env> {
     } finally {
       clearInterval(again);
       const jobs = this.typists.get(typist)! - 1;
-      if (jobs > 0) this.typists.set(typist, jobs);
-      else {
-        this.typists.delete(typist);
-        this.doings.delete(typist);
-      }
+      if (jobs === 0) this.typists.delete(typist);
+      else this.typists.set(typist, jobs);
       this.sayTyping(bot, threadId);
     }
   }
@@ -2196,16 +2197,20 @@ export class ChatRoom extends DurableObject<Env> {
   /**
    * Runs `work`, a call of one of the tools of `bot`, which is typing as it answers in thread `threadId`,
    * if there is one, else in the room: the room hears, beside its typing, that it's `doing` it, until
-   * it's done, and then that it's only typing again, while it still is.
+   * it's done, and then what a call it's making for another answer there is doing, if one still runs, or
+   * that it's only typing again, while it still is.
    */
   private async doingWhile<T>(bot: User, threadId: string | undefined, doing: string, work: () => Promise<T>): Promise<T> {
     const typist = typistOf(bot, threadId);
-    this.doings.set(typist, doing);
+    this.doings.set(typist, [...(this.doings.get(typist) ?? []), doing]);
     this.sayTyping(bot, threadId);
     try {
       return await work();
     } finally {
-      if (this.doings.get(typist) === doing) this.doings.delete(typist);
+      const doings = this.doings.get(typist)!;
+      const left = doings.toSpliced(doings.lastIndexOf(doing), 1);
+      if (left.length === 0) this.doings.delete(typist);
+      else this.doings.set(typist, left);
       this.sayTyping(bot, threadId);
     }
   }
@@ -2214,7 +2219,7 @@ export class ChatRoom extends DurableObject<Env> {
   private sayTyping(bot: User, threadId: string | undefined): void {
     const typist = typistOf(bot, threadId);
     const typing = this.typists.has(typist);
-    const doing = typing ? this.doings.get(typist) : undefined;
+    const doing = typing ? this.doings.get(typist)?.at(-1) : undefined;
     this.broadcast({ type: "typing", user: bot, typing, ...(threadId !== undefined && { threadId }), ...(doing !== undefined && { doing }) });
   }
 

@@ -622,6 +622,30 @@ describe("A call of a tool an administrator always allows an agent", () => {
     expect(inGeneral.log.flatMap((frame) => (frame.type === "typing" ? [frame.threadId] : []))).not.toContain(undefined);
   });
 
+  it("is said for as long as it runs, while a call another answer makes there starts and ends meanwhile", async () => {
+    const { inGeneral, ada } = await setUp();
+    await pick(ada, ["create_issue", "search_issues"], { always: ["create_issue", "search_issues"] });
+    // The first question's call is held, by polling, until the test lets it go on.
+    let [creating, goOn] = [false, false];
+    server.result = async ({ params }) => {
+      if (params?.name !== "create_issue") return { content: [{ type: "text", text: "Found none." }] };
+      creating = true;
+      while (!goOn) await sleep(10);
+      return { content: [{ type: "text", text: "Opened #12." }] };
+    };
+    script = [CALL, SEARCH, { text: "There are none." }, { text: "I opened #12 for it." }];
+    const mention = `<action-text-attachment sgid="${mentionSgid(EMBER.id)}" content-type="${MENTION_CONTENT_TYPE}"></action-text-attachment>`;
+
+    await post(inGeneral, `<p>${mention} open an issue for the login bug</p>`);
+    await vi.waitFor(() => expect(creating).toBe(true));
+    expect((await ask(inGeneral, "is there an issue for logout?")).plainText).toBe("There are none.");
+    // The second answer's call is done, and the first's, which still runs, is said again.
+    expect(doing(inGeneral).at(-1)).toBe("is using Tracker: create_issue");
+    goOn = true;
+    expect((await fromEmber(inGeneral)).plainText).toBe("I opened #12 for it.");
+    expect(await doneDoing(inGeneral)).toEqual(["is typing", "is using Tracker: create_issue", "is using Tracker: search_issues", "is using Tracker: create_issue", "is typing", "stopped"]);
+  });
+
   it("is of that tool alone: another the agent has still asks first, and so does that one once the administrator takes it back", async () => {
     const { general, inGeneral, ada } = await setUp();
     await pick(ada, ["create_issue", "search_issues"], { always: ["create_issue"] });
