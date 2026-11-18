@@ -261,6 +261,8 @@ export interface HuddleAttachment {
   screens?: Connections;
   /** How often the tab has invited people into the huddle in the minute that started at `since`, once it has. */
   inviting?: Tally;
+  /** Set once the tab has invited someone who isn't in the huddle into it. */
+  invited?: true;
   /** How many reactions of the tab's the room has told the huddle of in the ten seconds that started at `since`, once it has told of one. */
   reacting?: Tally;
   /** Set once the room has closed the socket itself, having told the others whatever they're to hear of it. */
@@ -424,7 +426,8 @@ export class Huddle {
     const first = members[0]?.attachment;
     if (!first) return null;
     const { roomId, startedAt, messageId } = first;
-    return { roomId, startedAt, people: members.map(({ attachment }) => attachment.user), ...(messageId !== undefined && { messageId }) };
+    const invited = members.some(({ attachment }) => attachment.invited === true);
+    return { roomId, startedAt, people: members.map(({ attachment }) => attachment.user), ...(messageId !== undefined && { messageId }), ...(invited && { invited }) };
   }
 
   /**
@@ -661,7 +664,9 @@ export class Huddle {
    * Workspace tells those of them who are in the room, on every tab they have open, and the room pushes
    * the invitation to whoever the Workspace finds with Ember in view nowhere, without the tab waiting
    * on it. A tab that has invited people as often as one may in a minute hears that nobody more is, and
-   * so does one whose invitation the Workspace couldn't be given.
+   * so does one whose invitation the Workspace couldn't be given. The room's message of the huddle is
+   * theirs to come back to, should they not join, so the room keeps that someone was invited before
+   * anyone is, and whoever invites them can leave at once (./message.ts).
    */
   private async invite(ws: WebSocket, userIds: UserId[]): Promise<void> {
     const inviting = oneMore(attachmentOf(ws).inviting, Date.now(), MINUTE_MS, INVITES_A_MINUTE);
@@ -670,6 +675,8 @@ export class Huddle {
     const inIt = new Set(this.members().map(({ attachment }) => attachment.user.id));
     const invited = userIds.filter((userId) => !inIt.has(userId));
     if (invited.length === 0) return;
+    change(ws, (attachment) => ({ ...attachment, invited: true }));
+    this.ctx.waitUntil(this.changed(this.now()));
     try {
       const pushes = await workspace(this.env).inviteToHuddle(roomId, user.id, invited);
       // A Workspace still on the code from before it answered pushes, as it may be for some minutes after an update, answers nothing.

@@ -414,7 +414,10 @@ Objects, D1 or speed call for something else.
   again brings the message in step with it too, which makes up for a write that failed, and for an
   object that came back with nobody left in its huddle. A row still unwritten as its huddle ends is
   written then, saying that it's over, and one deleted before the room heard that it was written
-  stays deleted.
+  stays deleted. A huddle that nobody joined leaves no row: once it's over, the room deletes the row
+  as it deletes any message's, and forgets what it kept of the huddle. Unless someone was invited
+  into the huddle, which the room keeps with the rest once anyone is, or the row has a reply in its
+  thread or a reaction: then it says that the huddle is over, as any other's does.
 - **The huddles that are over are rows of the Workspace's.** The Huddles page lists the latest
   huddles that are over in all of someone's rooms, as Slack's lists its recent huddles, which no
   room's object can answer for the others, so the Workspace keeps a row for each in `past_huddles`

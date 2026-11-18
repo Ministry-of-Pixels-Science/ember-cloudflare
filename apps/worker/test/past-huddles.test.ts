@@ -8,8 +8,8 @@ import { MIGRATIONS } from "../src/migrations";
 import type { HuddleChange } from "../src/room-log";
 import { MessageStore } from "../src/store";
 import { Workspace } from "../src/workspace";
-import { alarmOf, huddlesOn, kept, welcomed, type HuddleSocket } from "./huddle-support";
-import { api, connect, createRoom, freshDeploy, freshRoom, openWorkspaceSocket, post, roomSql, roomStub, signIn, workspaceSql, workspaceStub, type Session, type Socket, type WorkspaceSocket } from "./support";
+import { alarmOf, huddlesOn, kept, reached, welcomed, type HuddleSocket } from "./huddle-support";
+import { api, connect, createRoom, direct, freshDeploy, freshRoom, openWorkspaceSocket, post, roomSql, roomStub, signIn, workspaceSql, workspaceStub, type Session, type Socket, type WorkspaceSocket } from "./support";
 
 // The huddles that are over, as the Huddles page lists them (`GET /api/huddles`): each room sends the
 // Workspace its huddles' messages as they come to say their huddles are over, and as their threads gain
@@ -184,9 +184,16 @@ describe("The huddles that are over", () => {
 
   it("leave out one nobody else joined, as Slack's do, but for as long as its thread has a reply", async () => {
     const { ada } = await huddlesOn();
-    const room = await freshRoom("solo");
+    const grace = await signIn("Grace");
+    const room = (await direct(ada, grace)).id;
     const tab = await connect(room, ada);
-    const over = await held(room, tab, ada);
+    // Its message stays in the room for Grace, whom Ada invites as a direct message's huddle does, and who doesn't join.
+    const adas = await welcomed(room, ada);
+    const message = await huddleMessage(tab);
+    adas.send({ type: "huddle.invite", userIds: [grace.user.id] });
+    await reached(adas);
+    await left(adas);
+    const over = await ended(tab, message);
     await taken(room);
     expect(await listFor(ada)).toEqual([]);
 
