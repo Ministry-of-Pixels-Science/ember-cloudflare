@@ -34,6 +34,7 @@ import {
   type Bot,
   type BotChanges,
   type BotSettings,
+  type ChangedBlocks,
   type CustomStyles,
   type DirectoryUser,
   type DirectRoom,
@@ -172,6 +173,7 @@ import {
   type Client,
   type Connecting,
   type AssistantPicks,
+  type DeletedAccount,
   type DirectoryEntry,
   type Disconnection,
   type InvitationPush,
@@ -1886,14 +1888,14 @@ export class Workspace extends DurableObject<Env> {
 
   /**
    * Invites into room `roomId`'s huddle the people `userIds` names, as the room says `by`, who's in it,
-   * does: each of them who's in the room, and hears its @mentions of them or more, is told on every tab
-   * they have open, where it rings. Nobody else is told, so nobody hears of a room they aren't in, and
-   * nothing is kept of an invitation. Whoever of them has Ember in view nowhere, with no tab open or
+   * does: each of them who's in the room, hears its @mentions of them or more and hasn't blocked `by` is
+   * told on every tab they have open, where it rings. Nobody else is told, so nobody hears of a room they
+   * aren't in, and nothing is kept of an invitation. Whoever of them has Ember in view nowhere, with no tab open or
    * none of them shown, is pushed it too, while Web Push is on: this answers their pushes, for the room
    * to send, none of them to a guest while `EMBER_GUEST_SIGN_IN` doesn't let guests stay signed in.
    */
   async inviteToHuddle(roomId: RoomId, by: UserId, userIds: UserId[]): Promise<InvitationPush[]> {
-    const invited = await this.store.huddleInvitees(roomId, userIds);
+    const invited = await this.store.huddleInvitees(roomId, by, userIds);
     this.tell(invited, { type: "huddle.invited", roomId, by });
     const away = invited.filter((userId) => !this.hasInView(userId));
     if (away.length === 0 || !(await webPush(this.env)).on) return [];
@@ -3185,10 +3187,10 @@ export class Workspace extends DurableObject<Env> {
   async sidebar(credentials: Credentials): Promise<Sidebar | null> {
     const user = await this.authenticate(credentials);
     if (!user) return null;
-    const [{ rooms, favorites, sharedOrder, huddles, huddleSounds, invitationRoomId }, account] = await Promise.all([this.store.roomsFor(user.id), this.joinableAccount()]);
+    const [{ rooms, favorites, sharedOrder, huddles, blocks, huddleSounds, invitationRoomId }, account] = await Promise.all([this.store.roomsFor(user.id), this.joinableAccount()]);
     const invited = invitationRoomId !== null && rooms.some((room) => room.id === invitationRoomId);
     const invitation = account && invited ? { roomId: invitationRoomId, joinCode: account.joinCode } : null;
-    return { rooms, favorites, sharedOrder, invitation, huddles, ...(!hearsAllHuddleSounds(huddleSounds) && { huddleSounds }) };
+    return { rooms, favorites, sharedOrder, invitation, huddles, blocks, ...(!hearsAllHuddleSounds(huddleSounds) && { huddleSounds }) };
   }
 
   /**
@@ -3288,6 +3290,47 @@ export class Workspace extends DurableObject<Env> {
     this.tell([userId], { type: "favorites.changed", favorites });
   }
 
+  /**
+   * Has the person `credentials` signs in block whoever has id `userId`, as Block on their page and in
+   * their messages' More actions does: "not found" unless somebody they're told of has it, "yourself" for
+   * their own, or null without a valid session. From then on what the person blocked posts collapses for
+   * them, and doesn't mark their rooms unread, push to them or ring them, and the person blocked can't
+   * start a DM with them, though nothing tells them so. Their DM with them alone leaves their sidebar.
+   * Every tab of theirs hears whom they've blocked now, and the DM's level, when blocking hid it.
+   */
+  async block(credentials: Credentials, userId: UserId): Promise<ChangedBlocks | "not found" | "yourself" | null> {
+    const user = await this.authenticate(credentials);
+    if (!user) return null;
+    if (userId === user.id) return "yourself";
+    if (!(await this.isListedTo(userId, user.id))) return "not found";
+    return this.blocksChanged(user.id, await this.store.block(user.id, userId, new Date().toISOString()));
+  }
+
+  /**
+   * Has the person `credentials` signs in unblock whoever has id `userId`, as Unblock on their page and in
+   * Blocked people on their profile does, giving their DM with them alone the level it had before
+   * blocking hid it, or null without a valid session. Every tab of theirs hears whom they've blocked now,
+   * and the DM's level, when unblocking showed it again. Unblocking someone not blocked changes nothing.
+   */
+  async unblock(credentials: Credentials, userId: UserId): Promise<ChangedBlocks | null> {
+    const user = await this.authenticate(credentials);
+    if (!user) return null;
+    return this.blocksChanged(user.id, await this.store.unblock(user.id, userId));
+  }
+
+  /** Tells every tab of `userId`'s what `change` leaves: their level in the DM it hid or showed again, then whom they've blocked. */
+  private blocksChanged(userId: UserId, change: ChangedBlocks): ChangedBlocks {
+    if (change.direct) this.tell([userId], { type: "room.involvement", roomId: change.direct.roomId, involvement: change.direct.involvement });
+    this.tell([userId], { type: "blocks.changed", blocks: change.blocks });
+    return change;
+  }
+
+  /** Whether somebody has id `userId` whom `askerId` is told of: anyone but an AI agent only administrators' direct messages reach, unless they're one. */
+  private async isListedTo(userId: UserId, askerId: UserId): Promise<boolean> {
+    const [entry] = await this.store.directoryEntries([userId]);
+    return entry !== undefined && (entry.keptFor !== "admin-dms" || (await this.store.isAdministrator(askerId)));
+  }
+
   /** Sends `frame` on the workspace sockets of each of `userIds`, every tab of theirs, and nobody else's. */
   private tell(userIds: Iterable<UserId>, frame: WorkspaceServerFrame): void {
     const data = JSON.stringify(frame);
@@ -3356,17 +3399,18 @@ export class Workspace extends DurableObject<Env> {
    * who exist, whatever their status, or their DM with themselves when it names nobody else. An AI agent
    * kept for administrators counts as nobody to anyone else, and one only their direct messages reach to
    * an administrator who names with it anyone who isn't one, a member or a bot, who would read what it
-   * says (`DIRECT_PEOPLE`). A group of people has one DM, so the one they have opens again. Answers it,
-   * and whether it's new, or null without a valid session. Everyone in a new DM sees it in their sidebars
-   * at once, and nobody else hears of it.
+   * says (`DIRECT_PEOPLE`). A group of people has one DM, so the one they have opens again, but a new one
+   * is refused when someone it names has blocked them, answering the name of the first of those by name.
+   * Answers the DM, and whether it's new, or null without a valid session. Everyone in a new DM sees it in
+   * their sidebars at once, and nobody else hears of it.
    */
-  async startDirect(credentials: Credentials, userIds: UserId[]): Promise<{ room: DirectRoom; started: boolean } | null> {
+  async startDirect(credentials: Credentials, userIds: UserId[]): Promise<{ room: DirectRoom; started: boolean } | { refusedBy: string } | null> {
     const user = await this.authenticate(credentials);
     if (!user) return null;
     const people = userIds.length > 0 ? await this.store.directPeople(userIds, user.id) : [];
     const memberIds = [user.id, ...people.map((person) => person.id)];
     const direct = await this.store.startDirect(sortableId(), user.id, memberIds, new Date().toISOString());
-    if (direct.started) this.tell(direct.room.members.map((member) => member.id), { type: "room.saved", room: direct.room });
+    if ("room" in direct && direct.started) this.tell(direct.room.members.map((member) => member.id), { type: "room.saved", room: direct.room });
     return direct;
   }
 
@@ -3542,7 +3586,8 @@ export class Workspace extends DurableObject<Env> {
    * (`deactivate`), and their name, email address, password, bio and avatar go, as do the rooms they
    * starred and the accounts elsewhere they connected. Their row stays, named as deleted accounts are,
    * since their DMs name them. The outbox has every room they can have written in delete their messages
-   * and boosts, and R2 their avatar. Everyone's workspace sockets hear of it.
+   * and boosts, and R2 their avatar. Everyone's workspace sockets hear of it, and the tabs of whoever had
+   * blocked them whom they've blocked now.
    */
   async deleteAccount(
     credentials: Credentials,
@@ -3566,18 +3611,19 @@ export class Workspace extends DurableObject<Env> {
         if (tooSoon) return tooSoon;
         const deletedAt = new Date(now).toISOString();
         // As when removing someone, until the database says it queued nothing.
-        let queued = true;
+        let deletion: DeletedAccount = { queued: true, blockers: [] };
         try {
-          queued = await this.sessions.change(
+          deletion = await this.sessions.change(
             (session) => session.user.id === person.id,
             () => this.store.deleteAccount(person.id, person.avatar?.key ?? null, CloseCode.Revoked, now, deletedAt),
           );
         } finally {
           this.closeSockets(person.id, CloseCode.Revoked);
-          if (queued) await this.revocationsQueued(now);
+          if (deletion.queued) await this.revocationsQueued(now);
           else if (person.avatar) await this.wakeAt(now);
         }
         if (person.accounts.length > 0) await this.forgetUnlinked();
+        for (const { userId, blocks } of deletion.blockers) this.tell([userId], { type: "blocks.changed", blocks });
         const deleted = { id: person.id, name: DELETED_PERSON_NAME, bio: null, role: "member", status: "deactivated", updatedAt: deletedAt, agent: false, keptFor: null } as const;
         this.broadcast({ type: "user.updated", user: await this.directoryUser(deleted) });
         return "deleted";

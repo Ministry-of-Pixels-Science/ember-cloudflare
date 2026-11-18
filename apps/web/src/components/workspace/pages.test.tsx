@@ -15,6 +15,7 @@ const ANSWERS: Record<string, () => Response> = {
       sharedOrder: [],
       invitation: null,
       huddles: {},
+      blocks: { userIds: [], version: 0 },
     }),
   "GET /api/users": () => Response.json({ users: [] }),
   "GET /api/searches?q=": () => Response.json({ search: null, matches: [], next: null, rooms: [], recent: [] }),

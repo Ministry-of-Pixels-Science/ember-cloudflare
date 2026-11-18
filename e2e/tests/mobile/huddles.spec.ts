@@ -52,7 +52,7 @@ async function openDirectWithHuddlesOn(page: Page, request: APIRequestContext, r
     { ...direct, unread: false, involvement: "everything" },
   ];
   await page.route("**/api/sidebar", (route) =>
-    route.fulfill({ json: { rooms, favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: huddle ? { [direct.id]: huddle } : {} } satisfies Sidebar }),
+    route.fulfill({ json: { rooms, favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: huddle ? { [direct.id]: huddle } : {}, blocks: { userIds: [], version: 0 } } satisfies Sidebar }),
   );
   await changeTheWorkspace(page, (account) => ({ ...account, huddles: true }), listing([room.id]));
   await page.goto(`/rooms/${direct.id}`);
@@ -336,7 +336,7 @@ test("more invitations than the phone is tall enough for are a scroll away, unde
   const names = Array.from({ length: 8 }, (_, index) => `Launch ${index + 1}`);
   const others = names.map((name, index): SidebarRoom => ({ id: `invited-${index + 1}`, name, kind: "open", icon: null, unread: false, involvement: "mentions" }));
   const rooms: SidebarRoom[] = [{ ...room, kind: "open", icon: null, unread: false, involvement: "mentions" }, ...others];
-  await page.route("**/api/sidebar", (route) => route.fulfill({ json: { rooms, favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: {} } satisfies Sidebar }));
+  await page.route("**/api/sidebar", (route) => route.fulfill({ json: { rooms, favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: {}, blocks: { userIds: [], version: 0 } } satisfies Sidebar }));
   const tell = await changeTheWorkspace(page, (account) => ({ ...account, huddles: true }), listing([room.id]));
   await openRoom(page, room);
   for (const { id } of [...others, room]) tell({ type: "huddle.invited", roomId: id, by: grace.id });

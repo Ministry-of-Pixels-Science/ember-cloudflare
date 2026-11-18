@@ -1,5 +1,6 @@
 import {
   startingInvolvement,
+  type Blocks,
   type Favorites,
   type HuddleSounds,
   type Involvement,
@@ -132,8 +133,9 @@ function withHuddle(huddles: Sidebar["huddles"], roomId: RoomId, huddle: LiveHud
  * saved, here or anywhere else, one that's gone for this person, deleted or no longer theirs, a room the
  * workspace socket says has been marked unread or read, a DM it says a message has come in, a room
  * whose huddle it says someone joined or left, a room's level, as one saved in any of their tabs leaves
- * it, their stars, as a star saved in any of their tabs leaves them, or the shared order, as saving it
- * here leaves their rooms in it.
+ * it, their stars, as a star saved in any of their tabs leaves them, the shared order, as saving it
+ * here leaves their rooms in it, or whom they've blocked, as blocking or unblocking someone in any of
+ * their tabs leaves them.
  */
 export type RoomChange =
   | { type: "saved"; room: Room }
@@ -143,7 +145,8 @@ export type RoomChange =
   | { type: "huddle"; roomId: RoomId; huddle: LiveHuddle | null }
   | { type: "involved"; roomId: RoomId; involvement: Involvement }
   | { type: "starred"; favorites: Favorites }
-  | { type: "reordered"; sharedOrder: RoomId[] };
+  | { type: "reordered"; sharedOrder: RoomId[] }
+  | { type: "blocked"; blocks: Blocks };
 
 /** What the server answers a change to a room with: the room as saved, gone for this person, or their level in it. */
 export type RoomAnswer = Extract<RoomChange, { type: "saved" | "gone" | "involved" }>;
@@ -169,6 +172,9 @@ export interface RoomListState {
 }
 
 export const NO_ROOM_LIST: RoomListState = { list: null, pending: [], askAgain: false };
+
+/** The list when the first doesn't arrive: no rooms, stars or blocks. */
+const NO_SIDEBAR: Sidebar = { rooms: [], favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: {}, blocks: { userIds: [], version: 0 } };
 
 /** A change, or the list asked for, arriving, or failing to. */
 export type RoomListAction = SidebarChange | { type: "asked" } | { type: "loaded"; list: Sidebar } | { type: "unanswered" };
@@ -209,6 +215,9 @@ function changed(list: Sidebar, change: SidebarChange): Sidebar {
       return change.favorites.version > list.favorites.version ? { ...list, favorites: change.favorites } : list;
     case "reordered":
       return { ...list, sharedOrder: change.sharedOrder };
+    // As stars do, blocks come from a block's answer, the socket and the list itself, so the newest stands.
+    case "blocked":
+      return change.blocks.version > list.blocks.version ? { ...list, blocks: change.blocks } : list;
   }
 }
 
@@ -238,7 +247,7 @@ export function roomListReducer(state: RoomListState, action: RoomListAction): R
     }
     // When the first list fails to arrive, there are no rooms to show, rather than a list loading for good.
     case "unanswered":
-      return { list: state.list ?? { rooms: [], favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: {} }, pending: null, askAgain: false };
+      return { list: state.list ?? NO_SIDEBAR, pending: null, askAgain: false };
     default:
       return { ...state, list: state.list && changed(state.list, action), pending: state.pending && [...state.pending, action] };
   }

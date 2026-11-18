@@ -33,6 +33,7 @@ import { pushEndpoint } from "@/lib/push";
 import type { RoomAnswer } from "@/lib/room-list";
 import { cn } from "@/lib/utils";
 import { AnswerLevels } from "./answer-levels";
+import { BlockedPeople } from "./blocked-people";
 import { ConversationNotifications } from "./conversation-notifications";
 import { DeleteAccount } from "./delete-account";
 import { HuddleSoundSwitches } from "./huddle-sound-switches";
@@ -411,6 +412,7 @@ export function ProfilePage({ me, rooms, askForRoom, huddleSounds, askForHuddleS
         {outsideAi && <YourOutsideAi connections={outsideAi} onChanged={setOutsideAi} onFailed={onFailed} />}
         {huddleSounds && <HuddleSoundSwitches sounds={huddleSounds} askForSounds={askForHuddleSounds} onFailed={onFailed} />}
         {rooms && <ConversationNotifications me={me} rooms={rooms} askForRoom={askForRoom} onFailed={onFailed} />}
+        <BlockedPeople />
         {transferId && <SignInLink transferId={transferId} mine />}
         {fields && <DeleteAccount name={savedName} hasPassword={hasPassword} onDelete={onDeleteAccount} onFailed={onFailed} />}
       </Panel>

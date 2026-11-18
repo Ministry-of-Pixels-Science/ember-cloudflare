@@ -21,6 +21,7 @@ import {
   type BotChanges,
   type Bots,
   type BotSettings,
+  type ChangedBlocks,
   type ChangedPerson,
   type CustomDomainCheck,
   type CustomDomainLookup,
@@ -942,6 +943,14 @@ export async function banPerson(userId: UserId): Promise<DirectoryUser> {
 /** Lifts someone's ban, making them active, and answers them as `banPerson` does. */
 export async function unbanPerson(userId: UserId): Promise<DirectoryUser> {
   return (await request<ChangedPerson>(`/api/users/${encodeURIComponent(userId)}/ban`, { method: "DELETE" })).user;
+}
+
+/**
+ * Blocks someone, or unblocks them once `blocked` is false, answering whom you've blocked now and your
+ * level in your DM with them alone, when that hid it or showed it again.
+ */
+export async function changeBlock(userId: UserId, blocked: boolean): Promise<ChangedBlocks> {
+  return request<ChangedBlocks>(`/api/users/${encodeURIComponent(userId)}/block`, { method: blocked ? "POST" : "DELETE" });
 }
 
 /** A copy of someone's sidebar, and the ETag the server sent it with. */

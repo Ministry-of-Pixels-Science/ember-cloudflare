@@ -60,7 +60,7 @@ test.describe("Levels on your profile", () => {
       },
     ];
     await page.route("**/api/sidebar", (route) =>
-      route.fulfill({ json: { rooms, favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: {} } satisfies Sidebar }),
+      route.fulfill({ json: { rooms, favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: {}, blocks: { userIds: [], version: 0 } } satisfies Sidebar }),
     );
     await page.goto("/users/me/profile");
     const list = page.getByRole("list", { name: "Conversation notifications" });
