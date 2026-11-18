@@ -169,6 +169,7 @@ export type AddPreview = (preview: LinkPreview) => void;
 
 /** The preview asked for of a pasted link: the link, and how to stop asking for it. */
 interface Asking {
+  /** The link's address, as `linkedUrls` finds it in what's written. */
   url: string;
   request: AbortController;
   preview: Promise<LinkPreview | null>;
@@ -180,7 +181,7 @@ interface Asking {
 interface DraftPreviews {
   /** The preview asked for of the link pasted last. */
   asking: Asking | null;
-  /** The links whose previews it has asked for. */
+  /** The links whose previews it has asked for, as `linkedUrls` finds them. */
   asked: Set<string>;
   /** Whether it has added a preview, so that one taken out of what's written stays out. */
   added: boolean;
@@ -192,9 +193,10 @@ const noPreviews = (): DraftPreviews => ({ asking: null, asked: new Set(), added
  * A link pasted in the composer gets the preview of the page it goes to below its paragraph, when the
  * page has one, unless another link is pasted first, or the editor it was pasted in goes: with the
  * composer, or as the editor opens again, which `opening` counts. Previews that can't be had are left
- * out without a word. As Slack adds a link's preview a moment after its message, a preview still on its
- * way as the message goes is added to the message once it comes, or else that of its first link typed
- * rather than pasted, unless a preview was added to what was written, or taken out of it.
+ * out without a word. As Slack adds a link's preview a moment after its message, the preview of a pasted
+ * link still on its way as the message goes is added to the message once it comes, if the link went
+ * with it as pasted, or else that of its first link whose preview wasn't asked for, as one typed rather
+ * than pasted, unless a preview was added to what was written, or taken out of it.
  */
 function useLinkPreviews(opening: number) {
   const draft = useRef(noPreviews());
@@ -210,9 +212,9 @@ function useLinkPreviews(opening: number) {
     const previews = draft.current;
     previews.asking?.request.abort();
     const request = new AbortController();
-    const asking: Asking = { url, request, preview: fetchLinkPreview(url, request.signal).catch(() => null) };
+    const asking: Asking = { url: linkedUrls(url)[0] ?? url, request, preview: fetchLinkPreview(url, request.signal).catch(() => null) };
     previews.asking = asking;
-    previews.asked.add(url);
+    previews.asked.add(asking.url);
     const preview = await asking.preview;
     if (!preview || request.signal.aborted || asking.sent) return;
     previews.added = true;
@@ -224,20 +226,21 @@ function useLinkPreviews(opening: number) {
   const sent = (body: string, addPreview: AddPreview) => {
     const { asking, asked, added } = draft.current;
     draft.current = noPreviews();
-    const text = added || hasPreview(body) ? null : writtenBody(body).plainText;
-    if (asking && text?.includes(asking.url)) asking.sent = true;
+    // Whole addresses, so that a link changed after it was pasted doesn't take the preview of the one pasted.
+    const links = added || hasPreview(body) ? null : linkedUrls(writtenBody(body).plainText);
+    if (asking && links?.includes(asking.url)) asking.sent = true;
     else asking?.request.abort();
-    if (text === null) return;
+    if (!links) return;
     const pastedPreview = asking?.sent ? asking.preview : Promise.resolve(null);
-    void pastedPreview.then((found) => found ?? typedLinkPreview(text, asked)).then((found) => found && addPreview(found));
+    void pastedPreview.then((found) => found ?? typedLinkPreview(links, asked)).then((found) => found && addPreview(found));
   };
 
   return { pasted, sent };
 }
 
-/** The preview of the first link to a web page in the plain text `text` whose preview wasn't `asked` for as it was pasted. */
-async function typedLinkPreview(text: string, asked: Set<string>): Promise<LinkPreview | null> {
-  const typed = linkedUrls(text).find((url) => /^https?:\/\//i.test(url) && !asked.has(url));
+/** The preview of the first of a message's `links` to a web page whose preview wasn't `asked` for as it was pasted. */
+async function typedLinkPreview(links: string[], asked: Set<string>): Promise<LinkPreview | null> {
+  const typed = links.find((url) => /^https?:\/\//i.test(url) && !asked.has(url));
   return typed === undefined ? null : fetchLinkPreview(typed).catch(() => null);
 }
 

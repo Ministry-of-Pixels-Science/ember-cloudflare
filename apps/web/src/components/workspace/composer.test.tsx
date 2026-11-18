@@ -1095,6 +1095,23 @@ describe("Link previews while writing", () => {
       expect(addPreview).not.toHaveBeenCalled();
     });
 
+    it("asks for a pasted link changed before the message went as it went, rather than add the pasted one's preview", async () => {
+      let answerPasted!: () => void;
+      const pastedAnswered = new Promise<void>((resolve) => (answerPasted = resolve));
+      const fetch = previews(async (url) => {
+        if (url.endsWith("/story")) await pastedAnswered;
+        return Response.json({ ...basecamp, title: url });
+      });
+      const { addPreview, input, user } = await showComposer();
+      await user.paste("https://example.com/story");
+      await user.type(input, "/other{Enter}");
+      await vi.waitFor(() => expect(addPreview).toHaveBeenCalledExactlyOnceWith({ ...basecamp, title: "https://example.com/story/other" }));
+      expect(fetch.mock.calls[0]![1].signal!.aborted).toBe(true);
+
+      await act(async () => answerPasted());
+      expect(addPreview).toHaveBeenCalledOnce();
+    });
+
     it("asks once for a pasted link's page that has none, then for a link typed after it, and forgets a preview whose link has gone", async () => {
       const answers: Record<string, Response> = { "https://example.com/none": new Response(null, { status: 204 }), "https://example.com/some": Response.json(basecamp) };
       const fetch = previews((url) => answers[url]!);
