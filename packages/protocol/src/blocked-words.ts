@@ -36,8 +36,14 @@ const INVISIBLE = /\p{Cf}/gu;
  */
 const OWN_WORD = String.raw`[\p{Extended_Pictographic}\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]`;
 
-/** A word: one of those, with any marks it takes, or else a run of letters, numbers and marks. */
-const WORD = new RegExp(String.raw`${OWN_WORD}\p{M}*|(?:(?!${OWN_WORD})[\p{L}\p{N}\p{M}])+`, "gu");
+/**
+ * A flag, which two regional indicators draw, read two at a time from the first, as they're drawn, or
+ * one left over, which shows as its letter in a box. Unicode counts them as neither letters nor pictographs.
+ */
+const FLAG = String.raw`\p{Regional_Indicator}{1,2}`;
+
+/** A word: a flag, or one of those, with any marks it takes, or else a run of letters, numbers and marks. */
+const WORD = new RegExp(String.raw`(?:${FLAG}|${OWN_WORD})\p{M}*|(?:(?!${OWN_WORD})[\p{L}\p{N}\p{M}])+`, "gu");
 
 /**
  * The words of `text` as blocked words match them: lowercased, a final sigma read as any sigma and ß as
@@ -95,8 +101,8 @@ export function parseBlockedWords(value: unknown): string[] | { error: string } 
 /** Whether a text has a blocked word or phrase in it. */
 export type BlockedWordsCheck = (text: string) => boolean;
 
-/** Whether a word, as `wordsOf` reads it, is an emoji. */
-const isEmoji = (word: string) => /^\p{Extended_Pictographic}/u.test(word);
+/** Whether a word, as `wordsOf` reads it, is an emoji or a flag. */
+const isEmoji = (word: string) => /^[\p{Extended_Pictographic}\p{Regional_Indicator}]/u.test(word);
 
 /**
  * What checks a text for the words and phrases `blocked` lists, which it finds whole, in order, as

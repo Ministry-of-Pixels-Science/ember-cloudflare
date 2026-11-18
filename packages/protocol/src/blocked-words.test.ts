@@ -34,8 +34,10 @@ describe("wordsOf", () => {
     expect(wordsOf("ﾊﾞｶ")).toEqual(wordsOf("バカ"));
   });
 
-  it("reads each emoji, and each character of a script written without spaces, as a word", () => {
+  it("reads each emoji, a flag too, and each character of a script written without spaces, as a word", () => {
     expect(wordsOf("🖕🏻🖕 ❤️")).toEqual(["🖕", "🖕", "❤"]);
+    // A flag is two regional indicators, read two at a time, as they're drawn; one left over is a letter in a box.
+    expect(wordsOf("🇧🇧 go🇺🇸🇬🇧 🇦")).toEqual(["🇧🇧", "go", "🇺🇸", "🇬🇧", "🇦"]);
     expect(wordsOf("你是笨蛋吗")).toEqual(["你", "是", "笨", "蛋", "吗"]);
   });
 });
@@ -56,10 +58,17 @@ describe("blockedWordsCheck", () => {
   });
 
   it("finds a phrase's words with emoji between them, and a phrase with an emoji in it as it's written", () => {
-    for (const text of ["darn 🖕 it", "darn🔥🔥it", "Darn ©️ it!"]) expect(blocks(text)).toBe(true);
+    for (const text of ["darn 🖕 it", "darn🔥🔥it", "Darn ©️ it!", "darn 🇺🇸 it"]) expect(blocks(text)).toBe(true);
     const emojiPhrases = blockedWordsCheck(["🖕 you", "go 🔥"]);
     for (const text of ["🖕 you", "🖕🏻you", "let's go 🔥🔥"]) expect(emojiPhrases(text)).toBe(true);
     for (const text of ["🖕 😀 you", "go 😀 🔥", "go away 🔥"]) expect(emojiPhrases(text)).toBe(false);
+  });
+
+  it("finds a flag as it's drawn, and a phrase with one in it as it's written", () => {
+    const flags = blockedWordsCheck(["🇧🇧", "go 🇺🇸"]);
+    for (const text of ["Barbados 🇧🇧!", "🇬🇧🇧🇧", "let's go 🇺🇸🇺🇸"]) expect(flags(text)).toBe(true);
+    // 🇦🇧🇧🇩 draws A and B in boxes, then Bangladesh's flag, not Barbados's.
+    for (const text of ["🇦🇧🇧🇩", "let's go", "go 🇬🇧"]) expect(flags(text)).toBe(false);
   });
 
   it("finds an emoji, whatever its skin tone, and a word of a script written without spaces inside a sentence", () => {
@@ -97,6 +106,7 @@ describe("blockedWordsRefusal", () => {
 describe("parseBlockedWords", () => {
   it("keeps a list of text as Blocked words keeps it", () => {
     expect(parseBlockedWords([" fudge ", "darn  it", "FUDGE", ""])).toEqual(["fudge", "darn it"]);
+    expect(parseBlockedWords(["🇧🇧", "go", "go 🇧🇧"])).toEqual(["🇧🇧", "go", "go 🇧🇧"]);
     expect(parseBlockedWords([])).toEqual([]);
   });
 
