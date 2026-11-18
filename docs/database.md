@@ -377,6 +377,17 @@ Objects, D1 or speed call for something else.
   0036), so it stays dismissed on every device they sign in on, whatever their role later. The
   sidebar reads it in the statement that already reads the version of their stars, so it costs no
   statement more.
+- **Which huddle sounds someone hears are columns of the person.** `users.huddle_music`,
+  `huddle_chimes` and `huddle_ring` (workspace migration 0071) are each 1 until they turn that sound
+  off on their profile: a huddle's music, its sounds of someone joining and leaving, and an
+  invitation's ring. Kept with the person, as Slack keeps its preferences with the account, what
+  they choose holds on every device they sign in on, where a browser's storage would keep it for
+  that browser alone. The sidebar reads them in that same statement, so they cost no statement
+  more either, and says nothing of them while all three are on, which leaves the sidebar of
+  someone who has turned none off, and its ETag, as they were. One `UPDATE` changes the sounds a
+  switch names, keeps the rest, and returns all three, which the Workspace tells that person's
+  tabs, one change at a time, so that the last a tab hears of is the last kept. Deleting an account
+  puts all three back to 1, with the rest of the person's picks.
 - **Each group of people has one DM, found by its key.** Ember keeps each DM's members' ids, sorted,
   as a JSON array in `rooms.direct_key` (workspace migration 0016), under a unique index. Starting a
   DM is one batch: it adds the room unless the key has one (`ON CONFLICT DO NOTHING`), puts the

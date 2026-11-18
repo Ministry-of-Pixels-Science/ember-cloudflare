@@ -1,6 +1,7 @@
 import {
   startingInvolvement,
   type Favorites,
+  type HuddleSounds,
   type Involvement,
   type LiveHuddle,
   type Room,
@@ -9,6 +10,7 @@ import {
   type Sidebar,
   type SidebarRoom,
 } from "@ember/protocol";
+import { hearsAllHuddleSounds } from "@ember/protocol/huddles";
 import { isHidden } from "./involvement";
 
 // Someone's rooms keep the order `GET /api/sidebar` gives them, the order they were put in them, which
@@ -147,10 +149,11 @@ export type RoomChange =
 export type RoomAnswer = Extract<RoomChange, { type: "saved" | "gone" | "involved" }>;
 
 /**
- * A change to the list: to someone's rooms, or to the welcome card: the join link's new code, made here,
- * or the card dismissed, here or in another of their tabs.
+ * A change to the list: to someone's rooms, to the welcome card: the join link's new code, made here,
+ * or the card dismissed, here or in another of their tabs, or to which of a huddle's sounds they hear,
+ * as a switch on their profile leaves them, in any of their tabs.
  */
-export type SidebarChange = RoomChange | { type: "join code"; joinCode: string } | { type: "invitation dismissed" };
+export type SidebarChange = RoomChange | { type: "join code"; joinCode: string } | { type: "invitation dismissed" } | { type: "huddle sounds"; sounds: HuddleSounds };
 
 /**
  * Someone's rooms: the server's list, once it arrives, with the changes made since it was asked for,
@@ -169,6 +172,11 @@ export const NO_ROOM_LIST: RoomListState = { list: null, pending: [], askAgain: 
 
 /** A change, or the list asked for, arriving, or failing to. */
 export type RoomListAction = SidebarChange | { type: "asked" } | { type: "loaded"; list: Sidebar } | { type: "unanswered" };
+
+/** `list` with `sounds` as the ones of a huddle's its person hears, which it leaves out while they hear them all, as the server's does. */
+function withHuddleSounds({ huddleSounds: _, ...list }: Sidebar, sounds: HuddleSounds): Sidebar {
+  return hearsAllHuddleSounds(sounds) ? list : { ...list, huddleSounds: sounds };
+}
 
 function changed(list: Sidebar, change: SidebarChange): Sidebar {
   switch (change.type) {
@@ -193,6 +201,8 @@ function changed(list: Sidebar, change: SidebarChange): Sidebar {
       return { ...list, invitation: list.invitation && { ...list.invitation, joinCode: change.joinCode } };
     case "invitation dismissed":
       return { ...list, invitation: null };
+    case "huddle sounds":
+      return withHuddleSounds(list, change.sounds);
     // Stars come from a star's answer, the socket and the list itself, in whatever order they arrive,
     // so the newest stands.
     case "starred":

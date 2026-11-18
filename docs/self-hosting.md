@@ -1283,6 +1283,17 @@ you're the only one in it, quiet music plays on a loop, as Slack's does, from fi
 find yourself alone until someone joins you. The two sounds, and an invitation's ring, were written
 for Ember and the music was generated for it by Google's AI, so nothing is owed for playing them, and
 `apps/web/src/lib/huddle-sounds/` says where each came from and how to change them.
+
+Each person chooses which of these they hear, under **Huddle sounds** on their profile, where
+huddles are on: a switch for the music, "Play music when you're the only one in a huddle", one for
+the two sounds, "Play a sound when someone joins or leaves", and one for an invitation's ring, "Ring
+when someone invites you to a huddle". Each is on until they turn it off, and is saved as it's
+moved, with their account, as Slack keeps its preferences, so it holds wherever they're signed in,
+and their other tabs and devices go by it at once. So does the huddle they're in: the music stops
+as it's turned off, and turned on while they're alone, starts five seconds later. With the ring off
+an invitation still shows, without a sound, and still reaches them as a push notification where it
+would have.
+
 Ctrl+Alt+Shift+H (⌘⌥⇧H on a Mac) leaves the huddle you're in, or opens the preview for the room
 you're looking at, and Ctrl+Shift+Space (⌘⇧Space) mutes and unmutes. The arrow beside the headphones
 copies the huddle's link, which opens the room at the preview, or the huddle once you're in it. A
@@ -1323,13 +1334,13 @@ sidebar, when there's someone in it to huddle with, which a bot or an AI agent i
 can no longer sign in. Starting one there invites the others in it. Wherever they have Ember open,
 an invitation shows in the window's corner, under the header, whatever page they're on: who invites
 them, over Decline and Join. It rings for half a minute, in one of a browser's tabs at a time, and
-without a sound for someone who's in a huddle already. Join opens the huddle's preview, so nobody is
-in a huddle before they've said how they join it, and answering an invitation, either way, takes it
-down in their other tabs and on their other devices. Whoever started the huddle isn't told of a
-Decline. It stops ringing by itself once the huddle is over, or once they're in it. An invitation
-reaches the people in the direct message who hear its @mentions or more, so nobody who has turned
-its notifications off. Nothing is kept of an invitation, so a tab whose connection is down when one
-comes never shows it.
+without a sound for someone who's in a huddle already, or who has turned the ring off on their
+profile. Join opens the huddle's preview, so nobody is in a huddle before they've said how they join
+it, and answering an invitation, either way, takes it down in their other tabs and on their other
+devices. Whoever started the huddle isn't told of a Decline. It stops ringing by itself once the
+huddle is over, or once they're in it. An invitation reaches the people in the direct message who
+hear its @mentions or more, so nobody who has turned its notifications off. Nothing is kept of an
+invitation, so a tab whose connection is down when one comes never shows it.
 
 Anyone in a huddle can invite more of its room's people into it. Invite people, the first button
 along the huddle's base, or in the menu of More, the last before Leave, on a phone, lists the people

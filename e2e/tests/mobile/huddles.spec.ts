@@ -8,9 +8,10 @@ import { expect, hasDrawerLayout, openKeyboard, SWITCHES, test } from "./fixture
 // A huddle on a phone: its button in the header of a room or a DM, its message in the room, the preview
 // it starts from, the invitation into one, and the huddle the tab is in, opened and as its bar, which
 // switches between the phone's cameras, keeps its screen awake, invites people from the menu of its
-// More button, and has reactions and stickers; and the Huddles switch of a room's settings. The main
-// test server has no huddles, whose keys Cloudflare would be asked about, so these pages are told that
-// huddles are on, and the huddle a tab joins is the test's own, as is the message of one.
+// More button, and has reactions and stickers; the Huddles switch of a room's settings; and Huddle sounds
+// on someone's profile. The main test server has no huddles, whose keys Cloudflare would be asked about,
+// so these pages are told that huddles are on, and the huddle a tab joins is the test's own, as is the
+// message of one.
 
 /** A huddle's socket, for `page.routeWebSocket`. */
 const HUDDLE_SOCKET = /\/api\/rooms\/[^/]+\/huddle/;
@@ -869,4 +870,24 @@ test("a room's settings fit the phone with their Huddles switch, on and off, whe
   await expect(page.getByRole("switch")).toHaveCount(0);
   await none.scrollIntoViewIfNeeded();
   await screenIsFine();
+});
+
+test("Huddle sounds, on your profile, fit the phone with a switch for each of a huddle's sounds, which a tap turns off and saves", async ({ page, room, screenIsFine }) => {
+  await openRoomWithHuddlesOn(page, room);
+  await page.goto("/users/me/profile");
+  const sounds = page.getByRole("region", { name: "Huddle sounds", exact: true });
+  const switches = sounds.getByRole("switch");
+  await expect(switches).toHaveCount(3);
+  await sounds.scrollIntoViewIfNeeded();
+  for (const each of await switches.all()) await expect(each).toBeInViewport({ ratio: 1 });
+  await screenIsFine({ denseTargets: [SWITCHES] });
+
+  // Off, a switch stays where it was tapped to once Ember has saved it, and the others where they were.
+  const music = sounds.getByRole("switch", { name: "Play music when you're the only one in a huddle", exact: true });
+  const saved = page.waitForResponse((response) => response.request().method() === "PATCH" && new URL(response.url()).pathname === "/api/users/me/huddle-sounds");
+  await music.tap();
+  expect((await saved).status()).toBe(200);
+  await expect(music).not.toBeChecked();
+  expect(await switches.evaluateAll((all) => all.map((each) => each.getAttribute("aria-checked")))).toEqual(["false", "true", "true"]);
+  await screenIsFine({ denseTargets: [SWITCHES] });
 });

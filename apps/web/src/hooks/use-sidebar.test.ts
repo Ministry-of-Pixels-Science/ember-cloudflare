@@ -510,6 +510,56 @@ describe("Huddles in your rooms", () => {
   });
 });
 
+describe("Huddle sounds, which each person turns on or off for themselves", () => {
+  const EVERY_SOUND = { music: true, chimes: true, ring: true };
+  const NO_MUSIC = { ...EVERY_SOUND, music: false };
+  const NO_RING = { ...EVERY_SOUND, ring: false };
+
+  it("keeps which of a huddle's sounds Ada hears as the workspace socket says one of her tabs saved them, even over a list on its way", async () => {
+    server.change({ ...unstarred([design]), huddleSounds: NO_MUSIC });
+    const { result } = await showSidebar();
+    expect(result.current.list?.huddleSounds).toEqual(NO_MUSIC);
+    const release = holdAnswers();
+    socket().connect();
+    socket().receive({ type: "huddle.sounds", sounds: NO_RING });
+    expect(result.current.list?.huddleSounds).toEqual(NO_RING);
+    await release();
+    await settle();
+    expect(result.current.list?.huddleSounds).toEqual(NO_RING);
+
+    // Once she hears them all again, the list says nothing of them, as the server's doesn't.
+    socket().receive({ type: "huddle.sounds", sounds: EVERY_SOUND });
+    expect(result.current.list).not.toHaveProperty("huddleSounds");
+    expect(result.current.list?.rooms).toEqual([design]);
+  });
+
+  it("keeps the sounds the server answers a switch with, unless the workspace socket has said which she hears since", async () => {
+    const { result } = await showSidebar();
+    socket().connect();
+    await settle();
+
+    // Ada turns the music off, and her answer comes before the socket's word of it.
+    const saved = result.current.askForHuddleSounds();
+    act(() => saved(NO_MUSIC));
+    expect(result.current.list?.huddleSounds).toEqual(NO_MUSIC);
+    socket().receive({ type: "huddle.sounds", sounds: NO_MUSIC });
+    expect(result.current.list?.huddleSounds).toEqual(NO_MUSIC);
+
+    // She turns the ring off, and the socket brings that, then the music turned back on in another tab just after, before her answer.
+    const answered = result.current.askForHuddleSounds();
+    socket().receive({ type: "huddle.sounds", sounds: { ...NO_MUSIC, ring: false } });
+    socket().receive({ type: "huddle.sounds", sounds: NO_RING });
+    act(() => answered({ ...NO_MUSIC, ring: false }));
+    expect(result.current.list?.huddleSounds).toEqual(NO_RING);
+
+    // What the socket says of anything else leaves an answer to take its place.
+    const later = result.current.askForHuddleSounds();
+    socket().receive({ type: "room.unread", roomId: design.id, at: NOON });
+    act(() => later(EVERY_SOUND));
+    expect(result.current.list).not.toHaveProperty("huddleSounds");
+  });
+});
+
 describe("Make or revoke administrators", () => {
   /** Ada's sidebar, connected, telling `onSessionChanged` and the directory's `reload`, `update` and `remove`. */
   async function connected() {
