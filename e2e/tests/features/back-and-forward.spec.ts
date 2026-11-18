@@ -50,7 +50,7 @@ test.describe("Back and Forward", () => {
     await expect(forward).toBeDisabled();
   });
 
-  test("keep both through a reload, and Forward on the page Back loads afresh after one", async ({ members, rooms }) => {
+  test("keep both through a reload, and on the pages Back and Forward go to after one", async ({ members, rooms }) => {
     const ada = await members.signIn("Ada");
     const { back, forward } = arrows(ada.page);
     const heading = ada.page.getByRole("heading", { level: 1 });

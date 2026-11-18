@@ -171,7 +171,9 @@ window.addEventListener("popstate", (event) => {
   }
   proceeding = false;
   if (next !== null) position = next;
-  ahead = wentOnFrom(event.state);
+  // Going back leaves the page it went from ahead, which an entry an earlier version of the app added
+  // doesn't say, though a reload keeps it in this page's history.
+  ahead = distance < 0 || wentOnFrom(event.state);
   followUp = null;
   notify();
 });

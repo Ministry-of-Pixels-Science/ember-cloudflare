@@ -450,7 +450,7 @@ describe("Back and Forward", () => {
     await waitFor(() => expect(location.pathname).toBe("/rooms/random"));
   });
 
-  it("keeps both through a reload, and Forward on a page Back loads afresh after one", async () => {
+  it("keeps both through a reload, and on a page loaded afresh from the history, as a restored tab loads one", async () => {
     const { navigate } = await openedAt("/rooms/general");
     act(() => navigate("/rooms/random"));
     act(() => navigate("/rooms/design"));
@@ -458,9 +458,25 @@ describe("Back and Forward", () => {
     await waitFor(() => expect(location.pathname).toBe("/rooms/random"));
     expect((await loaded()).result.current).toEqual({ back: true, forward: true });
 
-    // After a reload, Back loads the page it goes to afresh, which the app went on from before it.
+    // A tab the browser restores loads the page Back goes to afresh, which the app went on from before.
     act(() => history.back());
     await waitFor(() => expect(location.pathname).toBe("/rooms/general"));
     expect((await loaded()).result.current).toEqual({ back: false, forward: true });
+  });
+
+  it("has Forward after going back to a page an earlier version of the app added, which doesn't say what's ahead of it", async () => {
+    // Its pages, numbered but not marked, then the reload that brought this version, on the last of them.
+    history.replaceState({ position: 0 }, "", "/rooms/general");
+    history.pushState({ position: 1 }, "", "/rooms/random");
+    history.pushState({ position: 2 }, "", "/rooms/design");
+    const { result } = await loaded();
+    expect(result.current).toEqual({ back: true, forward: false });
+
+    act(() => history.back());
+    await waitFor(() => expect(result.current).toEqual({ back: true, forward: true }));
+    expect(location.pathname).toBe("/rooms/random");
+    act(() => history.back());
+    await waitFor(() => expect(location.pathname).toBe("/rooms/general"));
+    expect(result.current).toEqual({ back: false, forward: true });
   });
 });
