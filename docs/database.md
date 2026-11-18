@@ -741,6 +741,9 @@ Objects, D1 or speed call for something else.
   and for everyone who isn't a chat bot. The statement that puts everyone active in a room made, or
   opened to everyone, leaves those bots out, as it does those agents, and so does the one that lifts a
   ban, since a ban keeps memberships. The rooms a bot's kept to are its memberships, as an agent's are.
+  Keeping it to fewer queues a `pending_revocations` row for each open room it leaves, in the same
+  batch, as taking someone out of a private room does, so a post its key was let in with just before
+  is turned away.
 
 ## Writing SQL here
 

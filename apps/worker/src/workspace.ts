@@ -3915,11 +3915,12 @@ export class Workspace extends DurableObject<Env> {
    * has stored under a key `reservePicture` reserved, in place of the one it had, if it's given one, as
    * `changeAvatar` gives someone theirs, and putting it in every open room, or keeping it to the open
    * rooms `changes` picks, which takes its key and its webhook out of the others at once, as nothing
-   * finds it in them then (`activeBotKey`, `MESSAGE_BOTS`). Answers it as its edit page then shows it:
-   * "forbidden" unless that's an administrator, "not found" unless `botId` is an active bot, "name
-   * reserved" for a new name that's @ember's, and "agent's name" for one that's an agent's, unless it was
-   * the bot's before, or null without a valid session. Everyone's workspace sockets hear of a new name or
-   * avatar.
+   * finds it in them then (`activeBotKey`, `MESSAGE_BOTS`), and, before answering, has those rooms turn
+   * away what it was let send them earlier, as taking someone out of a private room does
+   * (`closingSockets`). Answers it as its edit page then shows it: "forbidden" unless that's an
+   * administrator, "not found" unless `botId` is an active bot, "name reserved" for a new name that's
+   * @ember's, and "agent's name" for one that's an agent's, unless it was the bot's before, or null
+   * without a valid session. Everyone's workspace sockets hear of a new name or avatar.
    */
   async changeBot(
     credentials: Credentials,
@@ -3930,7 +3931,7 @@ export class Workspace extends DurableObject<Env> {
     const user = await this.authenticate(credentials);
     if (!user) return null;
     return this.inALaterSecond(() =>
-      this.oneAtATime(async () => {
+      this.closingSockets(async () => {
         if (!(await this.store.isAdministrator(user.id))) return "forbidden";
         const bot = await this.store.activeBot(botId);
         if (!bot) return "not found";
@@ -3940,7 +3941,13 @@ export class Workspace extends DurableObject<Env> {
         const tooSoon = avatar && tooSoonAfter(bot.updatedAt, now);
         if (tooSoon) return tooSoon;
         const previous = avatar && ((await this.store.avatarOwner(botId))?.avatar?.key ?? null);
-        await this.store.changeBot(botId, changes, new Date(now).toISOString(), avatar && { avatar, previous, dueAt: now });
+        // As when signing out, until the database says it queued nothing.
+        let queued = Boolean(changes.rooms);
+        try {
+          queued = await this.store.changeBot(botId, changes, CloseCode.Reconnect, now, new Date(now).toISOString(), avatar && { avatar, previous, dueAt: now });
+        } finally {
+          if (queued) await this.revocationsQueued(now);
+        }
         if (previous) await this.wakeAt(now);
         const changed = (await this.store.activeBot(botId))!;
         if (changed.name !== bot.name || avatar) this.broadcast({ type: "user.updated", user: await this.directoryUser(changed) });

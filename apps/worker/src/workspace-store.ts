@@ -2646,6 +2646,15 @@ const LEAVE_UNPICKED_ROOMS = `DELETE FROM memberships WHERE user_id = ?1 AND roo
   AND EXISTS (SELECT 1 FROM rooms WHERE rooms.id = memberships.room_id AND rooms.kind = 'open')`;
 
 /**
+ * Queues turning away, with code ?3, due at ?4, what ?1 was let send to the open rooms it's in that the
+ * JSON list ?2 doesn't name, which `LEAVE_UNPICKED_ROOMS` then takes it out of, answering a row for each.
+ */
+const QUEUE_UNPICKED_ROOM_REVOCATIONS = `INSERT INTO pending_revocations (room_id, tag, code, due_at)
+  SELECT memberships.room_id, ?1, ?3, ?4 FROM memberships JOIN rooms ON rooms.id = memberships.room_id
+  WHERE memberships.user_id = ?1 AND rooms.kind = 'open' AND memberships.room_id NOT IN (SELECT value FROM json_each(?2))
+  RETURNING id`;
+
+/**
  * Keeps the open rooms each active agent kept to the open rooms picked is in, as Ember AI is turned off,
  * so that turning it on again puts it back in them.
  */
@@ -4673,15 +4682,21 @@ export class WorkspaceStore {
   /**
    * Changes a bot, in one batch: its webhook first, which delivers to `webhookUrl`, or goes when that's
    * "", then its name, then its avatar, as `changeAvatar` gives someone theirs, then the open rooms it's
-   * in (`botRoomsChange`). What's left out stays as it is.
+   * in (`botRoomsChange`), queuing turning away what it was let send to those it leaves, with `code`, due
+   * at `dueAt`, as taking someone out of a private room does. What's left out stays as it is. Answers
+   * whether it queued any revocations.
    */
-  async changeBot(botId: UserId, { name, webhookUrl, rooms }: BotChanges, now: string, avatar: AvatarChange | null): Promise<void> {
-    await this.db.batch([
+  async changeBot(botId: UserId, { name, webhookUrl, rooms }: BotChanges, code: CloseCode, dueAt: number, now: string, avatar: AvatarChange | null): Promise<boolean> {
+    // First, while the rooms it leaves still have it.
+    const revocations = rooms ? [statement(QUEUE_UNPICKED_ROOM_REVOCATIONS, botId, JSON.stringify(rooms), code, dueAt)] : [];
+    const [revoked] = (await this.db.batch([
+      ...revocations,
       ...(webhookUrl === undefined ? [] : [webhookUrl ? statement(SAVE_WEBHOOK, botId, webhookUrl, now) : statement(`DELETE FROM webhooks WHERE user_id = ?`, botId)]),
       ...(name === undefined ? [] : [statement(RENAME_BOT, name, now, botId)]),
       ...(avatar ? avatarChange(botId, avatar.avatar, avatar.previous, now, avatar.dueAt) : []),
       ...(rooms === undefined ? [] : botRoomsChange(botId, rooms, now)),
-    ]);
+    ])) as unknown[][];
+    return revocations.length > 0 && revoked!.length > 0;
   }
 
   /** Gives a bot a new token, recording when, so its old key no longer works. */
