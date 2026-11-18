@@ -51,8 +51,10 @@ interface Kept {
   people: User[];
   /** Whether the room has written the message, and told everyone of it, or has seen it deleted, which leaves nothing to write. */
   posted: boolean;
-  /** When the room found nobody left in the huddle, once it has. */
+  /** When the room found nobody left in the huddle, once it has, which the message says from then. */
   endedAt?: string;
+  /** Set from when the huddle goes on after that until the message says so: such a huddle ends again, once nobody is left in it. */
+  resumed?: true;
 }
 
 /** What the room tells everyone of a huddle's message: that it's there, or what it says now. */
@@ -78,13 +80,13 @@ export class HuddleMessage {
   /**
    * The huddle that `userId` joins now, with nobody else in one, where it's the huddle the latest
    * message is of going on: one the room hasn't found over, as when its object has come back since, or
-   * one they were in that it found over no longer than `HUDDLE_RESUMED_MS` ago. Undefined for a huddle
-   * that starts now.
+   * has gone on since it did, or one they were in that it found over no longer than `HUDDLE_RESUMED_MS`
+   * ago. Undefined for a huddle that starts now.
    */
   async resumed(userId: UserId, now = Date.now()): Promise<ResumedHuddle | undefined> {
     const kept = await this.read();
     if (!kept) return undefined;
-    const back = kept.endedAt === undefined || (now - Date.parse(kept.endedAt) <= HUDDLE_RESUMED_MS && kept.people.some(({ id }) => id === userId));
+    const back = kept.endedAt === undefined || kept.resumed === true || (now - Date.parse(kept.endedAt) <= HUDDLE_RESUMED_MS && kept.people.some(({ id }) => id === userId));
     return back ? { startedAt: kept.startedAt, messageId: kept.messageId } : undefined;
   }
 
@@ -145,23 +147,31 @@ export class HuddleMessage {
   }
 
   /**
-   * Keeps whoever has joined the huddle since among those who've been in it. A message that isn't
-   * written yet is written, and one that said the huddle was over says that it's going on.
+   * Keeps whoever has joined the huddle since among those who've been in it, and that it goes on, when
+   * its message says that it's over, before anything is written. A write can fail for as long as the
+   * huddle goes on, and whoever came and went meanwhile was in it all the same, as it ends only once
+   * nobody is left in it again. A message that isn't written yet is written, and one that says the
+   * huddle is over says that it's going on.
    */
   private async goOn(store: MessageStore, kept: Kept, { people }: HuddleNow): Promise<HuddleMessageFrame[]> {
-    const { endedAt, ...going } = { ...kept, people: withNewcomers(kept.people, people) };
-    if (!kept.posted) return this.post(store, going);
-    const told = endedAt === undefined ? [] : await this.say(store, kept.messageId, { startedAt: kept.startedAt });
-    if (endedAt !== undefined || going.people !== kept.people) await this.keep(going);
+    const everyone = withNewcomers(kept.people, people);
+    const resumed = kept.endedAt !== undefined;
+    const known = everyone === kept.people && resumed === (kept.resumed === true) ? kept : await this.keep({ ...kept, people: everyone, ...(resumed && { resumed }) });
+    if (!known.posted) return this.post(store, known);
+    if (!resumed) return [];
+    const told = await this.say(store, known.messageId, { startedAt: known.startedAt });
+    const { endedAt: _, resumed: __, ...going } = known;
+    await this.keep(going);
     return told;
   }
 
   /**
-   * Has the message say that the huddle is over, and who was in it, unless it says so already. One that
-   * couldn't be written as the huddle started is written saying so.
+   * Has the message say that the huddle is over, and who was in it, unless it says so already, of a
+   * huddle that hasn't gone on since. One that couldn't be written as the huddle started is written
+   * saying so.
    */
-  private async end(store: MessageStore, kept: Kept): Promise<HuddleMessageFrame[]> {
-    if (kept.endedAt !== undefined) return [];
+  private async end(store: MessageStore, { resumed, ...kept }: Kept): Promise<HuddleMessageFrame[]> {
+    if (kept.endedAt !== undefined && !resumed) return [];
     const endedAt = new Date().toISOString();
     const over = { startedAt: kept.startedAt, endedAt, people: kept.people };
     const told = kept.posted ? await this.say(store, kept.messageId, over) : await this.write(store, kept, over);
