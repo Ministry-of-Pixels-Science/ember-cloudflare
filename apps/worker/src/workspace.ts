@@ -115,6 +115,7 @@ import {
   type YourApp,
   type YourAppSignedOut,
 } from "@ember/protocol/apps";
+import { blockedWordsCheck, type BlockedWordsCheck } from "@ember/protocol/blocked-words";
 import { hearsAllHuddleSounds, type HuddleSoundChanges, type HuddleSounds } from "@ember/protocol/huddles";
 import type { MemberfulKeysChange, MemberfulSaved } from "@ember/protocol/memberful";
 import type { HandledReports, NewReport, ReportOutcome, Reports, ReportSubject } from "@ember/protocol/reports";
@@ -124,6 +125,7 @@ import { providerMovesOf } from "./assistant/model-tests";
 import { eachAtMost, ROOMS_AT_ONCE } from "./at-once";
 import { directoryOf, TooSoon, tooSoonAfter, versionOf } from "./avatar-tokens";
 import { banProblem, type BanProblem } from "./bans";
+import { blockedWordsVersion, type BlockedWords } from "./blocked-words";
 import { botKeyOf, isBotToken, newBotToken, webhookTokenOf } from "./bots/keys";
 import { openDb, type Db } from "./db";
 import { alreadyAMemberEmail, emailDomainLinkEmail, invitationEmail, passwordResetCodeEmail, testEmail } from "./emails";
@@ -354,6 +356,9 @@ function changedNavigationIcons(icons: NavigationIcons, changes: NavigationIconC
 
 /** Whether `domains` lists the same domains as `kept`, in the same order. */
 const sameDomains = (domains: string[], kept: string[]) => domains.length === kept.length && domains.every((domain, index) => domain === kept[index]);
+
+/** Whether `words` are the blocked words `kept` lists, in the same order. */
+const sameWords = (words: readonly string[], kept: readonly string[]) => words.length === kept.length && words.every((word, index) => word === kept[index]);
 
 /** Whether Email domain lets people at `domain` join `account`. */
 const letsInEmailDomain = (account: Pick<Account, "emailDomainSignUp" | "emailDomains" | "memberfulSignIn">, domain: string) =>
@@ -739,6 +744,12 @@ export type JoinLink = "joins" | "off" | "memberful" | "not found";
 /** Why open sign-up lets nobody in: it's off, or the workspace has let in as many new people as it does in an hour. */
 export type SignUpRefusal = "closed" | "full";
 
+/** Why someone can't be called a name: it's an agent's, or it has a word Blocked words keeps out. */
+export type NameRefusal = "agent's name" | "blocked words";
+
+/** What a room's events answer: what the room is to deliver, and the version of the blocked words (`blockedWords`). */
+export type RoomEventAnswer = RoomEventDeliveries & { blockedWords: string };
+
 /**
  * What handling a report answers: the reports it closed, or why it closed none, as Remove and Ban answer
  * when they can't, and as `Workspace.handleReport` says.
@@ -1022,6 +1033,8 @@ export class Workspace extends DurableObject<Env> {
   private knownAccount: JoinableAccount | null = null;
   /** Counts the starts and ends of changes to the account, so a read that overlapped one isn't kept: on D1, queries interleave. */
   private accountChanges = 0;
+  /** The account's blocked words, with their version and what checks text for them, made again only for another list. */
+  private blocking: { words: readonly string[]; version: string; check: BlockedWordsCheck } | null = null;
   /** The Memberful sites someone here is known to be linked to an account at (see `offersMemberfulSignIn`). */
   private readonly linkedSites = new Set<string>();
   /** Counts the unlinkings of accounts elsewhere, so a read that overlapped one isn't kept as a linked site: on D1, queries interleave. */
@@ -1344,6 +1357,7 @@ export class Workspace extends DurableObject<Env> {
       turnstile: (await this.openedTurnstileKeys(account)) ? "saved" : null,
       invitations,
       emailDomains: canAdminister ? account.emailDomains : [],
+      blockedWords: canAdminister ? account.blockedWords : [],
       addresses: canAdminister ? { deployed: account.deployedAddress, others: account.otherAddresses } : { deployed: null, others: [] },
       assistant: canAdminister ? await this.assistantSettings(account) : null,
       huddles: canAdminister ? await this.huddlesSettings(account) : null,
@@ -1362,7 +1376,7 @@ export class Workspace extends DurableObject<Env> {
    */
   async changeAccount(
     credentials: Credentials,
-    { name, tagline, settings, customDomain, navigationIcons, emailFrom, emailDomains }: AccountChanges,
+    { name, tagline, settings, customDomain, navigationIcons, emailFrom, emailDomains, blockedWords }: AccountChanges,
     host: string,
   ): Promise<Account | AccountRefusal | "forbidden" | null> {
     return this.administerAccount(credentials, async (account) => {
@@ -1388,6 +1402,7 @@ export class Workspace extends DurableObject<Env> {
         ...(emailDomains !== undefined && !sameDomains(emailDomains, account.emailDomains) && { emailDomains }),
         ...(icons && { navigationIcons: icons }),
         ...(emailFrom !== undefined && emailFrom !== account.emailFrom && { emailFrom }),
+        ...(blockedWords !== undefined && !sameWords(blockedWords, account.blockedWords) && { blockedWords }),
       };
       // Open lets anyone in, and Members only only Memberful's members, so neither is turned on while the other is.
       const open = change.openSignUp ?? account.openSignUp;
@@ -1401,7 +1416,10 @@ export class Workspace extends DurableObject<Env> {
       if (domainsChange && changed.emailDomainSignUp && changed.emailDomains.length === 0) return "no email domains";
       if (change.emailDomainSignUp && (await this.emailSender(changed)) === null) return "no email";
       const save = (now: string) => this.store.changeAccount(change, now);
-      // Pages show neither the From address nor, while Email domain is off, its domains, so a change to
+      // Pages don't show blocked words, so a change to them alone tells no one, nor counts as the account
+      // changing, which would give its logo another address.
+      if (Object.keys(change).every((key) => key === "blockedWords")) return this.shownAccount(await this.storeAccount(changed, () => save(new Date().toISOString())));
+      // Nor do they show the From address nor, while Email domain is off, its domains, so a change to
       // them alone, like a new join code, tells no one.
       if (Object.keys(change).every((key) => key === "emailFrom" || (key === "emailDomains" && !changed.emailDomainSignUp))) {
         return this.shownAccount(await this.saveAccount(changed, save));
@@ -2444,6 +2462,7 @@ export class Workspace extends DurableObject<Env> {
       outsideAi: false,
       deployedAddress: null,
       otherAddresses: [],
+      blockedWords: [],
     };
     this.sessions.remember(tokenDigest, session);
     return { user: meOf(session), room };
@@ -2454,9 +2473,10 @@ export class Workspace extends DurableObject<Env> {
    * session their cookie's token opens. Everyone's workspace sockets hear of them, so pages already open
    * know them. Answers "not found" if `code` isn't the join code, "memberful" while Memberful is members
    * only, "off" while the link is off, "agent's name" for a name that's an agent's (`takesAgentsName`),
-   * and null if someone already has their email address.
+   * "blocked words" for one with a word Blocked words keeps out, and null if someone already has their
+   * email address.
    */
-  async join(code: string, person: Omit<NewPerson, "id">, tokenDigest: string, client: Client): Promise<Me | Exclude<JoinLink, "joins"> | "agent's name" | null> {
+  async join(code: string, person: Omit<NewPerson, "id">, tokenDigest: string, client: Client): Promise<Me | Exclude<JoinLink, "joins"> | NameRefusal | null> {
     // The Worker checked the link before the form arrived, but it may have been regenerated or turned off since.
     return this.oneAtATime(async () => {
       const link = await this.joinLink(code);
@@ -2470,7 +2490,8 @@ export class Workspace extends DurableObject<Env> {
    * whichever ways to join are on, recording who sent it, or one they asked for at the email domains
    * while Email domain lets its domain in. Answers "gone" once the link doesn't work, having expired,
    * been used or replaced, an invitation's having been revoked, "agent's name" for a name that's an
-   * agent's, and null if someone has its email address already, whatever its case, which leaves it be.
+   * agent's, "blocked words" for one with a word Blocked words keeps out, and null if someone has its
+   * email address already, whatever its case, which leaves it be.
    */
   async joinWithEmailLink(
     kind: EmailLinkKind,
@@ -2478,7 +2499,7 @@ export class Workspace extends DurableObject<Env> {
     person: Omit<NewPerson, "id" | "emailAddress">,
     tokenDigest: string,
     client: Client,
-  ): Promise<Me | "gone" | "agent's name" | null> {
+  ): Promise<Me | "gone" | NameRefusal | null> {
     // One at a time, so that two joins with the same link can't both add someone.
     return this.oneAtATime(async () => {
       const link = await this.workingEmailLink(linkDigest);
@@ -2553,10 +2574,11 @@ export class Workspace extends DurableObject<Env> {
   /**
    * Adds someone who signed up while anyone may as a member, as `join` adds someone with the join link.
    * Answers "closed" if sign-up has closed since it began, "full" if sign-ups are `limited` and the
-   * hour's new people have filled them since, "agent's name" for a name that's an agent's, and null if
-   * someone already has their email address.
+   * hour's new people have filled them since, "agent's name" for a name that's an agent's, "blocked
+   * words" for one with a word Blocked words keeps out, and null if someone already has their email
+   * address.
    */
-  async signUp(person: Omit<NewPerson, "id">, tokenDigest: string, client: Client, limited: boolean): Promise<Me | SignUpRefusal | "agent's name" | null> {
+  async signUp(person: Omit<NewPerson, "id">, tokenDigest: string, client: Client, limited: boolean): Promise<Me | SignUpRefusal | NameRefusal | null> {
     // One at a time, so that the hour's sign-ups never pass the limit together.
     return this.oneAtATime(async () => {
       const account = await this.joinableAccount();
@@ -2575,11 +2597,12 @@ export class Workspace extends DurableObject<Env> {
   /**
    * Adds `person` as a member, in every open room, with the session their cookie's token opens, and tells
    * everyone's workspace sockets, as joining does, answering who they are, "agent's name" for a name
-   * that's an agent's, which nobody can take (`takesAgentsName`), or null if someone already has their
-   * email address.
+   * that's an agent's, which nobody can take (`takesAgentsName`), "blocked words" for one with a word
+   * Blocked words keeps out, or null if someone already has their email address.
    */
-  private async addMember(person: Omit<NewPerson, "id">, tokenDigest: string, client: Client): Promise<Me | "agent's name" | null> {
+  private async addMember(person: Omit<NewPerson, "id">, tokenDigest: string, client: Client): Promise<Me | NameRefusal | null> {
     if (await this.takesAgentsName(null, person.name)) return "agent's name";
+    if (await this.hasBlockedWord(person.name)) return "blocked words";
     const session: StoredSession = { id: sortableId(), user: { id: sortableId(), name: person.name }, administrator: false, guest: false, lastActiveAt: Date.now() };
     let welcomed: DirectRoom[];
     try {
@@ -2700,14 +2723,16 @@ export class Workspace extends DurableObject<Env> {
 
   /**
    * Adds someone who signs in with just a name, and the session their cookie's token opens, unless
-   * Memberful is members only, which answers "memberful", or the name is an agent's, which answers
-   * "agent's name". Everyone's workspace sockets hear of them.
+   * Memberful is members only, which answers "memberful", the name is an agent's, which answers "agent's
+   * name", or it has a word Blocked words keeps out, which answers "blocked words". Everyone's workspace
+   * sockets hear of them.
    */
-  async signInGuest(name: string, tokenDigest: string, client: Client): Promise<Me | "memberful" | "agent's name"> {
+  async signInGuest(name: string, tokenDigest: string, client: Client): Promise<Me | "memberful" | NameRefusal> {
     // One at a time, as joining is, so that none can overlap turning Members only on.
     return this.oneAtATime(async () => {
       if ((await this.joinableAccount())?.memberfulSignIn) return "memberful";
       if (await this.takesAgentsName(null, name)) return "agent's name";
+      if (await this.hasBlockedWord(name)) return "blocked words";
       const session: StoredSession = { id: sortableId(), user: { id: sortableId(), name }, administrator: false, guest: true, lastActiveAt: Date.now() };
       await this.store.createGuest(session.user, session.id, tokenDigest, client, new Date(session.lastActiveAt).toISOString());
       this.sessions.remember(tokenDigest, session);
@@ -2720,8 +2745,9 @@ export class Workspace extends DurableObject<Env> {
    * Signs in `member`, who signed in to the Memberful site `issuer`, with the session their cookie's
    * token opens: as the person their Memberful account is linked to, whether Memberful is on or not, or
    * else, while it's on, as someone new, a member in every open room, linked to it, as joining adds
-   * someone, called by the first of their names that isn't an agent's, else "Member" (`namelessMember`),
-   * with a username made from it (`firstFreeUsername`), which answers "joined".
+   * someone, called by the first of their names that isn't an agent's and has no word Blocked words keeps
+   * out, else "Member" (`namelessMember`), with a username made from it (`firstFreeUsername`), which
+   * answers "joined".
    * Accounts are linked by the site and the member's id there, never matched by email address.
    * What Memberful said of their membership, as of `readAt`, is gone by as a check's is
    * (`settleMembership`), unless the Workspace has gone by a newer read: a member whose membership has
@@ -2751,9 +2777,9 @@ export class Workspace extends DurableObject<Env> {
       }
       if (!(await this.joinableAccount())?.memberfulJoin) return "off";
       if (!member.subscribed) return "membership";
-      // Nobody can take an agent's name, which Memberful knows nothing of.
-      const agents = await this.store.agentEntries();
-      const free = (name: string) => !agents.some((agent) => sameName(agent.name, name));
+      // Nobody can take an agent's name, which Memberful knows nothing of, nor one with a blocked word.
+      const [agents, { check: blocks }] = await Promise.all([this.store.agentEntries(), this.blockedWordsNow()]);
+      const free = (name: string) => !agents.some((agent) => sameName(agent.name, name)) && !blocks(name);
       const name = member.names.find(free) ?? namelessMember(free);
       const session: StoredSession = { id: sortableId(), user: { id: sortableId(), name }, administrator: false, guest: false, lastActiveAt: Date.now() };
       const person = { ...session.user, username: await this.firstFreeUsername(name, free), emailAddress: member.emailAddress };
@@ -3554,14 +3580,15 @@ export class Workspace extends DurableObject<Env> {
   }
 
   /**
-   * Creates a room as the person `credentials` signs in: "forbidden" unless they may create rooms, or
-   * null without a valid session. Everyone it puts in sees it in their sidebars at once, and nobody else
-   * hears of it.
+   * Creates a room as the person `credentials` signs in: "forbidden" unless they may create rooms,
+   * "blocked words" for a name with a word Blocked words keeps out, or null without a valid session.
+   * Everyone it puts in sees it in their sidebars at once, and nobody else hears of it.
    */
-  async createRoom(credentials: Credentials, room: NewRoom): Promise<SharedRoom | "forbidden" | null> {
+  async createRoom(credentials: Credentials, room: NewRoom): Promise<SharedRoom | "forbidden" | "blocked words" | null> {
     const user = await this.authenticate(credentials);
     if (!user) return null;
     if (!(await this.mayCreateRoomsAs(user.id))) return "forbidden";
+    if (await this.hasBlockedWord(room.name)) return "blocked words";
     const created: SharedRoom = { id: sortableId(), kind: room.kind, name: room.name, icon: room.icon || null };
     const memberIds = await this.store.createRoom(created, user.id, room.kind === "closed" ? room.memberIds : null, new Date().toISOString());
     this.tell(memberIds, { type: "room.saved", room: created });
@@ -4731,6 +4758,29 @@ export class Workspace extends DurableObject<Env> {
     return this.store.hasUsername(username, userId);
   }
 
+  /** The account's blocked words as `blocking` keeps them, made again once the account has another list. */
+  private async blockedWordsNow(): Promise<{ words: readonly string[]; version: string; check: BlockedWordsCheck }> {
+    const words = (await this.joinableAccount())?.blockedWords ?? [];
+    if (this.blocking?.words !== words) this.blocking = { words, version: blockedWordsVersion(words), check: blockedWordsCheck(words) };
+    return this.blocking;
+  }
+
+  /**
+   * The words Blocked words keeps out, and their version, for a room to check what it saves against,
+   * as it does until a message it saves comes back with another version, or for a minute
+   * (`ChatRoom.hasBlockedWord`).
+   */
+  async blockedWords(): Promise<BlockedWords> {
+    const { words, version } = await this.blockedWordsNow();
+    return { version, words: [...words] };
+  }
+
+  /** Whether any of `texts` has a word Blocked words keeps out. */
+  private async hasBlockedWord(...texts: (string | null)[]): Promise<boolean> {
+    const { check } = await this.blockedWordsNow();
+    return texts.some((text) => text !== null && check(text));
+  }
+
   /**
    * Whether someone or a bot called `name`, or someone new, for null, takes an agent's name by being
    * called `rename`, which nobody can, whether Ember AI is on or off, unless it was theirs already.
@@ -4905,7 +4955,9 @@ export class Workspace extends DurableObject<Env> {
    * now, too. Everyone's workspace sockets hear of a new name, username or bio, which the people
    * directory lists. A new name can't be @ember's ("name reserved"), or an agent's ("agent's name"),
    * unless it was theirs before, and a blank username is saved as none, while one that's someone
-   * else's, whatever their status, or @ember's or an agent's name, is "username taken".
+   * else's, whatever their status, or @ember's or an agent's name, is "username taken". A new name,
+   * username or bio with a word Blocked words keeps out is "blocked words", though one kept from before
+   * the word was blocked can stay.
    */
   async changeProfile(
     credentials: Credentials,
@@ -4914,7 +4966,7 @@ export class Workspace extends DurableObject<Env> {
     checked: string | null,
     pushEndpoint: string | null,
     memberfulSite: string | null,
-  ): Promise<YourProfile | "email address taken" | "password needed" | "memberful" | "name reserved" | "agent's name" | "username taken" | null> {
+  ): Promise<YourProfile | "email address taken" | "password needed" | "memberful" | "name reserved" | NameRefusal | "username taken" | null> {
     return this.closingSockets(async () => {
       // Checked in line, unlike most changes: a password reset ahead of it ends their sessions, and a
       // save whose session was still valid before then mustn't put back a password of its own.
@@ -4933,6 +4985,7 @@ export class Workspace extends DurableObject<Env> {
       if (!listed && profile.emailAddress === person.emailAddress && passwordDigest === null) return this.yourProfile(person, session);
       if (takesReservedName(person.name, profile.name)) return "name reserved";
       if (await this.takesAgentsName(person.name, profile.name)) return "agent's name";
+      if (await this.hasBlockedWord(...(["name", "username", "bio"] as const).filter((field) => profile[field] !== person[field]).map((field) => profile[field]))) return "blocked words";
       if (profile.username !== person.username && profile.username !== null && (await this.usernameTaken(profile.username, user.id))) return "username taken";
       // Read again here, since a reset ahead of this in line, or another change, can have replaced the password checked.
       if (person.password && changesSignIn(person, changes.emailAddress, passwordDigest !== null) && (await this.store.signInOf(user.id))?.passwordDigest !== checked) {
@@ -5024,20 +5077,23 @@ export class Workspace extends DurableObject<Env> {
 
   /**
    * Makes `changes` to room `roomId` as the person `credentials` signs in, answering the room as it
-   * is then: "not found" as for its settings, "forbidden" unless they can change it, or null without
-   * a valid session. Anyone it takes out of the room is told to reconnect, and finds it gone, and it
+   * is then: "not found" as for its settings, "forbidden" unless they can change it, "blocked words" for
+   * a new name with a word Blocked words keeps out, though the name it has stays, or null without a
+   * valid session. Anyone it takes out of the room is told to reconnect, and finds it gone, and it
    * leaves their sidebars. Everyone in it sees it as it is now in theirs, or, when only who's in it
    * changed, the people it puts in do. A huddle going on in a room it turns huddles off in is left
    * by each tab that hears so, and ends for whoever is in it still as the room next checks it
    * (`huddlesIn`).
    */
-  async changeRoom(credentials: Credentials, roomId: RoomId, changes: RoomChanges): Promise<SharedRoom | "not found" | "forbidden" | null> {
+  async changeRoom(credentials: Credentials, roomId: RoomId, changes: RoomChanges): Promise<SharedRoom | "not found" | "forbidden" | "blocked words" | null> {
     const user = await this.authenticate(credentials);
     if (!user) return null;
     return this.closingSockets(async () => {
       const found = await this.store.roomToChange(roomId, user.id);
       if (!found) return "not found";
       if (!found.canAdminister) return "forbidden";
+      // Its settings send the name it has with every change.
+      if (changes.name && changes.name !== found.room.name && (await this.hasBlockedWord(changes.name))) return "blocked words";
       const { huddles: _, ...room } = found.room;
       const changed: SharedRoom = {
         ...room,
@@ -5157,15 +5213,17 @@ export class Workspace extends DurableObject<Env> {
    * else does. A new message in a DM moves it to the top of everyone's DMs there, its author's too, and
    * one call's messages move it once. It answers the bots' webhooks each new message is delivered to,
    * the new messages @ember is to answer and, while Web Push is on, their pushes, for the room to send,
-   * none of them to a guest while `EMBER_GUEST_SIGN_IN` doesn't let guests stay signed in.
+   * none of them to a guest while `EMBER_GUEST_SIGN_IN` doesn't let guests stay signed in, and the
+   * version of the blocked words, which tells the room whether the list it keeps is still the latest.
    */
-  async applyRoomEvents(roomId: RoomId, events: RoomEvent[], viewerIds: UserId[]): Promise<RoomEventDeliveries> {
-    if (events.length === 0) return { pushes: [], webhooks: [], asks: [] };
+  async applyRoomEvents(roomId: RoomId, events: RoomEvent[], viewerIds: UserId[]): Promise<RoomEventAnswer> {
+    const { version: blockedWords } = await this.blockedWordsNow();
+    if (events.length === 0) return { pushes: [], webhooks: [], asks: [], blockedWords };
     const { on: pushing } = await webPush(this.env);
     const { marks, active, pushes, webhooks, asks } = await this.store.applyRoomEvents(roomId, events, viewerIds, pushing, guestSignIn(this.env));
     for (const [userId, mark] of marks) this.tell([userId], mark === null ? { type: "room.read", roomId } : { type: "room.unread", roomId, ...mark });
     if (active) this.tell(active.userIds, { type: "room.active", roomId, at: active.at });
-    return { pushes, webhooks, asks };
+    return { pushes, webhooks, asks, blockedWords };
   }
 
   /**

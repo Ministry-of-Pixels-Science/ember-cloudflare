@@ -156,6 +156,8 @@ export interface JoinableAccount extends Omit<Account, "logo" | "huddles"> {
   deployedAddress: string | null;
   /** The custom domains Ember has moved away from, newest first, which may still reach it (`EmberAddresses.others`). */
   otherAddresses: string[];
+  /** The words and phrases Blocked words keeps out, as administrators listed them, which nobody else sees. */
+  blockedWords: string[];
 }
 
 /** A Turnstile widget's keys as the account keeps them: its site key, and its secret key sealed (`seal`). */
@@ -241,8 +243,8 @@ export interface NewAccount {
  * What `WorkspaceStore.changeAccount` changes: the name, the tagline, the settings workspace settings'
  * switches change, the custom domain and the ones it moved away from, the navigation icons whose slots
  * change, the From address, the sealed Resend API key, Turnstile's keys, Memberful's, the SFU app
- * huddles run through, and the domains Email domain lets in. Memberful's two settings change together,
- * or not at all, as `memberful`.
+ * huddles run through, the domains Email domain lets in, and the words Blocked words keeps out.
+ * Memberful's two settings change together, or not at all, as `memberful`.
  */
 export type AccountChange = Partial<
   Pick<
@@ -264,6 +266,7 @@ export type AccountChange = Partial<
     | "turnstileKeys"
     | "memberfulKeys"
     | "huddles"
+    | "blockedWords"
   >
 > & {
   memberful?: Pick<Account, "memberfulJoin" | "memberfulSignIn">;
@@ -1456,6 +1459,12 @@ function emailDomainsIn(settings: Record<string, unknown> | null): string[] {
   return [...new Set(kept.map((domain: unknown) => (typeof domain === "string" ? emailDomainOf(domain) : null)).filter((domain) => domain !== null))];
 }
 
+/** The words and phrases Blocked words keeps out, which the account's settings keep as `blocked_words`, or none while they keep none. */
+function blockedWordsIn(settings: Record<string, unknown> | null): string[] {
+  const kept = settings?.blocked_words;
+  return Array.isArray(kept) ? kept.filter((word: unknown) => typeof word === "string") : [];
+}
+
 /**
  * The navigation icons the account's settings keep as `ember_navigation_icons`: an object of slots,
  * where any other value is none, and a slot or an icon Ember doesn't know is left out.
@@ -2186,6 +2195,7 @@ const REMEMBER_ASSISTANT_LIMITS = rememberSetting("assistant_limits");
 const REMEMBER_ASSISTANT_INSTRUCTIONS = rememberSetting("assistant_instructions");
 const REMEMBER_ASSISTANT_PROMPT_TEMPLATE = rememberSetting("assistant_prompt_template");
 const REMEMBER_OTHER_ADDRESSES = rememberSetting("other_addresses");
+const REMEMBER_BLOCKED_WORDS = rememberSetting("blocked_words");
 
 /** Navigation icon changes as the merge patch `CHANGE_NAVIGATION_ICONS` takes them: null for a slot's default. */
 const navigationIconsPatch = (changes: NavigationIconChanges) => Object.fromEntries(Object.entries(changes).map(([slot, icon]) => [slot, icon || null]));
@@ -3141,14 +3151,16 @@ export class WorkspaceStore {
       outsideAi: isPresent(settings?.outside_ai),
       deployedAddress: deployedAddressIn(settings),
       otherAddresses: otherAddressesIn(settings),
+      blockedWords: blockedWordsIn(settings),
     };
   }
 
   /**
    * Changes the workspace's name, tagline, settings, custom domain and the ones it moved away from,
-   * navigation icons, From address, Resend API key, Turnstile's keys, Memberful's, huddles' SFU app and
-   * email domains, as `change` has them, in one batch. Memberful's settings are stored both at once, so that an account
-   * from before `memberful_join` reads as they're saved.
+   * navigation icons, From address, Resend API key, Turnstile's keys, Memberful's, huddles' SFU app,
+   * email domains and blocked words, as `change` has them, in one batch. Memberful's settings are stored
+   * both at once, so that an account from before `memberful_join` reads as they're saved. Blocked words
+   * aren't recorded as a change, since pages don't show them, so the logo's address stays as it is.
    */
   async changeAccount(
     {
@@ -3171,6 +3183,7 @@ export class WorkspaceStore {
       turnstileKeys,
       memberfulKeys,
       huddles,
+      blockedWords,
     }: AccountChange,
     now: string,
   ): Promise<void> {
@@ -3198,6 +3211,7 @@ export class WorkspaceStore {
         ? []
         : [statement(SET_MEMBERFUL_KEYS, JSON.stringify(memberfulKeys && { site: memberfulKeys.site, client_id: memberfulKeys.clientId, secrets: memberfulKeys.sealedSecrets }), now)]),
       ...(huddles === undefined ? [] : [statement(SET_HUDDLES, JSON.stringify(huddles && storedHuddles(huddles)), now)]),
+      ...(blockedWords === undefined ? [] : [statement(REMEMBER_BLOCKED_WORDS, JSON.stringify(blockedWords))]),
     ]);
   }
 

@@ -24,12 +24,14 @@ import {
   type User,
   type UserId,
 } from "@ember/protocol";
+import { BLOCKED_WORDS_REFUSED } from "@ember/protocol/blocked-words";
 import { parseHuddleSocketParams } from "@ember/protocol/huddles";
 import { prepareBody, userIdFromSgid, userIdsIn, type PreparedBody } from "@ember/richtext";
 import {
   AGENT_NOTES,
   AnswerError,
   answerOf,
+  BLOCKED_ANSWER,
   NOTES,
   PICKED_MODEL_NOTES,
   previewAttachment,
@@ -64,6 +66,7 @@ import {
 } from "./apps/tools";
 import { CALL_WAITS_MS, fits, WaitingCalls, type WaitingCall } from "./apps/waiting-calls";
 import { JobQueue } from "./at-once";
+import { isFresh, keptBlockedWords, NO_BLOCKED_WORDS, type KeptBlockedWords } from "./blocked-words";
 import { actingButton, clickPayload } from "./bots/clicks";
 import { payloadOf, slackMessage, type SlackMessage, type SlackPayload } from "./bots/slack";
 import { postClick, postWebhook, WebhookError, webhookPayload, type ClickAnswer, type Reply } from "./bots/webhooks";
@@ -129,6 +132,9 @@ const UNDELIVERED_ROOM = "undeliveredRoom";
  * sooner than that, to check the huddle.
  */
 const LOGS_DUE = "logsDue";
+
+/** What an error frame adds for a message refused for `why`: that its writer is to change it, when it's for a word Blocked words keeps out. */
+const rewriting = (why: string) => (why === BLOCKED_WORDS_REFUSED ? { rewrite: true as const } : {});
 
 /** Why the room keeps nothing of a message: it couldn't show it, or there's nothing in it. `MESSAGE_TOO_LONG` says when there's too much. */
 const UNREADABLE = "That message couldn't be saved.";
@@ -348,6 +354,11 @@ export class ChatRoom extends DurableObject<Env> {
    * viewing the room as it's sent, as before.
    */
   private readonly seenBy = new Map<string, UserId[]>();
+  /**
+   * The blocked words the room checks what it saves against, as the Workspace last gave them, or null
+   * until it asks (`hasBlockedWord`). Kept in memory only.
+   */
+  private blockedWords: KeptBlockedWords | null = null;
   /** The room's huddle, whose sockets it keeps beside the room's own. */
   private readonly huddle: Huddle;
   /** The message the room keeps of its huddle, among its own. */
@@ -778,7 +789,7 @@ export class ChatRoom extends DurableObject<Env> {
    * Adds the bot's boost of `content`, trimmed, to the message `messageId`: as a socket's boost.create
    * does, but even when the bot has added the same one, as there, answering it. Answers `NOT_FOUND` when
    * the room turns the bot away, as `createBotMessage` does, or has no such message, then `BLANK` when
-   * `content` is only spaces, or why the room keeps no boost of it.
+   * `content` is only spaces, or why the room keeps no boost of it, as when it has a blocked word.
    */
   async addBotBoost(roomId: RoomId, { bot, authorizedAt }: BotAccess, messageId: string, content: string): Promise<Boost | string> {
     return this.serially(async () => {
@@ -789,6 +800,7 @@ export class ChatRoom extends DurableObject<Env> {
       const trimmed = content.trim();
       if (trimmed === "") return BLANK;
       if (trimmed.length > MAX_BOOST_LENGTH) return BOOST_TOO_LONG;
+      if (await this.hasBlockedWord(trimmed)) return BLOCKED_WORDS_REFUSED;
       return this.addBoost(store, messageId, bot, trimmed, now);
     });
   }
@@ -812,14 +824,16 @@ export class ChatRoom extends DurableObject<Env> {
   /**
    * Starts `uploader`'s upload of `file` to the room, as a reply in the thread it names if it names one,
    * answering the file's key, or null once the room has heard that their access ended, or the room was
-   * deleted, after the Workspace checked, as it turns away a socket then, or `MESSAGE_GONE` when it has
-   * no such thread. The alarm comes back once it's a day old, to delete it from R2 if it's unfinished.
+   * deleted, after the Workspace checked, as it turns away a socket then, `MESSAGE_GONE` when it has no
+   * such thread, or `BLOCKED_WORDS_REFUSED` for a name with a word Blocked words keeps out. The alarm
+   * comes back once it's a day old, to delete it from R2 if it's unfinished.
    */
-  async startUpload(roomId: RoomId, uploader: Uploader, file: NewUpload): Promise<{ key: string } | typeof MESSAGE_GONE | null> {
+  async startUpload(roomId: RoomId, uploader: Uploader, file: NewUpload): Promise<{ key: string } | typeof MESSAGE_GONE | typeof BLOCKED_WORDS_REFUSED | null> {
     const startedAt = Date.now();
     const started = await this.serially(async () => {
       if (await this.revocationsFor(roomId).refuse(uploader.tags, uploader.authorizedAt)) return null;
       if (file.parentId !== undefined && !(await this.inThread(this.storeFor(roomId), file.parentId, false))) return MESSAGE_GONE;
+      if (await this.hasBlockedWord(file.name)) return BLOCKED_WORDS_REFUSED;
       const key = base36(KEY_LENGTH);
       const blob = {
         id: key,
@@ -919,20 +933,21 @@ export class ChatRoom extends DurableObject<Env> {
    * Starts the bot's upload of a file named `filename`, of `declaredType` as it says, to the room, for a
    * form that brings it to R2 as it arrives, as `startUpload` starts someone's, or, with `messageId`, one
    * to give the bot's message in place of its file. Answers the file's key, or `NOT_FOUND` when the room
-   * turns the bot away, as `createBotMessage` does, or has no such message, and `FORBIDDEN` when it's
-   * someone else's.
+   * turns the bot away, as `createBotMessage` does, or has no such message, `FORBIDDEN` when it's
+   * someone else's, and `BLOCKED_WORDS_REFUSED` for a name with a word Blocked words keeps out.
    */
   async startBotUpload(
     roomId: RoomId,
     { bot, authorizedAt }: BotAccess,
     file: Pick<ArrivingFile, "filename" | "declaredType">,
     messageId?: string,
-  ): Promise<{ key: string } | typeof NOT_FOUND | typeof FORBIDDEN> {
+  ): Promise<{ key: string } | typeof NOT_FOUND | typeof FORBIDDEN | typeof BLOCKED_WORDS_REFUSED> {
     const startedAt = Date.now();
     const started = await this.serially(async () => {
       if (await this.revocationsFor(roomId).refuse([bot.id], authorizedAt)) return NOT_FOUND;
       const message = messageId === undefined ? null : await this.botsOwn(this.storeFor(roomId), bot, messageId);
       if (message === NOT_FOUND || message === FORBIDDEN) return message;
+      if (await this.hasBlockedWord(file.filename)) return BLOCKED_WORDS_REFUSED;
       return { key: await this.startArriving(roomId, bot.id, file, startedAt) };
     });
     if (typeof started === "object") await this.wakeAt(roomId, startedAt + UNFINISHED_UPLOAD_KEPT_MS);
@@ -1038,7 +1053,7 @@ export class ChatRoom extends DurableObject<Env> {
         const inThread = frame.parentId === undefined ? undefined : await this.inThread(store, frame.parentId, frame.alsoSend === true);
         if (inThread === null) return this.send(ws, { type: "error", message: MESSAGE_GONE, clientMessageId: frame.clientMessageId, failed: frame.type });
         const body = await this.prepare(frame.body);
-        if (typeof body === "string") return this.send(ws, { type: "error", message: body, clientMessageId: frame.clientMessageId, failed: frame.type });
+        if (typeof body === "string") return this.send(ws, { type: "error", message: body, clientMessageId: frame.clientMessageId, failed: frame.type, ...rewriting(body) });
         await this.create(store, user, frame.clientMessageId, body, now, { inThread });
         // Everyone else takes the message as its author's stop.
         markTyping(ws, false);
@@ -1065,6 +1080,7 @@ export class ChatRoom extends DurableObject<Env> {
         if (!message) return this.refuse(ws, "That message no longer exists");
         // A person adds each reaction once, so one they've already added is a repeated click.
         if (message.boosts.some((b) => b.booster.id === user.id && b.content === frame.content)) return;
+        if (await this.hasBlockedWord(frame.content)) return this.send(ws, { type: "error", message: BLOCKED_WORDS_REFUSED, failed: frame.type });
         await this.addBoost(store, frame.messageId, user, frame.content, now);
         return;
       }
@@ -1307,7 +1323,8 @@ export class ChatRoom extends DurableObject<Env> {
 
   /**
    * What the room keeps of a body a client sent, naming the people it mentions as they are now, or
-   * why it keeps nothing.
+   * why it keeps nothing, which is `BLOCKED_WORDS_REFUSED` when what it says has a blocked word. The
+   * names of the people it mentions aren't its writer's words, so they're not checked.
    */
   private async prepare(markup: string): Promise<PreparedBody | string> {
     const ids = userIdsIn(markup);
@@ -1315,7 +1332,9 @@ export class ChatRoom extends DurableObject<Env> {
     const body = prepareBody(markup, (sgid) => people.get(userIdFromSgid(sgid) ?? ""));
     if (body === null) return UNREADABLE;
     if (body.blank) return EMPTY;
-    return isMessageTooLong(body.plainText) ? MESSAGE_TOO_LONG : body;
+    if (isMessageTooLong(body.plainText)) return MESSAGE_TOO_LONG;
+    const written = body.mentions.reduce((text, { name }) => text.replaceAll(`@${name}`, " "), body.plainText);
+    return (await this.hasBlockedWord(written)) ? BLOCKED_WORDS_REFUSED : body;
   }
 
   /**
@@ -1331,7 +1350,34 @@ export class ChatRoom extends DurableObject<Env> {
     if (typeof body === "string" && body !== EMPTY) return body;
     const text = typeof body === "string" ? { html: "", plainText: "", mentions: [] } : body;
     const plainText = [text.plainText, kept.plainText].filter((line) => line !== "").join("\n");
-    return isMessageTooLong(plainText) ? MESSAGE_TOO_LONG : { ...text, plainText, cards: kept.cards };
+    if (isMessageTooLong(plainText)) return MESSAGE_TOO_LONG;
+    return (await this.hasBlockedWord(kept.plainText)) ? BLOCKED_WORDS_REFUSED : { ...text, plainText, cards: kept.cards };
+  }
+
+  /**
+   * Whether `text` has a word Blocked words keeps out, as the list the room keeps has them, which it asks
+   * the Workspace for once it's a minute old, or once a message the room saved has come back from the
+   * Workspace with another version of it (`sendEvents`), so that messages don't wait on the
+   * Workspace. A change reaches a room by its next message saved, then, or within a minute.
+   */
+  private async hasBlockedWord(text: string): Promise<boolean> {
+    const now = Date.now();
+    const kept = isFresh(this.blockedWords, now) ? this.blockedWords : (this.blockedWords = await this.blockedWordsAt(now));
+    return kept.check(text);
+  }
+
+  /**
+   * The blocked words as the Workspace gives them at `now`. While it can't be reached, as when it's
+   * restarting, the room goes by the list it had, or by none, for another minute, rather than turn every
+   * message away, as its log waits for the Workspace to send it (`sendEvents`).
+   */
+  private async blockedWordsAt(now: number): Promise<KeptBlockedWords> {
+    try {
+      return keptBlockedWords(await workspace(this.env).blockedWords(), now);
+    } catch (error) {
+      console.error("Could not ask for the blocked words; going by those the room had", error);
+      return { ...(this.blockedWords ?? keptBlockedWords(NO_BLOCKED_WORDS, now)), heardAt: now };
+    }
   }
 
   /** The room's database, with its migrations applied first if its storage needs them. */
@@ -1407,7 +1453,9 @@ export class ChatRoom extends DurableObject<Env> {
       return seen ? { ...event, viewerIds: [...new Set([...seen, ...viewers])] } : event;
     };
     const events = logged.map((event) => (event.threadOnly && event.message?.parentId !== undefined ? { ...event, viewerIds: viewingThread(event.message.parentId) } : seeing(event)));
-    const { pushes, webhooks, asks } = await workspace(this.env).applyRoomEvents(roomId, events, viewers);
+    const { pushes, webhooks, asks, blockedWords } = await workspace(this.env).applyRoomEvents(roomId, events, viewers);
+    // Blocked words that have changed since the room heard of them are asked for again before the next check.
+    if (this.blockedWords && this.blockedWords.version !== blockedWords) this.blockedWords = null;
     // The Workspace answers a message's pushes, webhooks and question for @ember once, so they're sent
     // whatever happens next, and the log's next call doesn't wait on push services, bots or models.
     if (pushes.length > 0) this.ctx.waitUntil(this.push(pushes));
@@ -2005,7 +2053,9 @@ export class ChatRoom extends DurableObject<Env> {
       if (!(await this.findUndeleted(store, message.id))) return "the message is gone";
       const inThread = message.parentId === undefined ? undefined : await this.inThread(store, message.parentId, false);
       if (inThread === null) return THREAD_GONE;
-      const body = await this.answerBody(answer, preview);
+      const answered = await this.answerBody(answer, preview);
+      // An answer with a blocked word isn't posted: the answerer says why it can't answer instead.
+      const body = answered === BLOCKED_WORDS_REFUSED ? await this.answerBody(answerOf(BLOCKED_ANSWER), null) : answered;
       if (typeof body === "string") return body;
       await this.create(store, access.bot, crypto.randomUUID(), body, new Date().toISOString(), { kind: "reply", inThread });
       return null;

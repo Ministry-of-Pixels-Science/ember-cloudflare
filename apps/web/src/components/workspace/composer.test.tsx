@@ -906,6 +906,57 @@ describe("A thread's draft, beside its room and in the room's huddle over it", (
   });
 });
 
+describe("A message the room won't take for what it says", () => {
+  const WHY = "This community doesn't allow one of these words.";
+
+  it("comes back to be changed, keeping it as the draft, with why above the card, until something's sent", async () => {
+    const { composer, input, user, onSend } = await showComposer();
+    await user.type(input, "Oh fudge");
+    await user.keyboard("{Enter}");
+    expect(input).toHaveValue("");
+
+    let taken = false;
+    act(() => void (taken = composer.current!.giveBack("<p>Oh fudge</p>", WHY, false)));
+    expect(taken).toBe(true);
+    expect(input).toHaveValue("Oh fudge");
+    expect(input).toHaveFocus();
+    expect(screen.getByRole("alert")).toHaveTextContent(WHY);
+    expect(localStorage.getItem("composer-draft-u1-r1")).toBe("<p>Oh fudge</p>");
+
+    await user.clear(input);
+    await user.type(input, "Oh fiddlesticks");
+    expect(screen.getByRole("alert")).toHaveTextContent(WHY);
+    await user.keyboard("{Enter}");
+    expect(onSend).toHaveBeenLastCalledWith("<p>Oh fiddlesticks</p>", false);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("stays out of the composer once something else is written there", async () => {
+    const { composer, input, user } = await showComposer();
+    await user.type(input, "Never mind");
+
+    let taken = true;
+    act(() => void (taken = composer.current!.giveBack("<p>Oh fudge</p>", WHY, false)));
+    expect(taken).toBe(false);
+    expect(input).toHaveValue("Never mind");
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("comes back to a thread's composer with Also send to the room ticked again, as it went", async () => {
+    const { composer, input } = await showComposer({ threadId: "m1" });
+    act(() => void composer.current!.giveBack("<p>Oh fudge</p>", WHY, true));
+    expect(input).toHaveValue("Oh fudge");
+    expect(screen.getByRole("checkbox", { name: "Also send to #general" })).toBeChecked();
+  });
+
+  it("says why only in the room it came back in", async () => {
+    const { composer, view } = await showComposer();
+    act(() => void composer.current!.giveBack("<p>Oh fudge</p>", WHY, false));
+    view.rerender(<Composer ref={composer} roomId="r2" roomName="random" userId="u1" typing={[]} disabled={false} onSend={() => true} onSendFiles={() => {}} onTyping={() => {}} />);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
 describe("Reply with a quote", () => {
   it("writes a reply in place of what's written, with the cursor at its end, keeping it as the draft", async () => {
     const composer = createRef<ComposerHandle>();

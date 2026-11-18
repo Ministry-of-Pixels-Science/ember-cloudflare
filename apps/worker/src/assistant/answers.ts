@@ -398,6 +398,9 @@ export const NOTES: Record<RefusalReason | "unopened token", string> = {
   "unopened token": `I can't answer right now: Ember AI's API token no longer opens here. An administrator can set it up again under ${AI_SETTINGS}.`,
 };
 
+/** What @ember or an agent says in place of an answer with a word Blocked words keeps out, which isn't posted. */
+export const BLOCKED_ANSWER = "I can't answer that here: my answer had a word this community doesn't allow.";
+
 /** What an agent says instead, for the reasons only administrators, who set it up, can do something about. */
 export const AGENT_NOTES: Partial<Record<RefusalReason, string>> = {
   "out of room": `I couldn't answer: my model thought for as long as it may before it wrote anything. Try asking again, or an administrator can choose less Thinking for me under ${AI_SETTINGS}.`,
