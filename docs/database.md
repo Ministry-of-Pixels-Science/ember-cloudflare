@@ -20,7 +20,7 @@ Each file in `apps/worker/migrations/` belongs to one kind of Durable Object, wh
 `apps/worker/src/migrations.ts` names as its scope: `room` for messages, boosts, revocations, the
 room's change log, its log of messages for the search index, its recent deletions, its files and the
 calls of apps' tools that wait to be allowed, and
-`workspace` for the workspace-wide tables (the account, people, sessions, linked accounts, push
+`workspace` for the workspace-wide tables (the account, people, sessions and the addresses their sockets come from, linked accounts, push
 subscriptions, webhooks, bans, recent searches, rooms, memberships, stars, pending revocations,
 purges and reindexes, the rooms deleted, the apps connected, the tools picked for each agent, and the AI apps people connect to Ember). On DO SQLite, an object applies only its own scope's
 files, so a room's storage never holds workspace tables. Wrangler applies every file to D1, where
@@ -29,7 +29,7 @@ schema is in `apps/worker/search-migrations/`, which only the index applies, lis
 `SEARCH_MIGRATIONS`.
 
 So far rooms keep `messages`, `boosts`, `revocations`, `room_events`, `unindexed_messages`,
-`message_deletions`, `blobs` and `waiting_calls`, the Workspace keeps `accounts`, `users`, `sessions`, `identities`,
+`message_deletions`, `blobs` and `waiting_calls`, the Workspace keeps `accounts`, `users`, `sessions`, `session_addresses`, `identities`,
 `pending_identities`, `membership_checks`, `membership_catch_ups`, `push_subscriptions`, `webhooks`,
 `bans`, `email_links`, `email_link_requests`, `password_resets`, `searches`, `recent_searches`, `rooms`,
 `memberships`, `favorites`, `blocks`, `reports`, `pending_revocations`, `pending_purges`, `pending_reindexes`,
@@ -258,10 +258,20 @@ Objects, D1 or speed call for something else.
   from the set of banned addresses it keeps, so the check costs that call but never a database read,
   even on D1. It reads the set again after a ban or a lifted ban, and doesn't keep a read that one
   overtook. A room socket's check reads the address's ban in the statement that already reads the
-  person's membership, so it costs nothing more and never waits on that set. Banning addresses, or
-  lifting their ban, queues closing the sockets from each in every room: one `INSERT ... SELECT`
-  joins `rooms` with the addresses, sent as one JSON value, writing a `pending_revocations` row for
-  each.
+  person's membership, so it costs nothing more and never waits on that set.
+- **Bans reach the rooms that can hold a socket from their addresses.** Banning addresses, or lifting
+  their ban, queues closing the sockets from each, and a room lets in only its members, so only the
+  rooms of the people whose sessions came from them can hold one. A room socket's check, or an
+  upload's, records in the same transaction that its session comes from its address, in
+  `session_addresses` (workspace migration 0076), which writes a row only the first time, and before
+  it reads the ban, so a ban saved meanwhile finds the session. Its rows go with their session. One
+  `INSERT ... SELECT` then finds the sessions through the table's index by address, the addresses
+  sent as one JSON value, and their people's rooms through `memberships`' index by person, writing a
+  `pending_revocations` row for each room and address, and leaving out whoever is banned, whose
+  sessions' sockets close for good anyway. It used to write one for every room, more of them the more
+  people there are, since everyone who joins has a DM with everyone: at 64 people a ban asked 2,041
+  rooms. The migration took the address each session was last seen at as one its sockets came from,
+  as sockets let in before it can still be open.
 - **A ban deletes messages through the outbox, a page at a time.** Campfire's
   `RemoveBannedContentJob` finds a banned person's messages through `index_messages_on_creator_id`
   and deletes them one by one. Ours are spread over rooms, so the batch that bans someone writes a

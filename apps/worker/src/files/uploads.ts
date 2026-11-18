@@ -12,7 +12,7 @@ import {
 import { credentialsOf } from "../auth";
 import { jsonBodyOf } from "../bodies";
 import type { Env } from "../env";
-import { addressTag, MAX_ADDRESS_LENGTH, sessionTag } from "../revocations";
+import { addressTag, sessionTag, taggedAddress } from "../revocations";
 import { workspace, type Credentials } from "../workspace";
 import { objectKey, previewKey, type Identified, type RoomBlob } from "./blobs";
 import { sanitizedFilename } from "./filename";
@@ -87,8 +87,8 @@ async function uploaderIn(env: Env, credentials: Credentials, roomId: RoomId): P
   if (!access) return problem(401, NOT_SIGNED_IN);
   if (!access.member) return problem(404, ROOM_NOT_FOUND);
   if (access.banned) return tooManyRequests();
-  const { ip } = credentials.client;
-  const tags = [access.user.id, sessionTag(access.sessionId), ...(ip !== null && ip.length <= MAX_ADDRESS_LENGTH ? [addressTag(ip)] : [])];
+  const address = taggedAddress(credentials.client.ip);
+  const tags = [access.user.id, sessionTag(access.sessionId), ...(address !== null ? [addressTag(address)] : [])];
   return { user: access.user, tags, authorizedAt: access.authorizedAt };
 }
 

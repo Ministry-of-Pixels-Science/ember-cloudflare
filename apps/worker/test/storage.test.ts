@@ -43,6 +43,7 @@ const TABLES: Record<Exclude<Scope, "search">, string[]> = {
     "reports",
     "rooms",
     "searches",
+    "session_addresses",
     "sessions",
     "users",
     "webhooks",
@@ -339,6 +340,44 @@ describe("Durable Object SQLite or D1", () => {
       { id: "tablet", transfers_since: 0 },
     ]);
     expect(linked).toMatchObject({ id: "tablet", user: { id: "u1", name: "Grace" } });
+  });
+
+  it("takes the address each session was last seen at as one its sockets came from, for the sockets let in before those were recorded, and forgets them with the session", async () => {
+    // D1 runs the same SQL, at setup, with no sessions from before.
+    if (sharedD1()) return;
+    // A new room's storage stands in for a Workspace's from before, since a Workspace migrates as it opens.
+    const room = await freshRoom("session-addresses-before");
+    const { recorded, forgotten } = await runInDurableObject(roomStub(room), (_room, state: DurableObjectState) => {
+      const { sql } = state.storage;
+      sql.exec("CREATE TABLE d1_migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE)");
+      for (const { name, sql: migration } of MIGRATIONS.filter(({ scope, name }) => scope === "workspace" && name < "0076")) {
+        sql.exec(migration);
+        sql.exec("INSERT INTO d1_migrations (name) VALUES (?)", name);
+      }
+      sql.exec("INSERT INTO users (id, name, created_at, updated_at) VALUES ('u1', 'Grace', 'now', 'now')");
+      // The laptop signed in from one address and the phone from another, and nothing says where the tablet or the watch did.
+      const signIn = (id: string, ip: string | null) =>
+        sql.exec(
+          `INSERT INTO sessions (id, user_id, token_digest, ip_address, user_agent, last_active_at, created_at, updated_at)
+           VALUES (?, 'u1', ?, ?, 'Firefox', 'now', 'now', 'now')`,
+          id,
+          `digest of ${id}`,
+          ip,
+        );
+      signIn("laptop", "203.0.113.7");
+      signIn("phone", "2001:db8::7");
+      signIn("tablet", null);
+      signIn("watch", " ");
+      migrate(state.storage, "workspace");
+      const recorded = sql.exec("SELECT session_id, ip_address FROM session_addresses ORDER BY session_id").toArray();
+      sql.exec("DELETE FROM sessions WHERE id = 'laptop'");
+      return { recorded, forgotten: sql.exec("SELECT session_id, ip_address FROM session_addresses ORDER BY session_id").toArray() };
+    });
+    expect(recorded).toEqual([
+      { session_id: "laptop", ip_address: "203.0.113.7" },
+      { session_id: "phone", ip_address: "2001:db8::7" },
+    ]);
+    expect(forgotten).toEqual([{ session_id: "phone", ip_address: "2001:db8::7" }]);
   });
 
   it("gives a search index from before its indexes by room those, so a search of filters alone finds what it held", async () => {
