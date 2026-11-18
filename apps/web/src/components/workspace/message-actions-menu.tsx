@@ -298,9 +298,12 @@ export function MessageActionsMenu({ message, nodes, row, threaded, editable, th
   });
 
   // Focus leaving the bar closes it, rather than focus landing anywhere else, which would shut a bar the
-  // pointer opened as the composer, ready a moment after the messages show, takes focus.
+  // pointer opened as the composer, ready a moment after the messages show, takes focus. Focus going to
+  // what holds the bar isn't leaving it: Safari doesn't focus a button that's clicked or tapped, but what
+  // holds it and can take focus, the page's main content, a moment before the click would land.
   const focusLeft = useEffectEvent((event: FocusEvent) => {
-    if (event.relatedTarget && !container.current?.contains(event.relatedTarget as Node)) close();
+    const to = event.relatedTarget as Node | null;
+    if (to && !container.current?.contains(to) && !to.contains(container.current)) close();
   });
 
   // Escape closes a bar Add a boost opened, handing focus back to it. Otherwise it closes the tray first,
@@ -597,7 +600,7 @@ function FileActions({ file }: { file: StoredFile }) {
   return (
     <>
       <ActionTooltip label="Download">
-        <a href={file.downloadUrl} aria-label="Download" className={cn(ACTION, "ios-pwa:hidden")}>
+        <a href={file.downloadUrl} download aria-label="Download" className={cn(ACTION, "ios-pwa:hidden")}>
           <Download />
         </a>
       </ActionTooltip>

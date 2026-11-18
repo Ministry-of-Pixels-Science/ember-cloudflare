@@ -114,7 +114,8 @@ describe("Image viewer", () => {
     expect(within(viewer()!).getByRole("img", { name: "moon.jpg" })).toHaveAttribute("src", moon.url);
     const download = within(viewer()!).getByRole("link", { name: "Download file" });
     expect(download).toHaveAttribute("href", moon.downloadUrl);
-    expect(download).not.toHaveAttribute("download");
+    // Downloaded, never opened, under the name the server gives it.
+    expect(download).toHaveAttribute("download", "");
 
     await userEvent.click(screen.getByRole("button", { name: "Close image viewer" }));
     expect(viewer()).not.toBeInTheDocument();

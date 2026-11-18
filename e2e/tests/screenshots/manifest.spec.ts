@@ -2,7 +2,7 @@ import path from "node:path";
 import type { RoomIconName, Sidebar } from "@ember/protocol";
 import { MENTION_CONTENT_TYPE, mentionSgid } from "@ember/richtext";
 import type { APIRequestContext, Page, TestInfo } from "@playwright/test";
-import { cookieHeader, createSession, expect, keepOtherRoomsOut, openRoom, Participant, signInAs, test, type Session, type TestRoom } from "../../fixtures";
+import { answerChanged, cookieHeader, createSession, expect, keepOtherRoomsOut, openRoom, Participant, signInAs, test, type Session, type TestRoom } from "../../fixtures";
 import { settle } from "../mobile/audits";
 
 // The web app manifest's screenshots, which an install prompt shows: Ember on a phone. `pnpm
@@ -68,12 +68,7 @@ test.describe("Web app manifest", () => {
 
     // Every other test's open rooms take everyone in too, so the sidebar lists just these.
     const listed = new Set([general.id, launch.id, design.id, support.id, random.id, withSam, withPriya]);
-    await page.route("**/api/sidebar", async (route) => {
-      const response = await route.fetch();
-      if (!response.ok()) return route.fulfill({ response });
-      const sidebar = (await response.json()) as Sidebar;
-      await route.fulfill({ response, json: { ...sidebar, rooms: sidebar.rooms.filter(({ id }) => listed.has(id)) } });
-    });
+    await page.route("**/api/sidebar", (route) => answerChanged<Sidebar>(route, (sidebar) => ({ ...sidebar, rooms: sidebar.rooms.filter(({ id }) => listed.has(id)) })));
     await keepOtherRoomsOut(page, listed);
     await signInAs(page, maya);
 

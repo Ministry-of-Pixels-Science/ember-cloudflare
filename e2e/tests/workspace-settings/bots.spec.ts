@@ -3,7 +3,7 @@ import type { AddressInfo } from "node:net";
 import { gzipSync } from "node:zlib";
 import { devices, type APIResponse, type Locator, type Page } from "@playwright/test";
 import { expect, test } from "../../fixtures";
-import { ADMINISTRATOR, drawnPicture, editorField, nextSecond, shownPicture, signInAsAdministrator, useOwnAddress } from "../../fixtures";
+import { ADMINISTRATOR, drawnPicture, editorField, nextSecond, shownPicture, signInAsAdministrator, useOwnAddress, variantType } from "../../fixtures";
 import { auditScreen } from "../mobile/audits";
 import { join } from "./fixtures";
 
@@ -144,7 +144,7 @@ test.describe("Add and edit a bot", () => {
 
     const avatar = botNamed(page, name).getByRole("link", { name, exact: true }).locator("img");
     await expect(avatar).toHaveAttribute("src", /^\/users\/[^/]+\/avatar\?v=\d{14}$/);
-    expect(await shownPicture(avatar)).toEqual({ type: "image/webp", width: 512, height: 341 });
+    expect(await shownPicture(avatar)).toEqual({ type: await variantType(page), width: 512, height: 341 });
     const first = (await avatar.getAttribute("src"))!;
 
     await botNamed(page, name).getByRole("link", { name: `Edit ${name}` }).click();
@@ -155,7 +155,7 @@ test.describe("Add and edit a bot", () => {
     await page.getByRole("button", { name: "Save changes" }).click();
     await expect(page).toHaveURL(/\/account\/bots$/);
     await expect(avatar).not.toHaveAttribute("src", first);
-    expect(await shownPicture(avatar)).toEqual({ type: "image/webp", width: 256, height: 512 });
+    expect(await shownPicture(avatar)).toEqual({ type: await variantType(page), width: 256, height: 512 });
   });
 });
 

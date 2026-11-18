@@ -2,7 +2,7 @@ import type { Bootstrap } from "@ember/protocol";
 import { APP_SECRET_UNKNOWN } from "@ember/protocol/huddles";
 import type { Page } from "@playwright/test";
 import { expect, test } from "../../fixtures";
-import { ADMINISTRATOR, drawnPicture, SAME_ORIGIN, shownPicture } from "../../fixtures";
+import { ADMINISTRATOR, drawnPicture, SAME_ORIGIN, shownPicture, variantType } from "../../fixtures";
 import { SETUP_TOKEN } from "../../projects/first-run";
 import { AI_GATEWAY_ACCOUNT, SETTINGS_FIRST_RUN, SFU_APP } from "../../projects/workspace-settings";
 import { startFakeSfu } from "../workspace-settings/fake-sfu";
@@ -127,7 +127,7 @@ test.describe("Set up the workspace", () => {
     }
     await expect(startHuddle).toHaveCount(0);
     // Their avatar is the variant their browser made of the photo, within 512×512.
-    expect(await shownPicture(page.getByRole("link", { name: "Your profile" }).locator("img"))).toEqual({ type: "image/webp", width: 341, height: 512 });
+    expect(await shownPicture(page.getByRole("link", { name: "Your profile" }).locator("img"))).toEqual({ type: await variantType(page), width: 341, height: 512 });
     // Setup made the rooms general and random, and nothing else.
     const rooms = page.getByRole("region", { name: "Rooms" }).getByRole("link");
     await expect(rooms).toHaveCount(2);

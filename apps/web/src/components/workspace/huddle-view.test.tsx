@@ -52,8 +52,17 @@ const huddle = (changes: Partial<JoinedHuddle> = {}): JoinedHuddle => ({
 });
 /** A camera's stream, as much of one as a tile reads, which is the way it faces, where the browser says: jsdom has none. */
 const camera = (facingMode?: string) => ({ getVideoTracks: () => [{ getSettings: () => ({ facingMode }) }] }) as unknown as MediaStream;
-/** And a shared screen's, of which it reads nothing. */
-const shared = () => ({}) as MediaStream;
+/** And a shared screen's, of which it reads nothing but its picture, which has come. */
+const shared = () => ({ getVideoTracks: () => [] }) as unknown as MediaStream;
+/** A camera's stream whose first packets have yet to come, and what brings them. */
+function cameraToCome(): { stream: MediaStream; come: () => void } {
+  const picture = Object.assign(new EventTarget(), { muted: true });
+  const come = () => {
+    picture.muted = false;
+    picture.dispatchEvent(new Event("unmute"));
+  };
+  return { stream: { getVideoTracks: () => [picture] } as unknown as MediaStream, come };
+}
 const crowd = (count: number) => Array.from({ length: count }, (_, index) => inHuddle({ id: `u${index}`, name: `Person ${index}` }));
 /** Hears that the session has ended, which none here does. */
 const failed = vi.fn();
@@ -507,6 +516,24 @@ describe("The tiles of a huddle", () => {
     // Someone else's is as it is whichever way it faces.
     rerender(<HuddleView huddle={huddle({ watched: new Map([["sam", camera("user")]]) })} room={general} me={me} onFailed={failed} />);
     expect(screen.getByLabelText("Sam Rivera's camera")).not.toHaveClass("-scale-x-100");
+  });
+
+  it("gives a picture its stream once the stream's first packets come, as WebKit can show nothing of one it's given before", () => {
+    const sams = cameraToCome();
+    renderView(huddle({ people: [inHuddle(sam, { video: true })], watched: new Map([["sam", sams.stream]]) }));
+    const picture = screen.getByLabelText<HTMLVideoElement>("Sam Rivera's camera");
+    expect(picture.srcObject).not.toBe(sams.stream);
+    sams.come();
+    expect(picture.srcObject).toBe(sams.stream);
+  });
+
+  it("gives a picture that's gone before its stream's first packets came nothing once they come", () => {
+    const sams = cameraToCome();
+    const { rerender } = renderView(huddle({ people: [inHuddle(sam, { video: true })], watched: new Map([["sam", sams.stream]]) }));
+    const picture = screen.getByLabelText<HTMLVideoElement>("Sam Rivera's camera");
+    rerender(<HuddleView huddle={huddle()} room={general} me={me} onFailed={failed} />);
+    sams.come();
+    expect(picture.srcObject).toBeNull();
   });
 
   it("plays a picture the browser kept from playing at the person's next click or key, until it's gone", async () => {
