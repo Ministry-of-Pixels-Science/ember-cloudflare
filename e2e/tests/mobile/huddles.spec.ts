@@ -191,7 +191,7 @@ async function letScreenBeKeptAwake(page: Page): Promise<void> {
 }
 
 /** Where a page keeps the connection that stands in for the SFU's, which sends it the screens it watches, and the picture they show. */
-type SentScreens = Window & { screensSent?: RTCPeerConnection; screenPicture?: MediaStreamTrack };
+type SentScreens = Window & { screensSent?: RTCPeerConnection; screenPicture?: MediaStreamTrack; screensDrawn?: number; screenEvents?: unknown[][] };
 
 /**
  * In the page: a connection of its own that sends it `count` screens, as the SFU's would, each the
@@ -200,12 +200,37 @@ type SentScreens = Window & { screensSent?: RTCPeerConnection; screenPicture?: M
  * closed, as the SFU's would be, and each sends copies of one picture, which the page keeps, so the
  * browser never lets go of the camera's picture while copies of it play.
  */
-async function offerScreens(count: number): Promise<{ sdp: string; mids: string[] }> {
+async function offerScreens({ count, drawn }: { count: number; drawn: boolean }): Promise<{ sdp: string; mids: string[] }> {
   const sending = window as SentScreens;
   sending.screensSent?.close();
-  sending.screenPicture ??= (await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } })).getVideoTracks()[0]!;
+  // TEMPORARY, for CI's WebKit run: pictures drawn on canvases, in place of the camera's, when `drawn`.
+  let pictures: MediaStreamTrack[];
+  if (drawn) {
+    clearInterval(sending.screensDrawn);
+    const canvases = Array.from({ length: count }, () => Object.assign(document.createElement("canvas"), { width: 1280, height: 720 }));
+    let frame = 0;
+    const draw = () => {
+      frame += 1;
+      for (const canvas of canvases) {
+        const context = canvas.getContext("2d")!;
+        context.fillStyle = "#1d4ed8";
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        context.fillStyle = "#ffffff";
+        context.fillRect((frame * 20) % canvas.width, 0, 80, canvas.height);
+      }
+    };
+    draw();
+    sending.screensDrawn = window.setInterval(draw, 1000 / 15);
+    pictures = canvases.map((canvas) => canvas.captureStream(15).getVideoTracks()[0]!);
+  } else {
+    if (!sending.screenPicture) {
+      sending.screenPicture = (await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } })).getVideoTracks()[0]!;
+      for (const type of ["mute", "unmute", "ended"]) sending.screenPicture.addEventListener(type, () => sending.screenEvents?.push([Math.round(performance.now()), `picture ${type}`]));
+    }
+    pictures = Array.from({ length: count }, () => sending.screenPicture!.clone());
+  }
   const connection = new RTCPeerConnection();
-  const sent = Array.from({ length: count }, () => connection.addTransceiver(sending.screenPicture!.clone(), { direction: "sendonly" }));
+  const sent = pictures.map((picture) => connection.addTransceiver(picture, { direction: "sendonly" }));
   await connection.setLocalDescription(await connection.createOffer());
   if (!connection.localDescription!.sdp.includes("a=candidate:")) await new Promise((resolve) => connection.addEventListener("icecandidate", resolve, { once: true }));
   sending.screensSent = connection;
@@ -218,7 +243,7 @@ async function offerScreens(count: number): Promise<{ sdp: string; mids: string[
  * connection it has yet to make, as it does once it shows the huddle opened, and whenever it shows it
  * opened again.
  */
-async function standInHuddleWithScreens(page: Page, you: User, sharing: User[], others: User[] = []): Promise<void> {
+async function standInHuddleWithScreens(page: Page, you: User, sharing: User[], others: User[] = [], experiment = { drawn: false }): Promise<void> {
   const people = [...sharing.map((user) => ({ user, screen: true })), ...[...others, you].map((user) => ({ user, screen: false }))].map((person) => ({ ...person, muted: false, audio: false, video: false }));
   await page.routeWebSocket(HUDDLE_SOCKET, (ws) => {
     const say = (frame: HuddleServerFrame) => ws.send(JSON.stringify(frame));
@@ -226,7 +251,7 @@ async function standInHuddleWithScreens(page: Page, you: User, sharing: User[], 
     ws.onMessage(async (message) => {
       const frame = JSON.parse(String(message)) as HuddleClientFrame;
       if (frame.type === "huddle.listen" && frame.kind === "screen" && frame.fresh && frame.watch?.length === sharing.length) {
-        const { sdp, mids } = await page.evaluate(offerScreens, sharing.length);
+        const { sdp, mids } = await page.evaluate(offerScreens, { count: sharing.length, drawn: experiment.drawn });
         say({ type: "huddle.offer", kind: "screen", sdp, tracks: sharing.map(({ id }, index) => ({ mid: mids[index]!, kind: "screen", userId: id })) });
       } else if (frame.type === "huddle.answer" && frame.kind === "screen") {
         await page.evaluate((sdp) => (window as SentScreens).screensSent!.setRemoteDescription({ type: "answer", sdp }), frame.sdp);
@@ -786,9 +811,84 @@ test("Invite people, with more people to invite than it lists at once, has a sea
   await expect.poll(() => invitationsSent(said)).toEqual([{ type: "huddle.invite", userIds: ["invite-42"] }]);
 });
 
+// TEMPORARY, for CI's WebKit run: what's made of the shared screens, from the stand-in's camera to the page's videos.
+type ScreensRecorded = SentScreens & { connectionsMade?: RTCPeerConnection[] };
+
+/** In the page, before it loads: keeps every connection given a description, and what happens to them and to videos. */
+function recordScreens(): void {
+  const recorded = window as ScreensRecorded;
+  const made: RTCPeerConnection[] = (recorded.connectionsMade = []);
+  const events: unknown[][] = (recorded.screenEvents = []);
+  const now = () => Math.round(performance.now());
+  const setRemoteDescription = RTCPeerConnection.prototype.setRemoteDescription as (this: RTCPeerConnection, description: RTCSessionDescriptionInit) => Promise<void>;
+  RTCPeerConnection.prototype.setRemoteDescription = function (this: RTCPeerConnection, description: RTCSessionDescriptionInit) {
+    if (!made.includes(this)) {
+      const index = made.push(this) - 1;
+      this.addEventListener("connectionstatechange", () => events.push([now(), `connection ${index}`, this.connectionState]));
+      this.addEventListener("track", ({ track }) => {
+        events.push([now(), `track ${index}`, track.kind, track.muted]);
+        for (const type of ["mute", "unmute", "ended"]) track.addEventListener(type, () => events.push([now(), `${type} ${index}`, track.kind]));
+      });
+    }
+    return setRemoteDescription.call(this, description);
+  } as typeof RTCPeerConnection.prototype.setRemoteDescription;
+  for (const type of ["loadedmetadata", "loadeddata", "playing", "pause", "waiting", "stalled", "emptied", "error"]) {
+    document.addEventListener(type, (event) => events.push([now(), type, (event.target as Element).getAttribute?.("aria-label")]), true);
+  }
+}
+
+/** In the page: what each connection sends and receives, what the videos show, and what has happened so far. */
+async function screensState(): Promise<unknown> {
+  const recorded = window as ScreensRecorded;
+  const connections = await Promise.all(
+    (recorded.connectionsMade ?? []).map(async (connection, index) => {
+      const stats: unknown[] = [];
+      try {
+        (await connection.getStats()).forEach((stat) => {
+          if (stat.type === "outbound-rtp" || stat.type === "inbound-rtp") {
+            stats.push({ type: stat.type, kind: stat.kind, mid: stat.mid, packets: stat.packetsSent ?? stat.packetsReceived, bytes: stat.bytesSent ?? stat.bytesReceived, framesEncoded: stat.framesEncoded, framesSent: stat.framesSent, framesReceived: stat.framesReceived, framesDecoded: stat.framesDecoded, width: stat.frameWidth, encoder: stat.encoderImplementation, decoder: stat.decoderImplementation, pli: stat.pliCount, nack: stat.nackCount });
+          }
+          if (stat.type === "candidate-pair" && (stat.nominated || stat.state === "succeeded")) stats.push({ type: "pair", state: stat.state, nominated: stat.nominated, sent: stat.bytesSent, received: stat.bytesReceived });
+        });
+      } catch (error) {
+        stats.push(String(error));
+      }
+      return {
+        index,
+        local: connection.localDescription?.type,
+        state: connection.connectionState,
+        ice: connection.iceConnectionState,
+        senders: connection.getSenders().map(({ track }) => track && { kind: track.kind, state: track.readyState, muted: track.muted, enabled: track.enabled }),
+        receivers: connection.getReceivers().map(({ track }) => ({ kind: track.kind, state: track.readyState, muted: track.muted })),
+        stats,
+      };
+    }),
+  );
+  const videos = [...document.querySelectorAll<HTMLVideoElement>("#huddle video")].map((video) => ({
+    label: video.getAttribute("aria-label"),
+    paused: video.paused,
+    readyState: video.readyState,
+    width: video.videoWidth,
+    time: video.currentTime,
+    error: video.error?.code ?? null,
+    tracks: (video.srcObject as MediaStream | null)?.getTracks().map((track) => ({ state: track.readyState, muted: track.muted })),
+  }));
+  const picture = recorded.screenPicture;
+  return { at: Math.round(performance.now()), videos, picture: picture && { state: picture.readyState, muted: picture.muted, enabled: picture.enabled }, connections, events: recorded.screenEvents };
+}
+
 test("the screens people share in the huddle you're in fit the phone, one large and the other among the huddle's tiles, under it or beside it", async ({ page, room, session, participant, screenIsFine }) => {
+  // TEMPORARY, for CI's WebKit run.
+  test.setTimeout(120_000);
+  await page.addInitScript(recordScreens);
+  const report = async (label: string) => {
+    const state = JSON.stringify(await page.evaluate(screensState), null, 1);
+    console.log(label, state);
+    await test.info().attach(label, { body: state, contentType: "application/json" });
+  };
+  const experiment = { drawn: false };
   const sharing = await Promise.all(["Ada", "Grace"].map(async (name) => (await participant(name)).session.user));
-  await standInHuddleWithScreens(page, session.user, sharing);
+  await standInHuddleWithScreens(page, session.user, sharing, [], experiment);
   await openRoomWithHuddlesOn(page, room);
   await header(page).getByRole("button", { name: "Start huddle", exact: true }).tap();
   await page.getByRole("dialog", { name: `Start a huddle in ${room.name}` }).getByRole("button", { name: "Start Huddle" }).tap();
@@ -800,6 +900,7 @@ test("the screens people share in the huddle you're in fit the phone, one large 
   const stage = opened.getByRole("figure");
   await expect(stage).toContainText("Ada's screen");
   await expect.poll(() => shows("Ada's screen"), { timeout: 15_000 }).toBe(true);
+  await report("after opening");
   await expect(stage).toBeInViewport({ ratio: 1 });
   // The tiles are under it on a phone held upright, and beside it on one held on its side, clear of one another. Grace's screen is the first of them.
   const list = opened.getByRole("list", { name: "In the huddle" });
@@ -829,8 +930,24 @@ test("the screens people share in the huddle you're in fit the phone, one large 
   const bar = page.getByRole("region", { name: `Huddle in ${room.name}` });
   await expect(bar).toContainText("Ada and Grace are sharing screens");
   await screenIsFine();
+  await report("minimized");
   await bar.getByTitle("Open huddle").first().tap();
-  await expect.poll(() => shows("Ada's screen"), { timeout: 15_000 }).toBe(true);
+  await expect
+    .poll(() => shows("Ada's screen"), { timeout: 15_000 })
+    .toBe(true)
+    .catch(async (error: unknown) => {
+      // TEMPORARY, for CI's WebKit run: what was sent and received, whether playing it from the page shows it, and whether pictures drawn on canvases show.
+      await report("after reopening");
+      const played = await opened.getByLabel("Ada's screen", { exact: true }).evaluate((video: HTMLVideoElement) => video.play().then(() => "played", (reason: unknown) => String(reason)));
+      await page.waitForTimeout(3_000);
+      await report(`after play(), which said ${played}, showing ${await shows("Ada's screen")}`);
+      experiment.drawn = true;
+      await opened.getByRole("button", { name: "Minimize huddle" }).tap();
+      await bar.getByTitle("Open huddle").first().tap();
+      const drawnShow = await expect.poll(() => shows("Ada's screen"), { timeout: 15_000 }).toBe(true).then(() => true, () => false);
+      await report(`after reopening on drawn pictures, showing ${drawnShow}`);
+      throw error;
+    });
   await expect(tiles).toHaveCount(4);
 });
 

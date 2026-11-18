@@ -190,9 +190,12 @@ function CustomReaction({ me, fieldRef, onAdd, onCancel }: { me: Me; fieldRef?: 
 
   useImperativeHandle(fieldRef, () => field.current!);
   useScrollIntoView(form);
-  // The field takes focus without the browser scrolling to it, since the form scrolls itself into view: Safari
-  // scrolls to a field focused as it's added once the frame's callbacks have run, which stops that scroll as it starts.
-  useLayoutEffect(() => field.current!.focus({ preventScroll: true }), []);
+  // The field takes focus once the form's laid out, without the browser scrolling to it, since the form scrolls
+  // itself into view: Safari's focus on a field it has yet to lay out, or that scrolls to it, stops that scroll.
+  useLayoutEffect(() => {
+    form.current!.getBoundingClientRect();
+    field.current!.focus({ preventScroll: true });
+  }, []);
 
   return (
     <form

@@ -5,6 +5,13 @@ import { expect, test, unique } from "./fixtures";
 
 const signInHeading = (page: Page) => page.getByRole("heading", { level: 1, name: "Sign in to Ember" });
 
+/**
+ * How long a tab can take to hear that the server closed its socket, and to go to sign in. A browser hears it
+ * once the connection under the socket ends, which wrangler dev leaves to the browser: Chrome ends it after
+ * 2 seconds, and WebKit on Linux after 5.
+ */
+const SOCKET_CLOSE_HEARD_MS = 10_000;
+
 test.describe("Sign in with email and password", () => {
   test.beforeEach(({ page }) => useOwnAddress(page));
 
@@ -292,8 +299,9 @@ test.describe("Sign out", () => {
 
       await logOut(laptop);
       await expect(signInHeading(laptop)).toBeVisible();
-      // The room closed the other tab's socket, so it found out without being touched.
-      await expect(signInHeading(otherTab)).toBeVisible();
+      // The room closed the other tab's socket, so it found out without being touched, once the browser heard
+      // (`SOCKET_CLOSE_HEARD_MS`).
+      await expect(signInHeading(otherTab)).toBeVisible({ timeout: SOCKET_CLOSE_HEARD_MS });
 
       const composer = editorField(phone, "Write a message");
       await composer.fill("Still signed in on the phone");
@@ -321,7 +329,7 @@ test.describe("One live connection per tab outside the open room", () => {
 
       await logOut(laptop);
       await expect(signInHeading(laptop)).toBeVisible();
-      await expect(signInHeading(settings)).toBeVisible();
+      await expect(signInHeading(settings)).toBeVisible({ timeout: SOCKET_CLOSE_HEARD_MS });
     } finally {
       await laptop.context().close();
     }

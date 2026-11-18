@@ -463,6 +463,9 @@ test.describe("Formatting row", () => {
     await ada.composer().pressSequentially("See ");
     await ada.composer().press("ControlOrMeta+Shift+U");
     await expect(linkDialog(ada).getByLabel("Text")).toBeFocused();
+    // The click shut the tooltip that named Show formatting as the pointer reached it, which takes Escape until it
+    // has faded, hidden under the dialog as it is.
+    await expect(ada.page.getByRole("tooltip", { includeHidden: true })).toHaveCount(0);
     await ada.page.keyboard.press("Escape");
     await expect(linkDialog(ada)).toBeHidden();
     await expect(ada.composer()).toBeFocused();
