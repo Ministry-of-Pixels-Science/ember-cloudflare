@@ -53,12 +53,11 @@ interface Joined {
 }
 
 /**
- * Has one more person join the huddle `people` are in, as `session`: they're welcomed, publish their
- * voice and ask to hear everyone, and everyone asks to hear them. Resolves once the room has told each
- * of them that they do, with the newcomer among `people`.
+ * Has `client`, whose person the room has just welcomed, join the huddle `people` are in: they publish
+ * their voice and ask to hear everyone, and everyone asks to hear them. Resolves once the room has told
+ * each of them that they do, with the newcomer among `people` and how long both took from the welcome.
  */
-async function join(server: Server, room: string, people: HuddleClient[], session: Session): Promise<Joined> {
-  const { client, ms: welcome } = await HuddleClient.connect(server.url, room, session);
+async function join(people: HuddleClient[], client: HuddleClient): Promise<Omit<Joined, "welcome">> {
   const welcomedAt = performance.now();
   const others = people.length;
   let hears = 0;
@@ -70,18 +69,15 @@ async function join(server: Server, room: string, people: HuddleClient[], sessio
   };
   for (const person of people) {
     person.onHeard = (userId, at) => {
-      if (userId === session.user.id && ++heardBy === others) heardByAllAt = at;
+      if (userId === client.session.user.id && ++heardBy === others) heardByAllAt = at;
     };
   }
   client.talk();
   const joined = await waitFor(() => client.published && hears >= others && heardBy >= others, JOINED_TIMEOUT_MS);
   for (const person of [...people, client]) person.onHeard = null;
-  if (!joined) {
-    client.close();
-    throw new Error(`Of the ${others} in the huddle, the newcomer heard ${hears} and ${heardBy} heard the newcomer within ${JOINED_TIMEOUT_MS}ms`);
-  }
+  if (!joined) throw new Error(`Of the ${others} in the huddle, the newcomer heard ${hears} and ${heardBy} heard the newcomer within ${JOINED_TIMEOUT_MS}ms`);
   people.push(client);
-  return { welcome, hearsAll: others > 0 ? hearsAllAt - welcomedAt : null, heardByAll: others > 0 ? heardByAllAt - welcomedAt : null };
+  return { hearsAll: others > 0 ? hearsAllAt - welcomedAt : null, heardByAll: others > 0 ? heardByAllAt - welcomedAt : null };
 }
 
 /**
@@ -125,6 +121,8 @@ export async function huddle(server: Server, sfu: StandInSfu, options: HuddleOpt
   await turnHuddlesOn(server.url, await setUp(server.url), SFU_APP);
   const room = await newRoom(server, "huddle");
   const people: HuddleClient[] = [];
+  /** Everyone the room has welcomed: the people in the huddle, and a newcomer who then couldn't join them, whose errors count as theirs do. */
+  const welcomed: HuddleClient[] = [];
   const steps: HuddleStep[] = [];
   let stopped: string | null = null;
 
@@ -137,7 +135,9 @@ export async function huddle(server: Server, sfu: StandInSfu, options: HuddleOpt
         const joined: Joined[] = [];
         for (const session of sessions) {
           askedBeforeLast = sfu.requests;
-          joined.push(await join(server, room, people, session));
+          const { client, ms: welcome } = await HuddleClient.connect(server.url, room, session);
+          welcomed.push(client);
+          joined.push({ welcome, ...(await join(people, client)) });
         }
         return joined;
       });
@@ -159,6 +159,6 @@ export async function huddle(server: Server, sfu: StandInSfu, options: HuddleOpt
       break;
     }
   }
-  closeAll(people);
-  return { ...options, steps, errors: sum(people.map((person) => person.errors.length)), stopped };
+  closeAll(welcomed);
+  return { ...options, steps, errors: sum(welcomed.map((client) => client.errors.length)), stopped };
 }
