@@ -4,6 +4,7 @@ import {
   ASSISTANT_NAME,
   CANT_SEND_EMAIL,
   CloseCode,
+  DELETED_PERSON_NAME,
   domainOfEmailAddress,
   EMAILS_PER_ADDRESS,
   EMAIL_LINKS_PER_NETWORK,
@@ -3499,6 +3500,80 @@ export class Workspace extends DurableObject<Env> {
     return removed;
   }
 
+  /**
+   * What deleting the account of the person `credentials` signs in checks first: the digest of their
+   * password, if they have one, which the Worker checks the one typed against, counting it against
+   * sign-in's limit for `ip`: "limited" past it. "only administrator" for the only administrator, who
+   * must make someone else one first. Null without a valid session. The password itself stays in the
+   * Worker, as at sign-in.
+   */
+  async accountDeletionCheck(credentials: Credentials, ip: string): Promise<{ passwordDigest: string | null } | "limited" | "only administrator" | null> {
+    const session = await this.session(credentials);
+    const signIn = session && (await this.store.signInOf(session.user.id));
+    if (!signIn) return null;
+    if (await this.isOnlyAdministrator(session.user.id)) return "only administrator";
+    if (signIn.passwordDigest === null) return { passwordDigest: null };
+    return this.signInAttempts.attempt(ip) ? { passwordDigest: signIn.passwordDigest } : "limited";
+  }
+
+  /**
+   * Deletes the account of the person `credentials` signs in, once they've said they mean it: with their
+   * password while they have one, whose digest was `checked` as the Worker checked it, or else by typing
+   * `name`, theirs as `sameName` compares names. "password needed" when they have a password whose
+   * digest isn't `checked`, "name needed" without one when `name` isn't theirs, "only administrator" for
+   * the only administrator, or null without a valid session. Everything removing them does follows
+   * (`deactivate`), and their name, email address, password, bio and avatar go, as do the rooms they
+   * starred and the accounts elsewhere they connected. Their row stays, named as deleted accounts are,
+   * since their DMs name them. The outbox has every room they can have written in delete their messages
+   * and boosts, and R2 their avatar. Everyone's workspace sockets hear of it.
+   */
+  async deleteAccount(
+    credentials: Credentials,
+    checked: string | null,
+    name: string | undefined,
+  ): Promise<"deleted" | "password needed" | "name needed" | "only administrator" | null> {
+    return this.inALaterSecond(() =>
+      this.closingSockets(async () => {
+        const session = await this.session(credentials);
+        if (!session) return null;
+        const person = await this.store.ownProfile(session.user.id);
+        if (!person) return null;
+        // Read again here, since a reset or a change ahead of this in line can have replaced the password checked.
+        const passwordDigest = (await this.store.signInOf(person.id))?.passwordDigest ?? null;
+        if (passwordDigest !== checked) return "password needed";
+        if (passwordDigest === null && (name === undefined || !sameName(name, person.name))) return "name needed";
+        if (await this.isOnlyAdministrator(person.id)) return "only administrator";
+        const now = Date.now();
+        // Their avatar's address changes with the second they last changed in, so the one browsers keep isn't theirs anymore.
+        const tooSoon = tooSoonAfter(person.updatedAt, now);
+        if (tooSoon) return tooSoon;
+        const deletedAt = new Date(now).toISOString();
+        // As when removing someone, until the database says it queued nothing.
+        let queued = true;
+        try {
+          queued = await this.sessions.change(
+            (session) => session.user.id === person.id,
+            () => this.store.deleteAccount(person.id, person.avatar?.key ?? null, CloseCode.Revoked, now, deletedAt),
+          );
+        } finally {
+          this.closeSockets(person.id, CloseCode.Revoked);
+          if (queued) await this.revocationsQueued(now);
+          else if (person.avatar) await this.wakeAt(now);
+        }
+        if (person.accounts.length > 0) await this.forgetUnlinked();
+        const deleted = { id: person.id, name: DELETED_PERSON_NAME, bio: null, role: "member", status: "deactivated", updatedAt: deletedAt, agent: false, keptFor: null } as const;
+        this.broadcast({ type: "user.updated", user: await this.directoryUser(deleted) });
+        return "deleted";
+      }),
+    );
+  }
+
+  /** Whether `userId` is the only administrator, whom the account can't do without. */
+  private async isOnlyAdministrator(userId: UserId): Promise<boolean> {
+    const administrators = await this.store.administratorIds();
+    return administrators.length === 1 && administrators[0] === userId;
+  }
+
   /** Whether `userId` is @ember's or an agent's, which go with Ember AI, on the AI assistant tab, so that removing or banning them finds nobody. */
   private async goesWithEmberAi(userId: UserId): Promise<boolean> {
     return userId === ASSISTANT_ID || this.store.isAgent(userId);
@@ -4422,12 +4497,13 @@ export class Workspace extends DurableObject<Env> {
   /**
    * Bans `userId`, whatever their status, as the person `credentials` signs in, answering them as the
    * people directory then lists them: "forbidden" unless that's an administrator, "not found" if nobody
-   * has the id, or it's @ember's or an agent's (`goesWithEmberAi`), or null without a valid session.
-   * Nobody can ban themselves ("yourself"), so there's always an administrator. If any IP address
-   * recorded on their sessions is one a ban can't block, it answers what's wrong with it and changes
-   * nothing. Otherwise it blocks them all, all their sessions end, their sockets close for good, here at
-   * once and in every room they're in through the outbox, and the outbox has every room they can have
-   * written in delete their messages. Everyone's workspace sockets hear of it.
+   * has the id, or it's @ember's or an agent's (`goesWithEmberAi`), or someone who deleted their
+   * account, or null without a valid session. Nobody can ban themselves ("yourself"), so there's always
+   * an administrator. If any IP address recorded on their sessions is one a ban can't block, it answers
+   * what's wrong with it and changes nothing. Otherwise it blocks them all, all their sessions end, their
+   * sockets close for good, here at once and in every room they're in through the outbox, and the outbox
+   * has every room they can have written in delete their messages. Everyone's workspace sockets hear of
+   * it.
    */
   async banPerson(
     credentials: Credentials,
@@ -4437,7 +4513,7 @@ export class Workspace extends DurableObject<Env> {
     if (!user) return null;
     return this.closingSockets(async () => {
       if (!(await this.store.isAdministrator(user.id))) return "forbidden";
-      const person = (await this.goesWithEmberAi(userId)) ? null : await this.store.person(userId);
+      const person = (await this.goesWithEmberAi(userId)) ? null : await this.store.bannablePerson(userId);
       if (!person) return "not found";
       if (userId === user.id) return "yourself";
       const ipAddresses = await this.store.sessionIpAddresses(userId);
@@ -4484,8 +4560,9 @@ export class Workspace extends DurableObject<Env> {
     return this.closingSockets(async () => {
       if (!(await this.store.isAdministrator(user.id))) return "forbidden";
       // As when banning, @ember and the agents go with Ember AI, which lifting a ban would otherwise
-      // bring back, and an agent kept to the open rooms picked would be put in every one.
-      const person = (await this.goesWithEmberAi(userId)) ? null : await this.store.person(userId);
+      // bring back, and an agent kept to the open rooms picked would be put in every one. Nor does it
+      // bring back someone who deleted their account.
+      const person = (await this.goesWithEmberAi(userId)) ? null : await this.store.bannablePerson(userId);
       if (!person) return "not found";
 
       const now = Date.now();
@@ -5229,7 +5306,8 @@ export class Workspace extends DurableObject<Env> {
   /**
    * Asks rooms to delete the messages of the people banned since, up to `limit` rooms, each
    * `MESSAGES_PER_PURGE` at a time, and only those written before the ban was lifted, if it has been,
-   * even while it's asking. A room that has more of theirs left is asked again at once, and one that
+   * even while it's asking, and the messages and boosts of the people who deleted their accounts, all
+   * of them, as many at a time. A room that has more of theirs left is asked again at once, and one that
    * can't be reached later, as a revocation is. A room is asked only once the sockets queued to close
    * there have closed, as those delivered just before may have, so a banned person can't write through
    * one after it's done. Answers how many it read.
@@ -5243,10 +5321,13 @@ export class Workspace extends DurableObject<Env> {
     const finished: number[] = [];
     const unfinished: number[] = [];
     const failed: number[] = [];
-    await eachAtMost(due, ROOMS_AT_ONCE, async ({ id, roomId, userId, liftedAt }) => {
+    await eachAtMost(due, ROOMS_AT_ONCE, async ({ id, roomId, userId, liftedAt, deletedAccount }) => {
       try {
+        const room = this.env.CHAT_ROOM.getByName(roomId);
         const until = liftedAt ?? this.liftedBans.get(userId) ?? null;
-        const more = await this.env.CHAT_ROOM.getByName(roomId).removeMessagesBy(roomId, userId, MESSAGES_PER_PURGE, until);
+        const more = deletedAccount
+          ? await room.removeEverythingBy(roomId, userId, MESSAGES_PER_PURGE)
+          : await room.removeMessagesBy(roomId, userId, MESSAGES_PER_PURGE, until);
         (more ? unfinished : finished).push(id);
       } catch (error) {
         console.error(`Could not delete messages in room ${roomId}; trying again later`, error);

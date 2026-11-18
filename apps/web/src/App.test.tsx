@@ -1,9 +1,21 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CloseCode, EMAIL_LINK_GONE, SIGN_IN_REJECTED, type Account, type AccountChanges, type Bootstrap, type Message, type WorkspaceSettings } from "@ember/protocol";
+import {
+  CloseCode,
+  DELETION_NAME_NEEDED,
+  EMAIL_LINK_GONE,
+  SIGN_IN_REJECTED,
+  type Account,
+  type AccountChanges,
+  type AccountDeletion,
+  type Bootstrap,
+  type Message,
+  type WorkspaceSettings,
+} from "@ember/protocol";
 import type { HuddlesSetup } from "@ember/protocol/huddles";
 import { QUESTION } from "@/components/setup-huddles";
+import { ACCOUNT_DELETED } from "@/components/workspace/delete-account";
 import { flashOnNextPage } from "@/lib/flash";
 import { showHuddle } from "@/lib/huddle-store";
 import { loadPage } from "@/lib/page";
@@ -140,6 +152,12 @@ function serve({
       return Response.json({ user: ada }, { status: 201 });
     }
     if (route === "DELETE /api/session") {
+      signedIn = false;
+      return new Response(null, { status: 204 });
+    }
+    if (route === "DELETE /api/users/me" && signedIn) {
+      // Without a password, as the profile it serves has none, the name typed says you mean it.
+      if ((JSON.parse(String(init?.body)) as AccountDeletion).name !== me.name) return Response.json({ error: DELETION_NAME_NEEDED }, { status: 422 });
       signedIn = false;
       return new Response(null, { status: 204 });
     }
@@ -1226,6 +1244,81 @@ describe("Sign out", () => {
     await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/session", expect.objectContaining({ method: "DELETE" })));
     expect(screen.getByRole("heading", { level: 1, name: "Your profile" })).toBeInTheDocument();
     expect(loadPage).not.toHaveBeenCalled();
+  });
+});
+
+describe("Delete my account", () => {
+  /** Deletes your account from your profile, typing `name` to say you mean it. */
+  async function deleteAccount(name = ada.name) {
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Delete my account" }));
+    await user.type(screen.getByLabelText(`Type your name, ${ada.name}, to delete your account`), name);
+    await user.click(screen.getByRole("button", { name: "Delete my account" }));
+  }
+
+  it("deletes your account and loads the sign-in page, which says so, even when the workspace closes its socket first", async () => {
+    WorkspaceSocket.all = [];
+    vi.stubGlobal("WebSocket", WorkspaceSocket);
+    history.replaceState(null, "", "/rooms/general");
+    const fetch = serve({ signedIn: true });
+    render(<App />);
+    await roomHeading();
+    await waitFor(() => expect(WorkspaceSocket.all).toHaveLength(1));
+    act(() => WorkspaceSocket.all[0]!.welcome(ada));
+    await openYourProfile();
+    // The server deletes it at once, but its answer is held back, while the Workspace closes the socket for good.
+    let answer!: () => void;
+    const answered = new Promise<void>((resolve) => (answer = resolve));
+    const server = fetch.getMockImplementation()!;
+    fetch.mockImplementation(async (input, init) => {
+      const response = await server(input, init);
+      if (`${init?.method} ${String(input)}` === "DELETE /api/users/me") await answered;
+      return response;
+    });
+
+    await deleteAccount();
+    act(() => WorkspaceSocket.all[0]!.end(CloseCode.Revoked));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/me", expect.anything()));
+    answer();
+    await waitFor(() => expect(loadPage).toHaveBeenCalledWith("/session/new", { kind: "notice", text: ACCOUNT_DELETED }));
+    expect(loadPage).toHaveBeenCalledOnce();
+    expect(sessionStorage.getItem("ember:return-to")).toBeNull();
+  });
+
+  it("ends this browser's push subscription once it's deleted, which the server forgot with the rest", async () => {
+    const subscription = { endpoint: "https://fcm.googleapis.com/fcm/send/abc", unsubscribe: vi.fn(async () => true) };
+    const registration = { pushManager: { getSubscription: async () => subscription } };
+    Object.defineProperty(navigator, "serviceWorker", { value: { getRegistration: async () => registration }, configurable: true });
+    try {
+      serve({ signedIn: true });
+      render(<App />);
+      await roomHeading();
+      await openYourProfile();
+      await deleteAccount();
+      await waitFor(() => expect(loadPage).toHaveBeenCalledWith("/session/new", { kind: "notice", text: ACCOUNT_DELETED }));
+      expect(subscription.unsubscribe).toHaveBeenCalled();
+    } finally {
+      Reflect.deleteProperty(navigator, "serviceWorker");
+    }
+  });
+
+  it("stays signed in, saying why, when it's refused, and a session that ends later still goes to sign in", async () => {
+    WorkspaceSocket.all = [];
+    vi.stubGlobal("WebSocket", WorkspaceSocket);
+    const fetch = serve({ signedIn: true });
+    render(<App />);
+    await roomHeading();
+    await waitFor(() => expect(WorkspaceSocket.all).toHaveLength(1));
+    act(() => WorkspaceSocket.all[0]!.welcome(ada));
+    await openYourProfile();
+    await deleteAccount("Not Ada");
+    expect(await screen.findByText(DELETION_NAME_NEEDED)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 1, name: "Your profile" })).toBeInTheDocument();
+    expect(loadPage).not.toHaveBeenCalled();
+
+    await fetch("/api/session", { method: "DELETE" });
+    act(() => WorkspaceSocket.all[0]!.end(CloseCode.Reconnect));
+    await waitFor(() => expect(loadPage).toHaveBeenCalledWith("/session/new"));
   });
 });
 

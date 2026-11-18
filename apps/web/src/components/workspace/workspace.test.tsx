@@ -148,7 +148,14 @@ function showWorkspace(path = "/", me = ada, account?: Account) {
   const [onAccountChanged, onSignOut, onSessionChanged] = [vi.fn(), vi.fn(), vi.fn()];
   history.replaceState(null, "", path);
   const workspace = (
-    <Workspace me={me} workspaceName="Analytical Engines" onAccountChanged={onAccountChanged} onSignOut={onSignOut} onSessionChanged={onSessionChanged} />
+    <Workspace
+      me={me}
+      workspaceName="Analytical Engines"
+      onAccountChanged={onAccountChanged}
+      onSignOut={onSignOut}
+      onDeleteAccount={vi.fn()}
+      onSessionChanged={onSessionChanged}
+    />
   );
   const page = (shown?: Account) => (
     <PushContext value={PUSH_ON}>

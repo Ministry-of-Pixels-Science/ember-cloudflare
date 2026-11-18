@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useReducer, useRef, useState, type MouseEvent, type ReactNode } from "react";
-import { ASSISTANT_ID, searchOfQuery, startingInvolvement, type Account, type DirectRoom, type Favorites, type Me, type Room, type RoomId, type SidebarRoom, type User } from "@ember/protocol";
+import { ASSISTANT_ID, searchOfQuery, startingInvolvement, type Account, type AccountDeletion, type DirectRoom, type Favorites, type Me, type Room, type RoomId, type SidebarRoom, type User } from "@ember/protocol";
 import { CAMERAS_OFF, SCREENS_OFF } from "@ember/protocol/huddles";
 import { useFlash } from "@/components/flash";
 import { Xmark } from "@/components/icons/iconoir";
@@ -249,6 +249,8 @@ interface Props {
   onAccountChanged: (account: Account) => void;
   /** Signs out, settling with whether it did. */
   onSignOut: () => Promise<boolean>;
+  /** Deletes your account and goes to sign in, settling once it's deleted, or failing with why not. */
+  onDeleteAccount: (deletion: AccountDeletion) => Promise<void>;
   /**
    * Called when this browser's session stops signing in `me`: with null once it has expired, or with
    * whoever another tab signed in as.
@@ -256,7 +258,7 @@ interface Props {
   onSessionChanged: (me: Me | null) => void;
 }
 
-export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSessionChanged }: Props) {
+export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onDeleteAccount, onSessionChanged }: Props) {
   // How many times the workspace socket has said what the account is. A page's answer from the server
   // shows only if no more has been said since it was asked for, since it may have been read before.
   const accountsHeard = useRef(0);
@@ -791,7 +793,7 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onSe
       case "app-signed-in":
         return rarePage(({ AppSignedInPage }) => <AppSignedInPage me={me} onFailed={failed} />);
       case "profile":
-        return rarePage(({ ProfilePage }) => <ProfilePage me={me} rooms={rooms} askForRoom={askForRoom} onSignOut={onSignOut} onFailed={failed} />);
+        return rarePage(({ ProfilePage }) => <ProfilePage me={me} rooms={rooms} askForRoom={askForRoom} onSignOut={onSignOut} onDeleteAccount={onDeleteAccount} onFailed={failed} />);
       case "push-subscriptions":
         return rarePage(({ PushSubscriptionsPage }) => <PushSubscriptionsPage back={back} onFailed={failed} />);
       case "search":
