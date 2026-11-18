@@ -3,6 +3,7 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PeopleContext, type People } from "@/hooks/use-directory";
+import type { DirectSidebarRoom } from "@/lib/room-list";
 import { ConversationNotifications } from "./conversation-notifications";
 
 const ada: Me = { id: "ada", name: "Ada Lovelace", administrator: false };
@@ -13,7 +14,7 @@ const [grace, linus]: User[] = [
 const asAda = { id: ada.id, name: ada.name };
 
 const room = (id: string, name: string, involvement: SidebarRoom["involvement"] = "mentions"): SidebarRoom => ({ id, name, kind: "open", icon: null, unread: false, involvement });
-const direct = (id: string, members: User[], involvement: SidebarRoom["involvement"] = "everything"): SidebarRoom => ({
+const direct = (id: string, members: User[], involvement: SidebarRoom["involvement"] = "everything"): DirectSidebarRoom => ({
   id,
   kind: "direct",
   members: [asAda, ...members],
@@ -70,6 +71,17 @@ describe("Levels on your profile", () => {
     expect(rows()).toEqual(["design: Notifying about @ mentions"]);
     unmount();
     renderList([direct("d1", [grace!])]);
+    expect(rows()).toEqual(["Grace Hopper: Notifying about all messages"]);
+  });
+
+  it("leaves out the DM that welcomed you until a message comes in it, as the sidebar does, but lists the ones you welcomed someone in", () => {
+    /** `dm`, started as `userId` joined, as it started. */
+    const joined = (dm: DirectSidebarRoom, userId: string): DirectSidebarRoom => ({ ...dm, joined: { userId, at: "2026-10-16T12:00:00.000Z" } });
+    const welcomed = joined(direct("d1", [grace!]), ada.id);
+    const { unmount } = renderList([room("r1", "design"), welcomed, joined(direct("d2", [linus!]), linus!.id)]);
+    expect(rows()).toEqual(["design: Notifying about @ mentions", "—", "Linus: Notifying about all messages"]);
+    unmount();
+    renderList([{ ...welcomed, activeAt: "2026-10-16T12:05:00.000Z" }]);
     expect(rows()).toEqual(["Grace Hopper: Notifying about all messages"]);
   });
 

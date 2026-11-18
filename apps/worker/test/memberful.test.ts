@@ -661,7 +661,7 @@ describe("Sign in with Memberful", () => {
         { ip_address: IP, user_agent: "Katherine's laptop" },
       ]);
       const { rooms } = (await (await api("/api/sidebar", { headers: { Cookie: cookieOf(response) } })).json()) as Sidebar;
-      expect(rooms.map((room) => room.kind !== "direct" && room.name)).toEqual(["general", "random"]);
+      expect(rooms.flatMap((room) => (room.kind !== "direct" ? [room.name] : []))).toEqual(["general", "random"]);
 
       // The code went to Memberful's token endpoint with the app's keys, and the token to its member API, neither following a redirect.
       expect(site.requests.map(({ method, url, redirect }) => [method, new URL(url).pathname, redirect])).toEqual([
@@ -678,7 +678,7 @@ describe("Sign in with Memberful", () => {
       expect(new URL(site.requests[1]!.url).searchParams.get("query")).toContain("currentMember");
     });
 
-    it("tells everyone's workspace sockets of someone new, as the people directory lists them", async () => {
+    it("tells everyone's workspace sockets of someone new, as the people directory lists them, and of the DM welcoming them", async () => {
       const administrator = await setUpWithMemberful();
       fakeMemberful();
       const workspace = await openWorkspaceSocket(administrator);
@@ -688,6 +688,12 @@ describe("Sign in with Memberful", () => {
       const listed = users.find((person) => person.id === user.id);
       expect(listed).toMatchObject({ name: "Katherine Johnson", role: "member", status: "active" });
       expect(await workspace.next()).toEqual({ type: "user.updated", user: listed });
+      // As joining with the join link starts one (join.test.ts).
+      const { rooms } = (await (await api("/api/sidebar", { headers: { Cookie: administrator.cookie } })).json()) as Sidebar;
+      const welcome = rooms.find((room) => room.kind === "direct")!;
+      expect(welcome).toMatchObject({ joined: { userId: user.id }, members: expect.arrayContaining([{ id: user.id, name: "Katherine Johnson" }]) });
+      const { unread: _, involvement: __, ...room } = welcome;
+      expect(await workspace.next()).toEqual({ type: "room.saved", room });
     });
 
     it("signs the same person in again by their Memberful account, whatever its name and email address are now, straight to the page they signed in from", async () => {

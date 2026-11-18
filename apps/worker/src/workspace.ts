@@ -143,6 +143,7 @@ import {
   type MemberfulMember,
   type MemberfulSetup,
 } from "./memberful-api";
+import { Presence } from "./presence";
 import { webPush } from "./push/keys";
 import { FixedWindowLimit } from "./rate-limit";
 import { urlOf } from "./request-url";
@@ -161,7 +162,6 @@ import { SessionCache } from "./session-cache";
 import { CLOSE_REASONS, closeTooLarge, isTooLarge, MAX_WORKSPACE_FRAME_SIZE, RESERVED_CLOSE_CODES } from "./sockets";
 import type { Transfer } from "./transfers";
 import type { TurnstileKeys } from "./turnstile";
-import { isViewing, type Viewing } from "./viewing";
 import {
   allowingHuddles,
   NEW_ACCOUNT_LOOKS,
@@ -203,6 +203,7 @@ import {
   type StoredBotSettings,
   type StoredPushSubscription,
   type StoredSession,
+  type Welcome,
 } from "./workspace-store";
 
 /** How often a session's last activity, browser and IP are written, at most. */
@@ -806,21 +807,6 @@ function isCode(code: string, joinCode: string): boolean {
   return given.length === expected.length && crypto.subtle.timingSafeEqual(given, expected);
 }
 
-/**
- * What a workspace socket's attachment says of its tab: whether it's shown, as its address said and its
- * `presence.visible` frames since, and when the Workspace last heard so, as a room's sockets say of theirs.
- */
-type Shown = Pick<Viewing, "visible" | "heardAt">;
-
-/**
- * What a socket with no attachment counts as saying, like one whose address didn't say: that its tab
- * isn't shown. The Workspace let it in before it kept this, and a socket stays connected when the
- * Workspace takes new code after hibernating.
- */
-const UNSAID: Shown = { visible: false, heardAt: 0 };
-
-const shownOf = (tab: WebSocket) => (tab.deserializeAttachment() as Shown | null) ?? UNSAID;
-
 /** Sends `frame` on a workspace socket, unless it has closed since. */
 function send(ws: WebSocket, frame: WorkspaceServerFrame): void {
   try {
@@ -1047,6 +1033,8 @@ export class Workspace extends DurableObject<Env> {
   private readonly strayTokens = new Map<string, Promise<boolean>>();
   /** The last change asked for, which the next one waits for (see `oneAtATime`). */
   private lastChange: Promise<unknown> = Promise.resolve();
+  /** Who's active, as the workspace sockets' tabs say, which the tabs that listen hear of. */
+  private readonly presence: Presence;
   /** Ember AI's models being asked through their providers' endpoints, while they are (see `moveToProviderEndpoints`). */
   private movingToProviderEndpoints: Promise<void> | null = null;
   /** Counts the times Ember AI is set up, changed or turned off, so a move onto the providers' endpoints that overlapped one isn't kept. */
@@ -1071,6 +1059,7 @@ export class Workspace extends DurableObject<Env> {
     // As in rooms, the runtime answers the app's heartbeats without waking the Workspace.
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('{"type":"ping"}', '{"type":"pong"}'));
     this.db = openDb(env, ctx.storage, "workspace");
+    this.presence = new Presence(ctx);
     this.store = new WorkspaceStore(this.db);
     this.outside = new OutsideStore(this.db);
     // The outbox can hold revocations with no alarm set for them: the Workspace can stop after saving a
@@ -1089,7 +1078,8 @@ export class Workspace extends DurableObject<Env> {
   /**
    * Lets in a tab's workspace socket, which the Worker sends on with the credentials of the request
    * for it, if they sign someone in. Like a room's, it's tagged with its person and its session, so
-   * signing out can find it, and keeps whether its tab is shown, as its address says.
+   * signing out can find it, and keeps whether its tab is shown, as its address says, and in use, as it
+   * counts until the tab says otherwise (`Presence`).
    */
   override async fetch(request: Request): Promise<Response> {
     if (request.headers.get("Upgrade") !== "websocket") return new Response("Expected a WebSocket upgrade", { status: 426 });
@@ -1101,7 +1091,7 @@ export class Workspace extends DurableObject<Env> {
     const { visible } = parseWorkspaceSocketParams(urlOf(request).searchParams);
     const { 0: client, 1: server } = new WebSocketPair();
     this.ctx.acceptWebSocket(server, [session.user.id, sessionTag(session.id)]);
-    server.serializeAttachment({ visible, heardAt: Date.now() } satisfies Shown);
+    this.presence.connected(server, session.user.id, visible);
     // On D1, signing out can end the session while the check above reads it, and close the session's
     // sockets before this one is among them. Now that it is, checking again settles it: the session
     // cache forgets a session as it starts ending, and doesn't keep a lookup an ending overlapped.
@@ -1110,23 +1100,32 @@ export class Workspace extends DurableObject<Env> {
     // have changed while the tab was without a socket.
     const [current, account] = await Promise.all([this.session(credentials), this.account()]);
     if (current) send(server, { type: "welcome", you: meOf(current), account: account ?? ACCOUNT_BEFORE_SETUP });
-    else server.close(CloseCode.Reconnect, CLOSE_REASONS[CloseCode.Reconnect]);
+    else this.closeSocket(server, CloseCode.Reconnect);
     return new Response(null, { status: 101, webSocket: client });
   }
 
   /**
-   * Keeps whether a tab says it's shown, and answers a ping that the runtime doesn't, because it carries
-   * more than its type. A workspace socket sends nothing else.
+   * Keeps whether a tab is in use and whether it's shown, as it says (`Presence`), and answers a ping that
+   * the runtime doesn't, because it carries more than its type. A workspace socket sends nothing else.
    */
   override async webSocketMessage(ws: WebSocket, raw: string | ArrayBuffer): Promise<void> {
-    if (isTooLarge(raw, MAX_WORKSPACE_FRAME_SIZE)) return closeTooLarge(ws);
+    if (isTooLarge(raw, MAX_WORKSPACE_FRAME_SIZE)) {
+      closeTooLarge(ws);
+      return this.presence.closed(ws);
+    }
     const frame = typeof raw === "string" ? parseWorkspaceClientFrame(raw) : null;
-    if (frame?.type === "presence.visible") return ws.serializeAttachment({ visible: frame.visible, heardAt: Date.now() } satisfies Shown);
+    if (frame?.type === "presence.active") return this.presence.said(ws, frame.active);
+    if (frame?.type === "presence.visible") return this.presence.shown(ws, frame.visible);
     send(ws, frame ? { type: "pong" } : { type: "error", message: "Unrecognized frame" });
   }
 
   override async webSocketClose(ws: WebSocket, code: number): Promise<void> {
     ws.close(RESERVED_CLOSE_CODES.has(code) ? 1000 : code, "Closing");
+    this.presence.closed(ws);
+  }
+
+  override async webSocketError(ws: WebSocket): Promise<void> {
+    this.presence.closed(ws);
   }
 
   /** Sends `frame` on every workspace socket, written out once for them all. */
@@ -1145,8 +1144,14 @@ export class Workspace extends DurableObject<Env> {
   private closeSockets(tag: string, code: CloseCode, kept?: string): void {
     for (const socket of this.ctx.getWebSockets(tag)) {
       if (kept !== undefined && this.ctx.getTags(socket).includes(kept)) continue;
-      if (socket.readyState === WebSocket.OPEN) socket.close(code, CLOSE_REASONS[code]);
+      if (socket.readyState === WebSocket.OPEN) this.closeSocket(socket, code);
     }
+  }
+
+  /** Closes a workspace socket with `code`, which leaves its person away unless they have another tab in use. */
+  private closeSocket(socket: WebSocket, code: CloseCode): void {
+    socket.close(code, CLOSE_REASONS[code]);
+    this.presence.closed(socket);
   }
 
   /** Resolves once the workspace's database answers a query. */
@@ -1897,17 +1902,9 @@ export class Workspace extends DurableObject<Env> {
   async inviteToHuddle(roomId: RoomId, by: UserId, userIds: UserId[]): Promise<InvitationPush[]> {
     const invited = await this.store.huddleInvitees(roomId, by, userIds);
     this.tell(invited, { type: "huddle.invited", roomId, by });
-    const away = invited.filter((userId) => !this.hasInView(userId));
+    const away = invited.filter((userId) => !this.presence.inView(userId));
     if (away.length === 0 || !(await webPush(this.env)).on) return [];
     return this.store.invitationPushes(roomId, by, away, guestSignIn(this.env));
-  }
-
-  /**
-   * Whether `userId` has Ember in view: a tab of theirs has said it's shown, and the Workspace has heard
-   * from it lately, as a room asks of whoever's viewing it (`isViewing`).
-   */
-  private hasInView(userId: UserId, now = Date.now()): boolean {
-    return this.ctx.getWebSockets(userId).some((tab) => tab.readyState === WebSocket.OPEN && isViewing(shownOf(tab), this.ctx.getWebSocketAutoResponseTimestamp(tab), now));
   }
 
   /**
@@ -2569,15 +2566,30 @@ export class Workspace extends DurableObject<Env> {
   private async addMember(person: Omit<NewPerson, "id">, tokenDigest: string, client: Client): Promise<Me | "agent's name" | null> {
     if (await this.takesAgentsName(null, person.name)) return "agent's name";
     const session: StoredSession = { id: sortableId(), user: { id: sortableId(), name: person.name }, administrator: false, guest: false, lastActiveAt: Date.now() };
+    let welcomed: DirectRoom[];
     try {
-      await this.store.createMember({ ...person, id: session.user.id }, session.id, tokenDigest, client, new Date(session.lastActiveAt).toISOString());
+      welcomed = await this.store.createMember({ ...person, id: session.user.id }, await this.welcomes(), session.id, tokenDigest, client, new Date(session.lastActiveAt).toISOString());
     } catch (error) {
       if (await this.store.hasEmailAddress(person.emailAddress)) return null;
       throw error;
     }
     this.sessions.remember(tokenDigest, session);
     await this.publishPerson(session.user.id);
+    this.tellWelcomed(session.user.id, welcomed);
     return meOf(session);
+  }
+
+  /**
+   * A DM for each of the people here, to welcome someone who joins to them, as Slack starts one with
+   * everyone for someone new: everyone active but bots and guests (`WELCOMERS`).
+   */
+  private async welcomes(): Promise<Welcome[]> {
+    return (await this.store.welcomers()).map((user) => ({ roomId: sortableId(), user }));
+  }
+
+  /** Tells everyone a DM `welcomed` welcomes `newcomerId` to of their DM with them, which their sidebars show at once. */
+  private tellWelcomed(newcomerId: UserId, welcomed: DirectRoom[]): void {
+    for (const room of welcomed) this.tell(room.members.flatMap(({ id }) => (id === newcomerId ? [] : [id])), { type: "room.saved", room });
   }
 
   /**
@@ -2730,8 +2742,10 @@ export class Workspace extends DurableObject<Env> {
       const name = member.names.find(free) ?? namelessMember(free);
       const session: StoredSession = { id: sortableId(), user: { id: sortableId(), name }, administrator: false, guest: false, lastActiveAt: Date.now() };
       const person = { ...session.user, username: await this.firstFreeUsername(name, free), emailAddress: member.emailAddress };
+      let welcomed: DirectRoom[];
       try {
-        await this.store.createLinkedMember(person, linkedAccountOf(issuer, member), readAt, session.id, tokenDigest, client, new Date(session.lastActiveAt).toISOString());
+        const now = new Date(session.lastActiveAt).toISOString();
+        welcomed = await this.store.createLinkedMember(person, linkedAccountOf(issuer, member), readAt, await this.welcomes(), session.id, tokenDigest, client, now);
       } catch (error) {
         if (member.emailAddress !== null && (await this.store.hasEmailAddress(member.emailAddress))) return "taken";
         throw error;
@@ -2740,6 +2754,7 @@ export class Workspace extends DurableObject<Env> {
       await this.keepCatchingUp(Date.now() + MEMBERSHIP_CATCH_UP_MS);
       this.sessions.remember(tokenDigest, session);
       await this.publishPerson(session.user.id);
+      this.tellWelcomed(session.user.id, welcomed);
       return "joined";
     });
   }
@@ -4977,19 +4992,19 @@ export class Workspace extends DurableObject<Env> {
 
   /**
    * Applies the events room `roomId` sends from its log, in order, with `viewerIds`, who is viewing the
-   * room as it sends them: a new message marks the room unread for its members who aren't, and someone
-   * opening it clears their mark. Each event is applied once, however often it's sent. Whoever's mark
-   * changes hears of it on their workspace sockets, and nobody else does. A new message in a DM moves it
-   * to the top of everyone's DMs there, its author's too, and one call's messages move it once. It
-   * answers the bots' webhooks each new message is delivered to, the new messages @ember is to answer
-   * and, while Web Push is on, their pushes, for the room to send, none of them to a guest while
-   * `EMBER_GUEST_SIGN_IN` doesn't let guests stay signed in.
+   * room as it sends them: a new message marks the room unread for its members who aren't, in a DM
+   * counting it for them, and someone opening it clears their mark. Each event is applied once, however
+   * often it's sent. Whoever's mark or count changes hears of it on their workspace sockets, and nobody
+   * else does. A new message in a DM moves it to the top of everyone's DMs there, its author's too, and
+   * one call's messages move it once. It answers the bots' webhooks each new message is delivered to,
+   * the new messages @ember is to answer and, while Web Push is on, their pushes, for the room to send,
+   * none of them to a guest while `EMBER_GUEST_SIGN_IN` doesn't let guests stay signed in.
    */
   async applyRoomEvents(roomId: RoomId, events: RoomEvent[], viewerIds: UserId[]): Promise<RoomEventDeliveries> {
     if (events.length === 0) return { pushes: [], webhooks: [], asks: [] };
     const { on: pushing } = await webPush(this.env);
     const { marks, active, pushes, webhooks, asks } = await this.store.applyRoomEvents(roomId, events, viewerIds, pushing, guestSignIn(this.env));
-    for (const [userId, at] of marks) this.tell([userId], at === null ? { type: "room.read", roomId } : { type: "room.unread", roomId, at });
+    for (const [userId, mark] of marks) this.tell([userId], mark === null ? { type: "room.read", roomId } : { type: "room.unread", roomId, ...mark });
     if (active) this.tell(active.userIds, { type: "room.active", roomId, at: active.at });
     return { pushes, webhooks, asks };
   }

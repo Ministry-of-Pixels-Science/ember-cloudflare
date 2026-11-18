@@ -87,7 +87,9 @@ Objects, D1 or speed call for something else.
   skip Campfire's `connections` and `connected_at` columns: each room's object knows from its
   sockets who's viewing it, and sends that list with its messages. And ours writes only the rows it
   changes, so `unread_at` is the time of the first message since someone last read the room; nothing
-  reads it but to ask whether it's set.
+  reads it but to ask whether it's set. In a DM the same `UPDATE` writes every unread row, adding one
+  to `memberships.unread_count` (workspace migration 0065), so a DM's row counts its messages since,
+  as Slack's do; a read sets it back to 0.
 - **No unbounded lists of bound values.** Durable Object SQLite and D1 bind at most 100 values a
   statement, and binding a page's message ids made a 100-message page fail on both.
 - **Tabs that connect again find what changed through an index on messages.** Campfire's
@@ -404,6 +406,11 @@ Objects, D1 or speed call for something else.
   group in it only if it was added, and reads the DM the key names. So it costs the same however
   many DMs there are, and two people starting the same DM at once get one between them. A DM's
   members never change, so its key stays true.
+- **Someone who joins is welcomed in the batch that adds them.** As Slack does, each active person
+  here gets a DM with them, which `rooms.newcomer_id` (workspace migration 0065) says is a welcome,
+  so its timeline opens with their having joined. The batch that adds them adds the DMs and puts both
+  people in each from one JSON list read with `json_each`, so it binds the same few values however
+  many people there are, though it writes a room and two memberships, and their indexes, for each.
 - **A DM's place is the time of its latest message, which the Workspace writes as it applies it.**
   The Workspace keeps when a DM's latest message came in `rooms.last_message_at` (workspace
   migration 0017), set by the statement that records the events a room sent (`applied_seq`, below)

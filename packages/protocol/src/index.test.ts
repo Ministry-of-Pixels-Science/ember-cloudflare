@@ -300,15 +300,27 @@ describe("Presence", () => {
 });
 
 describe("One live connection per tab outside the open room", () => {
-  it("takes pings on the workspace socket, and whether its tab is shown, as a boolean, and nothing else", () => {
+  it("takes pings on the workspace socket, whether its tab is in use and whether it's shown, as booleans, and nothing else", () => {
     expect(parseWorkspaceClientFrame('{"type":"ping"}')).toEqual({ type: "ping" });
     expect(parseWorkspaceClientFrame('{"type":"ping","nonce":"n1"}')).toEqual({ type: "ping" });
+    expect(parseWorkspaceClientFrame('{"type":"presence.active","active":false}')).toEqual({ type: "presence.active", active: false });
+    expect(parseWorkspaceClientFrame('{"type":"presence.active","active":true,"userId":"u2"}')).toEqual({ type: "presence.active", active: true });
     expect(parseWorkspaceClientFrame('{"type":"presence.visible","visible":false}')).toEqual({ type: "presence.visible", visible: false });
     expect(parseWorkspaceClientFrame('{"type":"presence.visible","visible":true,"extra":1}')).toEqual({ type: "presence.visible", visible: true });
-    for (const visible of [undefined, null, 1, "true", "visible"]) {
-      expect(parseWorkspaceClientFrame(JSON.stringify({ type: "presence.visible", visible })), String(visible)).toBeNull();
+    for (const value of [undefined, null, 1, "true", "yes"]) {
+      expect(parseWorkspaceClientFrame(JSON.stringify({ type: "presence.active", active: value })), String(value)).toBeNull();
+      expect(parseWorkspaceClientFrame(JSON.stringify({ type: "presence.visible", visible: value })), String(value)).toBeNull();
     }
-    for (const raw of ['{"type":"typing.start"}', '{"type":"message.create","clientMessageId":"c1","body":"hi"}', "[]", "null", "{"]) {
+    for (const raw of [
+      '{"type":"typing.start"}',
+      '{"type":"message.create","clientMessageId":"c1","body":"hi"}',
+      '{"type":"presence","active":true}',
+      '{"type":"presence.active","visible":true}',
+      '{"type":"presence.visible","active":true}',
+      "[]",
+      "null",
+      "{",
+    ]) {
       expect(parseWorkspaceClientFrame(raw), raw).toBeNull();
     }
   });

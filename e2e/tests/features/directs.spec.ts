@@ -229,25 +229,28 @@ test.describe("DM order", () => {
     await startDirect(request, ada, [grace]);
     await startDirect(request, ada, [linus]);
     await startDirect(request, grace, [linus]);
-    const names = (...others: Member[]) => others.map((other) => `Direct message with ${other.name}`);
+    // Each row's text, which ends with how many messages it has unread, if any.
+    const names = (...others: Member[]) => others.map((other) => new RegExp(`^Direct message with ${other.name}\\d*$`));
     await expect(directRows(ada)).toHaveText(names(linus, grace));
     await expect(directRows(grace)).toHaveText(names(linus, ada));
 
-    // Grace writes to Ada, which moves their DM to the top of both their sidebars.
+    // Grace writes to Ada, which moves their DM to the top of both their sidebars, unread in Ada's.
     await directRow(grace, [ada]).click();
     await grace.connected();
     await grace.send("Hello, Ada");
     await expect(directRows(ada)).toHaveText(names(grace, linus));
+    await expect(directRow(ada, [grace])).toHaveAccessibleDescription("Active 1 unread message");
     await expect(directRows(grace)).toHaveText(names(ada, linus));
     await expect(directRows(linus)).toHaveText(names(grace, ada));
 
     await ada.page.reload();
     await expect(directRows(ada)).toHaveText(names(grace, linus));
+    await expect(directRow(ada, [grace])).toHaveAccessibleDescription("Active 1 unread message");
   });
 });
 
 test.describe("DMs in the sidebar", () => {
-  test("lists only the DMs someone is in, never the people who've joined, until they start one", async ({ members, request }) => {
+  test("lists only the DMs someone is in, from when one is started with them", async ({ members, request }) => {
     const ada = await members.signIn(unique("Ada"));
     const grace = await members.signIn(unique("Grace"));
     await ada.page.reload();
