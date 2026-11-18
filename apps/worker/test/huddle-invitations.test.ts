@@ -83,6 +83,7 @@ async function invitingBy(room: RoomId, inviteToHuddle: (real: (...invitation: I
     const real = workspace(huddle.env);
     const standIn = {
       huddleApp: () => real.huddleApp(),
+      huddlesIn: (roomId: RoomId) => real.huddlesIn(roomId),
       reportHuddle: (...report: Parameters<typeof real.reportHuddle>) => real.reportHuddle(...report),
       inviteToHuddle: (...invitation: Invitation) => inviteToHuddle((...given) => real.inviteToHuddle(...given), ...invitation),
     };

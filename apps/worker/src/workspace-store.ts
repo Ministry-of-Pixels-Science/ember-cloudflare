@@ -578,7 +578,7 @@ export interface ReportedHuddle {
 
 /** What changing a room changed, and who's in it then. */
 export interface SavedRoomChange {
-  /** Whether its name, kind or icon changed. */
+  /** Whether its name, kind or icon changed, or whether it allows huddles. */
   roomChanged: boolean;
   memberIds: UserId[];
   /** Who the change put in the room. */
@@ -1437,7 +1437,12 @@ function navigationIconsIn(settings: Record<string, unknown> | null): Navigation
   return icons;
 }
 
-interface RoomToChangeRow extends SharedRoom {
+/** Whether a room's settings allow huddles in it, as `rooms.huddles_allowed` keeps it: 1 until they're turned off there. */
+interface HuddlesAllowedRow {
+  huddles_allowed: number;
+}
+
+interface RoomToChangeRow extends Omit<SharedRoom, "huddles">, HuddlesAllowedRow {
   can_administer: number;
 }
 
@@ -1454,7 +1459,7 @@ interface StartRow {
 }
 
 /** A room someone is in, as `ROOMS_FOR_USER` reads it: a DM's name and icon are null. */
-interface SidebarRow extends HuddleRow, StartRow {
+interface SidebarRow extends HuddleRow, HuddlesAllowedRow, StartRow {
   id: RoomId;
   kind: SidebarRoom["kind"];
   name: string | null;
@@ -1513,12 +1518,17 @@ const membersOf = (rows: DirectMemberRow[]): User[] => rows.map(({ id, name }) =
 /** Who a DM welcomes, and since when, when it started as they joined: nothing for any other. */
 const joinedOf = ({ newcomer_id, started_at }: StartRow): Pick<DirectRoom, "joined"> => (newcomer_id === null ? {} : { joined: { userId: newcomer_id, at: started_at } });
 
+/** What a shared room says of huddles in it: that they're off while its settings don't allow them, and nothing otherwise. */
+export const allowingHuddles = (allowed: boolean): Pick<SharedRoom, "huddles"> => (allowed ? {} : { huddles: false });
+
+const allowsHuddles = ({ huddles_allowed }: HuddlesAllowedRow) => huddles_allowed !== 0;
+
 /** A DM, `id`, last active at `activeAt`, with the people `members` reads, and who it welcomes, if anyone. */
 const directOf = (id: RoomId, activeAt: string, members: DirectMemberRow[], start: StartRow): DirectRoom => ({ id, kind: "direct", members: membersOf(members), activeAt, ...joinedOf(start) });
 
 /** A room someone is in, with the people in it if it's a DM, whom `members` reads. */
 const roomOf = (row: SidebarRow, members: DirectMemberRow[] = []): Room =>
-  row.kind === "direct" ? directOf(row.id, row.active_at, members, row) : { id: row.id, kind: row.kind, name: row.name ?? "", icon: row.icon };
+  row.kind === "direct" ? directOf(row.id, row.active_at, members, row) : { id: row.id, kind: row.kind, name: row.name ?? "", icon: row.icon, ...allowingHuddles(allowsHuddles(row)) };
 
 /**
  * A room as someone's sidebar lists it, with whether it's marked unread for them, since when, and in a
@@ -1532,7 +1542,7 @@ const sidebarRoom = (row: SidebarRow, members?: DirectMemberRow[]): SidebarRoom 
   involvement: row.involvement,
 });
 
-const roomToChange = (row: RoomToChangeRow) => ({ room: { id: row.id, kind: row.kind, name: row.name, icon: row.icon }, canAdminister: row.can_administer === 1 });
+const roomToChange = (row: RoomToChangeRow) => ({ room: { id: row.id, kind: row.kind, name: row.name, icon: row.icon, ...allowingHuddles(allowsHuddles(row)) }, canAdminister: row.can_administer === 1 });
 
 const storedSession = (row: SessionRow): StoredSession => ({
   id: row.session_id,
@@ -1586,7 +1596,7 @@ function welcomedBy({ id, name }: User, welcomes: Welcome[], started: Array<{ id
  */
 export const ROOMS_FOR_USER = `SELECT rooms.id, rooms.kind, rooms.name, rooms.icon, ${ACTIVE_AT}, ${START}, memberships.unread_at IS NOT NULL AS unread,
     memberships.unread_at AS unread_since, memberships.unread_count, memberships.involvement, rooms.shared_position, rooms.huddle_started_at,
-    rooms.huddle_user_ids
+    rooms.huddle_user_ids, rooms.huddles_allowed
   FROM memberships JOIN rooms ON rooms.id = memberships.room_id
   WHERE memberships.user_id = ? ORDER BY memberships.created_at, rooms.created_at, rooms.id`;
 
@@ -1691,6 +1701,9 @@ export const INVITATION_PUSHES = `SELECT push_subscriptions.id, push_subscriptio
 
 /** A room's huddle, as its row keeps it. */
 const HUDDLE = `SELECT huddle_started_at, huddle_user_ids FROM rooms WHERE id = ?`;
+
+/** Whether a room's settings allow huddles in it. */
+const HUDDLES_ALLOWED = `SELECT huddles_allowed FROM rooms WHERE id = ?`;
 
 /**
  * A DM's key: its people's ids, each once, sorted, as a JSON array, so each group of people has one key
@@ -2669,7 +2682,7 @@ const MENTIONABLE_MEMBERS = `SELECT ${DIRECTORY_COLUMNS}
 const CAN_ADMINISTER = `(users.role = ${ADMINISTRATOR} OR rooms.creator_id = users.id) AS can_administer`;
 
 /** A room someone is in, unless it's a DM, and whether they can change it. */
-export const ROOM_TO_CHANGE = `SELECT rooms.id, rooms.kind, rooms.name, rooms.icon, ${CAN_ADMINISTER}
+export const ROOM_TO_CHANGE = `SELECT rooms.id, rooms.kind, rooms.name, rooms.icon, rooms.huddles_allowed, ${CAN_ADMINISTER}
   FROM memberships JOIN rooms ON rooms.id = memberships.room_id JOIN users ON users.id = memberships.user_id
   WHERE memberships.room_id = ? AND memberships.user_id = ? AND rooms.kind <> 'direct'`;
 
@@ -2736,13 +2749,14 @@ export const ROOM_MEMBERS = `SELECT user_id FROM memberships WHERE room_id = ?`;
 const ROOM_RANKED = `SELECT shared_position IS NOT NULL AS ranked FROM rooms WHERE id = ?`;
 
 /**
- * Renames a room, changes its kind and sets its icon, keeping whichever is null as it is, and records
- * when, unless nothing changes. An icon of "" is the default `#`, stored as null.
+ * Renames a room, changes its kind, sets its icon and says whether it allows huddles, keeping whichever
+ * is null as it is, and records when, unless nothing changes. An icon of "" is the default `#`, stored
+ * as null.
  */
 const UPDATE_ROOM = `UPDATE rooms SET name = coalesce(?1, name), kind = coalesce(?2, kind),
-    icon = CASE WHEN ?3 IS NULL THEN icon ELSE nullif(?3, '') END, updated_at = ?4
+    icon = CASE WHEN ?3 IS NULL THEN icon ELSE nullif(?3, '') END, huddles_allowed = coalesce(?6, huddles_allowed), updated_at = ?4
   WHERE id = ?5 AND (name IS NOT coalesce(?1, name) OR kind IS NOT coalesce(?2, kind)
-    OR icon IS NOT CASE WHEN ?3 IS NULL THEN icon ELSE nullif(?3, '') END) RETURNING id`;
+    OR icon IS NOT CASE WHEN ?3 IS NULL THEN icon ELSE nullif(?3, '') END OR huddles_allowed IS NOT coalesce(?6, huddles_allowed)) RETURNING id`;
 
 /** Of the rooms a JSON list names, those that are neither registered nor deleted. */
 const UNREGISTERED_ROOMS = `SELECT DISTINCT value AS id FROM json_each(?)
@@ -4015,6 +4029,12 @@ export class WorkspaceStore {
     return row ? liveHuddleOf(row) : null;
   }
 
+  /** Whether a room's settings allow huddles in it, which those of a room the Workspace doesn't know do. */
+  async roomAllowsHuddles(roomId: RoomId): Promise<boolean> {
+    const [row] = await this.db.all<HuddlesAllowedRow>(HUDDLES_ALLOWED, roomId);
+    return !row || allowsHuddles(row);
+  }
+
   /** Records that someone has dismissed the welcome card, at `now`, unless they had already. */
   async dismissInvitation(userId: UserId, now: string): Promise<void> {
     await this.db.run(DISMISS_INVITATION, now, userId);
@@ -4923,14 +4943,14 @@ export class WorkspaceStore {
   }
 
   /**
-   * Makes `changes` to a room in one transaction: renames it, and makes it open to everyone active, or
-   * private to just the people `memberIds` names, taking anyone else out but those suspended in a room
-   * that was private already, whom its settings don't list, and queueing closing their sockets there
-   * with `code`, due at `dueAt`. Answers what it changed, who's in the room then, and whether the shared
-   * order ranks it.
+   * Makes `changes` to a room in one transaction: renames it, allows huddles in it or not, and makes it
+   * open to everyone active, or private to just the people `memberIds` names, taking anyone else out but
+   * those suspended in a room that was private already, whom its settings don't list, and queueing
+   * closing their sockets there with `code`, due at `dueAt`. Answers what it changed, who's in the room
+   * then, and whether the shared order ranks it.
    */
   async changeRoom(roomId: RoomId, changes: RoomChanges, code: CloseCode, dueAt: number, now: string): Promise<SavedRoomChange> {
-    const update = statement(UPDATE_ROOM, changes.name ?? null, changes.kind ?? null, changes.icon ?? null, now, roomId);
+    const update = statement(UPDATE_ROOM, changes.name ?? null, changes.kind ?? null, changes.icon ?? null, now, roomId, changes.huddles === undefined ? null : Number(changes.huddles));
     const members = statement(ROOM_MEMBERS, roomId);
     const ranked = statement(ROOM_RANKED, roomId);
     if (changes.kind === "open") {

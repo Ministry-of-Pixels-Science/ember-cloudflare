@@ -44,7 +44,11 @@ async function unreported(room: RoomId): Promise<() => Promise<void>> {
     const huddle = huddleOf(instance);
     original = huddle.env;
     const reached = workspace(original);
-    const cutOff = { huddleApp: () => reached.huddleApp(), reportHuddle: () => Promise.reject(new Error("The Workspace is unreachable")) };
+    const cutOff = {
+      huddleApp: () => reached.huddleApp(),
+      huddlesIn: (roomId: RoomId) => reached.huddlesIn(roomId),
+      reportHuddle: () => Promise.reject(new Error("The Workspace is unreachable")),
+    };
     huddle.env = { ...original, WORKSPACE: { getByName: () => cutOff } as unknown as Env["WORKSPACE"] };
   });
   return () => runInDurableObject(roomStub(room), (instance: ChatRoom) => void (huddleOf(instance).env = original!));

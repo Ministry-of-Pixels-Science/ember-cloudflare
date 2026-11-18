@@ -437,6 +437,25 @@ describe("Room settings page", () => {
   });
 });
 
+describe("Allow huddles in a room", () => {
+  it("takes whether huddles are allowed in the room, alone or with its other changes, or nothing to change", () => {
+    expect(parseRoomChanges({ huddles: false })).toEqual({ huddles: false });
+    expect(parseRoomChanges({ kind: "open", huddles: true })).toEqual({ kind: "open", huddles: true });
+    expect(parseRoomChanges({ name: "Leads", kind: "closed", memberIds: ["u1"], huddles: false })).toEqual({ name: "Leads", kind: "closed", memberIds: ["u1"], huddles: false });
+    expect(parseRoomChanges({ name: "Design" })).toHaveProperty("huddles", undefined);
+  });
+
+  it("refuses anything but true or false", () => {
+    for (const huddles of [null, 0, 1, "", "false", "off", [], {}]) {
+      expect(parseRoomChanges({ name: "Design", huddles }), JSON.stringify(huddles)).toBe("Huddles must be true or false");
+    }
+  });
+
+  it("takes nothing of huddles for a new room, which starts with them allowed", () => {
+    expect(parseNewRoom({ kind: "open", name: "Design", huddles: false })).not.toHaveProperty("huddles");
+  });
+});
+
 describe("Switch a room between open and private", () => {
   it("takes making a room open, with or without a new name, and ignores members it doesn't need", () => {
     expect(parseRoomChanges({ kind: "open" })).toEqual({ kind: "open" });

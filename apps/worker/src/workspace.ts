@@ -126,7 +126,7 @@ import { alreadyAMemberEmail, emailDomainLinkEmail, invitationEmail, passwordRes
 import { guestSignIn, type Env } from "./env";
 import { pictureObjects, type StoredPicture } from "./files/pictures";
 import type { RelayKey } from "./huddles/relay";
-import type { HuddleApp, SfuApp } from "./huddles/sfu";
+import type { HuddleApp, RoomHuddles, SfuApp } from "./huddles/sfu";
 import { alphanumeric, sortableId } from "./ids";
 import { sendEmail, sendEmails, senderOf, type Sender } from "./mail";
 import {
@@ -161,6 +161,7 @@ import { CLOSE_REASONS, closeTooLarge, isTooLarge, MAX_WORKSPACE_FRAME_SIZE, RES
 import type { Transfer } from "./transfers";
 import type { TurnstileKeys } from "./turnstile";
 import {
+  allowingHuddles,
   NEW_ACCOUNT_LOOKS,
   WorkspaceStore,
   type AccountChange,
@@ -1846,6 +1847,16 @@ export class Workspace extends DurableObject<Env> {
     const account = await this.joinableAccount();
     const app = account && (await this.openedHuddleApp(account));
     return account && app && { ...app, cameras: account.huddleCameras, screens: account.huddleScreens, relay: await this.openedRelay(account) };
+  }
+
+  /**
+   * The same for room `roomId`, with whether the room's settings allow huddles in it. The room asks as
+   * someone joins its huddle and each time it checks one, so turning huddles off in a room's settings
+   * ends the one under way there.
+   */
+  async huddlesIn(roomId: RoomId): Promise<RoomHuddles> {
+    const [app, allowed] = await Promise.all([this.huddleApp(), this.store.roomAllowsHuddles(roomId)]);
+    return { app, allowed };
   }
 
   /** The SFU app `account` keeps the keys of, with its secret opened, or null while it keeps none or the secret doesn't open. */
@@ -4782,7 +4793,9 @@ export class Workspace extends DurableObject<Env> {
    * is then: "not found" as for its settings, "forbidden" unless they can change it, or null without
    * a valid session. Anyone it takes out of the room is told to reconnect, and finds it gone, and it
    * leaves their sidebars. Everyone in it sees it as it is now in theirs, or, when only who's in it
-   * changed, the people it puts in do.
+   * changed, the people it puts in do. A huddle going on in a room it turns huddles off in is left
+   * by each tab that hears so, and ends for whoever is in it still as the room next checks it
+   * (`huddlesIn`).
    */
   async changeRoom(credentials: Credentials, roomId: RoomId, changes: RoomChanges): Promise<SharedRoom | "not found" | "forbidden" | null> {
     const user = await this.authenticate(credentials);
@@ -4791,13 +4804,15 @@ export class Workspace extends DurableObject<Env> {
       const found = await this.store.roomToChange(roomId, user.id);
       if (!found) return "not found";
       if (!found.canAdminister) return "forbidden";
+      const { huddles: _, ...room } = found.room;
       const changed: SharedRoom = {
-        ...found.room,
+        ...room,
         ...(changes.name && { name: changes.name }),
         ...(changes.kind && { kind: changes.kind }),
         ...(changes.icon !== undefined && { icon: changes.icon || null }),
+        ...allowingHuddles(changes.huddles ?? found.room.huddles !== false),
       };
-      if (!changes.name && !changes.kind && changes.icon === undefined) return changed;
+      if (!changes.name && !changes.kind && changes.icon === undefined && changes.huddles === undefined) return changed;
       const now = Date.now();
       // As when signing out, until the database says it queued nothing.
       let queued = changes.kind === "closed";

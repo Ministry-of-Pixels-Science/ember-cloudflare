@@ -26,8 +26,12 @@ function peopleListed(names: string[], count: number): string {
  */
 export const huddledWith = (room: DirectRoom, meId: UserId, joinsNone: (user: User) => boolean): User[] => room.members.filter((member) => member.id !== meId && !joinsNone(member));
 
-/** Whether a room has huddles where they're on: every shared room, and a direct message with someone to huddle with. */
-export const hasHuddles = (room: Room, meId: UserId, joinsNone: (user: User) => boolean): boolean => room.kind !== "direct" || huddledWith(room, meId, joinsNone).length > 0;
+/**
+ * Whether a room has huddles where they're on: every shared room whose settings allow them, and a
+ * direct message with someone to huddle with.
+ */
+export const hasHuddles = (room: Room, meId: UserId, joinsNone: (user: User) => boolean): boolean =>
+  room.kind === "direct" ? huddledWith(room, meId, joinsNone).length > 0 : room.huddles !== false;
 
 /**
  * Who the person `meId` signs in can invite into a huddle they're in, of the people in its room
