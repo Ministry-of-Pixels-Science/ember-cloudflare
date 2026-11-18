@@ -617,7 +617,7 @@ describe("Ban and unban people", () => {
 
   it("leaves a chat bot kept to the open rooms picked in just those once its ban is lifted, as the ban kept it in them", async () => {
     const administrator = await setUp();
-    const [picked] = await openRooms();
+    const picked = (await openRooms())[0]!;
     const now = new Date().toISOString();
     await workspaceSql("INSERT INTO users (id, name, role, status, rooms_picked, created_at, updated_at) VALUES ('robot', 'Build Bot', 2, 2, 1, ?, ?)", now, now);
     await workspaceSql("INSERT INTO memberships (room_id, user_id, created_at, updated_at) VALUES (?, 'robot', ?, ?)", picked, now, now);
