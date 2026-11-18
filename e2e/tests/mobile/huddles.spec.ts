@@ -788,15 +788,15 @@ test("Invite people, with more people to invite than it lists at once, has a sea
   await expect.poll(() => invitationsSent(said)).toEqual([{ type: "huddle.invite", userIds: ["invite-42"] }]);
 });
 
-// TEMPORARY, to find why WebKit's screens showed blank once the huddle opened again: the test as it is,
-// with every connection kept, and with a wait before the huddle opens again, three times each.
-type Diagnosed = Window & { connectionsSeen?: WeakRef<RTCPeerConnection>[]; connectionsKept?: RTCPeerConnection[] };
+// TEMPORARY, to find why WebKit's screens show blank: their frames arrive and are decoded, but the
+// video stays paused, with nothing loaded. The test as the app is, and with each video told to play as
+// it's given its stream, six times each; on a blank screen, what its videos do, then after play(), then
+// after their stream is given to them again.
+type Diagnosed = Window & { connectionsSeen?: WeakRef<RTCPeerConnection>[] };
 
-/** TEMPORARY. In the page, before it loads: notes each connection, weakly, or with `keep`, keeps it. */
-function noteConnections(keep: boolean): void {
-  const diagnosed = window as Diagnosed;
-  const seen: WeakRef<RTCPeerConnection>[] = (diagnosed.connectionsSeen = []);
-  const kept: RTCPeerConnection[] = (diagnosed.connectionsKept = []);
+/** TEMPORARY. In the page, before it loads: notes each connection, weakly. */
+function noteConnections(): void {
+  const seen: WeakRef<RTCPeerConnection>[] = ((window as Diagnosed).connectionsSeen = []);
   const noted = new WeakSet<RTCPeerConnection>();
   for (const method of ["setLocalDescription", "setRemoteDescription"] as const) {
     const original = RTCPeerConnection.prototype[method] as (...args: unknown[]) => Promise<void>;
@@ -804,59 +804,77 @@ function noteConnections(keep: boolean): void {
       if (!noted.has(this)) {
         noted.add(this);
         seen.push(new WeakRef(this));
-        if (keep) kept.push(this);
       }
       return original.apply(this, args);
     };
   }
 }
 
-/** TEMPORARY. In the page: what each connection it noted, and each video, is doing. */
-async function screensState(): Promise<unknown> {
-  const FIELDS: Record<string, string[]> = {
-    "inbound-rtp": ["kind", "mid", "packetsReceived", "bytesReceived", "packetsLost", "framesReceived", "framesDecoded", "framesDropped", "keyFramesDecoded", "frameWidth", "frameHeight", "pliCount", "firCount", "nackCount", "freezeCount", "decoderImplementation"],
-    "outbound-rtp": ["kind", "mid", "packetsSent", "bytesSent", "framesEncoded", "framesSent", "keyFramesEncoded", "frameWidth", "frameHeight", "pliCount", "firCount", "nackCount", "qualityLimitationReason", "encoderImplementation", "active"],
-    "candidate-pair": ["state", "nominated", "bytesSent", "bytesReceived", "requestsSent", "responsesReceived", "localCandidateId", "remoteCandidateId"],
-    transport: ["dtlsState", "iceState", "selectedCandidatePairId"],
-    "local-candidate": ["id", "address", "port", "protocol", "candidateType"],
-    "remote-candidate": ["id", "address", "port", "protocol", "candidateType"],
-  };
-  const track = (of: MediaStreamTrack | null) => of && { id: of.id.slice(0, 8), readyState: of.readyState, muted: of.muted, enabled: of.enabled };
-  const connections = await Promise.all(
-    ((window as Diagnosed).connectionsSeen ?? []).map(async (seen) => {
-      const connection = seen.deref();
-      if (!connection) return "collected";
-      const stats: unknown[] = [];
-      try {
-        (await connection.getStats()).forEach((stat: Record<string, unknown>) => {
-          const fields = FIELDS[stat.type as string];
-          if (fields) stats.push({ type: stat.type, ...Object.fromEntries(fields.filter((field) => field in stat).map((field) => [field, stat[field]])) });
-        });
-      } catch (error) {
-        stats.push(String(error));
-      }
-      const transceivers = connection.getTransceivers().map(({ mid, direction, currentDirection, sender, receiver }) => ({ mid, direction, currentDirection, sent: track(sender.track), received: track(receiver.track) }));
-      return { state: connection.connectionState, ice: connection.iceConnectionState, signaling: connection.signalingState, transceivers, stats };
-    }),
-  );
-  const videos = [...document.querySelectorAll("video")].map((video) => ({
-    label: video.getAttribute("aria-label"),
-    paused: video.paused,
-    readyState: video.readyState,
-    networkState: video.networkState,
-    size: `${video.videoWidth}x${video.videoHeight}`,
-    currentTime: video.currentTime,
-    error: video.error?.code ?? null,
-    tracks: (video.srcObject as MediaStream | null)?.getTracks().map(track) ?? null,
-  }));
-  return { at: Math.round(performance.now()), connections, videos };
+/** TEMPORARY. In the page, before it loads: has each video play as it's given a stream, as well as by `autoplay`. */
+function playOnStream(): void {
+  const property = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "srcObject")!;
+  Object.defineProperty(HTMLMediaElement.prototype, "srcObject", {
+    ...property,
+    set(this: HTMLMediaElement, stream: MediaProvider | null) {
+      property.set!.call(this, stream);
+      if (stream && this instanceof HTMLVideoElement) void this.play().catch(() => {});
+    },
+  });
 }
 
-for (const way of ["as is", "kept", "slow"] as const)
-for (const round of [1, 2, 3])
+/** TEMPORARY. In the page: what each video in the huddle, and each connection receiving, is doing. */
+async function screensState(): Promise<unknown> {
+  const videos = [...document.querySelectorAll<HTMLVideoElement>("#huddle video")].map((video) => {
+    const track = (video.srcObject as MediaStream | null)?.getVideoTracks()[0];
+    return `${video.getAttribute("aria-label")}: ${video.paused ? "paused" : "playing"} ready ${video.readyState} ${video.videoWidth}x${video.videoHeight} at ${video.currentTime.toFixed(2)} track ${track ? `${track.id.slice(0, 8)} ${track.readyState}${track.muted ? " muted" : ""}` : "none"}`;
+  });
+  const receiving = await Promise.all(
+    ((window as Diagnosed).connectionsSeen ?? []).map(async (seen) => {
+      const connection = seen.deref();
+      if (!connection || connection.connectionState === "closed" || !connection.getTransceivers().some(({ direction }) => direction === "recvonly")) return null;
+      const inbound: string[] = [];
+      try {
+        (await connection.getStats()).forEach((stat: Record<string, unknown>) => {
+          if (stat.type === "inbound-rtp" && stat.kind === "video") inbound.push(`${stat.mid}: ${stat.framesDecoded} decoded ${stat.frameWidth}x${stat.frameHeight}`);
+        });
+      } catch (error) {
+        inbound.push(String(error));
+      }
+      const tracks = connection.getTransceivers().map(({ mid, receiver }) => `${mid}: ${receiver.track.id.slice(0, 8)}`);
+      return `${connection.connectionState} [${tracks.join(", ")}] [${inbound.join(", ")}]`;
+    }),
+  );
+  return { at: Math.round(performance.now()), videos, receiving: receiving.filter(Boolean) };
+}
+
+/** TEMPORARY. In the page: plays each paused video in the huddle, and says how that went within 3 seconds. */
+async function playPausedVideos(): Promise<string[]> {
+  const paused = [...document.querySelectorAll<HTMLVideoElement>("#huddle video")].filter((video) => video.paused);
+  return Promise.all(
+    paused.map(async (video) => {
+      const result = await Promise.race([video.play().then(() => "played", (error: Error) => error.name), new Promise<string>((resolve) => setTimeout(() => resolve("still pending"), 3_000))]);
+      return `${video.getAttribute("aria-label")}: ${result}`;
+    }),
+  );
+}
+
+/** TEMPORARY. In the page: gives each video in the huddle that has loaded nothing its stream again. */
+function reattachEmptyVideos(): void {
+  for (const video of document.querySelectorAll<HTMLVideoElement>("#huddle video")) {
+    if (video.readyState > 0) continue;
+    const stream = video.srcObject;
+    video.srcObject = null;
+    video.srcObject = stream;
+  }
+}
+
+for (const way of ["as is", "play"] as const)
+for (const round of [1, 2, 3, 4, 5, 6])
 test(`[diag ${way} ${round}] the screens people share in the huddle you're in fit the phone, one large and the other among the huddle's tiles, under it or beside it`, async ({ page, room, session, participant, screenIsFine }, testInfo) => {
   test.setTimeout(120_000);
-  await page.addInitScript(noteConnections, way === "kept");
+  await page.addInitScript(noteConnections);
+  if (way === "play") await page.addInitScript(playOnStream);
+  const name = `DIAG ${testInfo.project.name} ${way} ${round}`;
   const sharing = await Promise.all(["Ada", "Grace"].map(async (name) => (await participant(name)).session.user));
   await standInHuddleWithScreens(page, session.user, sharing);
   await openRoomWithHuddlesOn(page, room);
@@ -865,11 +883,28 @@ test(`[diag ${way} ${round}] the screens people share in the huddle you're in fi
   const opened = page.locator("#huddle");
   /** Whether the huddle shows the screen it labels `label`, whose picture plays and has a size, which a frame gives it. */
   const shows = (label: string) => opened.getByLabel(label, { exact: true }).evaluate((video: HTMLVideoElement) => !video.paused && video.videoWidth > 0 && video.currentTime > 0);
+  /** TEMPORARY. Waits for the huddle to show `label`'s screen, and when it doesn't, notes why, and what plays it. */
+  const waitToShow = async (label: string, step: string) => {
+    try {
+      await expect.poll(() => shows(label), { timeout: 15_000 }).toBe(true);
+      console.log(`${name} ${step}: shown`);
+    } catch (error) {
+      const blank = await page.evaluate(screensState);
+      const played = await page.evaluate(playPausedVideos);
+      await page.waitForTimeout(1_000);
+      const afterPlay = await page.evaluate(screensState);
+      await page.evaluate(reattachEmptyVideos);
+      await page.waitForTimeout(3_000);
+      const afterReattach = await page.evaluate(screensState);
+      console.log(`${name} ${step}: BLANK\n${name} blank ${JSON.stringify(blank)}\n${name} play() ${JSON.stringify(played)} then ${JSON.stringify(afterPlay)}\n${name} reattached ${JSON.stringify(afterReattach)}`);
+      throw error;
+    }
+  };
 
   // Ada's, who joined first, shows large, all of it on the screen, under whose it is.
   const stage = opened.getByRole("figure");
   await expect(stage).toContainText("Ada's screen");
-  await expect.poll(() => shows("Ada's screen"), { timeout: 15_000 }).toBe(true);
+  await waitToShow("Ada's screen", "opened");
   await expect(stage).toBeInViewport({ ratio: 1 });
   // The tiles are under it on a phone held upright, and beside it on one held on its side, clear of one another. Grace's screen is the first of them.
   const list = opened.getByRole("list", { name: "In the huddle" });
@@ -891,7 +926,7 @@ test(`[diag ${way} ${round}] the screens people share in the huddle you're in fi
   await tiles.first().getByRole("button", { name: "Show Grace's screen larger" }).tap();
   await expect(stage).toContainText("Grace's screen");
   await expect(tiles.first()).toHaveText("Ada's screen");
-  await expect.poll(() => shows("Grace's screen"), { timeout: 15_000 }).toBe(true);
+  await waitToShow("Grace's screen", "larger");
   await screenIsFine();
 
   // Minimized, the huddle's bar says who's sharing, and opened again it shows the screens again.
@@ -899,32 +934,8 @@ test(`[diag ${way} ${round}] the screens people share in the huddle you're in fi
   const bar = page.getByRole("region", { name: `Huddle in ${room.name}` });
   await expect(bar).toContainText("Ada and Grace are sharing screens");
   await screenIsFine();
-  if (way === "slow") await page.waitForTimeout(2_000);
   await bar.getByTitle("Open huddle").first().tap();
-  const name = `DIAG ${testInfo.project.name} ${way} ${round}`;
-  try {
-    await expect.poll(() => shows("Ada's screen"), { timeout: 15_000 }).toBe(true);
-    console.log(`${name}: shown\n${name} shown ${JSON.stringify(await page.evaluate(screensState))}`);
-  } catch (error) {
-    const first = await page.evaluate(screensState);
-    await page.waitForTimeout(3_000);
-    const later = await page.evaluate(screensState);
-    // Minimized, and opened again a while later.
-    await opened.getByRole("button", { name: "Minimize huddle" }).tap();
-    await page.waitForTimeout(3_000);
-    await bar.getByTitle("Open huddle").first().tap();
-    const recovered = await expect
-      .poll(() => shows("Ada's screen"), { timeout: 15_000 })
-      .toBe(true)
-      .then(
-        () => true,
-        () => false,
-      );
-    const after = await page.evaluate(screensState);
-    console.log(`${name}: blank; opened again slowly, ${recovered ? "shown" : "still blank"}\n${name} first ${JSON.stringify(first)}\n${name} later ${JSON.stringify(later)}\n${name} after ${JSON.stringify(after)}`);
-    await testInfo.attach("screens", { body: JSON.stringify({ first, later, recovered, after }, null, 1), contentType: "application/json" });
-    throw error;
-  }
+  await waitToShow("Ada's screen", "reopened");
   await expect(tiles).toHaveCount(4);
 });
 
