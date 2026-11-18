@@ -470,8 +470,11 @@ const closedOnJoining = (page: Page, room: TestRoom) =>
     room.id,
   );
 
-/** The SFU's sessions that have carried a track, each of which is a connection of some tab's. */
-const sessionsCarried = () => new Set(sfu.asked.flatMap(({ method, path }) => (method === "POST" ? (/\/sessions\/([^/]+)\/tracks\/new$/.exec(path)?.[1] ?? []) : [])));
+/**
+ * The SFU's sessions that have carried a track, each of which is a connection of some tab's. One the room
+ * asked a track for that the SFU no longer had, as when whoever published it left just then, carried none.
+ */
+const sessionsCarried = () => new Set(sfu.asked.flatMap(({ path, carried }) => (carried ? (/\/sessions\/([^/]+)\/tracks\/new$/.exec(path)?.[1] ?? []) : [])));
 
 /** Those of them the room hasn't had the SFU close a track of. */
 const sessionsLeftOpen = () => [...sessionsCarried()].filter((sessionId) => !sfu.asked.some(({ method, path }) => method === "PUT" && path.endsWith(`/sessions/${sessionId}/tracks/close`)));
