@@ -88,21 +88,29 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @ember/e2e exec playwright install --with-deps webkit
-      # TEMPORARY, to come out again: a trial of what the phone suite's shared-screens tests leave this
-      # machine doing, which slows the tests that run after them. Each repeat of them sends the screens
-      # another way (e2e/tests/mobile/huddles.spec.ts), beside a line every two seconds of what the
-      # machine is busy with (e2e/trial-load.mjs). Then the way they're sent now, with no trace recorded.
+      # TEMPORARY, to come out again: a run to confirm that the phone suite's shared-screens tests no longer
+      # crash the browser as their pages close, which had this machine write the crashed process's memory
+      # out and slowed the tests after them. The tests around them run twelve times over, beside a line
+      # every two seconds of what the machine is busy with (e2e/trial-load.mjs). Then three times with
+      # the screens left being sent as the page closes, which crashes it, and no core dump allowed, to
+      # see whether that alone spares the tests after them.
       - name: Trial of the shared-screens tests
         run: |
           trial() { pnpm --filter @ember/e2e exec playwright test tests/mobile/huddles.spec.ts --project "mobile iPhone SE" --project "mobile iPhone 17" --grep "Invite people, with more people|the screens people share|a huddle with more people|a room.s settings fit|Huddle sounds, on your profile|the sidebar.s Huddles row|the Huddles page fits" --reporter=list "$@" || true; }
-          nproc; free -m; cat /proc/sys/kernel/core_pattern; ulimit -c
+          crashes() { sudo dmesg | grep -c segfault || true; }
           node e2e/trial-load.mjs & LOAD=$!
           trial --repeat-each 12
-          echo "trial: as sent now, with no trace recorded"
-          SCREENS_TRIAL=now trial --repeat-each 2 --trace off
+          echo "trial: crashes so far $(crashes)"
+          echo "trial: left sending as the page closes, with no core dump allowed"
+          (ulimit -c 0; SCREENS_TRIAL=crash trial --repeat-each 3)
+          echo "trial: crashes so far $(crashes)"
+          sleep 45
           kill $LOAD || true
-          sudo dmesg | tail -n 80 || true
-          ls -la /var/crash 2>/dev/null || true
+          echo "trial: the suite starts at $(cut -d' ' -f1 /proc/uptime) s since the machine started"
+      - run: pnpm test:e2e
+      - name: The browser's crashes in this job
+        if: always()
+        run: sudo dmesg | grep segfault || true
       - uses: actions/upload-artifact@v6
         if: failure()
         with:

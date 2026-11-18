@@ -200,30 +200,35 @@ async function letScreenBeKeptAwake(page: Page): Promise<void> {
 }
 
 /** Where a page keeps the connection that stands in for the SFU's, which sends it the screens it watches, and the made-up camera they're pictures of. */
-type SentScreens = Window & { screensSent?: RTCPeerConnection; screensPictured?: MediaStream; screensDrawn?: HTMLCanvasElement };
+type SentScreens = Window & { screensSent?: RTCPeerConnection; screensPictured?: MediaStream };
 
-// TEMPORARY, to come out again: the trial's ways of sending the screens, one for each repeat of a test.
-// `none` leaves the shared-screens tests out, `now` sends as before, `end` does too and ends it all
-// before the test's page closes, `rate` asks the camera for 5 pictures a second, `one` sends the
-// camera's own track on every screen, and `canvas` sends a small canvas drawn 5 times a second.
-const WAYS = ["none", "end", "canvas", "one", "rate", "now"] as const;
-const way = () => (process.env.SCREENS_TRIAL as (typeof WAYS)[number] | undefined) ?? WAYS[test.info().repeatEachIndex % WAYS.length]!;
+/** In the page: ends what the connection that stands in for the SFU's sends it, and answers whether it had one. */
+function endScreens(): boolean {
+  const standIn = window as SentScreens;
+  if (!standIn.screensSent) return false;
+  standIn.screensSent.getSenders().forEach((sender) => sender.track?.stop());
+  standIn.screensSent.close();
+  standIn.screensPictured?.getTracks().forEach((track) => track.stop());
+  return true;
+}
 
+// TEMPORARY, to come out again: for the run on CI that confirms the hook below, each test tells how
+// long it took, and SCREENS_TRIAL=crash leaves the screens being sent as the page closes.
+const crashing = process.env.SCREENS_TRIAL === "crash";
 test.afterEach(async ({}, info) => {
-  console.log(`trial ${way()} ${info.project.name} :${info.line} ${info.status} ${info.duration}ms at ${new Date().toISOString().slice(11, 23)}`);
+  console.log(`trial ${crashing ? "crash" : "end"} ${info.project.name} :${info.line} ${info.status} ${info.duration}ms at ${new Date().toISOString().slice(11, 23)} r${info.repeatEachIndex}`);
 });
 
-/** TEMPORARY: ends what the stand-in sends, and leaves the app, before the test's page closes. */
-async function endScreens(page: Page): Promise<void> {
-  if (way() !== "end") return;
-  await page.evaluate(() => {
-    const standIn = window as SentScreens;
-    standIn.screensSent?.getSenders().forEach((sender) => sender.track?.stop());
-    standIn.screensSent?.close();
-    standIn.screensPictured?.getTracks().forEach((track) => track.stop());
-  });
-  await page.goto("about:blank");
-}
+// A page that closes while its stand-in still sends it screens crashes CI's WebKit on Linux more often
+// than not, in its video encoder, and that machine then spends half a minute writing the crashed
+// process's memory to its disk. Whatever waits on the disk meanwhile is slow, the test server's
+// database among it, so the tests that ran then timed out. So the screens end, and the page leaves the
+// app, before a test's page closes, whether the test passed or not.
+test.afterEach(async ({ page }) => {
+  if (crashing) return;
+  const sent = await page.evaluate(endScreens).catch(() => false);
+  if (sent) await page.goto("about:blank").catch(() => {});
+});
 
 /**
  * In the page: a connection of its own that sends it `count` screens, as the SFU's would, each the
@@ -237,38 +242,16 @@ async function endScreens(page: Page): Promise<void> {
  * busy the sender: sent as a camera's, which a busy sender makes smaller and larger again, 1280 by 720
  * crashed the page that showed it. And at half the camera's size, which asks the least of that page.
  */
-async function offerScreens({ count, way }: { count: number; way: string }): Promise<{ sdp: string; mids: string[] }> {
+async function offerScreens(count: number): Promise<{ sdp: string; mids: string[] }> {
   const standIn = window as SentScreens;
-  if (way !== "one") standIn.screensSent?.getSenders().forEach((sender) => sender.track?.stop());
+  standIn.screensSent?.getSenders().forEach((sender) => sender.track?.stop());
   standIn.screensSent?.close();
-  let picture: () => MediaStreamTrack;
-  if (way === "canvas") {
-    if (!standIn.screensDrawn) {
-      const canvas = (standIn.screensDrawn = document.createElement("canvas"));
-      [canvas.width, canvas.height] = [640, 360];
-      const context = canvas.getContext("2d")!;
-      let drawn = 0;
-      const draw = () => {
-        context.fillStyle = drawn % 2 ? "#224466" : "#446622";
-        context.fillRect(0, 0, canvas.width, canvas.height);
-        context.fillStyle = "#ffffff";
-        context.font = "48px sans-serif";
-        context.fillText(String(drawn++), 40, 200);
-      };
-      draw();
-      setInterval(draw, 200);
-    }
-    const canvas = standIn.screensDrawn;
-    picture = () => canvas.captureStream(5).getVideoTracks()[0]!;
-  } else {
-    const camera = (standIn.screensPictured ??= await navigator.mediaDevices.getUserMedia({ video: way === "rate" ? { width: 1280, height: 720, frameRate: 5 } : { width: 1280, height: 720 } }));
-    picture = way === "one" ? () => camera.getVideoTracks()[0]! : () => camera.getVideoTracks()[0]!.clone();
-  }
+  const camera = (standIn.screensPictured ??= await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } }));
   const connection = new RTCPeerConnection();
   const sent = Array.from({ length: count }, () => {
-    const screen = picture();
+    const screen = camera.getVideoTracks()[0]!.clone();
     screen.contentHint = "detail";
-    return connection.addTransceiver(screen, way === "canvas" ? { direction: "sendonly" } : { direction: "sendonly", sendEncodings: [{ scaleResolutionDownBy: 2 }] });
+    return connection.addTransceiver(screen, { direction: "sendonly", sendEncodings: [{ scaleResolutionDownBy: 2 }] });
   });
   await connection.setLocalDescription(await connection.createOffer());
   if (!connection.localDescription!.sdp.includes("a=candidate:")) await new Promise((resolve) => connection.addEventListener("icecandidate", resolve, { once: true }));
@@ -284,14 +267,13 @@ async function offerScreens({ count, way }: { count: number; way: string }): Pro
  */
 async function standInHuddleWithScreens(page: Page, you: User, sharing: User[], others: User[] = []): Promise<void> {
   const people = [...sharing.map((user) => ({ user, screen: true })), ...[...others, you].map((user) => ({ user, screen: false }))].map((person) => ({ ...person, muted: false, audio: false, video: false }));
-  const sending = way();
   await page.routeWebSocket(HUDDLE_SOCKET, (ws) => {
     const say = (frame: HuddleServerFrame) => ws.send(JSON.stringify(frame));
     say({ type: "huddle.welcome", you, people, startedAt: new Date().toISOString() });
     ws.onMessage(async (message) => {
       const frame = JSON.parse(String(message)) as HuddleClientFrame;
       if (frame.type === "huddle.listen" && frame.kind === "screen" && frame.fresh && frame.watch?.length === sharing.length) {
-        const { sdp, mids } = await page.evaluate(offerScreens, { count: sharing.length, way: sending });
+        const { sdp, mids } = await page.evaluate(offerScreens, sharing.length);
         say({ type: "huddle.offer", kind: "screen", sdp, tracks: sharing.map(({ id }, index) => ({ mid: mids[index]!, kind: "screen", userId: id })) });
       } else if (frame.type === "huddle.answer" && frame.kind === "screen") {
         await page.evaluate((sdp) => (window as SentScreens).screensSent!.setRemoteDescription({ type: "answer", sdp }), frame.sdp);
@@ -852,7 +834,6 @@ test("Invite people, with more people to invite than it lists at once, has a sea
 });
 
 test("the screens people share in the huddle you're in fit the phone, one large and the other among the huddle's tiles, under it or beside it", async ({ page, room, session, participant, screenIsFine }) => {
-  test.skip(way() === "none", "TEMPORARY: the trial's run without the shared screens");
   const sharing = await Promise.all(["Ada", "Grace"].map(async (name) => (await participant(name)).session.user));
   await standInHuddleWithScreens(page, session.user, sharing);
   await openRoomWithHuddlesOn(page, room);
@@ -898,11 +879,9 @@ test("the screens people share in the huddle you're in fit the phone, one large 
   await bar.getByTitle("Open huddle").first().tap();
   await expect.poll(() => shows("Ada's screen"), { timeout: 15_000 }).toBe(true);
   await expect(tiles).toHaveCount(4);
-  await endScreens(page);
 });
 
 test("a huddle with more people in it than the phone shows beside a shared screen, or under it, scrolls its tiles by themselves", async ({ page, room, session, participant, screenIsFine }) => {
-  test.skip(way() === "none", "TEMPORARY: the trial's run without the shared screens");
   const ada = (await participant("Ada")).session.user;
   const others = Array.from({ length: 9 }, (_, index) => ({ id: `someone-${index}`, name: `Someone ${index + 1}` }));
   await standInHuddleWithScreens(page, session.user, [ada], others);
@@ -933,7 +912,6 @@ test("a huddle with more people in it than the phone shows beside a shared scree
   for (const side of ["x", "y", "width", "height"] as const) expect(after[side], side).toBeCloseTo(before[side], 0);
   await expect(stage).toBeInViewport({ ratio: 1 });
   expect(await page.evaluate(() => scrollY)).toBe(0);
-  await endScreens(page);
 });
 
 test("a room's settings fit the phone with their Huddles switch, on and off, when it warns of the huddle going on, and so do those that tell someone who can't change the room that it has none", async ({ page, room, session, screenIsFine }) => {
