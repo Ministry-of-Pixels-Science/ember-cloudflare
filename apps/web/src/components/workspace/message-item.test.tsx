@@ -169,6 +169,24 @@ const withMouse = () => {
   vi.stubGlobal("matchMedia", (media: string) => ({ matches: media === "(hover: hover) and (pointer: fine)", media, addEventListener() {}, removeEventListener() {} }));
 };
 
+/**
+ * Puts the message `article` is in inside the page's main content, which takes focus from the skip link,
+ * and answers how to press a button as Safari does: it doesn't focus a button that's clicked or tapped,
+ * but what holds it and can take focus, the main content, before the click lands.
+ */
+function inMainContent(article: HTMLElement) {
+  const main = Object.assign(document.createElement("main"), { tabIndex: -1 });
+  document.body.append(main);
+  main.append(article.closest("body > div")!);
+  onTestFinished(() => main.remove());
+  return (button: HTMLElement) => {
+    act(() => main.focus());
+    // The click lands on the button only where it's still there, under the pointer.
+    expect(button).toBeVisible();
+    fireEvent.click(button);
+  };
+}
+
 describe("Send a message", () => {
   it("shows the author, the time and the text", () => {
     const { article } = show(message({ plainText: "Line one\nLine two" }));
@@ -187,6 +205,7 @@ describe("Image, video and file previews", () => {
       // Hidden in Ember added to an iPhone's or iPad's home screen, which can't download.
       const download = within(article).getByRole("link", { name: "Download Q3 report.pdf" });
       expect(download).toHaveAttribute("href", report.downloadUrl);
+      expect(download).toHaveAttribute("download", "");
       expect(download).toHaveClass("ios-pwa:hidden");
       cleanup();
     }
@@ -252,6 +271,7 @@ describe("Download and share files", () => {
     expect(barNames()).toEqual(["👍Thumbs up", "👏Clapping", "👋Waving hand", "More reactions", "Reply in thread", "Download", "Copy link", "Block Ada"]);
     const download = within(actionBar()).getByRole("link", { name: "Download" });
     expect(download).toHaveAttribute("href", report.downloadUrl);
+    expect(download).toHaveAttribute("download", "");
     expect(download).toHaveClass("ios-pwa:hidden");
   });
 
@@ -628,6 +648,16 @@ describe("Message action bar", () => {
     expect(optionsOn("Hello")).toHaveFocus();
   });
 
+  it("sends a reaction from the tray in Safari, which moves focus to the main content as a button is pressed", async () => {
+    withMouse();
+    const { actions, article, user } = show(message());
+    const pressInSafari = inMainContent(article);
+    fireEvent.pointerEnter(article, { pointerType: "mouse" });
+    await user.click(within(actionBar()).getByRole("button", { name: "More reactions" }));
+    pressInSafari(within(screen.getByRole("group", { name: "More reactions" })).getByRole("button", { name: "Party popper" }));
+    expect(actions.boost).toHaveBeenCalledWith("m1", "🎉");
+  });
+
   it("keeps actions the pointer opened as focus moves elsewhere, as when the composer takes it once it's ready", () => {
     withMouse();
     const { article } = show(message());
@@ -867,6 +897,18 @@ describe("More actions on a message", () => {
     await user.click(copyLink);
     expect(await navigator.clipboard.readText()).toBe(`${location.origin}/rooms/general/@m1`);
     expect(copyLink).toHaveClass("text-positive");
+    expect(moreActions()).toBeVisible();
+  });
+
+  it("copies the message's text in Safari, which moves focus to the main content as a button is pressed, leaving the actions open", async () => {
+    withMouse();
+    const { article, user } = show(message({ plainText: "Copy me, please" }));
+    const pressInSafari = inMainContent(article);
+    await openMoreActions(user, article);
+    const copyText = within(moreActions()).getByRole("button", { name: "Copy text" });
+    pressInSafari(copyText);
+    await vi.waitFor(() => expect(copyText).toHaveClass("text-positive"));
+    expect(await navigator.clipboard.readText()).toBe("Copy me, please");
     expect(moreActions()).toBeVisible();
   });
 

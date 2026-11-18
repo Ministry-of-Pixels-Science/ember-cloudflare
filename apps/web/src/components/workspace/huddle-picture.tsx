@@ -22,7 +22,8 @@ interface Props {
  * A camera's picture, or a shared screen's, live, in what it's placed in. It plays without sound, as its
  * person's voice comes through the huddle's own speaker, and so by itself, but in a browser that keeps
  * any video from that, where it plays at the person's next click or key. A phone's browser can stop it
- * while the page is hidden, so it plays again as the page shows again.
+ * while the page is hidden, so it plays again as the page shows again. It's given its stream once the
+ * stream's first packets have come, as WebKit, given one before then, can show nothing of it.
  */
 export function HuddlePicture({ stream, label, mirrored = false, whole = false, onShape }: Props) {
   const video = useRef<HTMLVideoElement>(null);
@@ -33,7 +34,12 @@ export function HuddlePicture({ stream, label, mirrored = false, whole = false, 
   useEffect(() => {
     const element = video.current;
     if (!element) return;
-    element.srcObject = stream;
+    const waiting = stream.getVideoTracks().find((track) => track.muted);
+    const attach = () => {
+      element.srcObject = stream;
+    };
+    if (waiting) waiting.addEventListener("unmute", attach, { once: true });
+    else attach();
     const play = () => {
       if (element.paused) void element.play().catch(() => {});
     };
@@ -42,6 +48,7 @@ export function HuddlePicture({ stream, label, mirrored = false, whole = false, 
     const stopWatchingPage = whenShownAgain(play);
     for (const sized of SIZED) element.addEventListener(sized, shaped);
     return () => {
+      waiting?.removeEventListener("unmute", attach);
       for (const touch of TOUCHES) document.removeEventListener(touch, play, true);
       stopWatchingPage();
       for (const sized of SIZED) element.removeEventListener(sized, shaped);

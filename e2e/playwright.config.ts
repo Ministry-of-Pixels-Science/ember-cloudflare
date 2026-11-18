@@ -4,6 +4,7 @@ import { featureProjects, RECOVERY_TOKEN } from "./projects/features";
 import { FIRST_RUN, firstRunProjects, SETUP_TOKEN } from "./projects/first-run";
 import { mobileProjects } from "./projects/mobile";
 import { screenshotProjects } from "./projects/screenshots";
+import { webkitProjects } from "./projects/webkit";
 import {
   AI_GATEWAY_ACCOUNT,
   AI_GATEWAY_PORT,
@@ -38,11 +39,15 @@ export default defineConfig<MobileOptions>({
     launchOptions: { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined },
   },
   // Every suite finds the server set up: the first-run project sets it up before the others start.
-  projects: [
-    ...firstRunProjects,
-    ...workspaceSettingsProjects,
-    ...[...featureProjects, ...mobileProjects, ...screenshotProjects].map((project) => ({ ...project, dependencies: [FIRST_RUN] })),
-  ],
+  // `E2E_BROWSER=webkit` runs them in Safari's engine instead (projects/webkit.ts).
+  projects:
+    process.env.E2E_BROWSER === "webkit"
+      ? webkitProjects
+      : [
+          ...firstRunProjects,
+          ...workspaceSettingsProjects,
+          ...[...featureProjects, ...mobileProjects, ...screenshotProjects].map((project) => ({ ...project, dependencies: [FIRST_RUN] })),
+        ],
   // The production build and the API on one origin, served by `wrangler dev` the way the deployed
   // Worker serves them. State lives in e2e/.wrangler so tests never touch your local dev data, and
   // starts empty, since every open room a test makes takes in everyone who signs in after it.

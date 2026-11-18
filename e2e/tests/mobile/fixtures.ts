@@ -18,10 +18,11 @@ export interface MobileOptions {
 export const test = app.extend<MobileOptions & { screenIsFine: (options?: { denseTargets?: string[] }) => Promise<void> }>({
   safeArea: [{ top: 0, right: 0, bottom: 0, left: 0 }, { option: true }],
 
-  // Chromium can't know about a notch, so tell it what env(safe-area-inset-*) should report.
-  page: async ({ page, safeArea }, use) => {
-    const cdp = await page.context().newCDPSession(page);
-    await cdp.send("Emulation.setSafeAreaInsetsOverride", { insets: safeArea });
+  // Chromium can't know about a notch, so tell it what env(safe-area-inset-*) should report. WebKit
+  // can't be told, and reports none.
+  page: async ({ page, safeArea, browserName }, use) => {
+    const cdp = browserName === "chromium" ? await page.context().newCDPSession(page) : undefined;
+    await cdp?.send("Emulation.setSafeAreaInsetsOverride", { insets: safeArea });
     screens.set(page, { cdp, insets: safeArea });
     await use(page);
   },
@@ -58,8 +59,8 @@ export function hasDrawerLayout(page: Page): boolean {
   return page.viewportSize()!.width <= 900;
 }
 
-/** Each page's DevTools session and the insets it reports right now. */
-const screens = new WeakMap<Page, { cdp: CDPSession; insets: SafeArea }>();
+/** Each page's DevTools session, in Chromium, and the insets it reports right now. */
+const screens = new WeakMap<Page, { cdp?: CDPSession; insets: SafeArea }>();
 
 /**
  * Simulates the on-screen keyboard opening the way Chrome on Android does with
@@ -72,6 +73,6 @@ export async function openKeyboard(page: Page): Promise<void> {
   const keyboard = Math.round(height * (width > height ? 0.5 : 0.4));
   const screen = screens.get(page)!;
   screen.insets = { ...screen.insets, bottom: 0 };
-  await screen.cdp.send("Emulation.setSafeAreaInsetsOverride", { insets: screen.insets });
+  await screen.cdp?.send("Emulation.setSafeAreaInsetsOverride", { insets: screen.insets });
   await page.setViewportSize({ width, height: height - keyboard });
 }

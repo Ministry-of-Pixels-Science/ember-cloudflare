@@ -1,6 +1,6 @@
 import { CURRENT_PASSWORD_WRONG, DELETION_NAME_NEEDED, SIGN_IN_REJECTED } from "@ember/protocol";
 import type { Page } from "@playwright/test";
-import { ADMINISTRATOR, drawnPicture, nextSecond, shownPicture, useOwnAddress } from "../../fixtures";
+import { ADMINISTRATOR, drawnPicture, nextSecond, shownPicture, useOwnAddress, variantType } from "../../fixtures";
 import { expect, test } from "./fixtures";
 
 const unique = (name: string) => `${name} ${crypto.randomUUID().slice(0, 8)}`;
@@ -129,10 +129,11 @@ test.describe("Upload an avatar", () => {
     await expect(avatar).toHaveAttribute("src", /^\/users\/[^/]+\/avatar\?v=\d{14}$/);
     await expect(avatar).not.toHaveAttribute("src", initials!);
     // The variant Ada's browser made of it, within 512×512.
-    expect(await shownPicture(avatar)).toEqual({ type: "image/webp", width: 512, height: 341 });
+    const variant = { type: await variantType(page), width: 512, height: 341 };
+    expect(await shownPicture(avatar)).toEqual(variant);
     const uploaded = (await avatar.getAttribute("src"))!;
     await expect(gracesView).toHaveAttribute("src", uploaded);
-    expect(await shownPicture(gracesView)).toEqual({ type: "image/webp", width: 512, height: 341 });
+    expect(await shownPicture(gracesView)).toEqual(variant);
 
     await nextSecond();
     await remove.click();
@@ -158,7 +159,7 @@ test.describe("Upload an avatar", () => {
     await ada.page.getByLabel("Upload avatar").setInputFiles(await drawnPicture(ada.page, "tall.png", 800, 1200));
     await expect(ada.page.getByRole("alert")).toHaveText("It may take up to 30 minutes to change everywhere.");
     await expect(gracesView).toHaveAttribute("src", (await ada.page.getByRole("img", { name: "Your avatar" }).getAttribute("src"))!);
-    expect(await shownPicture(gracesView)).toEqual({ type: "image/webp", width: 341, height: 512 });
+    expect(await shownPicture(gracesView)).toEqual({ type: await variantType(ada.page), width: 341, height: 512 });
 
     // The picture fills its link, a message's 36px square, rather than running below it.
     const shown = await gracesView.boundingBox();

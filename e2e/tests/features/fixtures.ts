@@ -1,6 +1,6 @@
 import type { Sidebar } from "@ember/protocol";
 import type { APIRequestContext, BrowserContext, BrowserContextOptions, Locator, Page } from "@playwright/test";
-import { test as app, cookieHeader, createRoom, createSession, editorField, expect, keepOtherRoomsOut, makeAdministrator, type Session, type TestRoom } from "../../fixtures";
+import { test as app, answerChanged, cookieHeader, createRoom, createSession, editorField, expect, keepOtherRoomsOut, makeAdministrator, type Session, type TestRoom } from "../../fixtures";
 
 export { expect };
 
@@ -17,17 +17,14 @@ export interface Rooms {
  * Makes every page in `context` list just `rooms` of the server's rooms, and any DMs, as the list loads
  * and as the workspace socket brings rooms saved since, since every other test's open rooms take everyone
  * in too, while only the test's own people are in its DMs. The server still answers first, so a session
- * it refuses gets its 401 as usual, a page whose list is current gets its 304, and the welcome card's
- * invitation is the server's, for the general that setup made, which isn't listed.
+ * it refuses gets its 401 as usual, and the welcome card's invitation is the server's, for the general
+ * that setup made, which isn't listed.
  */
 async function showRooms(context: BrowserContext, rooms: Rooms): Promise<void> {
   const ids = new Set(Object.values(rooms).map((room) => room.id));
-  await context.route("**/api/sidebar", async (route) => {
-    const response = await route.fetch();
-    if (!response.ok()) return route.fulfill({ response });
-    const list = (await response.json()) as Sidebar;
-    await route.fulfill({ response, json: { ...list, rooms: list.rooms.filter((room) => room.kind === "direct" || ids.has(room.id)) } });
-  });
+  await context.route("**/api/sidebar", (route) =>
+    answerChanged<Sidebar>(route, (list) => ({ ...list, rooms: list.rooms.filter((room) => room.kind === "direct" || ids.has(room.id)) })),
+  );
   await keepOtherRoomsOut(context, ids);
 }
 

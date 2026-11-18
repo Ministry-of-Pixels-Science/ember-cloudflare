@@ -187,8 +187,10 @@ test("text cut off for good fails, but not text clamped or folded on purpose", a
   for (const problem of overflow) expect(problem).toMatch(/text in <p> "(Cut off after one line|Still cut off once opened)/);
 });
 
-test("a page wider than the phone fails, though the phone widens the window to fit it", async ({ page, safeArea }) => {
+test("a page wider than the phone fails, though the phone widens the window to fit it", async ({ page, safeArea, browserName }) => {
   await page.setContent(phonePage(`<div style="width: 120vw; height: 20px"></div>`));
   const { overflow } = await auditScreen(page, safeArea);
-  expect(overflow).toEqual([expect.stringContaining("the page scrolls sideways")]);
+  // WebKit's phones don't widen the window, so there the box past the screen's edge fails too.
+  const past = browserName === "webkit" ? [expect.stringMatching(/^<div> spans [\d.]+px–[\d.]+px on a [\d.]+px-wide screen$/)] : [];
+  expect(overflow).toEqual([expect.stringContaining("the page scrolls sideways"), ...past]);
 });
