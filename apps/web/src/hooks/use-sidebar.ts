@@ -72,8 +72,9 @@ const isSame = (you: Me, me: Me) => you.id === me.id && you.name === me.name && 
  * it wasn't connected reached it. Meanwhile the socket brings rooms as they're made, changed and
  * deleted, and as this person is put in them and taken out, marks rooms unread and read, moves DMs as
  * messages come in them, and brings the stars saved in any of their tabs, whom they've blocked in any of
- * them, the welcome card dismissed in any of them, and which of a huddle's sounds they hear, as a switch
- * in any of them leaves them. It loads again when the tab is shown after more than a minute hidden too, as
+ * them, the welcome card dismissed in any of them, which of a huddle's sounds they hear, as a switch in
+ * any of them leaves them, and for an administrator, how many reports are open. It loads again when the
+ * tab is shown after more than a minute hidden too, as
  * `refresh-room:visible` reloads it (Campfire's users/sidebar_helper.rb), which Campfire does on a
  * room's page and this does on every page, and, its rooms only, a while after the socket says the shared
  * order has changed. Once it says this person has been given another role, it loads again with the
@@ -83,7 +84,8 @@ const isSame = (you: Me, me: Me) => you.id === me.id && you.name === me.name && 
  * did.
  *
  * Once the socket is let in, it says whether this tab is in use, and again whenever that changes
- * (`watchUse`), and keeps who's `active` in the workspace as it hears (`activeStore`).
+ * (`watchUse`), and keeps who's `active` in the workspace as it hears (`activeStore`). `reportsHeard`
+ * counts the times the count of open reports has come, with a list or from the socket.
  *
  * `onSessionChanged` hears when who the browser's session signs in changes: null once it has expired,
  * whoever another tab signed in as, or `me` as they are now, once they've been made an administrator,
@@ -108,6 +110,10 @@ export function useSidebar(
 ) {
   const [{ list, askAgain }, change] = useReducer(roomListReducer, NO_ROOM_LIST);
   const [active] = useState(activeStore);
+  // How many times the count of open reports has come, with a list or from the socket, which the Reports
+  // list loads again on: reports can be made and handled with the count left as it was, as they may have
+  // been while the socket wasn't connected.
+  const [reportsHeard, setReportsHeard] = useState(0);
   // Whether a list the server sent has come, rather than only the empty one a failed first load leaves.
   const [answered, setAnswered] = useState(false);
   // How many of the workspace socket's frames have said what became of a room or of this person's level
@@ -124,6 +130,7 @@ export function useSidebar(
       try {
         copy = await fetchSidebar(copy);
         change({ type: "loaded", list: copy.sidebar });
+        setReportsHeard((heard) => heard + 1);
         setAnswered(true);
       } catch (error) {
         change({ type: "unanswered" });
@@ -262,6 +269,9 @@ export function useSidebar(
           return change({ type: "starred", favorites: frame.favorites });
         case "blocks.changed":
           return change({ type: "blocked", blocks: frame.blocks });
+        case "reports.changed":
+          setReportsHeard((heard) => heard + 1);
+          return change({ type: "reports", open: frame.open });
         case "invitation.dismissed":
           return change({ type: "invitation dismissed" });
         case "rooms.reordered":
@@ -353,5 +363,5 @@ export function useSidebar(
     };
   }, []);
 
-  return { list, answered, change, refresh, askForRoom, askForHuddleSounds, active, huddleChanges };
+  return { list, answered, change, refresh, askForRoom, askForHuddleSounds, active, huddleChanges, reportsHeard };
 }

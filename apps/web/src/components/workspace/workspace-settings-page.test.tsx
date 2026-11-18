@@ -29,6 +29,7 @@ import { formatOf, TOP_LEVELS, modelName, type AssistantChanges, type AssistantS
 import type { Agent, Agents } from "@ember/protocol/agents";
 import { RELAY_WITHOUT_HUDDLES, type HuddleRelaySetup, type HuddlesSetup } from "@ember/protocol/huddles";
 import type { MemberfulKeysChange, MemberfulSaved } from "@ember/protocol/memberful";
+import type { Reports } from "@ember/protocol/reports";
 import { FlashProvider } from "@/components/flash";
 import { Sheet } from "@/components/ui/sheet";
 import { AccountContext } from "@/hooks/use-account";
@@ -284,6 +285,8 @@ function serve(settings: WorkspaceSettings, { saved, regenerated, roleChanged, r
         const outcomes = emailAddresses.map((emailAddress) => ({ emailAddress, invitation: invitationTo(emailAddress), link: `https://ember.test/join/invitation#token=${emailAddress}` }));
         return Response.json({ outcomes } satisfies Invited);
       }
+      case "GET /api/reports":
+        return Response.json({ open: [], handled: [] } satisfies Reports);
       case "PUT /api/account/room_order":
         return ordered ? ordered() : Response.json({ sharedOrder: (JSON.parse(String(init?.body)) as { roomIds: RoomId[] }).roomIds });
       default:

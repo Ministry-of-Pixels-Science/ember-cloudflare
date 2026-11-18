@@ -822,6 +822,35 @@ describe("Block someone", () => {
   });
 });
 
+describe("Reports", () => {
+  it("counts an administrator's open reports as the workspace socket says, made or handled in any tab", async () => {
+    const { result } = await showSidebar();
+    socket().connect();
+    await settle();
+    socket().receive({ type: "reports.changed", open: 3 });
+    expect(result.current.list?.openReports).toBe(3);
+    socket().receive({ type: "reports.changed", open: 0 });
+    expect(result.current.list?.openReports).toBe(0);
+  });
+
+  it("counts the times the count comes, with a list or from the socket, though it's the same, for the Reports list to load again", async () => {
+    const { result } = await showSidebar();
+    socket().connect();
+    await settle();
+    const heard = result.current.reportsHeard;
+    socket().receive({ type: "reports.changed", open: 3 });
+    socket().receive({ type: "reports.changed", open: 3 });
+    expect(result.current.reportsHeard).toBe(heard + 2);
+    // A list loaded once the socket connects again, as the server says the one it has is current, though
+    // reports may have been made and handled while it wasn't connected.
+    socket().drop();
+    await wait(500);
+    socket().connect();
+    await settle();
+    expect(result.current.reportsHeard).toBe(heard + 3);
+  });
+});
+
 describe("Welcome card for administrators, until they dismiss it", () => {
   const invited: Sidebar = { ...unstarred([general]), invitation: { roomId: general.id, joinCode: "aB3d-Ef5h-iJ7k" } };
 

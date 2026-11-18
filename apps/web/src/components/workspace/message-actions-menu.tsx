@@ -15,7 +15,7 @@ import {
 } from "react";
 import { QUICK_REACTION_COUNT, REACTIONS, type Message, type StoredFile } from "@ember/protocol";
 import type { DisplayNode } from "@ember/richtext/dom";
-import { ChatPlusIn, Copy, Download, Edit, Emoji, MessageText, MoreHoriz, QuoteMessage, ShareAndroid, Trash, UserXmark } from "@/components/icons/iconoir";
+import { ChatPlusIn, Copy, Download, Edit, Emoji, MessageText, MoreHoriz, QuoteMessage, ShareAndroid, Trash, TriangleFlag, UserXmark } from "@/components/icons/iconoir";
 import { PageLink } from "@/components/page-link";
 import { ShareButton } from "@/components/share-button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -79,6 +79,8 @@ interface Props {
    * Left out on your own messages and a huddle's.
    */
   block?: { blocked: boolean; onChange: () => void };
+  /** Opens Report for the message, from More actions. Left out on your own messages and a huddle's. */
+  onReport?: () => void;
   ref?: Ref<MessageActionsHandle>;
 }
 
@@ -98,14 +100,15 @@ export interface MessageActionsHandle {
  * order Slack's bar has them. With a mouse, hovering the message opens the bar too, laid over the message's
  * top edge at the timeline's right, with Message options pinned as its last button, and each button names
  * itself in a tooltip as the pointer reaches it. On touch screens it opens beside Message options, with
- * Quote after Reply in thread, Copy link after that, then Block or Unblock its author on someone else's
- * message. Once opened, the bar stays in the page while it's shut, so Copy link keeps its color.
+ * Quote after Reply in thread, Copy link after that, then Block or Unblock its author and Report message
+ * on someone else's message. Once opened, the bar stays in the page while it's shut, so Copy link keeps
+ * its color.
  *
  * With a mouse, Message options then opens More actions under the bar, as Slack's does: Quote, Copy text,
- * Copy link, Block or Unblock its author on someone else's message, and on messages you can change, Edit
- * message and Delete message.
+ * Copy link, Block or Unblock its author and Report message on someone else's message, and on messages
+ * you can change, Edit message and Delete message.
  */
-export function MessageActionsMenu({ message, nodes, row, threaded, editable, threadPath, onReact, onQuote, onEdit, onDelete, onNewBoost, block, ref }: Props) {
+export function MessageActionsMenu({ message, nodes, row, threaded, editable, threadPath, onReact, onQuote, onEdit, onDelete, onNewBoost, block, onReport, ref }: Props) {
   const [open, setOpen] = useState(false);
   const [trayOpen, setTrayOpen] = useState(false);
   const [actionsOpen, setActionsOpen] = useState(false);
@@ -177,10 +180,14 @@ export function MessageActionsMenu({ message, nodes, row, threaded, editable, th
     onNewBoost();
   };
 
-  // So do Block and Unblock.
+  // So do Block and Unblock, and Report message, whose dialog takes it.
   const changeBlock = () => {
     close();
     block?.onChange();
+  };
+  const report = () => {
+    close();
+    onReport?.();
   };
 
   // Delete message asks first, as the editor's does. The composer takes focus as the message goes, or Message
@@ -413,7 +420,7 @@ export function MessageActionsMenu({ message, nodes, row, threaded, editable, th
             ref={bar}
             className={cn(
               PANEL,
-              "flex flex-wrap items-center p-1 group-data-[two-rows]/menu:grid group-data-[two-rows]/menu:grid-cols-[repeat(4,auto)] group-data-[two-rows]/menu:justify-self-end",
+              "flex flex-wrap items-center p-1 group-data-[two-rows]/menu:grid group-data-[two-rows]/menu:grid-cols-[repeat(var(--bar-columns,4),auto)] group-data-[two-rows]/menu:justify-self-end",
               overlapping && "pr-9 touch:pr-12",
             )}
           >
@@ -463,6 +470,11 @@ export function MessageActionsMenu({ message, nodes, row, threaded, editable, th
               </ActionTooltip>
             )}
             {!overlapping && block && <BlockButton message={message} blocked={block.blocked} onClick={changeBlock} />}
+            {!overlapping && onReport && (
+              <button type="button" aria-label="Report message" className={ACTION} onClick={report}>
+                <TriangleFlag />
+              </button>
+            )}
             {/* As Campfire's `.message__edit-btn` shows (messages.css). */}
             {editable && (
               <ActionTooltip label="Edit">
@@ -517,11 +529,13 @@ export function MessageActionsMenu({ message, nodes, row, threaded, editable, th
               <Copy />
               Copy link
             </button>
-            {block && (
-              <>
-                <hr className="my-1 border-message-border" />
-                <BlockButton message={message} blocked={block.blocked} onClick={changeBlock} item />
-              </>
+            {(block || onReport) && <hr className="my-1 border-message-border" />}
+            {block && <BlockButton message={message} blocked={block.blocked} onClick={changeBlock} item />}
+            {onReport && (
+              <button type="button" className={ITEM} onClick={report}>
+                <TriangleFlag />
+                Report message
+              </button>
             )}
             {editable && (
               <>
@@ -673,15 +687,46 @@ interface Placed {
 }
 
 /**
+ * How many columns a bar for fingers has in rows: the quick reactions and More reactions over the
+ * `rest` of its buttons, so four, or as many as the rest are while they fit in `width`.
+ */
+function columnsOf(bar: HTMLElement, rest: number, width: number): number {
+  const style = getComputedStyle(bar);
+  const frame = bar.offsetWidth - bar.clientWidth + parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+  const fit = Math.floor((width - frame) / (bar.lastElementChild as HTMLElement).offsetWidth);
+  return Math.max(QUICK_REACTION_COUNT + 1, Math.min(rest, fit));
+}
+
+/**
+ * Lays a bar for fingers out in rows as wide as fit in `width` (`columnsOf`), the quick reactions and
+ * More reactions over the rest, every row ending at the bar's right edge: the first, and the rest's
+ * last, where it has fewer buttons than the others, start that far in.
+ */
+function layOutRows(bar: HTMLElement, width: number) {
+  const rest = (Array.from(bar.children) as HTMLElement[]).slice(2).filter((button) => getComputedStyle(button).display !== "none");
+  const columns = columnsOf(bar, rest.length, width);
+  bar.style.setProperty("--bar-columns", String(columns));
+  (bar.firstElementChild as HTMLElement).style.gridColumnStart = String(columns - QUICK_REACTION_COUNT);
+  const short = rest.length % columns;
+  rest.forEach((button, index) => (button.style.gridColumnStart = short > 0 && index === rest.length - short ? String(columns - short + 1) : ""));
+}
+
+/** Where a message's row starts what it says, past its avatar's column, which a bar for fingers keeps clear of. */
+function contentLeft(row: HTMLElement): number {
+  const style = getComputedStyle(row);
+  return row.getBoundingClientRect().left + parseFloat(style.paddingLeft) + parseFloat(style.gridTemplateColumns) + parseFloat(style.columnGap);
+}
+
+/**
  * Places an open bar within the timeline less 8px on each side, and within what's on screen. With a
  * mouse, it overlaps the row, its top 17px above the row's, or higher to keep clear of a code block's
  * Copy code, and its right 16px in from the timeline's,
  * with Message options pinned as its last button, and the tray or More actions opens below it, or above
  * when there's more room there. For fingers, it opens 6px below its anchor, lined up with its right
  * edge, or above when it doesn't fit, or beside it when it fits neither, so it doesn't cover what opened
- * it, nor Message options. Its buttons then go in two rows of four, where a row of them would wrap or
- * doesn't fit beside its anchor. Answers false, placing nothing, once the row is out of the timeline's
- * sight, when the bar should close.
+ * it, nor Message options. Its buttons then go in rows, the reactions over the rest (`layOutRows`),
+ * where a row of them would wrap, reach over the message's avatar or not fit beside its anchor. Answers
+ * false, placing nothing, once the row is out of the timeline's sight, when the bar should close.
  */
 function placeMenu({ row, container, trigger, anchor, menu, bar, panel, overlapping }: Placed): boolean {
   const viewport = window.visualViewport;
@@ -746,7 +791,10 @@ function placeMenu({ row, container, trigger, anchor, menu, bar, panel, overlapp
     };
     let spot = spotFor(menuBox);
     const [first, last] = [bar.firstElementChild as HTMLElement, bar.lastElementChild as HTMLElement];
-    if (!spot.fits || last.offsetTop > first.offsetTop) {
+    const reachesAvatar = Math.min(spot.right, bounds.right) - menuBox.width < contentLeft(row);
+    if (!spot.fits || last.offsetTop > first.offsetTop || reachesAvatar) {
+      // As wide as fits right of the avatars' column, so lined up with Message options it keeps clear of them.
+      layOutRows(bar, bounds.right - contentLeft(row));
       menu.setAttribute("data-two-rows", "");
       menuBox = menu.getBoundingClientRect();
       spot = spotFor(menuBox);

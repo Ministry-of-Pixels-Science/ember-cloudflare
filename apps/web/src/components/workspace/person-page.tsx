@@ -2,11 +2,12 @@ import { useContext, useEffect, useLayoutEffect, useRef, useState } from "react"
 import type { DirectoryUser, Me, Person, PersonAnswer, User, UserId } from "@ember/protocol";
 import type { AgentProfile } from "@ember/protocol/agents";
 import { isWorkersAiModel } from "@ember/protocol/assistant";
-import { ChatLines, EditPencil, Prohibition, UserXmark } from "@/components/icons/iconoir";
+import { ChatLines, EditPencil, Prohibition, TriangleFlag, UserXmark } from "@/components/icons/iconoir";
 import { PageLink } from "@/components/page-link";
 import { BlockingContext } from "@/hooks/use-blocking";
 import { PeopleContext, useNameOf } from "@/hooks/use-directory";
 import { useMounted } from "@/hooks/use-mounted";
+import { ReportingContext } from "@/hooks/use-reporting";
 import { leave, PROFILE_PATH, useBackPath } from "@/hooks/use-route";
 import { useTitle } from "@/hooks/use-title";
 import { asListed, canAsk } from "@/lib/agents";
@@ -58,7 +59,8 @@ const DIRECT_BUTTON =
  * they're active, or, for an agent only administrators can ask, to anyone else, that they can't.
  * Administrators get a new sign-in link for anyone active who isn't a bot, themselves included, and Ban
  * for anyone else active or Remove ban for anyone banned. Everyone gets Block for anyone else active,
- * bots too, and Unblock for anyone they've blocked, whose page offers no DM. The people directory keeps
+ * bots too, and Unblock for anyone they've blocked, whose page offers no DM, and Report for anyone else
+ * active, for their name, picture or bio. The people directory keeps
  * what it lists of them current. Members suspended for their Memberful membership's lapsing show as
  * removed people do, but to administrators, who see them as banned people, with why they can't sign in,
  * and Ban.
@@ -78,6 +80,7 @@ export function PersonPage({ userId, me, onStartDirect, onPersonChanged, reloadP
   const blocking = useContext(BlockingContext);
   const blocked = blocking.blocked.has(userId);
   const [changingBlock, setChangingBlock] = useState(false);
+  const openReport = useContext(ReportingContext);
   // How many times a ban or its lifting has loaded the page again.
   const [reloads, setReloads] = useState(0);
   const back = useBackPath();
@@ -147,6 +150,7 @@ export function PersonPage({ userId, me, onStartDirect, onPersonChanged, reloadP
   const blockButton = person && !mine && (person.status === "active" || blocked) && (
     <BlockButton person={person} blocked={blocked} busy={changingBlock} onClick={changeBlock} />
   );
+  const reportButton = person && !mine && person.status === "active" && <ReportButton person={person} onClick={() => openReport({ kind: "person", person })} />;
   // Gone as soon as you stop being an administrator, before the page has loaded them again.
   const transferId = me.administrator ? fetched?.transferId : undefined;
   const editProfile = mine && (
@@ -180,6 +184,7 @@ export function PersonPage({ userId, me, onStartDirect, onPersonChanged, reloadP
                   )
                 )}
                 {blockButton}
+                {reportButton}
               </>
             ) : person.status === "deactivated" || (person.status === "suspended" && !me.administrator) ? (
               <>
@@ -236,6 +241,7 @@ export function PersonPage({ userId, me, onStartDirect, onPersonChanged, reloadP
                   <div className="mt-4">{person.name}’s Memberful membership has lapsed, so they can’t sign in until it’s renewed.</div>
                 )}
                 {blockButton && <div className="mt-4">{blockButton}</div>}
+                {reportButton && <div className="mt-4">{reportButton}</div>}
                 {me.administrator && !mine && (
                   <div className="mt-4">
                     <BanButton person={person} busy={banning} onClick={toggleBan} />
@@ -275,6 +281,16 @@ function BlockButton({ person, blocked, busy, onClick }: { person: Person; block
     <button type="button" aria-disabled={busy || undefined} onClick={onClick} className={cn(DIRECT_BUTTON, "bg-background")}>
       <UserXmark className="size-[1.3em]" />
       <span>{`${blocked ? "Unblock" : "Block"} ${person.name}`}</span>
+    </button>
+  );
+}
+
+/** Report, the full width of the panel, as Block is. */
+function ReportButton({ person, onClick }: { person: Person; onClick: () => void }) {
+  return (
+    <button type="button" onClick={onClick} className={cn(DIRECT_BUTTON, "bg-background")}>
+      <TriangleFlag className="size-[1.3em]" />
+      <span>{`Report ${person.name}`}</span>
     </button>
   );
 }

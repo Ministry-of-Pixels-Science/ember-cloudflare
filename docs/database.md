@@ -32,7 +32,7 @@ So far rooms keep `messages`, `boosts`, `revocations`, `room_events`, `unindexed
 `message_deletions`, `blobs` and `waiting_calls`, the Workspace keeps `accounts`, `users`, `sessions`, `identities`,
 `pending_identities`, `membership_checks`, `membership_catch_ups`, `push_subscriptions`, `webhooks`,
 `bans`, `email_links`, `email_link_requests`, `password_resets`, `searches`, `recent_searches`, `rooms`,
-`memberships`, `favorites`, `blocks`, `pending_revocations`, `pending_purges`, `pending_reindexes`,
+`memberships`, `favorites`, `blocks`, `reports`, `pending_revocations`, `pending_purges`, `pending_reindexes`,
 `deleted_rooms`, `apps`, `app_sign_ins`, `own_app_sign_ins`, `agent_tools`, `outside_clients`, `outside_connections` and `outside_spent_tokens`, and the search index keeps `search_messages`, `search_mentions`, `search_rooms` and the
 FTS5 table `search_index`. A room's id also
 names its Durable Object, and the Worker asks the Workspace whether someone is a member before it
@@ -330,6 +330,17 @@ Objects, D1 or speed call for something else.
   found by its `created_at`, so blocking again leaves be a DM shown since. `index_blocks_on_blocked_id`
   finds the blocks of someone whose account is deleted, which go with it, as theirs do, bumping the
   `blocks_version` of each person who had blocked them.
+- **Reports are rows of their own**, a `reports` row for each (workspace migration 0073), holding as
+  JSON in `subject` the message or the person as they were when reported, which the report shows
+  whatever becomes of them, and whom it's of in `subject_id`, so every list and count of them leaves
+  out an administrator's own with `subject_id <> ?`. Keeping one is an `INSERT ... SELECT ... WHERE
+  NOT EXISTS` an open one by the same person of the same message or person, so a second report keeps
+  nothing. The open ones, newest first, and the ones handled last come by
+  `index_reports_on_handled_at_and_created_at`, and deleting a message, or removing or banning
+  someone, closes every open report of it, or of them, in one `UPDATE ... RETURNING` by
+  `index_reports_on_message_id` or `index_reports_on_subject_id`. Every active administrator's count
+  of open reports is one statement, which binds nothing however many there are. Reports stay when
+  whoever made them, or whoever they're of, deletes their account, as the administrators' record.
 - **A room's place in the shared order is a column of the room**, `rooms.shared_position` (workspace
   migration 0020), so the sidebar's statement reads each room's place with the room, and listing the
   order costs nothing more, nor reads the places of rooms someone isn't in. Saving it reads the
