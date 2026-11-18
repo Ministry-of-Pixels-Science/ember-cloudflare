@@ -19,7 +19,7 @@ import {
   type SidebarRoom,
 } from "@ember/protocol";
 import { MODEL_NOT_LISTED, type YourAssistant, type YourAssistantChanged, type YourAssistantChanges } from "@ember/protocol/assistant";
-import { SSO_CONNECTIONS_PATH, SSO_DISCONNECTED_NOTICE, type SsoStatus } from "@ember/protocol/sso";
+import { MEMBERFUL_WITH_SSO, SSO_CONNECTIONS_PATH, SSO_DISCONNECTED_NOTICE, SSO_WITH_MEMBERFUL, type SsoStatus } from "@ember/protocol/sso";
 import type { HuddleSounds, HuddleSoundsChanged } from "@ember/protocol/huddles";
 import { FlashProvider } from "@/components/flash";
 import { Sheet } from "@/components/ui/sheet";
@@ -875,6 +875,23 @@ describe("Connect single sign-on", () => {
     expect(sso()).not.toHaveTextContent(/password|disconnect/i);
     expect(screen.queryByLabelText("New password")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Current password")).not.toBeInTheDocument();
+  });
+
+  it("offers no Connect to someone without a password whom the other way signs in, as their session would be all there was to check", async () => {
+    serve({ loaded: () => Response.json({ profile: { ...profile, password: false, memberful: CONNECTED, sso: SSO_NOT_CONNECTED }, transferId: LOADED_LINK } satisfies ProfileAnswer) });
+    showPage();
+    await loaded();
+    expect(sso()).toHaveTextContent(SSO_WITH_MEMBERFUL);
+    expect(within(sso()!).queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("offers no Connect Memberful either to someone without a password whom single sign-on signs in", async () => {
+    serve({ loaded: () => Response.json({ profile: { ...profile, password: false, memberful: NOT_CONNECTED, sso: SSO_CONNECTED }, transferId: LOADED_LINK } satisfies ProfileAnswer) });
+    showPage();
+    await loaded();
+    const memberful = screen.getByRole("region", { name: "Memberful" });
+    expect(memberful).toHaveTextContent(MEMBERFUL_WITH_SSO);
+    expect(within(memberful).queryByRole("button")).not.toBeInTheDocument();
   });
 
   it("has none while there's nothing to show", async () => {

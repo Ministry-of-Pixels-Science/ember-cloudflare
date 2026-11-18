@@ -3084,14 +3084,19 @@ export class Workspace extends DurableObject<Env> {
    * and the digest of their password, or "" without one, which the Worker checks the password they give
    * against, counting it against sign-in's limit for `ip`, as changing their email address or password
    * does: "limited" past it. "unneeded" unless `via` is the only way in, "forbidden" for a guest,
-   * "connected" when they're connected to an account there already, and null without a valid session.
+   * "connected" when they're connected to an account there already, "otherwise" for someone without a
+   * password whom the other way signs in, by the Memberful site Ember has the keys to, `memberfulSite`,
+   * or the provider, since holding their session is all there'd be to check, which isn't enough to add a
+   * way in, as it isn't to give them a first password (`signsInElsewhereAlone`), and null without a
+   * valid session.
    */
   async connectionCheck(
     via: SignInElsewhere,
     credentials: Credentials,
     ip: string,
     issuer: string,
-  ): Promise<{ userId: UserId; passwordDigest: string } | "limited" | "unneeded" | "forbidden" | "connected" | null> {
+    memberfulSite: string | null,
+  ): Promise<{ userId: UserId; passwordDigest: string } | "limited" | "unneeded" | "forbidden" | "connected" | "otherwise" | null> {
     const session = await this.session(credentials);
     if (!session) return null;
     if (!rulesOf(await this.joinableAccount(), via).only) return "unneeded";
@@ -3100,7 +3105,10 @@ export class Workspace extends DurableObject<Env> {
     if (!person) return null;
     if (person.subject !== null) return "connected";
     const passwordDigest = (await this.store.signInOf(session.user.id))?.passwordDigest ?? "";
-    if (passwordDigest !== "" && !this.signInAttempts.attempt(ip)) return "limited";
+    if (passwordDigest === "") {
+      const profile = await this.store.ownProfile(session.user.id);
+      if (profile && signsInElsewhereAlone(profile, memberfulSite, await this.ssoIssuer())) return "otherwise";
+    } else if (!this.signInAttempts.attempt(ip)) return "limited";
     return { userId: session.user.id, passwordDigest };
   }
 

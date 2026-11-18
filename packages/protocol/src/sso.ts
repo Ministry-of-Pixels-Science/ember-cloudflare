@@ -193,6 +193,13 @@ export const SSO_NOT_CONNECTED = "Single sign-on isn't connected.";
  * and a password that whoever holds their session could set would be another, as with Memberful.
  */
 export const PASSWORD_WITH_SSO = "You sign in with single sign-on, so there's no password to set.";
+/**
+ * Why connecting one account elsewhere is refused to someone without a password whom the other signs
+ * in: holding their session is all there'd be to check, which isn't enough to add a way in, as with a
+ * first password.
+ */
+export const SSO_WITH_MEMBERFUL = "You sign in with Memberful, so single sign-on can't be connected too.";
+export const MEMBERFUL_WITH_SSO = "You sign in with single sign-on, so Memberful can't be connected too.";
 
 /** Why single sign-on can't be turned on yet, nor SSO only. */
 export const SSO_SETUP_NEEDED = "Set up single sign-on first.";

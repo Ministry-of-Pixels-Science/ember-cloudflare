@@ -1,5 +1,6 @@
 import {
   MEMBERFUL_CALLBACK_PATH,
+  MEMBERFUL_CONNECTIONS_PATH,
   memberfulSignInPath,
   type AccountSettings,
   type Bootstrap,
@@ -18,6 +19,7 @@ import {
   ISSUER_UNSUPPORTED,
   CLIENT_SECRET_REFUSED,
   MEMBERFUL_OR_SSO_SIGN_IN_NEEDED,
+  MEMBERFUL_WITH_SSO,
   OPEN_WITH_SSO,
   PASSWORD_WITH_SSO,
   SSO_CALLBACK_PATH,
@@ -28,6 +30,7 @@ import {
   SSO_SETTINGS_PATH,
   SSO_SETUP_NEEDED,
   SSO_SIGN_IN_NEEDED,
+  SSO_WITH_MEMBERFUL,
   ssoSignInPath,
   type SsoConnection,
   type SsoSaved,
@@ -803,6 +806,19 @@ describe("Members only and SSO only together", () => {
 
   const offered = async () => (await (await withMemberful("/api/bootstrap")).json()) as Bootstrap;
 
+  /** Signs in with Memberful as Mary, answering the session. */
+  async function marysSession(): Promise<Session> {
+    const response = await memberfulCallback(await startMemberful());
+    expect(response.status).toBe(302);
+    const cookie = response.headers.getSetCookie().find((cookie) => !cookie.includes("memberful_state"))!.split(";")[0]!;
+    const me = await api("/api/me", { headers: { Cookie: cookie } });
+    return { user: shown(((await me.json()) as { user: Me }).user), cookie };
+  }
+
+  /** Starts connecting the account `session` signs in to one at `path`'s way in, from their profile, without a password. */
+  const connect = (path: string, session: Session) =>
+    withMemberful(path, { method: "POST", headers: { ...as(session), "CF-Connecting-IP": IP }, body: JSON.stringify({}) });
+
   it("can both be on, when someone new joins with either, and the join link and guests are off", async () => {
     const administrator = await setUpWithSso({ only: true });
     await turnOn(administrator, { memberfulSignIn: true });
@@ -832,6 +848,22 @@ describe("Members only and SSO only together", () => {
     expect(new URL(connection.memberfulConnection).origin).toBe(MEMBERFUL_SITE);
     expect(new URL(connection.ssoConnection).origin).toBe(ISSUER);
     expect(password.headers.getSetCookie().map((cookie) => cookie.split("=")[0])).toEqual(["__Host-memberful_state", "__Host-sso_state"]);
+  });
+
+  it("connects neither to someone without a password whom the other signs in, since holding their session is all there'd be to check", async () => {
+    const administrator = await setUpWithSso({ only: true });
+    await turnOn(administrator, { memberfulSignIn: true });
+    const katherines = await ssoSession(katherine);
+    const marys = await marysSession();
+
+    const memberful = await connect(MEMBERFUL_CONNECTIONS_PATH, katherines);
+    expect(memberful.status).toBe(403);
+    expect(await memberful.json()).toEqual({ error: MEMBERFUL_WITH_SSO });
+    const sso = await connect(SSO_CONNECTIONS_PATH, marys);
+    expect(sso.status).toBe(403);
+    expect(await sso.json()).toEqual({ error: SSO_WITH_MEMBERFUL });
+    expect(sso.headers.getSetCookie()).toEqual([]);
+    expect(await count("identities")).toBe(2);
   });
 
   it("lets nobody in with Memberful while SSO only is on and Memberful isn't members only, as its card shows it off", async () => {

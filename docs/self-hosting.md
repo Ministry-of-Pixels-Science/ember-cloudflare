@@ -370,7 +370,9 @@ Memberful and whose staff sign in with single sign-on: then those two, administr
 they invite are the only ones who sign in. While one of them is on, the other way lets nobody in, not
 even the people linked to it, unless it's the only way in too, so turning it on in Who can join turns
 on its only switch with it. Meanwhile, someone who joined with the other way has no password to reset,
-so only an administrator's sign-in link lets them in.
+so only an administrator's sign-in link lets them in. Nor can someone without a password whom one way
+signs in connect an account at the other from their profile, since holding their session would be all
+there was to check before adding a way in.
 
 To have open sign-up, Email domain's page and the page for a forgotten password check that whoever
 uses them is a person, an administrator sets up [Turnstile](https://developers.cloudflare.com/turnstile/),
@@ -1707,8 +1709,8 @@ What a self-hoster should know, beyond keeping the setup password and link to th
   before scrypt are replaced as their passwords sign in.
 - A session lasts until it goes 400 days unused. Changing your email address or password takes
   your current password, so holding someone's session isn't enough to take their account, and
-  someone Memberful or single sign-on signs in without a password isn't given one, so it isn't enough
-  to make another way in either. A new password ends your other sessions and forgets their browsers' push
+  someone Memberful or single sign-on signs in without a password isn't given one, nor can they
+  connect the other, so it isn't enough to make another way in either. A new password ends your other sessions and forgets their browsers' push
   subscriptions. A password reset, deactivation or ban ends all of a person's sessions within a
   minute.
 - Until Ember is set up, only the setup password, or the setup link a deploy printed, opens the form,

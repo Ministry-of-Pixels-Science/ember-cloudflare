@@ -1374,7 +1374,7 @@ describe("Connect single sign-on", () => {
   const address = () => `${location.pathname}${location.search}${location.hash}`;
 
   it("flashes that your account at the provider is connected, taking it out of the address", async () => {
-    serve({ "GET /api/users/me/profile": () => Response.json({ profile: { name: "Ada", emailAddress: "ada@example.com", bio: null, membershipNeeded: true, memberful: null, sso: null } }) });
+    serve({ "GET /api/users/me/profile": () => Response.json({ profile: { name: "Ada", emailAddress: "ada@example.com", bio: null, membershipNeeded: true, memberful: null, sso: null, apps: [], outsideAi: null } }) });
     showWorkspace("/users/me/profile?sso=connected#top");
     expect(await screen.findByRole("alert")).toHaveTextContent("Single sign-on connected.");
     expect(address()).toBe("/users/me/profile#top");

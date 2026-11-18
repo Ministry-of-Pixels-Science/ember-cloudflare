@@ -16,7 +16,7 @@ import {
   type ProfileChanges,
   type SidebarRoom,
 } from "@ember/protocol";
-import { SSO_DISCONNECTED_NOTICE, type SsoStatus } from "@ember/protocol/sso";
+import { MEMBERFUL_WITH_SSO, SSO_DISCONNECTED_NOTICE, SSO_WITH_MEMBERFUL, type SsoStatus } from "@ember/protocol/sso";
 import type { HuddleSounds } from "@ember/protocol/huddles";
 import { AUTH_FORM } from "@/components/auth-page";
 import { FIELD_INPUT, Field, SubmitButton } from "@/components/field";
@@ -434,6 +434,7 @@ export function ProfilePage({ me, rooms, askForRoom, huddleSounds, askForHuddleS
             hasPassword={hasPassword}
             hasEmailAddress={hasEmailAddress}
             membershipNeeded={membershipNeeded}
+            signsInOtherwise={!hasPassword && sso?.connected ? MEMBERFUL_WITH_SSO : undefined}
             onDisconnected={disconnected}
             onFailed={onFailed}
           />
@@ -446,6 +447,7 @@ export function ProfilePage({ me, rooms, askForRoom, huddleSounds, askForHuddleS
             hasPassword={hasPassword}
             hasEmailAddress={hasEmailAddress}
             membershipNeeded={membershipNeeded}
+            signsInOtherwise={!hasPassword && memberful?.connected ? SSO_WITH_MEMBERFUL : undefined}
             onDisconnected={disconnectedFromSso}
             onFailed={onFailed}
           />

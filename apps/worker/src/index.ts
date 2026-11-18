@@ -91,6 +91,7 @@ import { parseHuddleSoundChanges, type HuddleSoundsChanged, type PastHuddles } f
 import { OUTSIDE_AUTHORIZE_PATH } from "@ember/protocol/outside";
 import { parseNewReport, parseReportHandling, type HandledReports, type Reports } from "@ember/protocol/reports";
 import {
+  MEMBERFUL_WITH_SSO,
   OPEN_WITH_SSO,
   PASSWORD_WITH_SSO,
   SSO_CALLBACK_PATH,
@@ -104,6 +105,7 @@ import {
   SSO_SETTINGS_PATH,
   SSO_SIGN_IN_PATH,
   SSO_SIGN_IN_PROBLEMS,
+  SSO_WITH_MEMBERFUL,
   type ElsewhereConnection,
   type SsoStatus,
 } from "@ember/protocol/sso";
@@ -871,6 +873,8 @@ interface ConnectingElsewhere {
   unavailable: string;
   unneeded: string;
   passwordNeeded: string;
+  /** Why it's refused to someone without a password whom the other way signs in. */
+  signsInOtherwise: string;
   notConnected: string;
   disconnectPasswordNeeded: string;
   disconnectWithoutPassword: string;
@@ -885,6 +889,7 @@ const CONNECTING_MEMBERFUL: ConnectingElsewhere = {
   unavailable: MEMBERFUL_SIGN_IN_PROBLEMS.unavailable,
   unneeded: MEMBERFUL_SIGN_IN_PROBLEMS.unneeded,
   passwordNeeded: MEMBERFUL_PASSWORD_NEEDED,
+  signsInOtherwise: MEMBERFUL_WITH_SSO,
   notConnected: MEMBERFUL_NOT_CONNECTED,
   disconnectPasswordNeeded: MEMBERFUL_DISCONNECT_PASSWORD_NEEDED,
   disconnectWithoutPassword: MEMBERFUL_DISCONNECT_WITHOUT_PASSWORD,
@@ -899,6 +904,7 @@ const CONNECTING_SSO: ConnectingElsewhere = {
   unavailable: SSO_SIGN_IN_PROBLEMS.unavailable,
   unneeded: SSO_SIGN_IN_PROBLEMS.unneeded,
   passwordNeeded: SSO_PASSWORD_NEEDED,
+  signsInOtherwise: SSO_WITH_MEMBERFUL,
   notConnected: SSO_NOT_CONNECTED,
   disconnectPasswordNeeded: SSO_DISCONNECT_PASSWORD_NEEDED,
   disconnectWithoutPassword: SSO_DISCONNECT_WITHOUT_PASSWORD,
@@ -911,9 +917,10 @@ const CONNECTING_SSO: ConnectingElsewhere = {
  * email address or password, answers where to sign in there to connect your account there to yours,
  * with the cookie that keeps the state it goes with, to come back to your profile. 401 without a valid
  * session; 403 while it isn't the only way in, or there's nowhere to connect one (Ember lacks
- * Memberful's keys, or no provider is set up), or to a guest; 409 once you've connected one; 422 without
- * your password, or with one that isn't yours; and 429 past sign-in's limit, which checking the password
- * counts against.
+ * Memberful's keys, or no provider is set up), to a guest, or to someone without a password whom the
+ * other way signs in, which holding their session would be enough to add a way in to; 409 once you've
+ * connected one; 422 without your password, or with one that isn't yours; and 429 past sign-in's limit,
+ * which checking the password counts against.
  */
 async function connectElsewhere(request: Request, env: Env, elsewhere: ConnectingElsewhere): Promise<Response> {
   const credentials = await credentialsOf(request, env);
@@ -922,11 +929,12 @@ async function connectElsewhere(request: Request, env: Env, elsewhere: Connectin
   if (!issuer) return problem(403, elsewhere.unavailable);
   const body: unknown = await jsonBodyOf(request);
   const { currentPassword } = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
-  const check = await workspace(env).connectionCheck(elsewhere.via, credentials, request.headers.get("CF-Connecting-IP") ?? "unknown", issuer);
+  const check = await workspace(env).connectionCheck(elsewhere.via, credentials, request.headers.get("CF-Connecting-IP") ?? "unknown", issuer, await memberfulSiteFor(env));
   if (!check) return problem(401, "Not signed in");
   if (check === "limited") return problem(429, SIGN_IN_LIMITED);
   if (check === "unneeded") return problem(403, elsewhere.unneeded);
   if (check === "forbidden") return problem(403, `Guests can't connect ${elsewhere.name}`);
+  if (check === "otherwise") return problem(403, elsewhere.signsInOtherwise);
   if (check === "connected") return problem(409, `You've connected ${elsewhere.name} already`);
   if (check.passwordDigest !== "") {
     if (typeof currentPassword !== "string" || !currentPassword) return problem(422, elsewhere.passwordNeeded);
