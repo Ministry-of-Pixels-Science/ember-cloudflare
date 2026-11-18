@@ -1,6 +1,5 @@
 import type { DirectRoom, LiveHuddle, Message, RoomSettings, ServerFrame, Sidebar, SidebarRoom, User } from "@ember/protocol";
 import type { HuddleClientFrame, HuddleServerFrame, MessageHuddle } from "@ember/protocol/huddles";
-import { execFileSync } from "node:child_process";
 import type { APIRequestContext, Locator, Page, WebSocketRoute } from "@playwright/test";
 import { changeTheWorkspace, cookieHeader, editorField, huddleTilesKeepClear, isolateRoom, listing, openRoom, ROOM_SOCKET, signInAs, type Session, type Tells, type TestRoom } from "../../fixtures";
 import { auditScreen } from "./audits";
@@ -192,7 +191,7 @@ async function letScreenBeKeptAwake(page: Page): Promise<void> {
 }
 
 /** Where a page keeps the connection that stands in for the SFU's, which sends it the screens it watches. */
-type SentScreens = Window & { screensSent?: RTCPeerConnection; screenSize?: [number, number] };
+type SentScreens = Window & { screensSent?: RTCPeerConnection };
 
 /**
  * In the page: a connection of its own that sends it `count` screens, as the SFU's would, each the
@@ -200,8 +199,8 @@ type SentScreens = Window & { screensSent?: RTCPeerConnection; screenSize?: [num
  * address of its own, as the SFU's does, and the media section each is on.
  */
 async function offerScreens(count: number): Promise<{ sdp: string; mids: string[] }> {
-  const [width, height] = (window as SentScreens).screenSize ?? [1280, 720];
-  const picture = await navigator.mediaDevices.getUserMedia({ video: { width, height } });
+  // Smaller than a laptop's screen: CI's WebKit on Linux, sending two at 1280 by 720 and showing them, froze in about half its runs.
+  const picture = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 360 } });
   const connection = new RTCPeerConnection();
   const sent = Array.from({ length: count }, () => connection.addTransceiver(picture.getVideoTracks()[0]!.clone(), { direction: "sendonly" }));
   await connection.setLocalDescription(await connection.createOffer());
@@ -784,71 +783,7 @@ test("Invite people, with more people to invite than it lists at once, has a sea
   await expect.poll(() => invitationsSent(said)).toEqual([{ type: "huddle.invite", userIds: ["invite-42"] }]);
 });
 
-// TEMPORARY, to find why WebKit's page freezes as a huddle's shared screens start: the test with the
-// stand-in's screens as large as a laptop's, and smaller, six times each on each phone, and when the
-// page freezes, where each of WebKit's page processes is stuck, from gdb.
-
-/** TEMPORARY. Whether `evaluating` settles within 5 seconds, which a page that's frozen doesn't. */
-async function settles<T>(evaluating: Promise<T>): Promise<T | "FROZEN"> {
-  return Promise.race([evaluating, new Promise<"FROZEN">((resolve) => setTimeout(() => resolve("FROZEN"), 5_000))]);
-}
-
-/** TEMPORARY. Each of WebKit's page processes, and its threads' stacks, from gdb, which CI installs for this. */
-function webProcessStacks(): string {
-  let pids: string[];
-  try {
-    pids = execFileSync("pgrep", ["-f", "WebProcess"], { encoding: "utf8" }).trim().split("\n").filter(Boolean);
-  } catch (error) {
-    return `no page process: ${String(error)}`;
-  }
-  return pids
-    .map((pid) => {
-      try {
-        const command = execFileSync("ps", ["-o", "args=", "-p", pid], { encoding: "utf8" }).trim();
-        const stacks = execFileSync("sudo", ["-n", "gdb", "-p", pid, "-batch", "-nx", "-ex", "set pagination off", "-ex", "thread apply all bt 40"], { encoding: "utf8", timeout: 90_000, maxBuffer: 64 * 1024 * 1024 });
-        return `=== ${pid} ${command}\n${stacks}`;
-      } catch (error) {
-        return `=== ${pid}: ${String(error).slice(0, 2_000)}`;
-      }
-    })
-    .join("\n");
-}
-
-/** TEMPORARY. The stacks of each process's main thread, which gdb names Thread 1, out of `stacks`. */
-function mainThreads(stacks: string): string {
-  return stacks
-    .split(/^(?==== )/m)
-    .map((process) => {
-      const [heading] = process.split("\n");
-      const main = /^Thread 1 [^\n]*\n(?:#[^\n]*\n?)*/m.exec(process)?.[0] ?? "(no Thread 1)";
-      return `${heading}\n${main}`;
-    })
-    .join("\n");
-}
-
-for (const way of ["720p", "360p"] as const)
-for (const round of [1, 2, 3, 4, 5, 6])
-test(`[diag ${way} ${round}] the screens people share in the huddle you're in fit the phone, one large and the other among the huddle's tiles, under it or beside it`, async ({ page, room, session, participant, screenIsFine }, testInfo) => {
-  test.setTimeout(180_000);
-  if (way === "360p") await page.addInitScript(() => ((window as SentScreens).screenSize = [640, 360]));
-  const name = `DIAG ${testInfo.project.name} ${way} ${round}`;
-  /** TEMPORARY. Waits for `shown`, and when it doesn't come, says whether the page froze, and where. */
-  const waitFor = async (step: string, shown: () => Promise<unknown>) => {
-    try {
-      await shown();
-      console.log(`${name} ${step}: shown`);
-    } catch (error) {
-      const alive = await settles(page.evaluate(() => document.readyState));
-      if (alive !== "FROZEN") {
-        console.log(`${name} ${step}: BLANK`);
-        throw error;
-      }
-      const stacks = webProcessStacks();
-      await testInfo.attach("stacks", { body: stacks, contentType: "text/plain" });
-      console.log(`${name} ${step}: FROZEN\n${mainThreads(stacks)}\n${name} end of stacks`);
-      throw error;
-    }
-  };
+test("the screens people share in the huddle you're in fit the phone, one large and the other among the huddle's tiles, under it or beside it", async ({ page, room, session, participant, screenIsFine }) => {
   const sharing = await Promise.all(["Ada", "Grace"].map(async (name) => (await participant(name)).session.user));
   await standInHuddleWithScreens(page, session.user, sharing);
   await openRoomWithHuddlesOn(page, room);
@@ -861,7 +796,7 @@ test(`[diag ${way} ${round}] the screens people share in the huddle you're in fi
   // Ada's, who joined first, shows large, all of it on the screen, under whose it is.
   const stage = opened.getByRole("figure");
   await expect(stage).toContainText("Ada's screen");
-  await waitFor("opened", () => expect.poll(() => shows("Ada's screen"), { timeout: 15_000 }).toBe(true));
+  await expect.poll(() => shows("Ada's screen"), { timeout: 15_000 }).toBe(true);
   await expect(stage).toBeInViewport({ ratio: 1 });
   // The tiles are under it on a phone held upright, and beside it on one held on its side, clear of one another. Grace's screen is the first of them.
   const list = opened.getByRole("list", { name: "In the huddle" });
@@ -883,7 +818,7 @@ test(`[diag ${way} ${round}] the screens people share in the huddle you're in fi
   await tiles.first().getByRole("button", { name: "Show Grace's screen larger" }).tap();
   await expect(stage).toContainText("Grace's screen");
   await expect(tiles.first()).toHaveText("Ada's screen");
-  await waitFor("larger", () => expect.poll(() => shows("Grace's screen"), { timeout: 15_000 }).toBe(true));
+  await expect.poll(() => shows("Grace's screen"), { timeout: 15_000 }).toBe(true);
   await screenIsFine();
 
   // Minimized, the huddle's bar says who's sharing, and opened again it shows the screens again.
@@ -892,7 +827,7 @@ test(`[diag ${way} ${round}] the screens people share in the huddle you're in fi
   await expect(bar).toContainText("Ada and Grace are sharing screens");
   await screenIsFine();
   await bar.getByTitle("Open huddle").first().tap();
-  await waitFor("reopened", () => expect.poll(() => shows("Ada's screen"), { timeout: 15_000 }).toBe(true));
+  await expect.poll(() => shows("Ada's screen"), { timeout: 15_000 }).toBe(true);
   await expect(tiles).toHaveCount(4);
 });
 
