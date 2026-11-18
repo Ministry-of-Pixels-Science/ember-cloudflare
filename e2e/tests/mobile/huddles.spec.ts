@@ -219,34 +219,36 @@ async function offerScreens(count: number): Promise<{ sdp: string; mids: string[
 }
 
 // TEMPORARY, to come out again: ways the stand-in could send its screens, for runs that compare them in CI's WebKit.
-type OfferedWay = "as it is" | "closing" | "closing and steady";
+// Each sends its pictures as a screen's are sent, at their own size however busy the sender.
 interface Trial {
-  way: OfferedWay;
+  /** The size the made-up camera is asked for. */
   width: number;
   height: number;
+  /** Leaves the connection made before open, and takes a camera each time, as the stand-in does now, where the others stop and close it and keep one camera. */
+  leftOpen?: true;
+  /** How many times smaller than the camera's the sender sends its picture. */
+  scale?: number;
 }
-type TrialWindow = SentScreens & { screensPictured?: MediaStream; screensSentBefore?: RTCPeerConnection[]; sizesSeen?: Set<string>; sizesWatched?: number };
+type TrialWindow = SentScreens & { screensPictured?: MediaStream; screensSentBefore?: RTCPeerConnection[]; sizesSeen?: Set<string>; sizesWatched?: number; cameraGives?: string };
 
-/**
- * TEMPORARY: `offerScreens` as it is, which leaves the connection it made before open and takes a camera each
- * time; "closing", which stops and closes that connection and keeps one camera throughout; and "closing and
- * steady", which also sends its pictures as a screen's are sent, at their own size however busy the sender.
- */
-async function offerScreensEachWay({ count, way, width, height }: Trial & { count: number }): Promise<{ sdp: string; mids: string[] }> {
+/** TEMPORARY: `offerScreens`, each way a trial names. */
+async function offerScreensEachWay({ count, width, height, leftOpen, scale }: Trial & { count: number }): Promise<{ sdp: string; mids: string[] }> {
   const standIn = window as TrialWindow;
-  if (way === "as it is") {
+  if (leftOpen) {
     if (standIn.screensSent) (standIn.screensSentBefore ??= []).push(standIn.screensSent);
   } else {
     standIn.screensSent?.getSenders().forEach((sender) => sender.track?.stop());
     standIn.screensSent?.close();
   }
   const camera = () => navigator.mediaDevices.getUserMedia({ video: { width, height } });
-  const picture = way === "as it is" ? await camera() : (standIn.screensPictured ??= await camera());
+  const picture = leftOpen ? await camera() : (standIn.screensPictured ??= await camera());
+  const gives = picture.getVideoTracks()[0]!.getSettings();
+  standIn.cameraGives = `${gives.width}x${gives.height}@${gives.frameRate}`;
   const connection = new RTCPeerConnection();
   const sent = Array.from({ length: count }, () => {
     const screen = picture.getVideoTracks()[0]!.clone();
-    if (way === "closing and steady") screen.contentHint = "detail";
-    return connection.addTransceiver(screen, { direction: "sendonly" });
+    screen.contentHint = "detail";
+    return connection.addTransceiver(screen, { direction: "sendonly", ...(scale !== undefined && { sendEncodings: [{ scaleResolutionDownBy: scale }] }) });
   });
   await connection.setLocalDescription(await connection.createOffer());
   if (!connection.localDescription!.sdp.includes("a=candidate:")) await new Promise((resolve) => connection.addEventListener("icecandidate", resolve, { once: true }));
@@ -254,20 +256,38 @@ async function offerScreensEachWay({ count, way, width, height }: Trial & { coun
   return { sdp: connection.localDescription!.sdp, mids: sent.map(({ mid }) => mid!) };
 }
 
-/** TEMPORARY: the sizes the stand-in sends now and what limits them, the states of the connections it made before, and the sizes the huddle's pictures have had since last asked. */
-async function whatScreensDo(): Promise<{ sent: string[]; limited: string[]; before: string[]; sizes: string[] }> {
+interface ScreensDoing {
+  sent: string[];
+  limited: string[];
+  before: string[];
+  sizes: string[];
+  /** Frames the stand-in has encoded on the connection it sends on now, and how often whoever receives them has asked for a whole picture again. */
+  encoded: number;
+  askedAgain: number;
+  camera: string;
+}
+
+/**
+ * TEMPORARY: the sizes the stand-in sends now and what limits them, how many frames it has encoded, the states
+ * of the connections it made before, and the sizes the huddle's pictures have had since last asked.
+ */
+async function whatScreensDo(): Promise<ScreensDoing> {
   const standIn = window as TrialWindow;
   const sent: string[] = [];
   const limited: string[] = [];
+  let [encoded, askedAgain] = [0, 0];
   (await standIn.screensSent?.getStats())?.forEach((stat: Record<string, unknown>) => {
     if (stat.type !== "outbound-rtp") return;
     sent.push(`${String(stat.frameWidth)}x${String(stat.frameHeight)}`);
     limited.push(String(stat.qualityLimitationReason));
+    encoded += Number(stat.framesEncoded ?? 0);
+    askedAgain += Number(stat.pliCount ?? 0) + Number(stat.firCount ?? 0);
   });
   const sizes = [...(standIn.sizesSeen ?? [])];
   standIn.sizesSeen = new Set();
   standIn.sizesWatched ??= window.setInterval(() => document.querySelectorAll<HTMLVideoElement>("#huddle video").forEach((video) => standIn.sizesSeen!.add(`${video.videoWidth}x${video.videoHeight}`)), 50);
-  return { sent, limited, before: (standIn.screensSentBefore ?? []).map((connection) => connection.connectionState), sizes };
+  const before = (standIn.screensSentBefore ?? []).map((connection) => connection.connectionState);
+  return { sent, limited, before, sizes, encoded, askedAgain, camera: standIn.cameraGives ?? "" };
 }
 
 /**
@@ -892,61 +912,84 @@ test("the screens people share in the huddle you're in fit the phone, one large 
   await expect(tiles).toHaveCount(4);
 });
 
-for (const way of ["as it is", "closing", "closing and steady"] satisfies OfferedWay[]) {
-  for (const [width, height] of [
-    [640, 360],
-    [1280, 720],
-  ] as const) {
-    // TEMPORARY, to come out again: the huddle opened five times over, noting each time whether its screens play, and what's sent.
-    test(`[trial] screens ${width} wide, sent ${way}, in a huddle opened again and again`, async ({ page, room, session, participant }, testInfo) => {
-      test.setTimeout(240_000);
-      const sharing = await Promise.all(["Ada", "Grace"].map(async (name) => (await participant(name)).session.user));
-      await standInHuddleWithScreens(page, session.user, sharing, [], { way, width, height });
-      await openRoomWithHuddlesOn(page, room);
-      await header(page).getByRole("button", { name: "Start huddle", exact: true }).tap();
-      await page.getByRole("dialog", { name: `Start a huddle in ${room.name}` }).getByRole("button", { name: "Start Huddle" }).tap();
-      const opened = page.locator("#huddle");
-      const bar = page.getByRole("region", { name: `Huddle in ${room.name}` });
-      /** How far a screen's picture has played, as the test above asks whether it shows: nothing while it's paused or has no size. */
-      const time = (label: string) =>
-        opened
-          .getByLabel(label, { exact: true })
-          .evaluate((video: HTMLVideoElement) => (!video.paused && video.videoWidth > 0 ? video.currentTime : 0))
-          .catch(() => 0);
-      const times = () => Promise.all(["Ada's screen", "Grace's screen"].map(time));
-      const seen = { played: "", ms: [] as number[], sizes: new Set<string>(), sent: new Set<string>(), limited: new Set<string>(), before: [] as string[], failed: "" };
-      try {
-        await page.evaluate(whatScreensDo);
-        for (let round = 0; round < 5; round++) {
-          const began = Date.now();
-          const played = await expect
-            .poll(async () => (await times()).every((at) => at > 0), { timeout: 10_000 })
-            .toBe(true)
-            .then(
-              () => true,
-              () => false,
-            );
-          seen.ms.push(Date.now() - began);
-          // Whether they go on playing: each one's time a second and a half on.
-          const then = await times();
-          await page.waitForTimeout(1500);
-          const going = (await times()).every((at, index) => at > then[index]!);
-          seen.played += !played ? "0" : going ? "1" : "s";
-          const doing = await page.evaluate(whatScreensDo);
-          for (const size of doing.sizes) seen.sizes.add(size);
-          for (const size of doing.sent) seen.sent.add(size);
-          for (const reason of doing.limited) seen.limited.add(reason);
-          seen.before = doing.before;
-          await opened.getByRole("button", { name: "Minimize huddle" }).tap();
-          await expect(bar).toContainText("Ada and Grace are sharing screens");
-          await bar.getByTitle("Open huddle").first().tap();
-        }
-      } catch (error) {
-        seen.failed = String(error).slice(0, 200);
+const TRIALS: Array<[string, Trial]> = [
+  ["1280 by 720", { width: 1280, height: 720 }],
+  ["1280 by 720, with the earlier connections left open", { width: 1280, height: 720, leftOpen: true }],
+  ["1280 by 720, sent at half its size", { width: 1280, height: 720, scale: 2 }],
+  ["640 by 480", { width: 640, height: 480 }],
+  ["640 by 360", { width: 640, height: 360 }],
+];
+
+for (const [way, trial] of TRIALS) {
+  // TEMPORARY, to come out again: the huddle opened five times over, noting each time whether its screens play and go on playing, and what's sent meanwhile.
+  test(`[trial] screens from a camera of ${way}, in a huddle opened again and again`, async ({ page, room, session, participant }, testInfo) => {
+    test.setTimeout(240_000);
+    const sharing = await Promise.all(["Ada", "Grace"].map(async (name) => (await participant(name)).session.user));
+    await standInHuddleWithScreens(page, session.user, sharing, [], trial);
+    await openRoomWithHuddlesOn(page, room);
+    await header(page).getByRole("button", { name: "Start huddle", exact: true }).tap();
+    await page.getByRole("dialog", { name: `Start a huddle in ${room.name}` }).getByRole("button", { name: "Start Huddle" }).tap();
+    const opened = page.locator("#huddle");
+    const bar = page.getByRole("region", { name: `Huddle in ${room.name}` });
+    /** A screen's picture as it is: whether it plays, as the test above asks whether it shows, how far it has, and how many frames it has drawn, where the browser says. */
+    const picture = (label: string) =>
+      opened
+        .getByLabel(label, { exact: true })
+        .evaluate((video: HTMLVideoElement) => ({ playing: !video.paused && video.videoWidth > 0, at: video.currentTime, drawn: video.getVideoPlaybackQuality?.().totalVideoFrames ?? -1, ready: video.readyState }))
+        .catch(() => ({ playing: false, at: 0, drawn: -1, ready: -1 }));
+    const pictures = () => Promise.all(["Ada's screen", "Grace's screen"].map(picture));
+    const seen = {
+      played: "",
+      ms: [] as number[],
+      // Over the second and a half after its screens played: how far each went on, the frames each drew, the frames the stand-in encoded, and how each ended.
+      moved: [] as number[][],
+      drew: [] as number[][],
+      encoded: [] as number[],
+      ended: [] as string[],
+      askedAgain: 0,
+      camera: "",
+      sizes: new Set<string>(),
+      sent: new Set<string>(),
+      limited: new Set<string>(),
+      before: [] as string[],
+      failed: "",
+    };
+    try {
+      await page.evaluate(whatScreensDo);
+      for (let round = 0; round < 5; round++) {
+        if (round > 0) await bar.getByTitle("Open huddle").first().tap();
+        const began = Date.now();
+        const played = await expect
+          .poll(async () => (await pictures()).every(({ playing, at }) => playing && at > 0), { timeout: 10_000 })
+          .toBe(true)
+          .then(
+            () => true,
+            () => false,
+          );
+        seen.ms.push(Date.now() - began);
+        const [then, doingThen] = [await pictures(), await page.evaluate(whatScreensDo)];
+        await page.waitForTimeout(1500);
+        const [now, doing] = [await pictures(), await page.evaluate(whatScreensDo)];
+        const going = now.every(({ playing, at }, index) => playing && at > then[index]!.at);
+        seen.played += !played ? "0" : going ? "1" : "s";
+        seen.moved.push(now.map(({ at }, index) => Math.round((at - then[index]!.at) * 1000)));
+        seen.drew.push(now.map(({ drawn }, index) => (drawn < 0 ? -1 : drawn - then[index]!.drawn)));
+        seen.encoded.push(doing.encoded - doingThen.encoded);
+        seen.ended.push(now.map(({ playing, ready }) => `${playing ? "p" : "-"}${ready}`).join(" "));
+        seen.askedAgain = doing.askedAgain;
+        seen.camera = doing.camera;
+        for (const size of [...doingThen.sizes, ...doing.sizes]) seen.sizes.add(size);
+        for (const size of doing.sent) seen.sent.add(size);
+        for (const reason of doing.limited) seen.limited.add(reason);
+        seen.before = doing.before;
+        await opened.getByRole("button", { name: "Minimize huddle" }).tap();
+        await expect(bar).toContainText("Ada and Grace are sharing screens");
       }
-      console.log(`[trial] ${JSON.stringify({ way, width, project: testInfo.project.name, repeat: testInfo.repeatEachIndex, ...seen, sizes: [...seen.sizes], sent: [...seen.sent], limited: [...seen.limited] })}`);
-    });
-  }
+    } catch (error) {
+      seen.failed = String(error).slice(0, 200);
+    }
+    console.log(`[trial] ${JSON.stringify({ way, width: trial.width, project: testInfo.project.name, repeat: testInfo.repeatEachIndex, ...seen, sizes: [...seen.sizes], sent: [...seen.sent], limited: [...seen.limited] })}`);
+  });
 }
 
 test("a huddle with more people in it than the phone shows beside a shared screen, or under it, scrolls its tiles by themselves", async ({ page, room, session, participant, screenIsFine }) => {
