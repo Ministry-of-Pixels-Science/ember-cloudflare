@@ -1,6 +1,7 @@
-import { createContext, useCallback, useContext, useState } from "react";
+import { createContext, useCallback, useContext, useState, useSyncExternalStore } from "react";
 import type { DirectoryUser, User, UserId } from "@ember/protocol";
 import { fetchDirectory, type DirectoryCopy } from "@/lib/api";
+import { NOT_HEARD, type ActiveStore } from "@/lib/presence";
 import { oneAtATime } from "./use-sidebar";
 
 /** Everyone in the workspace by id, as the people directory last listed them. */
@@ -14,6 +15,23 @@ export const PeopleContext = createContext<People>(new Map());
  * those the workspace socket said had changed.
  */
 export const DirectoryLoaded = createContext(false);
+
+/** Who's active in the workspace, as the workspace socket last said (`activeStore`). */
+export const ActivePeople = createContext<ActiveStore>(NOT_HEARD);
+
+/** Someone's presence, as Slack shows it: active while they have a tab open that they're using, and away otherwise. */
+export type Presence = "active" | "away";
+
+/**
+ * Someone's presence, as the workspace socket last said, or null for a bot, which has none, or until the
+ * socket has said who's active.
+ */
+export function usePresenceOf(): (user: User) => Presence | null {
+  const store = useContext(ActivePeople);
+  const active = useSyncExternalStore(store.watch, store.current);
+  const people = useContext(PeopleContext);
+  return useCallback((user: User) => (active === null || people.get(user.id)?.role === "bot" ? null : active.has(user.id) ? "active" : "away"), [active, people]);
+}
 
 /**
  * Someone's name as the people directory lists them now, which follows a rename since their name was

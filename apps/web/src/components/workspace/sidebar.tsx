@@ -3,12 +3,12 @@ import type { Favorites, LiveHuddle, Me, RoomId, SidebarRoom, UserId } from "@em
 import { ChatPlusIn, Headset, NavArrowRight, StarSolid } from "@/components/icons/iconoir";
 import { RoomIcon } from "@/components/icons/room-icon";
 import { useAccount } from "@/hooks/use-account";
-import { PeopleContext, useNameOf } from "@/hooks/use-directory";
+import { PeopleContext, useNameOf, usePresenceOf, type Presence } from "@/hooks/use-directory";
 import { NEW_DIRECT_PATH, roomPath } from "@/hooks/use-route";
 import { useStarOrder } from "@/hooks/use-star-order";
 import { membersShown } from "@/lib/directs";
 import { inItsHuddle } from "@/lib/huddle-people";
-import { apart, inDirectOrder, inSidebarOrder, markedUnread, type DirectSidebarRoom } from "@/lib/room-list";
+import { apart, inDirectOrder, inSidebarOrder, isQuietWelcome, markedUnread, type DirectSidebarRoom } from "@/lib/room-list";
 import { cn } from "@/lib/utils";
 import { AgentBadge, useIsWithAgent } from "./agent-badge";
 import { opensNewDirect } from "./new-direct-dialog";
@@ -65,11 +65,15 @@ interface Props {
  * chose: held, the row can be dragged among the other starred rows, or moved with Alt and an arrow
  * (`useStarOrder`). The DMs follow, only the ones they're in, as the project's owner chose, rather than
  * Campfire's people to start one with too, latest active first, and a DM's row shows who else is in it.
- * A room or DM marked unread is bold with a dot at the end of its row, and one with a huddle going on
- * ends its row with who's in it. With Activity on, only the unread rows show, and with none it says
- * everything's read; with it off and nothing to list, it says it found nothing. Under them all,
- * Available Agents says how many AI agents this person can ask, and opens the list of them, as the
- * project's owner chose (2026-11-15), unless there are none, or Activity is on.
+ * Someone who joins after them starts in a DM with them, as in Slack, which the project's owner chose
+ * (2026-11-16), but the DMs that welcomed them as they joined show only once someone writes in one, or
+ * while it's open or has a huddle going on. A DM with one other person shows whether they're active or
+ * away, by a dot on their avatar. A room marked unread is bold with a dot at the end of its row, a DM with how many messages
+ * have come since in place of the dot, and either with a huddle going on ends its row with who's in it.
+ * With Activity on, only the unread rows show, and with none it says everything's read; with it off and
+ * nothing to list, it says it found nothing. Under them all, Available Agents says how many AI agents
+ * this person can ask, and opens the list of them, as the project's owner chose (2026-11-15), unless
+ * there are none, or Activity is on.
  */
 export function Sidebar({
   workspaceName,
@@ -99,7 +103,10 @@ export function Sidebar({
   const { order, moving, status, listRef, scrollerRef, listProps } = useStarOrder({ favorites, shown, nameOf, onSaved: onStarred, onSessionChanged });
   const listed = useMemo(() => inSidebarOrder(shared, order, sharedOrder), [shared, order, sharedOrder]);
   const starred = useMemo(() => new Set(order), [order]);
-  const directsListed = useMemo(() => inDirectOrder(directs), [directs]);
+  const directsListed = useMemo(
+    () => inDirectOrder(directs.filter((room) => room.id === currentRoomId || room.id in huddles || !isQuietWelcome(room, meId))),
+    [directs, currentRoomId, huddles, meId],
+  );
   const empty = loaded && listed.length === 0 && directsListed.length === 0;
   const helpId = useId();
   const unreadId = useId();
@@ -283,41 +290,96 @@ interface DirectRowProps {
 }
 
 /**
- * A DM's row: the avatar of the one other person in it, or of up to four in a group, at 24px or 14px
- * each, then their names, or yours in a DM with yourself, and the agent badge in a DM with an AI agent
- * alone. It ends with who's in its huddle while one is going on, as a room's does.
+ * A DM's row: the avatar of the one other person in it, with whether they're active or away, or of up
+ * to four in a group, at 24px or 14px each, then their names, or yours in a DM with yourself, and the
+ * agent badge in a DM with an AI agent alone. It ends with who's in its huddle while one is going on, as
+ * a room's does, and one marked unread with how many messages it counts, or a dot for one the server
+ * didn't count. Its presence and count are said to screen readers too.
  */
 function DirectRow({ room, meId, current, unreadId, huddle, onClick }: DirectRowProps) {
   const nameOf = useNameOf();
   const isWithAgent = useIsWithAgent();
+  const presenceOf = usePresenceOf();
+  const wordsId = useId();
   const members = membersShown(room, meId);
-  // The words for who's in its huddle, which come with its mark.
-  const inHuddleId = useId();
+  // An AI agent has no presence, though @ember's isn't listed as a bot until the directory has loaded.
+  const presence = members.length === 1 && !isWithAgent(room) ? presenceOf(members[0]!) : null;
+  const count = unreadId ? room.unreadCount : undefined;
+  // The words for its presence, who's in its huddle, and its count, which come with its mark.
+  const [presenceId, inHuddleId, countId] = [`${wordsId}-presence`, `${wordsId}-huddle`, `${wordsId}-count`];
+  const described = [presence && presenceId, huddle && inHuddleId, count === undefined ? unreadId : countId].filter(Boolean).join(" ");
   return (
-    <a
-      href={roomPath(room.id)}
-      aria-current={current ? "page" : undefined}
-      aria-describedby={[huddle && inHuddleId, unreadId].filter(Boolean).join(" ") || undefined}
-      onClick={onClick}
-      className={cn(ROW, unreadId && "font-[650]")}
-    >
-      {members.length > 1 ? (
-        // Campfire's `.avatar__group` (avatars.css): two to a row, centered on the 24px a single avatar takes.
-        <span aria-hidden="true" className="grid size-6 shrink-0 grid-cols-2 grid-rows-[min-content] place-content-center gap-px">
-          {members.slice(0, MAX_FACES).map((member) => (
-            <UserAvatar key={member.id} user={member} className="size-3.5" />
-          ))}
+    <>
+      <a
+        href={roomPath(room.id)}
+        aria-current={current ? "page" : undefined}
+        aria-describedby={described || undefined}
+        onClick={onClick}
+        className={cn(ROW, "group", unreadId && "font-[650]")}
+      >
+        {members.length > 1 ? (
+          // Campfire's `.avatar__group` (avatars.css): two to a row, centered on the 24px a single avatar takes.
+          <span aria-hidden="true" className="grid size-6 shrink-0 grid-cols-2 grid-rows-[min-content] place-content-center gap-px">
+            {members.slice(0, MAX_FACES).map((member) => (
+              <UserAvatar key={member.id} user={member} className="size-3.5" />
+            ))}
+          </span>
+        ) : (
+          members.map((member) => (
+            <span key={member.id} className="relative shrink-0">
+              <UserAvatar user={member} className="size-6" />
+              {presence && <PresenceDot presence={presence} />}
+            </span>
+          ))
+        )}
+        {/* The space after the hidden words starts the visible line, where it doesn't show. */}
+        <span className="min-w-0 flex-1 truncate">
+          <span className="sr-only">Direct message with</span> {members.map((member) => `${nameOf(member)}${member.id === meId ? " (you)" : ""}`).join(", ")}
+          {isWithAgent(room) && <AgentBadge className="ms-0.5" />}
         </span>
-      ) : (
-        members.map((member) => <UserAvatar key={member.id} user={member} className="size-6" />)
+        {huddle && <HuddleMark huddle={huddle} meId={meId} wordsId={inHuddleId} />}
+        {count !== undefined ? <UnreadCount count={count} /> : unreadId && <span aria-hidden="true" className="size-[7px] shrink-0 rounded-full bg-foreground" />}
+      </a>
+      {/* Outside the row, so they're no part of its text. */}
+      {presence && (
+        <span id={presenceId} hidden>
+          {presence === "active" ? "Active" : "Away"}
+        </span>
       )}
-      {/* The space after the hidden words starts the visible line, where it doesn't show. */}
-      <span className="min-w-0 flex-1 truncate">
-        <span className="sr-only">Direct message with</span> {members.map((member) => `${nameOf(member)}${member.id === meId ? " (you)" : ""}`).join(", ")}
-        {isWithAgent(room) && <AgentBadge className="ms-0.5" />}
-      </span>
-      {huddle && <HuddleMark huddle={huddle} meId={meId} wordsId={inHuddleId} />}
-      {unreadId && <span aria-hidden="true" className="size-[7px] shrink-0 rounded-full bg-foreground" />}
-    </a>
+      {count !== undefined && (
+        <span id={countId} hidden>
+          {count === 1 ? "1 unread message" : `${count} unread messages`}
+        </span>
+      )}
+    </>
+  );
+}
+
+/**
+ * Someone's presence at the corner of their avatar, as Slack marks it: a green dot while they're active
+ * and a ring while they're away, each edged in the row's color, which parts it from the avatar.
+ */
+function PresenceDot({ presence }: { presence: Presence }) {
+  return (
+    <span
+      aria-hidden="true"
+      data-presence={presence}
+      className={cn(
+        "absolute -right-0.5 -bottom-0.5 size-2.5 rounded-full ring-2 ring-surface group-hover:ring-hover group-aria-[current=page]:ring-hover",
+        presence === "active" ? "bg-positive" : "border-[1.5px] border-muted-foreground bg-surface group-hover:bg-hover group-aria-[current=page]:bg-hover",
+      )}
+    />
+  );
+}
+
+/** How many messages have come in a DM since it was marked unread, on an ink pill, as the rail's Activity counts, past 99 as 99+. */
+function UnreadCount({ count }: { count: number }) {
+  return (
+    <span
+      aria-hidden="true"
+      className="inline-flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-full bg-foreground px-[5px] text-[11px] leading-none font-semibold tabular-nums text-background"
+    >
+      {count > 99 ? "99+" : count}
+    </span>
   );
 }

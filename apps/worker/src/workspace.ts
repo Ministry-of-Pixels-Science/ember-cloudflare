@@ -26,6 +26,7 @@ import {
   SIGN_UPS_PER_HOUR,
   signsUpOpenly,
   signsUpWithEmailDomain,
+  usernameFrom,
   withNavigationIcons,
   type Account,
   type AccountChanges,
@@ -143,6 +144,7 @@ import {
   type MemberfulMember,
   type MemberfulSetup,
 } from "./memberful-api";
+import { Presence } from "./presence";
 import { webPush } from "./push/keys";
 import { FixedWindowLimit } from "./rate-limit";
 import { urlOf } from "./request-url";
@@ -161,7 +163,6 @@ import { SessionCache } from "./session-cache";
 import { CLOSE_REASONS, closeTooLarge, isTooLarge, MAX_WORKSPACE_FRAME_SIZE, RESERVED_CLOSE_CODES } from "./sockets";
 import type { Transfer } from "./transfers";
 import type { TurnstileKeys } from "./turnstile";
-import { isViewing, type Viewing } from "./viewing";
 import {
   allowingHuddles,
   NEW_ACCOUNT_LOOKS,
@@ -203,6 +204,7 @@ import {
   type StoredBotSettings,
   type StoredPushSubscription,
   type StoredSession,
+  type Welcome,
 } from "./workspace-store";
 
 /** How often a session's last activity, browser and IP are written, at most. */
@@ -806,21 +808,6 @@ function isCode(code: string, joinCode: string): boolean {
   return given.length === expected.length && crypto.subtle.timingSafeEqual(given, expected);
 }
 
-/**
- * What a workspace socket's attachment says of its tab: whether it's shown, as its address said and its
- * `presence.visible` frames since, and when the Workspace last heard so, as a room's sockets say of theirs.
- */
-type Shown = Pick<Viewing, "visible" | "heardAt">;
-
-/**
- * What a socket with no attachment counts as saying, like one whose address didn't say: that its tab
- * isn't shown. The Workspace let it in before it kept this, and a socket stays connected when the
- * Workspace takes new code after hibernating.
- */
-const UNSAID: Shown = { visible: false, heardAt: 0 };
-
-const shownOf = (tab: WebSocket) => (tab.deserializeAttachment() as Shown | null) ?? UNSAID;
-
 /** Sends `frame` on a workspace socket, unless it has closed since. */
 function send(ws: WebSocket, frame: WorkspaceServerFrame): void {
   try {
@@ -1047,6 +1034,8 @@ export class Workspace extends DurableObject<Env> {
   private readonly strayTokens = new Map<string, Promise<boolean>>();
   /** The last change asked for, which the next one waits for (see `oneAtATime`). */
   private lastChange: Promise<unknown> = Promise.resolve();
+  /** Who's active, as the workspace sockets' tabs say, which the tabs that listen hear of. */
+  private readonly presence: Presence;
   /** Ember AI's models being asked through their providers' endpoints, while they are (see `moveToProviderEndpoints`). */
   private movingToProviderEndpoints: Promise<void> | null = null;
   /** Counts the times Ember AI is set up, changed or turned off, so a move onto the providers' endpoints that overlapped one isn't kept. */
@@ -1071,6 +1060,7 @@ export class Workspace extends DurableObject<Env> {
     // As in rooms, the runtime answers the app's heartbeats without waking the Workspace.
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('{"type":"ping"}', '{"type":"pong"}'));
     this.db = openDb(env, ctx.storage, "workspace");
+    this.presence = new Presence(ctx);
     this.store = new WorkspaceStore(this.db);
     this.outside = new OutsideStore(this.db);
     // The outbox can hold revocations with no alarm set for them: the Workspace can stop after saving a
@@ -1089,7 +1079,8 @@ export class Workspace extends DurableObject<Env> {
   /**
    * Lets in a tab's workspace socket, which the Worker sends on with the credentials of the request
    * for it, if they sign someone in. Like a room's, it's tagged with its person and its session, so
-   * signing out can find it, and keeps whether its tab is shown, as its address says.
+   * signing out can find it, and keeps whether its tab is shown, as its address says, and in use, as it
+   * counts until the tab says otherwise (`Presence`).
    */
   override async fetch(request: Request): Promise<Response> {
     if (request.headers.get("Upgrade") !== "websocket") return new Response("Expected a WebSocket upgrade", { status: 426 });
@@ -1101,7 +1092,7 @@ export class Workspace extends DurableObject<Env> {
     const { visible } = parseWorkspaceSocketParams(urlOf(request).searchParams);
     const { 0: client, 1: server } = new WebSocketPair();
     this.ctx.acceptWebSocket(server, [session.user.id, sessionTag(session.id)]);
-    server.serializeAttachment({ visible, heardAt: Date.now() } satisfies Shown);
+    this.presence.connected(server, session.user.id, visible);
     // On D1, signing out can end the session while the check above reads it, and close the session's
     // sockets before this one is among them. Now that it is, checking again settles it: the session
     // cache forgets a session as it starts ending, and doesn't keep a lookup an ending overlapped.
@@ -1110,23 +1101,32 @@ export class Workspace extends DurableObject<Env> {
     // have changed while the tab was without a socket.
     const [current, account] = await Promise.all([this.session(credentials), this.account()]);
     if (current) send(server, { type: "welcome", you: meOf(current), account: account ?? ACCOUNT_BEFORE_SETUP });
-    else server.close(CloseCode.Reconnect, CLOSE_REASONS[CloseCode.Reconnect]);
+    else this.closeSocket(server, CloseCode.Reconnect);
     return new Response(null, { status: 101, webSocket: client });
   }
 
   /**
-   * Keeps whether a tab says it's shown, and answers a ping that the runtime doesn't, because it carries
-   * more than its type. A workspace socket sends nothing else.
+   * Keeps whether a tab is in use and whether it's shown, as it says (`Presence`), and answers a ping that
+   * the runtime doesn't, because it carries more than its type. A workspace socket sends nothing else.
    */
   override async webSocketMessage(ws: WebSocket, raw: string | ArrayBuffer): Promise<void> {
-    if (isTooLarge(raw, MAX_WORKSPACE_FRAME_SIZE)) return closeTooLarge(ws);
+    if (isTooLarge(raw, MAX_WORKSPACE_FRAME_SIZE)) {
+      closeTooLarge(ws);
+      return this.presence.closed(ws);
+    }
     const frame = typeof raw === "string" ? parseWorkspaceClientFrame(raw) : null;
-    if (frame?.type === "presence.visible") return ws.serializeAttachment({ visible: frame.visible, heardAt: Date.now() } satisfies Shown);
+    if (frame?.type === "presence.active") return this.presence.said(ws, frame.active);
+    if (frame?.type === "presence.visible") return this.presence.shown(ws, frame.visible);
     send(ws, frame ? { type: "pong" } : { type: "error", message: "Unrecognized frame" });
   }
 
   override async webSocketClose(ws: WebSocket, code: number): Promise<void> {
     ws.close(RESERVED_CLOSE_CODES.has(code) ? 1000 : code, "Closing");
+    this.presence.closed(ws);
+  }
+
+  override async webSocketError(ws: WebSocket): Promise<void> {
+    this.presence.closed(ws);
   }
 
   /** Sends `frame` on every workspace socket, written out once for them all. */
@@ -1145,8 +1145,14 @@ export class Workspace extends DurableObject<Env> {
   private closeSockets(tag: string, code: CloseCode, kept?: string): void {
     for (const socket of this.ctx.getWebSockets(tag)) {
       if (kept !== undefined && this.ctx.getTags(socket).includes(kept)) continue;
-      if (socket.readyState === WebSocket.OPEN) socket.close(code, CLOSE_REASONS[code]);
+      if (socket.readyState === WebSocket.OPEN) this.closeSocket(socket, code);
     }
+  }
+
+  /** Closes a workspace socket with `code`, which leaves its person away unless they have another tab in use. */
+  private closeSocket(socket: WebSocket, code: CloseCode): void {
+    socket.close(code, CLOSE_REASONS[code]);
+    this.presence.closed(socket);
   }
 
   /** Resolves once the workspace's database answers a query. */
@@ -1897,17 +1903,9 @@ export class Workspace extends DurableObject<Env> {
   async inviteToHuddle(roomId: RoomId, by: UserId, userIds: UserId[]): Promise<InvitationPush[]> {
     const invited = await this.store.huddleInvitees(roomId, by, userIds);
     this.tell(invited, { type: "huddle.invited", roomId, by });
-    const away = invited.filter((userId) => !this.hasInView(userId));
+    const away = invited.filter((userId) => !this.presence.inView(userId));
     if (away.length === 0 || !(await webPush(this.env)).on) return [];
     return this.store.invitationPushes(roomId, by, away, guestSignIn(this.env));
-  }
-
-  /**
-   * Whether `userId` has Ember in view: a tab of theirs has said it's shown, and the Workspace has heard
-   * from it lately, as a room asks of whoever's viewing it (`isViewing`).
-   */
-  private hasInView(userId: UserId, now = Date.now()): boolean {
-    return this.ctx.getWebSockets(userId).some((tab) => tab.readyState === WebSocket.OPEN && isViewing(shownOf(tab), this.ctx.getWebSocketAutoResponseTimestamp(tab), now));
   }
 
   /**
@@ -2569,15 +2567,30 @@ export class Workspace extends DurableObject<Env> {
   private async addMember(person: Omit<NewPerson, "id">, tokenDigest: string, client: Client): Promise<Me | "agent's name" | null> {
     if (await this.takesAgentsName(null, person.name)) return "agent's name";
     const session: StoredSession = { id: sortableId(), user: { id: sortableId(), name: person.name }, administrator: false, guest: false, lastActiveAt: Date.now() };
+    let welcomed: DirectRoom[];
     try {
-      await this.store.createMember({ ...person, id: session.user.id }, session.id, tokenDigest, client, new Date(session.lastActiveAt).toISOString());
+      welcomed = await this.store.createMember({ ...person, id: session.user.id }, await this.welcomes(), session.id, tokenDigest, client, new Date(session.lastActiveAt).toISOString());
     } catch (error) {
       if (await this.store.hasEmailAddress(person.emailAddress)) return null;
       throw error;
     }
     this.sessions.remember(tokenDigest, session);
     await this.publishPerson(session.user.id);
+    this.tellWelcomed(session.user.id, welcomed);
     return meOf(session);
+  }
+
+  /**
+   * A DM for each of the people here, to welcome someone who joins to them, as Slack starts one with
+   * everyone for someone new: everyone active but bots and guests (`WELCOMERS`).
+   */
+  private async welcomes(): Promise<Welcome[]> {
+    return (await this.store.welcomers()).map((user) => ({ roomId: sortableId(), user }));
+  }
+
+  /** Tells everyone a DM `welcomed` welcomes `newcomerId` to of their DM with them, which their sidebars show at once. */
+  private tellWelcomed(newcomerId: UserId, welcomed: DirectRoom[]): void {
+    for (const room of welcomed) this.tell(room.members.flatMap(({ id }) => (id === newcomerId ? [] : [id])), { type: "room.saved", room });
   }
 
   /**
@@ -2693,7 +2706,8 @@ export class Workspace extends DurableObject<Env> {
    * Signs in `member`, who signed in to the Memberful site `issuer`, with the session their cookie's
    * token opens: as the person their Memberful account is linked to, whether Memberful is on or not, or
    * else, while it's on, as someone new, a member in every open room, linked to it, as joining adds
-   * someone, called by the first of their names that isn't an agent's, else "Member" (`namelessMember`).
+   * someone, called by the first of their names that isn't an agent's, else "Member" (`namelessMember`),
+   * with a username made from it (`firstFreeUsername`), which answers "joined".
    * Accounts are linked by the site and the member's id there, never matched by email address.
    * What Memberful said of their membership, as of `readAt`, is gone by as a check's is
    * (`settleMembership`), unless the Workspace has gone by a newer read: a member whose membership has
@@ -2704,7 +2718,7 @@ export class Workspace extends DurableObject<Env> {
    * creates nothing, and "failed" once keys for another site have taken the place of the ones they signed
    * in with (`memberfulSiteReplaced`). Everyone's workspace sockets hear of someone new.
    */
-  async signInWithMemberful(issuer: string, member: MemberfulMember, readAt: number, tokenDigest: string, client: Client): Promise<Me | MemberfulRefusal> {
+  async signInWithMemberful(issuer: string, member: MemberfulMember, readAt: number, tokenDigest: string, client: Client): Promise<Me | "joined" | MemberfulRefusal> {
     // One at a time, so that two sign-ins of someone new can't both add them, none can overlap turning
     // Memberful off, giving it another site's keys, or a check of the same membership, and a suspension
     // closes the sockets it ends before answering.
@@ -2728,9 +2742,11 @@ export class Workspace extends DurableObject<Env> {
       const free = (name: string) => !agents.some((agent) => sameName(agent.name, name));
       const name = member.names.find(free) ?? namelessMember(free);
       const session: StoredSession = { id: sortableId(), user: { id: sortableId(), name }, administrator: false, guest: false, lastActiveAt: Date.now() };
-      const person = { ...session.user, emailAddress: member.emailAddress };
+      const person = { ...session.user, username: await this.firstFreeUsername(name, free), emailAddress: member.emailAddress };
+      let welcomed: DirectRoom[];
       try {
-        await this.store.createLinkedMember(person, linkedAccountOf(issuer, member), readAt, session.id, tokenDigest, client, new Date(session.lastActiveAt).toISOString());
+        const now = new Date(session.lastActiveAt).toISOString();
+        welcomed = await this.store.createLinkedMember(person, linkedAccountOf(issuer, member), readAt, await this.welcomes(), session.id, tokenDigest, client, now);
       } catch (error) {
         if (member.emailAddress !== null && (await this.store.hasEmailAddress(member.emailAddress))) return "taken";
         throw error;
@@ -2739,8 +2755,24 @@ export class Workspace extends DurableObject<Env> {
       await this.keepCatchingUp(Date.now() + MEMBERSHIP_CATCH_UP_MS);
       this.sessions.remember(tokenDigest, session);
       await this.publishPerson(session.user.id);
-      return meOf(session);
+      this.tellWelcomed(session.user.id, welcomed);
+      return "joined";
     });
+  }
+
+  /**
+   * The username someone new called `name` starts with: `usernameFrom` it, or that with the first number
+   * from 2 that makes it nobody's, nor @ember's name or one that `free` says is an agent's, or null if
+   * no number to 9999 does.
+   */
+  private async firstFreeUsername(name: string, free: (name: string) => boolean): Promise<string | null> {
+    const start = usernameFrom(name);
+    const taken = new Set(await this.store.usernamesStartingWith(start));
+    for (let number = 1; number < 10_000; number++) {
+      const username = number === 1 ? start : `${start}${number}`;
+      if (!taken.has(username) && !isReservedName(username) && free(username)) return username;
+    }
+    return null;
   }
 
   /**
@@ -3541,10 +3573,10 @@ export class Workspace extends DurableObject<Env> {
    * their sessions end, and their sockets close for good: here at once, and in every room they're in
    * through the outbox. Everyone's workspace sockets hear of it.
    */
-  private async deactivate({ id, name, bio, role, agent, keptFor }: DirectoryEntry): Promise<DirectoryUser> {
+  private async deactivate({ id, name, username, bio, role, agent, keptFor }: DirectoryEntry): Promise<DirectoryUser> {
     const now = Date.now();
     const removedAt = new Date(now).toISOString();
-    const removed = await this.directoryUser({ id, name, bio, role, status: "deactivated", updatedAt: removedAt, agent, keptFor });
+    const removed = await this.directoryUser({ id, name, username, bio, role, status: "deactivated", updatedAt: removedAt, agent, keptFor });
     // As when resetting a password, until the database says it queued nothing.
     let queued = true;
     try {
@@ -3624,7 +3656,7 @@ export class Workspace extends DurableObject<Env> {
         }
         if (person.accounts.length > 0) await this.forgetUnlinked();
         for (const { userId, blocks } of deletion.blockers) this.tell([userId], { type: "blocks.changed", blocks });
-        const deleted = { id: person.id, name: DELETED_PERSON_NAME, bio: null, role: "member", status: "deactivated", updatedAt: deletedAt, agent: false, keptFor: null } as const;
+        const deleted = { id: person.id, name: DELETED_PERSON_NAME, username: null, bio: null, role: "member", status: "deactivated", updatedAt: deletedAt, agent: false, keptFor: null } as const;
         this.broadcast({ type: "user.updated", user: await this.directoryUser(deleted) });
         return "deleted";
       }),
@@ -4549,6 +4581,15 @@ export class Workspace extends DurableObject<Env> {
   }
 
   /**
+   * Whether `username` is anyone's but `userId`'s, whatever their status, or @ember's name or an agent's,
+   * as typing @ finds them by their names.
+   */
+  private async usernameTaken(username: string, userId: UserId): Promise<boolean> {
+    if (isReservedName(username) || (await this.takesAgentsName(null, username))) return true;
+    return this.store.hasUsername(username, userId);
+  }
+
+  /**
    * Whether someone or a bot called `name`, or someone new, for null, takes an agent's name by being
    * called `rename`, which nobody can, whether Ember AI is on or off, unless it was theirs already.
    */
@@ -4655,8 +4696,8 @@ export class Workspace extends DurableObject<Env> {
    * Someone as the people directory lists them, with their avatar's address, and nothing else known of
    * them, such as their email address, whatever `person` brings.
    */
-  private async directoryUser({ id, name, bio, role, status, updatedAt, agent, keptFor }: DirectoryEntry): Promise<DirectoryUser> {
-    return (await directoryOf([{ id, name, bio, role, status, updatedAt, agent, keptFor }], this.env.SESSION_SECRET))[0]!;
+  private async directoryUser({ id, name, username, bio, role, status, updatedAt, agent, keptFor }: DirectoryEntry): Promise<DirectoryUser> {
+    return (await directoryOf([{ id, name, username, bio, role, status, updatedAt, agent, keptFor }], this.env.SESSION_SECRET))[0]!;
   }
 
   /** The profile of the person `credentials` signs in, or null without a valid session. */
@@ -4669,13 +4710,13 @@ export class Workspace extends DurableObject<Env> {
 
   /** `person`'s profile, as their own profile page shows it to their `session`. */
   private async yourProfile(person: OwnProfileEntry, session: StoredSession): Promise<YourProfile> {
-    const { name, emailAddress, bio, avatar, password, membershipNeeded } = person;
+    const { name, username, emailAddress, bio, avatar, password, membershipNeeded } = person;
     const [{ avatarUrl }, account] = await Promise.all([this.directoryUser(person), this.joinableAccount()]);
     const memberful = session.guest ? null : { membersOnly: account?.memberfulSignIn ?? false, accounts: person.accounts };
     const [apps, outsideAi] = await Promise.all([this.yourApps(person.id, session.guest, account), this.yourOutsideAi(person.id, session.guest, account)]);
     return {
       transfer: { userId: person.id, sessionId: session.id, shownAt: Date.now() },
-      profile: { name, emailAddress, bio, avatarUrl, avatar: avatar !== null, password, membershipNeeded, assistant: yourAssistantOf(account, person.picks), apps, outsideAi },
+      profile: { name, username, emailAddress, bio, avatarUrl, avatar: avatar !== null, password, membershipNeeded, assistant: yourAssistantOf(account, person.picks), apps, outsideAi },
       memberful,
     };
   }
@@ -4719,18 +4760,19 @@ export class Workspace extends DurableObject<Env> {
    * in every room they're in through the outbox, and their push subscriptions are forgotten but this
    * browser's, at `pushEndpoint`, and a password that replaces one they had unlinks the accounts
    * elsewhere they connected with it. Any new password ends the sign-in links this session showed until
-   * now, too. Everyone's workspace sockets hear of a new name or bio, which the people directory lists.
-   * A new name can't be @ember's ("name reserved"), or an agent's ("agent's name"), unless it was theirs
-   * before.
+   * now, too. Everyone's workspace sockets hear of a new name, username or bio, which the people
+   * directory lists. A new name can't be @ember's ("name reserved"), or an agent's ("agent's name"),
+   * unless it was theirs before, and a blank username is saved as none, while one that's someone
+   * else's, whatever their status, or @ember's or an agent's name, is "username taken".
    */
   async changeProfile(
     credentials: Credentials,
-    changes: Pick<ProfileChanges, "name" | "emailAddress" | "bio">,
+    changes: Pick<ProfileChanges, "name" | "username" | "emailAddress" | "bio">,
     passwordDigest: string | null,
     checked: string | null,
     pushEndpoint: string | null,
     memberfulSite: string | null,
-  ): Promise<YourProfile | "email address taken" | "password needed" | "memberful" | "name reserved" | "agent's name" | null> {
+  ): Promise<YourProfile | "email address taken" | "password needed" | "memberful" | "name reserved" | "agent's name" | "username taken" | null> {
     return this.closingSockets(async () => {
       // Checked in line, unlike most changes: a password reset ahead of it ends their sessions, and a
       // save whose session was still valid before then mustn't put back a password of its own.
@@ -4741,13 +4783,15 @@ export class Workspace extends DurableObject<Env> {
       if (!person) return null;
       const profile = {
         name: changes.name ?? person.name,
+        username: changes.username === undefined ? person.username : changes.username || null,
         emailAddress: changes.emailAddress === undefined ? person.emailAddress : changes.emailAddress || null,
         bio: changes.bio === undefined ? person.bio : changes.bio || null,
       };
-      const listed = profile.name !== person.name || profile.bio !== person.bio;
+      const listed = profile.name !== person.name || profile.username !== person.username || profile.bio !== person.bio;
       if (!listed && profile.emailAddress === person.emailAddress && passwordDigest === null) return this.yourProfile(person, session);
       if (takesReservedName(person.name, profile.name)) return "name reserved";
       if (await this.takesAgentsName(person.name, profile.name)) return "agent's name";
+      if (profile.username !== person.username && profile.username !== null && (await this.usernameTaken(profile.username, user.id))) return "username taken";
       // Read again here, since a reset ahead of this in line, or another change, can have replaced the password checked.
       if (person.password && changesSignIn(person, changes.emailAddress, passwordDigest !== null) && (await this.store.signInOf(user.id))?.passwordDigest !== checked) {
         return "password needed";
@@ -4965,19 +5009,19 @@ export class Workspace extends DurableObject<Env> {
 
   /**
    * Applies the events room `roomId` sends from its log, in order, with `viewerIds`, who is viewing the
-   * room as it sends them: a new message marks the room unread for its members who aren't, and someone
-   * opening it clears their mark. Each event is applied once, however often it's sent. Whoever's mark
-   * changes hears of it on their workspace sockets, and nobody else does. A new message in a DM moves it
-   * to the top of everyone's DMs there, its author's too, and one call's messages move it once. It
-   * answers the bots' webhooks each new message is delivered to, the new messages @ember is to answer
-   * and, while Web Push is on, their pushes, for the room to send, none of them to a guest while
-   * `EMBER_GUEST_SIGN_IN` doesn't let guests stay signed in.
+   * room as it sends them: a new message marks the room unread for its members who aren't, in a DM
+   * counting it for them, and someone opening it clears their mark. Each event is applied once, however
+   * often it's sent. Whoever's mark or count changes hears of it on their workspace sockets, and nobody
+   * else does. A new message in a DM moves it to the top of everyone's DMs there, its author's too, and
+   * one call's messages move it once. It answers the bots' webhooks each new message is delivered to,
+   * the new messages @ember is to answer and, while Web Push is on, their pushes, for the room to send,
+   * none of them to a guest while `EMBER_GUEST_SIGN_IN` doesn't let guests stay signed in.
    */
   async applyRoomEvents(roomId: RoomId, events: RoomEvent[], viewerIds: UserId[]): Promise<RoomEventDeliveries> {
     if (events.length === 0) return { pushes: [], webhooks: [], asks: [] };
     const { on: pushing } = await webPush(this.env);
     const { marks, active, pushes, webhooks, asks } = await this.store.applyRoomEvents(roomId, events, viewerIds, pushing, guestSignIn(this.env));
-    for (const [userId, at] of marks) this.tell([userId], at === null ? { type: "room.read", roomId } : { type: "room.unread", roomId, at });
+    for (const [userId, mark] of marks) this.tell([userId], mark === null ? { type: "room.read", roomId } : { type: "room.unread", roomId, ...mark });
     if (active) this.tell(active.userIds, { type: "room.active", roomId, at: active.at });
     return { pushes, webhooks, asks };
   }

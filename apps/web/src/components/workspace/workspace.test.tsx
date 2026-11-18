@@ -343,6 +343,14 @@ describe("Room addresses", () => {
     expect(location.pathname).toBe("/rooms/random");
   });
 
+  it("passes over the DM that welcomed you, which waits for a message to be listed, going from /rooms", async () => {
+    const welcome: DirectRoom = { ...withGrace, joined: { userId: ada.id, at: withGrace.activeAt } };
+    serve({ "GET /api/sidebar": () => Response.json(roomList([...rooms, welcome])) });
+    showWorkspace("/rooms");
+    expect(await roomHeading()).toHaveTextContent("random");
+    expect(location.pathname).toBe("/rooms/random");
+  });
+
   it("goes from /rooms home when you have no rooms", async () => {
     serve({ "GET /api/sidebar": () => Response.json(roomList([])) });
     showWorkspace("/rooms");
@@ -2337,6 +2345,21 @@ describe("Agent pages", () => {
       expect(await communitySettings()).toBeInTheDocument();
       unmount();
     }
+  });
+});
+
+describe("Who's active", () => {
+  it("marks the people in your DMs active or away as the workspace socket says", async () => {
+    vi.stubGlobal("WebSocket", WorkspaceSocket);
+    serve({ "GET /api/sidebar": () => Response.json(roomList([...rooms, withGrace])) });
+    showWorkspace("/rooms/general");
+    await roomHeading();
+    const presence = () => screen.getByRole("link", { name: "Direct message with Grace" }).querySelector("[data-presence]")?.getAttribute("data-presence");
+    expect(presence()).toBeUndefined();
+    await workspaceSends({ type: "presence", active: [ada.id, "u2"], away: [] });
+    expect(presence()).toBe("active");
+    await workspaceSends({ type: "presence", active: [], away: ["u2"] });
+    expect(presence()).toBe("away");
   });
 });
 

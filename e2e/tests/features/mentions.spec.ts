@@ -107,6 +107,22 @@ test.describe("@-mention people", () => {
     await expect(mention(zed.composer(), `Bea ${tag}`)).toHaveCount(2);
   });
 
+  test("lists someone whose username starts with what follows @ too, showing it after their name", async ({ members, participant, request }) => {
+    const tag = newTag();
+    const grace = await participant(`Grace ${tag}`);
+    const username = `amazing.${tag}`;
+    const changed = await request.patch("/api/users/me/profile", { data: { username }, headers: { Cookie: cookieHeader(grace.session) } });
+    expect(changed.status(), await changed.text()).toBe(200);
+    const ada = await members.signIn(`Ada ${tag}`);
+
+    await ada.composer().pressSequentially("Hey ");
+    await typeMention(ada.composer(), username.slice(0, -2));
+    await expect(offered(ada)).toHaveText([`Grace ${tag} @${username}`]);
+    await ada.composer().press("Tab");
+    // The mention names them, as every mention does.
+    await expect(mention(ada.composer(), `Grace ${tag}`)).toBeVisible();
+  });
+
   test("says No matches when no one's name has what follows @, and Escape closes the list, keeping what's written", async ({ members }) => {
     const ada = await members.signIn(`Ada ${newTag()}`);
     const nobody = `zz${newTag()}`;

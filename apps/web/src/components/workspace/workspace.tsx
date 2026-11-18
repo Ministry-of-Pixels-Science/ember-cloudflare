@@ -9,7 +9,7 @@ import { Sheet, SheetClose, SheetContent, SheetDescription, SheetTitle } from "@
 import { useAccount, useCamerasAllowed, useScreensAllowed } from "@/hooks/use-account";
 import { useAppBadge } from "@/hooks/use-app-badge";
 import { BlockingContext, type Blocking } from "@/hooks/use-blocking";
-import { DirectoryLoaded, PeopleContext, useDirectory } from "@/hooks/use-directory";
+import { ActivePeople, DirectoryLoaded, PeopleContext, useDirectory } from "@/hooks/use-directory";
 import { useHuddle } from "@/hooks/use-huddle";
 import { useMounted } from "@/hooks/use-mounted";
 import { useReleaseCheck } from "@/hooks/use-release-check";
@@ -25,7 +25,7 @@ import { lastRoomVisited } from "@/lib/last-room";
 import { takeMemberfulFlash } from "@/lib/memberful";
 import { loadPage } from "@/lib/page";
 import { updateOf } from "@/lib/release-check";
-import { markedUnread } from "@/lib/room-list";
+import { isQuietWelcome, markedUnread } from "@/lib/room-list";
 import { cn } from "@/lib/utils";
 import { afterNavigating, messagePath, navigate, pageMark, roomPath, routeOf, useHash, useRoute, useVisit, type Route } from "@/hooks/use-route";
 import { HuddlesContext, joinsNoHuddle, NO_HUDDLES, type Huddles } from "./huddle-button";
@@ -200,19 +200,22 @@ function directIn(rooms: Room[], roomId: RoomId): DirectRoom | null {
 
 /**
  * Where an address goes on to once someone's rooms are known, or null when it shows a page of its own:
- * home to the last room visited, `/rooms` to the room they were put in latest, a room's address for its
- * kind to the room's own, and a DM's settings home, unless it's theirs. New direct message's goes home
- * too, under the dialog it opens, and a message's own address goes on to its permalink.
+ * home to the last room visited, `/rooms` to the room they were put in latest, but for the DMs started
+ * as they joined that their sidebar leaves out (`isQuietWelcome`), a room's address for its kind to the
+ * room's own, and a DM's settings home, unless it's theirs. New direct message's goes home too, under
+ * the dialog it opens, and a message's own address goes on to its permalink.
  */
-function redirectOf(route: Route, rooms: SidebarRoom[]): Redirect | null {
+function redirectOf(route: Route, rooms: SidebarRoom[], meId: UserId): Redirect | null {
   switch (route.page) {
     case "home": {
       const room = lastRoomVisited(rooms);
       return room && { path: roomPath(room.id) };
     }
-    case "newest-room":
+    case "newest-room": {
       // With no room to go to, home says there are none.
-      return { path: rooms.length > 0 ? roomPath(rooms.at(-1)!.id) : "/" };
+      const newest = rooms.findLast((room) => !isQuietWelcome(room, meId));
+      return { path: newest ? roomPath(newest.id) : "/" };
+    }
     case "room-of-kind": {
       // A direct message's goes on without looking, and the room's own address checks it.
       if (route.kind === "direct") return { path: roomPath(route.roomId) };
@@ -282,7 +285,7 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onDe
   const directory = useDirectory();
   // The invitations into huddles that ring in this tab, as the workspace socket brings them and says they're answered.
   const [invitations, changeInvitations] = useReducer(invitationsReducer, NO_INVITATIONS);
-  const { list, answered, change: changeRooms, refresh, askForRoom, askForHuddleSounds } = useSidebar(me, onSessionChanged, directory, accountHeard, shownRoomGone, changeInvitations);
+  const { list, answered, change: changeRooms, refresh, askForRoom, askForHuddleSounds, active } = useSidebar(me, onSessionChanged, directory, accountHeard, shownRoomGone, changeInvitations);
   const [drawerOpen, setDrawerOpen] = useState(false);
   // New direct message, while it's open, with the link that opened it, which gets focus back, or null
   // when its address did.
@@ -589,8 +592,8 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onDe
 
   // Where the address goes on to, once the list it goes by has come.
   const goingOn = useMemo(
-    () => (rooms && !askingAgain && !goneRoom && !unansweredHere ? redirectOf(route, rooms) : null),
-    [rooms, askingAgain, goneRoom, unansweredHere, route],
+    () => (rooms && !askingAgain && !goneRoom && !unansweredHere ? redirectOf(route, rooms, me.id) : null),
+    [rooms, askingAgain, goneRoom, unansweredHere, route, me.id],
   );
   // Before the page paints, so a page that only goes on to another doesn't show.
   useLayoutEffect(() => {
@@ -1059,13 +1062,15 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onDe
   return (
     <PeopleContext value={directory.people}>
       <DirectoryLoaded value={directory.loaded}>
-        <SettingsLayout value={settings}>
-          <OpenSearchContext value={openSearch}>
-            <HuddlesContext value={huddles}>
-              <BlockingContext value={blocking}>{layout}</BlockingContext>
-            </HuddlesContext>
-          </OpenSearchContext>
-        </SettingsLayout>
+        <ActivePeople value={active}>
+          <SettingsLayout value={settings}>
+            <OpenSearchContext value={openSearch}>
+              <HuddlesContext value={huddles}>
+                <BlockingContext value={blocking}>{layout}</BlockingContext>
+              </HuddlesContext>
+            </OpenSearchContext>
+          </SettingsLayout>
+        </ActivePeople>
       </DirectoryLoaded>
     </PeopleContext>
   );

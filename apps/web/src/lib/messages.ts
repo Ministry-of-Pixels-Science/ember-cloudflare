@@ -49,6 +49,9 @@ export function lastReplyLabel(date: Date, now = new Date()): { long: string; sh
   return { long: on, short: on };
 }
 
+/** Whether two ISO times fall on the same day in the reader's time zone, as a timeline's separators tell days apart. */
+export const sameDay = (a: string, b: string) => dayFormat.format(new Date(a)) === dayFormat.format(new Date(b));
+
 /** The day each message was written, as `dayFormat` writes it, kept with the message, since a timeline asks again on every render. */
 const days = new WeakMap<Message, string>();
 function dayOf(message: Message): string {

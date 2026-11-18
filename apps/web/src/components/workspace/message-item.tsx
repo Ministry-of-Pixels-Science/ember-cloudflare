@@ -3,6 +3,7 @@ import type { CardAction, Me, Message, User } from "@ember/protocol";
 import { displayBody, isAllEmoji, type DisplayNode } from "@ember/richtext/dom";
 import { NavArrowRight } from "@/components/icons/iconoir";
 import { PageLink } from "@/components/page-link";
+import { useAccount } from "@/hooks/use-account";
 import { BlockingContext } from "@/hooks/use-blocking";
 import { PeopleContext } from "@/hooks/use-directory";
 import { messagePath, permalinkOf, threadPath } from "@/hooks/use-route";
@@ -239,6 +240,30 @@ function Author({ user }: { user: User }) {
       </strong>
       {isAgent(listed) && <AgentBadge />}
     </>
+  );
+}
+
+/**
+ * The line a DM started as someone joined the workspace opens with, as Slack's does: their avatar, name
+ * and when they joined, as a message's header shows them, then that they joined, in muted type. It's no
+ * message, so it has no permalink, actions or reactions.
+ */
+export function JoinedItem({ user, at }: { user: User; at: string }) {
+  const { name } = useAccount();
+  const joined = new Date(at);
+  return (
+    <article className="relative grid grid-cols-[36px_minmax(0,1fr)] gap-x-2 px-5 pt-1 max-md:grid-cols-[30px_minmax(0,1fr)] max-md:gap-x-2.5 max-md:px-3">
+      <AvatarLink user={user} square className="mt-2 size-9 max-md:size-[30px]" />
+      <div className="col-start-2 min-w-0 py-1">
+        <h3 className="flex min-h-[22px] items-baseline gap-2 text-[15px] leading-[22px] max-md:flex-wrap max-md:gap-x-2 max-md:gap-y-0.5">
+          <Author user={user} />
+          <time dateTime={at} title={dateTimeLabel(joined)} className="text-xs leading-[18px] whitespace-nowrap text-message-muted">
+            {timeLabel(joined)}
+          </time>
+        </h3>
+        <p className="text-[15px] leading-[22px] text-message-muted">joined {name}</p>
+      </div>
+    </article>
   );
 }
 
