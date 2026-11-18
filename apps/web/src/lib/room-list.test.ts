@@ -364,6 +364,15 @@ describe("Huddles in your rooms", () => {
     expect(another.list!.rooms).toBe(loaded.list!.rooms);
   });
 
+  it("takes whether a room allows huddles from the room as it's saved, which says so only while it doesn't", () => {
+    const off = roomListReducer(loaded, { type: "saved", room: { id: "r1", kind: "open", name: "Design", icon: null, huddles: false } });
+    expect(off.list!.rooms).toEqual([{ ...room("r1", "Design"), huddles: false }, room("r2", "general")]);
+    // Its huddle is the room's to end, so the list keeps it until it hears that it's over.
+    expect(off.list!.huddles).toEqual({ r1: huddle("ada") });
+    const on = roomListReducer(off, { type: "saved", room: { id: "r1", kind: "open", name: "Design", icon: null } });
+    expect(on.list!.rooms).toEqual([room("r1", "Design"), room("r2", "general")]);
+  });
+
   it("forgets the huddle of a room that's gone", () => {
     expect(roomListReducer(loaded, { type: "gone", roomId: "r1" }).list!.huddles).toEqual({});
     expect(roomListReducer(loaded, { type: "gone", roomId: "r2" }).list!.huddles).toEqual({ r1: huddle("ada") });
