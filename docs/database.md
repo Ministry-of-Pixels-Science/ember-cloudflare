@@ -355,7 +355,10 @@ Objects, D1 or speed call for something else.
   someone, closes every open report of it, or of them, in one `UPDATE ... RETURNING` by
   `index_reports_on_message_id` or `index_reports_on_subject_id`. Every active administrator's count
   of open reports is one statement, which binds nothing however many there are. Reports stay when
-  whoever made them, or whoever they're of, deletes their account, as the administrators' record.
+  whoever made them, or whoever they're of, deletes their account, as the administrators' record, but
+  deleting an account takes what the reports of them kept of them out of `subject` in the same batch,
+  by `index_reports_on_subject_id` (`CLEAR_REPORTS_OF`), as workspace migration 0078 does for accounts
+  deleted before then, and keeping one is refused in its `INSERT` once whoever it's of has deleted theirs.
 - **A room's place in the shared order is a column of the room**, `rooms.shared_position` (workspace
   migration 0020), so the sidebar's statement reads each room's place with the room, and listing the
   order costs nothing more, nor reads the places of rooms someone isn't in. Saving it reads the
