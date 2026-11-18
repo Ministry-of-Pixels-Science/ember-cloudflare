@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
+  ALL_HUDDLE_SOUNDS,
   APP_ID_REFUSED,
   APP_SECRET_REFUSED,
   appIdOf,
   appSecretOf,
   CAMERA_SIZES,
   carriesBothSizes,
+  hearsAllHuddleSounds,
+  HUDDLE_SOUNDS,
+  HUDDLE_SOUNDS_REFUSED,
   HUDDLE_STICKERS,
   HuddleCloseCode,
   huddleSocketQuery,
@@ -18,6 +22,7 @@ import {
   parseHuddleClientFrame,
   parseHuddleRelaySetup,
   parseHuddleSocketParams,
+  parseHuddleSoundChanges,
   parseHuddlesSetup,
   RELAY_API_TOKEN_REFUSED,
   RELAY_KEY_ID_REFUSED,
@@ -126,6 +131,32 @@ describe("Set up the relay", () => {
     }
     // Nor anything but an object.
     for (const given of [null, undefined, "keys", [KEY_ID, API_TOKEN]]) expect(parseHuddleRelaySetup(given)).toEqual({ error: RELAY_KEY_ID_REFUSED, field: "keyId" });
+  });
+});
+
+describe("A huddle's sounds, which each person turns on or off", () => {
+  it("are its music, its chimes and an invitation's ring, all of which everyone hears until they turn one off", () => {
+    expect(HUDDLE_SOUNDS).toEqual(["music", "chimes", "ring"]);
+    expect(ALL_HUDDLE_SOUNDS).toEqual({ music: true, chimes: true, ring: true });
+    expect(hearsAllHuddleSounds(ALL_HUDDLE_SOUNDS)).toBe(true);
+    for (const sound of HUDDLE_SOUNDS) expect(hearsAllHuddleSounds({ ...ALL_HUDDLE_SOUNDS, [sound]: false }), sound).toBe(false);
+  });
+
+  it("reads a change to them: each sound it turns on or off, and no others", () => {
+    expect(parseHuddleSoundChanges({ music: false })).toEqual({ music: false });
+    expect(parseHuddleSoundChanges({ ring: true, chimes: false })).toEqual({ chimes: false, ring: true });
+    expect(parseHuddleSoundChanges({ music: true, chimes: true, ring: true })).toEqual(ALL_HUDDLE_SOUNDS);
+    // Nothing to change changes nothing, and what isn't one of the sounds is passed over.
+    expect(parseHuddleSoundChanges({})).toEqual({});
+    expect(parseHuddleSoundChanges({ volume: 11, ring: false, music: undefined })).toEqual({ ring: false });
+  });
+
+  it("refuses a sound turned neither on nor off, and anything but an object", () => {
+    for (const on of ["off", "true", 0, 1, null, [], {}]) {
+      for (const sound of HUDDLE_SOUNDS) expect(parseHuddleSoundChanges({ [sound]: on }), `${sound}: ${JSON.stringify(on)}`).toBe(HUDDLE_SOUNDS_REFUSED);
+    }
+    expect(parseHuddleSoundChanges({ music: false, ring: "no" })).toBe(HUDDLE_SOUNDS_REFUSED);
+    for (const data of [null, undefined, "music", 7, true, [], [{ music: false }]]) expect(parseHuddleSoundChanges(data), JSON.stringify(data)).toBe("Expected a JSON object");
   });
 });
 

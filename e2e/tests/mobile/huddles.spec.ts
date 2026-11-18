@@ -1,24 +1,28 @@
 import type { DirectRoom, LiveHuddle, Message, RoomSettings, ServerFrame, Sidebar, SidebarRoom, User } from "@ember/protocol";
-import type { HuddleClientFrame, HuddleServerFrame, MessageHuddle } from "@ember/protocol/huddles";
+import type { HuddleClientFrame, HuddleServerFrame, MessageHuddle, PastHuddle, PastHuddles } from "@ember/protocol/huddles";
 import type { APIRequestContext, Locator, Page, WebSocketRoute } from "@playwright/test";
 import { changeTheWorkspace, cookieHeader, editorField, huddleTilesKeepClear, isolateRoom, listing, openRoom, ROOM_SOCKET, signInAs, type Session, type Tells, type TestRoom } from "../../fixtures";
 import { auditScreen } from "./audits";
-import { expect, hasDrawerLayout, openKeyboard, test } from "./fixtures";
+import { expect, hasDrawerLayout, openKeyboard, SWITCHES, test } from "./fixtures";
 
 // A huddle on a phone: its button in the header of a room or a DM, its message in the room, the preview
 // it starts from, the invitation into one, and the huddle the tab is in, opened and as its bar, which
 // switches between the phone's cameras, keeps its screen awake, invites people from the menu of its
-// More button, and has reactions and stickers. The main test server has no huddles, whose keys
-// Cloudflare would be asked about, so these pages are told that huddles are on, and the huddle a tab
-// joins is the test's own, as is the message of one.
+// More button, and has reactions and stickers; the Huddles switch of a room's settings; Huddle sounds on
+// someone's profile; and the Huddles page, with its row in the sidebar. The main test server has no
+// huddles, whose keys Cloudflare would be asked about, so these pages are told that huddles are on, and
+// the huddle a tab joins is the test's own, as are the message of one and the huddles that are over.
 
 /** A huddle's socket, for `page.routeWebSocket`. */
 const HUDDLE_SOCKET = /\/api\/rooms\/[^/]+\/huddle/;
 
-// A microphone and a camera for the preview to open, which a page may use without asking anyone.
-test.use({
-  launchOptions: { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined, args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"] },
-});
+// A microphone and a camera for the preview to open, which a page may use without asking anyone:
+// Chromium's made-up ones, or WebKit's, which a page gets once it's granted them.
+test.use(
+  process.env.E2E_BROWSER === "webkit"
+    ? { permissions: ["camera", "microphone"] }
+    : { launchOptions: { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined, args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"] } },
+);
 
 test.beforeEach(async ({ page, session }) => {
   // A phone's browser has no screen to share, which the desktop Chromium that stands in for it has.
@@ -43,19 +47,27 @@ async function openRoomWithHuddlesOn(page: Page, room: TestRoom, huddle?: LiveHu
  * that huddles are on, and that `huddle`, given one, is going on in the DM.
  */
 async function openDirectWithHuddlesOn(page: Page, request: APIRequestContext, room: TestRoom, session: Session, other: User, huddle?: LiveHuddle): Promise<void> {
+  const direct = await directWith(request, session, other);
+  await listRoomAndDirect(page, room, direct, huddle ? { [direct.id]: huddle } : {});
+  await page.goto(`/rooms/${direct.id}`);
+  await expect(page.getByRole("log", { name: `Messages with ${other.name}` })).not.toHaveAttribute("aria-busy");
+}
+
+/** The DM `session`'s person has with `other`, which this starts. */
+async function directWith(request: APIRequestContext, session: Session, other: User): Promise<DirectRoom> {
   const started = await request.post("/api/directs", { data: { userIds: [other.id] }, headers: { Cookie: cookieHeader(session) } });
   expect(started.status(), await started.text()).toBe(201);
-  const { room: direct } = (await started.json()) as { room: DirectRoom };
+  return ((await started.json()) as { room: DirectRoom }).room;
+}
+
+/** Has `page` list `room` and, after it, the DM `direct`, told that huddles are on and that `huddles` are going on, by room. */
+async function listRoomAndDirect(page: Page, room: TestRoom, direct: DirectRoom, huddles: Sidebar["huddles"]): Promise<void> {
   const rooms: SidebarRoom[] = [
     { ...room, kind: "open", icon: null, unread: false, involvement: "mentions" },
     { ...direct, unread: false, involvement: "everything" },
   ];
-  await page.route("**/api/sidebar", (route) =>
-    route.fulfill({ json: { rooms, favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: huddle ? { [direct.id]: huddle } : {} } satisfies Sidebar }),
-  );
+  await page.route("**/api/sidebar", (route) => route.fulfill({ json: { rooms, favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles, blocks: { userIds: [], version: 0 } } satisfies Sidebar }));
   await changeTheWorkspace(page, (account) => ({ ...account, huddles: true }), listing([room.id]));
-  await page.goto(`/rooms/${direct.id}`);
-  await expect(page.getByRole("log", { name: `Messages with ${other.name}` })).not.toHaveAttribute("aria-busy");
 }
 
 /** The room's header. */
@@ -127,19 +139,21 @@ type PhoneWindow = Window & { camerasAsked?: MediaTrackConstraints[]; screensKep
  * In the page, before it loads: has the browser be a phone's, with a camera over its screen and one on
  * its back, each of which says which way it faces, and of which it opens one at a time, as a phone
  * does. Each shows the picture of the browser's made-up camera. What the page asks of them is kept for
- * the test.
+ * the test. Like the other stand-ins here, it's on the browser's prototype: WebKit can let go of what's
+ * set on `navigator.mediaDevices` itself, once nothing else holds it, and hand the page a fresh one.
  */
 function phoneCameras(): void {
   const cameras = [
     { deviceId: "front", label: "Front Camera", facingMode: "user" },
     { deviceId: "back", label: "Back Camera", facingMode: "environment" },
   ];
-  const media = navigator.mediaDevices;
-  const [open, list] = [media.getUserMedia.bind(media), media.enumerateDevices.bind(media)];
+  const { getUserMedia, enumerateDevices } = MediaDevices.prototype;
+  const media = () => navigator.mediaDevices;
+  const [open, list] = [(constraints?: MediaStreamConstraints) => getUserMedia.call(media(), constraints), () => enumerateDevices.call(media())];
   const opened: MediaStreamTrack[] = [];
   const asked: MediaTrackConstraints[] = ((window as PhoneWindow).camerasAsked = []);
   const exactly = (constraint: ConstrainDOMString | undefined) => (constraint as { exact?: string } | undefined)?.exact;
-  media.getUserMedia = async (constraints) => {
+  MediaDevices.prototype.getUserMedia = async (constraints) => {
     if (!constraints?.video) return open(constraints);
     const video = constraints.video === true ? {} : constraints.video;
     asked.push(video);
@@ -154,7 +168,7 @@ function phoneCameras(): void {
     opened.push(track);
     return stream;
   };
-  media.enumerateDevices = async () => [
+  MediaDevices.prototype.enumerateDevices = async () => [
     ...(await list()).filter(({ kind }) => kind !== "videoinput"),
     ...cameras.map(({ deviceId, label }) => ({ kind: "videoinput", deviceId, label, groupId: "" }) as MediaDeviceInfo),
   ];
@@ -163,9 +177,9 @@ function phoneCameras(): void {
 /** In the page, before it loads: keeps what the browser hands the page each time the page has it keep the screen awake, for the test. */
 function keepWhatKeepsAwake(): void {
   const kept: WakeLockSentinel[] = ((window as PhoneWindow).screensKept = []);
-  const request = navigator.wakeLock.request.bind(navigator.wakeLock);
-  navigator.wakeLock.request = async (type) => {
-    const lock = await request(type);
+  const { request } = WakeLock.prototype;
+  WakeLock.prototype.request = async function (type) {
+    const lock = await request.call(this, type);
     kept.push(lock);
     return lock;
   };
@@ -176,28 +190,62 @@ function keepWhatKeepsAwake(): void {
  * its person. The headless Chromium these tests run in on CI refuses a page it hasn't been told to let.
  * Telling it so refuses the page whatever isn't named, so the microphone and the camera are named
  * too, and it holds for as long as the session that said it, which is left to end with the page.
+ * WebKit is told the same through Playwright's permissions.
  */
 async function letScreenBeKeptAwake(page: Page): Promise<void> {
+  if (page.context().browser()?.browserType().name() === "webkit") return page.context().grantPermissions(["screen-wake-lock"]);
   const cdp = await page.context().newCDPSession(page);
   const { targetInfo } = await cdp.send("Target.getTargetInfo");
   await cdp.send("Browser.grantPermissions", { permissions: ["wakeLockScreen", "audioCapture", "videoCapture"], browserContextId: targetInfo.browserContextId });
 }
 
-/** Where a page keeps the connection that stands in for the SFU's, which sends it the screens it watches. */
-type SentScreens = Window & { screensSent?: RTCPeerConnection };
+/** Where a page keeps the connection that stands in for the SFU's, which sends it the screens it watches, and the made-up camera they're pictures of. */
+type SentScreens = Window & { screensSent?: RTCPeerConnection; screensPictured?: MediaStream };
+
+/** In the page: ends what the connection that stands in for the SFU's sends it, and answers whether it had one. */
+function endScreens(): boolean {
+  const standIn = window as SentScreens;
+  if (!standIn.screensSent) return false;
+  standIn.screensSent.getSenders().forEach((sender) => sender.track?.stop());
+  standIn.screensSent.close();
+  standIn.screensPictured?.getTracks().forEach((track) => track.stop());
+  return true;
+}
+
+// A page that closes while its stand-in still sends it screens crashes CI's WebKit on Linux more often
+// than not, in its video encoder. So the screens end, and the page leaves the app, before a test's page
+// closes, whether the test passed or not.
+test.afterEach(async ({ page }) => {
+  const sent = await page.evaluate(endScreens).catch(() => false);
+  if (sent) await page.goto("about:blank").catch(() => {});
+});
 
 /**
  * In the page: a connection of its own that sends it `count` screens, as the SFU's would, each the
- * picture of its made-up camera, as wide as a screen is. Answers its offer of them, which names an
- * address of its own, as the SFU's does, and the media section each is on.
+ * picture of its made-up camera. Answers its offer of them, which names an address of its own, as the
+ * SFU's does, and the media section each is on. Asked again, as when the huddle is opened again, it
+ * stops sending on the connection it made before, as the SFU does on one the page has closed.
+ *
+ * It sends them the way that CI's WebKit on Linux, busy with both ends of them, went on playing. The
+ * camera is asked for a size it has: asked for 640 by 360, WebKit's gave the sender half the frames,
+ * and fewer each time the huddle was opened. Each is sent as a screen's picture is, at one size however
+ * busy the sender: sent as a camera's, which a busy sender makes smaller and larger again, 1280 by 720
+ * crashed the page that showed it. And at half the camera's size, which asks the least of that page.
  */
 async function offerScreens(count: number): Promise<{ sdp: string; mids: string[] }> {
-  const picture = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } });
+  const standIn = window as SentScreens;
+  standIn.screensSent?.getSenders().forEach((sender) => sender.track?.stop());
+  standIn.screensSent?.close();
+  const camera = (standIn.screensPictured ??= await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } }));
   const connection = new RTCPeerConnection();
-  const sent = Array.from({ length: count }, () => connection.addTransceiver(picture.getVideoTracks()[0]!.clone(), { direction: "sendonly" }));
+  const sent = Array.from({ length: count }, () => {
+    const screen = camera.getVideoTracks()[0]!.clone();
+    screen.contentHint = "detail";
+    return connection.addTransceiver(screen, { direction: "sendonly", sendEncodings: [{ scaleResolutionDownBy: 2 }] });
+  });
   await connection.setLocalDescription(await connection.createOffer());
   if (!connection.localDescription!.sdp.includes("a=candidate:")) await new Promise((resolve) => connection.addEventListener("icecandidate", resolve, { once: true }));
-  (window as SentScreens).screensSent = connection;
+  standIn.screensSent = connection;
   return { sdp: connection.localDescription!.sdp, mids: sent.map(({ mid }) => mid!) };
 }
 
@@ -329,13 +377,13 @@ test("an invitation into a huddle fits the phone, under the header of the page i
   await expect(invitation).toHaveCount(0);
 });
 
-test("more invitations than the phone is tall enough for are a scroll away, under the header, whose buttons stay in reach", async ({ page, room, participant, safeArea }) => {
+test("more invitations than the phone is tall enough for are a scroll away, under the header, whose buttons stay in reach", async ({ page, room, participant, safeArea, browserName }) => {
   const grace = (await participant("Grace Hopper")).session.user;
   // Into rooms of this page's own, more of them than any phone shows at once, the last into the room it has open.
   const names = Array.from({ length: 8 }, (_, index) => `Launch ${index + 1}`);
   const others = names.map((name, index): SidebarRoom => ({ id: `invited-${index + 1}`, name, kind: "open", icon: null, unread: false, involvement: "mentions" }));
   const rooms: SidebarRoom[] = [{ ...room, kind: "open", icon: null, unread: false, involvement: "mentions" }, ...others];
-  await page.route("**/api/sidebar", (route) => route.fulfill({ json: { rooms, favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: {} } satisfies Sidebar }));
+  await page.route("**/api/sidebar", (route) => route.fulfill({ json: { rooms, favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: {}, blocks: { userIds: [], version: 0 } } satisfies Sidebar }));
   const tell = await changeTheWorkspace(page, (account) => ({ ...account, huddles: true }), listing([room.id]));
   await openRoom(page, room);
   for (const { id } of [...others, room]) tell({ type: "huddle.invited", roomId: id, by: grace.id });
@@ -352,9 +400,11 @@ test("more invitations than the phone is tall enough for are a scroll away, unde
   const startHuddle = header(page).getByRole("button", { name: "Start huddle", exact: true });
   await startHuddle.tap({ trial: true });
 
-  // A wheel over one scrolls them, as a finger on one does, and under the header, not over it.
+  // A wheel over one scrolls them, as a finger on one does, and under the header, not over it. Playwright
+  // turns no wheel on WebKit's phones, so there the page scrolls them itself.
   await first.hover();
-  await page.mouse.wheel(0, 4000);
+  if (browserName === "webkit") await page.getByRole("region", { name: "Huddle invitations" }).evaluate((region) => region.scrollBy(0, 4000));
+  else await page.mouse.wheel(0, 4000);
   await expect(last).toBeInViewport({ ratio: 1 });
   await expect(first).not.toBeInViewport();
   await startHuddle.tap({ trial: true });
@@ -370,7 +420,11 @@ test("the preview a huddle starts from, with its microphone and speaker to choos
   await header(page).getByRole("button", { name: "Start huddle", exact: true }).tap();
   const preview = page.getByRole("dialog", { name: `Start a huddle in ${room.name}` });
   await expect(preview.getByRole("combobox", { name: "Microphone" })).toBeVisible();
-  await expect(preview.getByRole("combobox", { name: "Speaker" })).toBeVisible();
+  // Speaker, where the browser has speakers a page may play through, as Chromium's made-up ones are, and WebKit on Linux has none.
+  const speakers = await page.evaluate(
+    async () => "setSinkId" in HTMLMediaElement.prototype && (await navigator.mediaDevices.enumerateDevices()).some(({ kind, deviceId }) => kind === "audiooutput" && deviceId !== ""),
+  );
+  await expect(preview.getByRole("combobox", { name: "Speaker" })).toBeVisible({ visible: speakers });
   await expect(preview.getByRole("combobox", { name: "Camera" })).toHaveCount(0);
   await screenIsFine();
 
@@ -383,7 +437,7 @@ test("the preview a huddle starts from, with its microphone and speaker to choos
 test("the preview of a huddle going on, for someone with no microphone to use, fits the phone", async ({ page, room, participant, screenIsFine }) => {
   // As a browser answers once its person has said no.
   await page.addInitScript(() => {
-    navigator.mediaDevices.getUserMedia = () => Promise.reject(new DOMException("Permission denied", "NotAllowedError"));
+    MediaDevices.prototype.getUserMedia = () => Promise.reject(new DOMException("Permission denied", "NotAllowedError"));
   });
   const userIds = await Promise.all(["Ada", "Grace", "Linus"].map(async (name) => (await participant(name)).session.user.id));
   await openRoomWithHuddlesOn(page, room, { startedAt: new Date().toISOString(), userIds });
@@ -644,7 +698,9 @@ test("a huddle's reactions and stickers, from React among its buttons, or in Mor
   // An emoji tapped is sent as a reaction and closes the panel, which is over the people on a phone. Once
   // the room has told of it, the reaction rises over the person's name from the base of the people in
   // the huddle, in sight, and no tile has it. The focus is back on the button the panel opened from.
-  await grinning.tap();
+  // Playwright's WebKit sends no click after a tap whose pointerdown the page cancelled, as the picker's
+  // emoji do to keep the focus where it is, though Safari on an iPhone does, so WebKit clicks it.
+  await (page.context().browser()?.browserType().name() === "webkit" ? grinning.click() : grinning.tap());
   await expect(panel).toHaveCount(0);
   const people = opened.getByRole("list", { name: "In the huddle" }).locator("xpath=../..");
   const rising = people.locator('span[aria-hidden="true"]').filter({ has: page.getByText("😀", { exact: true }) });
@@ -837,11 +893,126 @@ test("a huddle with more people in it than the phone shows beside a shared scree
   await screenIsFine();
   // It scrolls to the last of them, the phone's own person, under the screen or beside it, which stays where it was.
   // All of the tile shows but a part of a pixel, where the list's height isn't a whole number of them.
-  const before = await stage.boundingBox();
+  const before = (await stage.boundingBox())!;
   await tiles.last().scrollIntoViewIfNeeded();
   await expect(tiles.last()).toBeInViewport({ ratio: 0.99 });
   await expect(tiles.last()).toContainText("(you)");
-  expect(await stage.boundingBox()).toEqual(before);
+  // To within a part of a pixel: the screen may be sent smaller meanwhile, in a shape that rounds a little off its own, which the stage takes.
+  const after = (await stage.boundingBox())!;
+  for (const side of ["x", "y", "width", "height"] as const) expect(after[side], side).toBeCloseTo(before[side], 0);
   await expect(stage).toBeInViewport({ ratio: 1 });
   expect(await page.evaluate(() => scrollY)).toBe(0);
+});
+
+test("a room's settings fit the phone with their Huddles switch, on and off, when it warns of the huddle going on, and so do those that tell someone who can't change the room that it has none", async ({ page, room, session, screenIsFine }) => {
+  await openRoomWithHuddlesOn(page, room, { startedAt: new Date().toISOString(), userIds: ["someone"] });
+  await page.goto(`/rooms/opens/${room.id}/edit`);
+  const allow = page.getByRole("switch", { name: "Allow huddles in this room" });
+  await expect(allow).toBeChecked();
+  await allow.scrollIntoViewIfNeeded();
+  await screenIsFine({ denseTargets: [SWITCHES] });
+  // Off, what's under the switch runs to two lines or three.
+  await allow.tap();
+  await expect(allow).toHaveAccessibleDescription("Members can't start or join huddles in this room. Saving ends the huddle that's going on.");
+  await screenIsFine({ denseTargets: [SWITCHES] });
+  // And on again, which leaves nothing to ask about before the page goes.
+  await allow.tap();
+  await expect(allow).toBeChecked();
+
+  const people = [{ id: session.user.id, name: session.user.name, member: true }];
+  await page.route(`**/api/rooms/${room.id}/settings`, (route) => route.fulfill({ json: { room: { ...room, kind: "open", icon: null, huddles: false }, canAdminister: false, people } satisfies RoomSettings }));
+  await page.reload();
+  const none = page.getByText("Members can't start or join huddles in this room.", { exact: true });
+  await expect(none).toBeVisible();
+  await expect(page.getByRole("switch")).toHaveCount(0);
+  await none.scrollIntoViewIfNeeded();
+  await screenIsFine();
+});
+
+test("Huddle sounds, on your profile, fit the phone with a switch for each of a huddle's sounds, which a tap turns off and saves", async ({ page, room, screenIsFine }) => {
+  await openRoomWithHuddlesOn(page, room);
+  await page.goto("/users/me/profile");
+  const sounds = page.getByRole("region", { name: "Huddle sounds", exact: true });
+  const switches = sounds.getByRole("switch");
+  await expect(switches).toHaveCount(3);
+  await sounds.scrollIntoViewIfNeeded();
+  for (const each of await switches.all()) await expect(each).toBeInViewport({ ratio: 1 });
+  await screenIsFine({ denseTargets: [SWITCHES] });
+
+  // Off, a switch stays where it was tapped to once Ember has saved it, and the others where they were.
+  const music = sounds.getByRole("switch", { name: "Play music when you're the only one in a huddle", exact: true });
+  const saved = page.waitForResponse((response) => response.request().method() === "PATCH" && new URL(response.url()).pathname === "/api/users/me/huddle-sounds");
+  await music.tap();
+  expect((await saved).status()).toBe(200);
+  await expect(music).not.toBeChecked();
+  expect(await switches.evaluateAll((all) => all.map((each) => each.getAttribute("aria-checked")))).toEqual(["false", "true", "true"]);
+  await screenIsFine({ denseTargets: [SWITCHES] });
+});
+
+/** The Huddles page's lists: the cards of the huddles going on, and the rows of the recent ones that are over. */
+const happeningNow = (page: Page) => page.getByRole("region", { name: "Happening now", exact: true }).getByRole("listitem");
+const recentHuddles = (page: Page) => page.getByRole("region", { name: "Recent huddles", exact: true }).getByRole("listitem");
+
+test("the sidebar's Huddles row, which counts the huddles going on, fits the phone, and so does the Huddles page it opens, with those to join over the recent ones, each of which goes to its thread", async ({ page, request, room, session, participant, screenIsFine }) => {
+  // A room's huddles with more people in them than they show the faces of, the first by a name that's one
+  // long word, and a DM's with someone whose name is long. The room's first that's over is as wordy as one gets.
+  const people = await Promise.all(["Wolfeschlegelsteinhausenbergerdorff", "Grace", "Linus", "Margaret", "Katherine"].map((name) => participant(name)));
+  const userIds = people.map((person) => person.session.user.id);
+  const admiral = (await participant("Grace Brewster Murray Hopper, Rear Admiral")).session.user;
+  const direct = await directWith(request, session, admiral);
+  // Its thread is a message's of the room's, which stands in for the huddle's.
+  const parent = await people[0]!.say("Notes from the huddle go here");
+  const ago = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+  const lastYear = new Date().getFullYear() - 1;
+  const over: PastHuddle[] = [
+    { roomId: room.id, messageId: parent.id, startedAt: ago(195), endedAt: ago(130), userIds: [session.user.id, ...userIds], replies: 12 },
+    { roomId: direct.id, messageId: "y".repeat(16), startedAt: ago(26 * 60), endedAt: ago(26 * 60 - 1), userIds: [admiral.id, session.user.id], replies: 0 },
+    { roomId: room.id, messageId: "x".repeat(16), startedAt: new Date(lastYear, 9, 12, 15, 4).toISOString(), endedAt: new Date(lastYear, 9, 12, 15, 28).toISOString(), userIds: [userIds[0]!, "someone-gone"], replies: 1 },
+  ];
+  await page.route("**/api/huddles", (route) => route.fulfill({ json: { huddles: over } satisfies PastHuddles }));
+  await listRoomAndDirect(page, room, direct, { [room.id]: { startedAt: ago(24), userIds }, [direct.id]: { startedAt: ago(3), userIds: [admiral.id] } });
+  await openRoom(page, room);
+
+  // The row is over the rooms, in the drawer where there's one, and ends with how many huddles are going on.
+  if (hasDrawerLayout(page)) await page.getByRole("button", { name: "Open conversations" }).tap();
+  const row = page.getByRole("link", { name: "Huddles, 2 happening now", exact: true });
+  await expect(row.getByText("2", { exact: true })).toBeVisible();
+  await screenIsFine();
+  await row.tap();
+  await expect(page).toHaveURL(/\/huddles$/);
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Huddles");
+  await expect(page.getByRole("dialog", { name: "Conversations" })).toHaveCount(0);
+
+  // Happening now has the DM's huddle, the latest to start, over the room's, each with who's in it, their
+  // faces and Join, and Recent huddles the three that are over. Each name keeps its first few letters.
+  await expect(happeningNow(page)).toHaveCount(2);
+  const [withAdmiral, inTheRoom] = [happeningNow(page).first(), happeningNow(page).last()];
+  await expect(withAdmiral).toContainText("Grace is in the huddle");
+  await expect(inTheRoom).toContainText("Wolfeschlegelsteinhausenbergerdorff, Grace, Linus, and 2 others are in the huddle");
+  await expect(inTheRoom.locator("img")).toHaveCount(4);
+  for (const [card, name] of [[withAdmiral, admiral.name], [inTheRoom, room.name]] as const) expect((await card.getByRole("link", { name, exact: true }).boundingBox())!.width).toBeGreaterThan(40);
+  await expect(recentHuddles(page)).toHaveCount(3);
+  await expect(recentHuddles(page).first()).toContainText(/ at \d{1,2}:\d{2}\s[AP]M · 1 hour and 5 minutes · 12 replies/);
+  await expect(recentHuddles(page).last()).toContainText(`Oct 12, ${lastYear} · 24 minutes · 1 reply`);
+  await screenIsFine();
+
+  // Join opens the preview its huddle is joined from.
+  await inTheRoom.getByRole("button", { name: `Join the huddle in ${room.name}`, exact: true }).tap();
+  const preview = page.getByRole("dialog", { name: `Join the huddle in ${room.name}` });
+  await expect(preview.getByRole("button", { name: "Join Huddle" })).toBeVisible();
+  await preview.getByRole("button", { name: "Cancel", exact: true }).last().tap();
+  await expect(preview).toHaveCount(0);
+
+  // A huddle that's over goes to its thread, wherever on its row it's tapped.
+  await recentHuddles(page).first().getByText("12 replies").tap();
+  await expect(page).toHaveURL(new RegExp(`/rooms/${room.id}/threads/${parent.id}$`));
+  await expect(page.getByRole("complementary", { name: "Thread" }).getByRole("article").first()).toContainText("Notes from the huddle go here");
+});
+
+test("the Huddles page fits the phone with nothing going on and no huddle over yet, which it says", async ({ page, room, screenIsFine }) => {
+  await changeTheWorkspace(page, (account) => ({ ...account, huddles: true }), listing([room.id]));
+  await page.goto("/huddles");
+  await expect(page.getByRole("region", { name: "Recent huddles", exact: true })).toContainText("No huddles yet. A huddle shows here once it’s over, if someone else joined it or its thread has a reply.");
+  await expect(page.getByRole("region", { name: "Happening now", exact: true })).toHaveCount(0);
+  await screenIsFine();
 });

@@ -28,7 +28,9 @@ const recordOutlines = async (page: Page) => {
     const animate = Element.prototype.animate;
     Element.prototype.animate = function (this: Element, ...args: Parameters<Element["animate"]>) {
       const animation = animate.apply(this, args);
-      outlines.push({ messageId: this.closest<HTMLElement>("[data-message-id]")?.dataset.messageId, outline: getComputedStyle(this).outline });
+      // Put together from its parts, as each browser writes the shorthand in an order of its own.
+      const { outlineColor, outlineStyle, outlineWidth } = getComputedStyle(this);
+      outlines.push({ messageId: this.closest<HTMLElement>("[data-message-id]")?.dataset.messageId, outline: `${outlineColor} ${outlineStyle} ${outlineWidth}` });
       return animation;
     };
   });

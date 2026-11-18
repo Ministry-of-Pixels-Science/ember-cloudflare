@@ -20,7 +20,7 @@ import { evictDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../src/env";
 import { APP, OTHER_APP, OTHER_RELAY, RELAY, relayServersMade } from "./huddle-support";
-import { api, apiWith, cookieOf, freshDeploy, openWorkspaceSocket, shown, signIn, withWorkspaceEnv, workspaceSql, workspaceStub, type Session } from "./support";
+import { api, apiWith, cookieOf, createRoom, freshDeploy, openWorkspaceSocket, shown, signIn, withWorkspaceEnv, workspaceSql, workspaceStub, type Session } from "./support";
 
 const ada = { name: "Ada Lovelace", emailAddress: "ada@example.com", password: "analytical engine" };
 
@@ -730,5 +730,27 @@ describe("Screen sharing in huddles (setting)", () => {
     // Started afresh, the Workspace has to read the account again.
     await evictDurableObject(workspaceStub());
     expect((await shownAccount()).huddleScreens).toBe(true);
+  });
+});
+
+describe("Allow huddles in a room (setting)", () => {
+  it("tells a room whether its own settings allow huddles in it, with the app huddles run through either way", async () => {
+    const administrator = await setUp();
+    fakeSfu();
+    await saveKeys(administrator);
+    const [room, other] = [await createRoom("Announcements", { as: administrator }), await createRoom("Design", { as: administrator })];
+    const app = { ...APP, cameras: true, screens: true, relay: null };
+    expect(await workspaceStub().huddlesIn(room.id)).toEqual({ app, allowed: true });
+
+    expect((await api(`/api/rooms/${room.id}`, { method: "PATCH", headers: as(administrator), body: JSON.stringify({ huddles: false }) })).status).toBe(200);
+    expect(await workspaceStub().huddlesIn(room.id)).toEqual({ app, allowed: false });
+    // Another room's still do, and so do those of a room the Workspace doesn't know.
+    expect(await workspaceStub().huddlesIn(other.id)).toEqual({ app, allowed: true });
+    expect(await workspaceStub().huddlesIn("no such room")).toEqual({ app, allowed: true });
+
+    // There's no app to tell it of while huddles are off.
+    await turnOff(administrator);
+    expect(await workspaceStub().huddlesIn(room.id)).toEqual({ app: null, allowed: false });
+    expect(await workspaceStub().huddlesIn(other.id)).toEqual({ app: null, allowed: true });
   });
 });

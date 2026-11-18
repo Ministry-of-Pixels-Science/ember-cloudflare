@@ -137,6 +137,37 @@ describe("Threads", () => {
     expect(send).toHaveBeenLastCalledWith(expect.objectContaining({ type: "message.create", body: "<p>Found them</p>", parentId: "m1", alsoSend: true }));
   });
 
+  it("gives a reply the room won't take for what it says back to the composer, ticked to go to the room too as it was, saying why", async () => {
+    const { send, receive, user } = showThread();
+    receive({ type: "thread.opened", parent, parentId: "m1", messages: [], hasMore: false });
+    const box = await screen.findByRole("textbox", { name: "Write a reply" });
+    await user.click(screen.getByRole("checkbox", { name: "Also send to #general" }));
+    await user.type(box, "Oh fudge{Enter}");
+    const { clientMessageId } = send.mock.lastCall![0] as Extract<ClientFrame, { type: "message.create" }>;
+    const why = "This community doesn't allow one of these words.";
+
+    receive({ type: "error", message: why, clientMessageId, failed: "message.create", rewrite: true });
+    expect(box).toHaveValue("Oh fudge");
+    expect(screen.getByRole("checkbox", { name: "Also send to #general" })).toBeChecked();
+    expect(screen.getAllByRole("alert").map((alert) => alert.textContent)).toEqual([why]);
+    expect(screen.getAllByRole("article")).toHaveLength(1);
+    expect(screen.queryByText("Not sent")).toBeNull();
+  });
+
+  it("leaves a reply the room won't take for what it says as not sent, with why, once another is being written", async () => {
+    const { send, receive, user } = showThread();
+    receive({ type: "thread.opened", parent, parentId: "m1", messages: [], hasMore: false });
+    const box = await screen.findByRole("textbox", { name: "Write a reply" });
+    await user.type(box, "Oh fudge{Enter}");
+    const { clientMessageId } = send.mock.lastCall![0] as Extract<ClientFrame, { type: "message.create" }>;
+    await user.type(box, "Sorry");
+
+    receive({ type: "error", message: "This community doesn't allow one of these words.", clientMessageId, failed: "message.create", rewrite: true });
+    expect(box).toHaveValue("Sorry");
+    expect(screen.getByText("Not sent")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("This community doesn't allow one of these words.");
+  });
+
   it("says the room was deleted in place of the composer", () => {
     const { receive } = showThread({ deleted: true });
     receive({ type: "thread.opened", parentId: "m1", parent, messages: [], hasMore: false });

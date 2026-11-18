@@ -1,7 +1,8 @@
 import { useEffect, useEffectEvent, useImperativeHandle, useRef, type Ref } from "react";
-import type { Favorites, Invitation, Involvement, Me } from "@ember/protocol";
+import type { Favorites, Invitation, Involvement, Me, User } from "@ember/protocol";
 import { MainContent } from "@/components/main-content";
 import { useNameOf } from "@/hooks/use-directory";
+import { useGivingBack } from "@/hooks/use-giving-back";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { useMessageEditors } from "@/hooks/use-message-editors";
 import { useRoom } from "@/hooks/use-room";
@@ -21,6 +22,14 @@ import { ThreadPanel } from "./thread-panel";
 
 /** Where a thread covers its room, rather than showing beside it: below 1180px wide. */
 const THREAD_COVERS_ROOM = "(width < 73.75rem)";
+
+/** Who joined the workspace, and when, in a DM started as they did, which its timeline opens with, or null. */
+function joinedIn(room: Room): { user: User; at: string } | null {
+  if (room.kind !== "direct" || !room.joined) return null;
+  const { userId, at } = room.joined;
+  const user = room.members.find((member) => member.id === userId);
+  return user ? { user, at } : null;
+}
 
 interface Props {
   room: Room;
@@ -61,7 +70,7 @@ export interface RoomViewHandle {
 }
 
 export function RoomView({ room, messageId, threadId, replyId, invitation, onDismissInvitation, me, favorite, gone, onStarred, involvement, newSince = null, askForRoom, onSessionChanged, onFailed, onGone, ref }: Props) {
-  const { state, frames, postMessage, postFiles, typing, loadOlder, loadNewer, jump, messageActions, dismissNotice } = useRoom(room.id, me, onSessionChanged, messageId);
+  const { state, frames, postMessage, postFiles, typing, loadOlder, loadNewer, jump, messageActions, dismissNotice, givenBack } = useRoom(room.id, me, onSessionChanged, messageId);
   const nameOf = useNameOf();
   const name = roomName(room, me.id, nameOf);
   const direct = room.kind === "direct";
@@ -95,6 +104,7 @@ export function RoomView({ room, messageId, threadId, replyId, invitation, onDis
   const composer = useRef<ComposerHandle>(null);
   const { editing, editors } = useMessageEditors(composer);
   useImperativeHandle(ref, () => ({ focusComposer: editors.returnFocus }), [editors]);
+  useGivingBack(state.messages, composer, givenBack);
   // A thread that covers the room leaves nothing of it to reach until it's closed.
   const covered = useMediaQuery(THREAD_COVERS_ROOM) && threadId !== undefined;
 
@@ -143,6 +153,7 @@ export function RoomView({ room, messageId, threadId, replyId, invitation, onDis
             onDropFiles={(files) => composer.current?.addFiles(files)}
             openThread={threadId}
             newSince={newSince}
+            joined={joinedIn(room)}
           />
           {deleted ? (
             <RoomDeleted />

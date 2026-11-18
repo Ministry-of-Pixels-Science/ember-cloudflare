@@ -140,7 +140,8 @@ describe("Reset a password from the server", () => {
     const sessions = (await workspaceSql("SELECT id FROM sessions WHERE user_id = ?", laptop.user.id)) as Array<{ id: string }>;
     const rooms = (await workspaceSql("SELECT room_id FROM memberships WHERE user_id = ?", laptop.user.id)) as Array<{ room_id: string }>;
     expect(sessions).toHaveLength(2);
-    expect(rooms).toHaveLength(3);
+    // general, random, the lobby, and the DM that welcomed her as she joined.
+    expect(rooms).toHaveLength(4);
 
     const queued = await runInDurableObject(workspaceStub(), (workspace: Workspace) =>
       (workspace as unknown as { store: WorkspaceStore }).store.resetPassword(laptop.user.id, "digest", CloseCode.Reconnect, later, new Date().toISOString()),

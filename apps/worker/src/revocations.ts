@@ -28,6 +28,12 @@ export const addressTag = (ipAddress: string) => `${ADDRESS_TAG_PREFIX}${ipAddre
 export const MAX_ADDRESS_LENGTH = "ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255".length;
 
 /**
+ * The IP address a request comes from, `ip`, as the tag on its sockets names it: none for one longer
+ * than any IP address, which isn't one a ban can hold, and would make too long a tag.
+ */
+export const taggedAddress = (ip: string | null): string | null => (ip !== null && ip.length <= MAX_ADDRESS_LENGTH ? ip : null);
+
+/**
  * The tag a revocation names to close every socket in a room, which deleting the room does. No socket
  * carries it, and no person's id or session's tag can be it.
  */

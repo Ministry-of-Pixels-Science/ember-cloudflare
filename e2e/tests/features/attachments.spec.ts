@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { uploadPartPath, uploadsPath, type Message, type Upload } from "@ember/protocol";
 import type { APIRequestContext, FileChooser, Locator, Page } from "@playwright/test";
-import { cookieHeader, drawnPicture } from "../../fixtures";
+import { allowClipboard, cookieHeader, downloadName, drawnPicture, variantType } from "../../fixtures";
 import { expect, test, type Member } from "./fixtures";
 
 /**
@@ -159,7 +159,7 @@ test.describe("Image, video and file previews", () => {
       await expect(member.page.getByRole("link", { name: "Download mural.png" })).toHaveCount(0);
     }
     const preview = await ada.page.request.get((await ada.page.getByRole("img", { name: "mural.png" }).getAttribute("src"))!);
-    expect(preview.headers()["content-type"]).toBe("image/webp");
+    expect(preview.headers()["content-type"]).toBe(await variantType(ada.page));
   });
 
   test("plays a video in place, in a box half its size, behind the poster its uploader's browser makes, loading nothing until it's played", async ({ members, request }) => {
@@ -179,7 +179,7 @@ test.describe("Image, video and file previews", () => {
       expect(await video.evaluate((element: HTMLVideoElement) => element.readyState)).toBe(0);
     }
     const poster = await request.get((await ada.page.locator("video").getAttribute("poster"))!);
-    expect(poster.headers()["content-type"]).toBe("image/webp");
+    expect(poster.headers()["content-type"]).toBe(await variantType(ada.page, { seeThrough: false }));
   });
 
   test("shows a picture without a thumbnail, as a bot's, as itself, and a file the browser couldn't make one of as its card", async ({ members, request, rooms }) => {
@@ -250,7 +250,7 @@ test.describe("Text files' text", () => {
       expect(shown!.y + shown!.height).toBeLessThanOrEqual(card!.y);
     }
 
-    await grace.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await allowClipboard(grace.page.context());
     const block = grace.message("deploy.sh").locator(".code-block");
     await block.hover();
     await block.getByRole("button", { name: "Copy code" }).click();
@@ -371,7 +371,7 @@ test.describe("Download and share files", () => {
     const { attachment } = await upload(request, ada, rooms.general.id, "Q3 report.txt", "Up and to the right");
 
     const [download] = await Promise.all([grace.page.waitForEvent("download"), downloadLink(grace, "Q3 report.txt").click()]);
-    expect(download.suggestedFilename()).toBe("Q3 report.txt");
+    expect(downloadName(download)).toBe("Q3 report.txt");
     expect(await readFile(await download.path(), "utf8")).toBe("Up and to the right");
 
     const bar = await grace.actions("Q3 report.txt");
@@ -379,10 +379,11 @@ test.describe("Download and share files", () => {
     await expect(bar.getByRole("button", { name: "Quote" })).toHaveCount(0);
     // Quoting a file would quote nothing, so More actions has no Quote either.
     await grace.message("Q3 report.txt").getByRole("button", { name: "Message options" }).click();
-    await expect(grace.message("Q3 report.txt").getByRole("group", { name: "More actions" }).getByRole("button")).toHaveText(["Copy link"]);
-    // Chromium on Linux can't share.
-    await expect(bar.getByRole("button", { name: "Share" })).toHaveCount(0);
-    await expect(grace.message("Q3 report.txt").getByRole("button", { name: "Share Q3 report.txt" })).toHaveCount(0);
+    await expect(grace.message("Q3 report.txt").getByRole("group", { name: "More actions" }).getByRole("button")).toHaveText(["Copy link", `Block ${ada.name}`, "Report message"]);
+    // Share shows only where the browser can share, which Chromium on Linux can't, and WebKit on a Mac can.
+    const shares = (await grace.page.evaluate(() => "canShare" in navigator)) ? 1 : 0;
+    await expect(bar.getByRole("button", { name: "Share" })).toHaveCount(shares);
+    await expect(grace.message("Q3 report.txt").getByRole("button", { name: "Share Q3 report.txt" })).toHaveCount(shares);
   });
 
   test("shares a file from its card and its image viewer untitled, and from its message's actions titled with its name", async ({ members, request, rooms }) => {
@@ -424,7 +425,7 @@ test.describe("Image viewer", () => {
     await expect(viewer.getByRole("button", { name: "Close image viewer" })).toBeFocused();
 
     const [download] = await Promise.all([grace.page.waitForEvent("download"), viewer.getByRole("link", { name: "Download file" }).click()]);
-    expect(download.suggestedFilename()).toBe("mural.png");
+    expect(downloadName(download)).toBe("mural.png");
     expect((await readFile(await download.path())).length).toBe((await drawnPicture(ada.page, "mural.png", 2400, 1600)).buffer.length);
     await expect(viewer).toBeVisible();
 

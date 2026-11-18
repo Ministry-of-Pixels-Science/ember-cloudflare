@@ -379,6 +379,12 @@ export interface ComposerHandle {
   replace(markup: string): void;
   /** Adds files to send with the next message, as dropping them on the room's messages does. */
   addFiles(files: Iterable<File>): void;
+  /**
+   * Writes `markup` back, a message the room wouldn't take for what it says, with `why` above the card,
+   * and Also send to the room ticked again if `alsoSend`, unless something's been written since. Answers
+   * whether it did.
+   */
+  giveBack(markup: string, why: string, alsoSend: boolean): boolean;
 }
 
 /**
@@ -387,7 +393,8 @@ export interface ComposerHandle {
  * Mention someone, and a round Send button, grey until there's something to send. @ offers the room's
  * people to mention. Files picked, pasted or dropped, and snippets, wait above the card to go with the
  * next message. What's written is kept as a draft until it's sent. A thread's has Also send to the room
- * before Send.
+ * before Send. A message the room won't take for what it says, as one with a word Blocked words keeps
+ * out, comes back to be changed, saying why above the card.
  */
 export function Composer({ roomId, roomName, direct = false, userId, typing, disabled, deferEditor = false, threadId, onSend, onSendFiles, onTyping, onEditLastMessage, autoFocus = true, mentionsAbove = false, ref }: Props) {
   const editor = useRef<RichTextEditorHandle>(null);
@@ -420,6 +427,8 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
   const wasBlank = useRef(!draft);
   // Whether Quote wrote what the editor opens with, before it showed, so it takes focus as Quote has it do.
   const replied = useRef(false);
+  // Why the room wouldn't take what's written here, which went back to be changed, until something's sent.
+  const [refusal, setRefusal] = useState<{ key: string; why: string } | null>(null);
   const placeholder = threadId !== undefined ? "Reply…" : `Message ${direct ? "" : "#"}${roomName}`;
 
   const keep = (body: string | null) => {
@@ -460,6 +469,14 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
       wrote(markup);
     },
     addFiles: picked.add,
+    giveBack: (markup, why, alsoSend) => {
+      const written = editor.current;
+      if (!written?.isBlank()) return false;
+      written.replace(markup);
+      setRefusal({ key, why });
+      if (alsoSend) setAlsoSend(true);
+      return true;
+    },
   }));
 
   // Up Arrow, with nothing written, edits your newest message. It's taken only from the composer or the
@@ -487,6 +504,7 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
   // unticks it.
   const submit = () => {
     if (disabled) return;
+    setRefusal(null);
     if (picked.files.length > 0) {
       onSendFiles(picked.files.map(({ file }) => file), alsoSend);
       picked.clear();
@@ -564,6 +582,11 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
             </p>
           )}
         </div>
+        {refusal?.key === key && (
+          <p role="alert" className="px-3 pb-2 text-[13px] leading-normal text-negative wrap-anywhere">
+            {refusal.why}
+          </p>
+        )}
         <div className="@container flex min-h-[108px] min-w-0 flex-col rounded-[12px] border bg-surface p-3 max-md:min-h-[100px] max-md:p-2.5">
           {formattingShown && (
             <FormattingToolbar

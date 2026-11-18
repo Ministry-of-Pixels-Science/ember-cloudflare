@@ -15,9 +15,15 @@ export const canAsk = (person: Pick<DirectoryUser, "adminsOnly">, me: Me) => me.
 
 /**
  * `person` as the people directory lists them now, `listed`: its entry over what was read of them before,
- * with whether only administrators can ask them, which the entry leaves out once anyone can again.
+ * with their username and whether only administrators can ask them, which the entry leaves out once
+ * they've taken their username away, and once anyone can ask them again.
  */
-export const asListed = <P extends DirectoryUser>(person: P, listed: DirectoryUser): P => ({ ...person, ...listed, adminsOnly: listed.adminsOnly });
+export const asListed = <P extends DirectoryUser>(person: P, listed: DirectoryUser): P => ({
+  ...person,
+  ...listed,
+  username: listed.username,
+  adminsOnly: listed.adminsOnly,
+});
 
 /**
  * How many AI agents `me` can ask, of the `people` the directory lists, which the sidebar's Available

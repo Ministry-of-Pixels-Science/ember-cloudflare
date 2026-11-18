@@ -66,7 +66,9 @@ export type WorkspacePage =
   /** Someone's page, at `/users/<id>`, whatever their status. */
   | { page: "person"; userId: UserId }
   /** Search, at `/searches`, whose query string holds what's searched for. */
-  | { page: "search" };
+  | { page: "search" }
+  /** Huddles, at `/huddles`: the huddles going on in someone's rooms, and the recent ones. */
+  | { page: "huddles" };
 
 /** Rails' names for each kind of room's controller. */
 export const KIND_SEGMENTS = { open: "opens", closed: "closeds", direct: "directs" } as const satisfies Record<RoomKind, string>;
@@ -84,6 +86,7 @@ export const NEW_DIRECT_PATH = "/rooms/directs/new";
 export const PROFILE_PATH = "/users/me/profile";
 export const PUSH_SUBSCRIPTIONS_PATH = "/users/me/push_subscriptions";
 export const SEARCHES_PATH = "/searches";
+export const HUDDLES_PATH = "/huddles";
 
 /**
  * A message's thread, which opens beside its room, or a reply's permalink there, which opens the thread at
@@ -129,6 +132,7 @@ export function workspacePageOf(pathname: string): WorkspacePage | null {
   const appId = app && decoded(app[1]!);
   if (appId) return { page: "app-settings", appId };
   if (pathname === SEARCHES_PATH) return { page: "search" };
+  if (pathname === HUDDLES_PATH) return { page: "huddles" };
   if (/^\/users\/[^/]+\/profile$/.test(pathname)) return { page: "profile" };
   if (/^\/users\/[^/]+\/push_subscriptions$/.test(pathname)) return { page: "push-subscriptions" };
   const person = pathname.match(/^\/users\/([^/]+)$/);
@@ -182,12 +186,55 @@ function huddlePageOf(roomSegment: string): WorkspacePage | null {
   return roomId ? { page: "room", roomId, huddle: true } : null;
 }
 
+// This package is typed without a platform's library, and every platform it runs on has these.
+declare const URL: new (url: string, base: string) => { readonly origin: string; readonly pathname: string; readonly search: string; readonly hash: string };
+declare const URLSearchParams: new (init: string) => { get(name: string): string | null };
+
+/** `address` read against `origin`, or null for one that isn't an address, by `new URL`, as Safari before 18 and Chrome before 126 have no `URL.parse`. */
+function urlOf(address: string, origin: string) {
+  try {
+    return new URL(address, origin);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `address`'s path, query and fragment, if it names a page at `origin` that `isPage` takes, or else "/",
+ * as `address` is someone's to make up: another site's, or a page that isn't one.
+ */
+function pathIn(address: string | null, origin: string, isPage: (pathname: string) => boolean): string {
+  const url = address === null ? null : urlOf(address, origin);
+  return url?.origin === origin && isPage(url.pathname) ? `${url.pathname}${url.search}${url.hash}` : "/";
+}
+
+/** The page of the workspace at `origin` that `address` names, its query and fragment included, or "/" for anything else. */
+export const workspacePathIn = (address: string | null, origin: string) => pathIn(address, origin, (pathname) => workspacePageOf(pathname) !== null);
+
+/** Where someone new who joined with Memberful chooses their picture, name and username, before going on. */
+export const WELCOME_PATH = "/welcome";
+
+/**
+ * The page at `origin` that signing in comes back to, as `address` names it: a page of the workspace, or
+ * the welcome page, which someone whose session ended there comes back to, and which checks the page it
+ * goes on to itself, or "/" for anything else.
+ */
+export const signInReturnPathIn = (address: string | null, origin: string) =>
+  pathIn(address, origin, (pathname) => pathname === WELCOME_PATH || workspacePageOf(pathname) !== null);
+
+/** The welcome page's address for someone new who goes on to `returnPath`, a page of the workspace, as its `return_to` says. */
+export const welcomePath = (returnPath: string) => (returnPath === "/" ? WELCOME_PATH : `${WELCOME_PATH}?return_to=${encodeURIComponent(returnPath)}`);
+
+/** The page of the workspace at `origin` that the welcome page goes on to, as `search`, its address's query, names it. */
+export const pageAfterWelcome = (search: string, origin: string) => workspacePathIn(new URLSearchParams(search).get("return_to"), origin);
+
 /**
  * Whether the app shows a page at `pathname`: sign-in, the page that asks whether to connect an AI
- * app, or one of the workspace's. The Worker answers setup's, the join link's and open sign-up's
- * addresses itself.
+ * app, the welcome page, or one of the workspace's. The Worker answers setup's, the join link's and
+ * open sign-up's addresses itself.
  */
-export const isAppPage = (pathname: string) => pathname === SIGN_IN_PATH || pathname === OUTSIDE_AUTHORIZE_PATH || workspacePageOf(pathname) !== null;
+export const isAppPage = (pathname: string) =>
+  pathname === SIGN_IN_PATH || pathname === OUTSIDE_AUTHORIZE_PATH || pathname === WELCOME_PATH || workspacePageOf(pathname) !== null;
 
 /**
  * What the Worker has the browser fetch with a workspace page, for a browser with a session cookie,

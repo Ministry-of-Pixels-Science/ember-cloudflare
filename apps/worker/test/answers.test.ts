@@ -5,6 +5,7 @@ import { MENTION_CONTENT_TYPE, mentionSgid, OPENGRAPH_EMBED_CONTENT_TYPE, prepar
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   answerOf,
+  BLOCKED_ANSWER,
   NOTES,
   previewAttachment,
   questionFor,
@@ -573,6 +574,19 @@ describe("@ember", () => {
     const question = await post(client, `<p>${mention(EMBER)} hello?</p>`);
     expect(await nextAnswer(client)).toMatchObject({ creator: EMBER, plainText: NOTES.credits });
     expect(errors).toHaveBeenCalledWith(expect.stringMatching(new RegExp(`^Ember AI's model ${MODEL.replaceAll(".", "\\.")} didn't answer message ${question.id}: .*Insufficient credits`)));
+    client.close();
+  });
+
+  it("says it can't answer there in place of an answer with a word Blocked words keeps out", async () => {
+    const { ada, general } = await setUp();
+    // What it says in its place is Ember's words, which are posted even with one of them blocked.
+    const blocked = await api("/api/account", { method: "PATCH", headers: { Cookie: ada.cookie }, body: JSON.stringify({ blockedWords: ["fudge", "community"] }) });
+    expect(blocked.status).toBe(200);
+    internet(() => chatAnswer("Oh **fudge**, it moved to Friday."));
+    const client = await connect(general, ada);
+
+    await post(client, `<p>${mention(EMBER)} when's the launch?</p>`);
+    expect(await nextAnswer(client)).toMatchObject({ creator: EMBER, plainText: BLOCKED_ANSWER });
     client.close();
   });
 

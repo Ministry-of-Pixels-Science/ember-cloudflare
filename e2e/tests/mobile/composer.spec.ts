@@ -1,4 +1,4 @@
-import { editorField, openRoom, signInAs } from "../../fixtures";
+import { cookieHeader, editorField, openRoom, signInAs } from "../../fixtures";
 import { expect, openKeyboard, test } from "./fixtures";
 
 test.beforeEach(async ({ page, session }) => {
@@ -89,17 +89,21 @@ test("the composer and the newest message stay in view when the keyboard opens",
   await screenIsFine();
 });
 
-test("the people @ lists show above the text, fit the phone, each big enough to tap, and a tap mentions one", async ({ page, room, participant, screenIsFine }) => {
+test("the people @ lists show above the text, fit the phone, each big enough to tap, and a tap mentions one", async ({ page, request, room, participant, screenIsFine }) => {
   // A word only this test's people have in their names, as everyone is in the room.
   const tag = crypto.randomUUID().slice(0, 8);
-  await participant(`Bea ${tag}`);
+  const bea = await participant(`Bea ${tag}`);
+  // With a username nearly as long as one can be, which the list shows after her name.
+  const username = `beatrice_${tag}_hq`;
+  const changed = await request.patch("/api/users/me/profile", { data: { username }, headers: { Cookie: cookieHeader(bea.session) } });
+  expect(changed.status(), await changed.text()).toBe(200);
   await participant(`Cy ${tag}`);
   await openRoom(page, room);
   const composer = editorField(page, "Write a message");
   await composer.tap();
   await page.keyboard.type(`Hi @${tag}`);
   const people = page.getByRole("listbox").getByRole("option");
-  await expect(people).toHaveText([`Bea ${tag}`, `Cy ${tag}`]);
+  await expect(people).toHaveText([`Bea ${tag} @${username}`, `Cy ${tag}`]);
   // Above the line being written: two would fit under it, where the keyboard and the home indicator cover them.
   const line = (await composer.locator("p").first().boundingBox())!;
   const list = (await page.getByRole("listbox").boundingBox())!;

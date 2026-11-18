@@ -1,6 +1,6 @@
 import { DEFAULT_LEVELS, TOP_LEVELS } from "@ember/protocol/assistant";
 import type { APIRequestContext, Locator, Page } from "@playwright/test";
-import { administratorSession, cookieHeader, drawnPicture, editorField, expect, SAME_ORIGIN, shownPicture, signInAsAdministrator, test, useOwnAddress } from "../../fixtures";
+import { administratorSession, cookieHeader, drawnPicture, editorField, expect, SAME_ORIGIN, shownPicture, signInAsAdministrator, test, useOwnAddress, variantType } from "../../fixtures";
 import { AI_GATEWAY_ACCOUNT } from "../../projects/workspace-settings";
 import { ANTHROPIC_PATH, FOUND, GEMMA, HELLO, NEWER, RECALL_QUESTION, RECALLED, SOURCE, startFakeGateway, type FakeGateway } from "./fake-gateway";
 
@@ -329,10 +329,11 @@ test.describe("Ember AI", () => {
     await expect(avatar).not.toHaveAttribute("src", flame);
     const uploaded = (await avatar.getAttribute("src"))!;
     // The variant the administrator's browser made of it, 512×512.
-    expect(await shownPicture(avatar)).toEqual({ type: "image/webp", width: 512, height: 512 });
+    const variant = { type: await variantType(page), width: 512, height: 512 };
+    expect(await shownPicture(avatar)).toEqual(variant);
     // The room shows it without loading again.
     await expect(answersAvatar).toHaveAttribute("src", uploaded);
-    expect(await shownPicture(answersAvatar)).toEqual({ type: "image/webp", width: 512, height: 512 });
+    expect(await shownPicture(answersAvatar)).toEqual(variant);
 
     // Straight away, which can be the same second, and the address is new all the same.
     await useTheFlame.click();

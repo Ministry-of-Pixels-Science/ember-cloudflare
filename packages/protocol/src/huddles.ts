@@ -5,7 +5,7 @@
 // service, which relays what the browser sends and receives, by a TURN key in the same account, whose
 // ID and API token administrators give in Set up the relay, through `/api/account/huddles/relay`.
 
-import type { User, UserId } from "./index.ts";
+import type { RoomId, User, UserId } from "./index.ts";
 import { MAX_ID_LENGTH } from "./pages.ts";
 
 /**
@@ -248,6 +248,76 @@ export interface MessageHuddle {
   startedAt: string;
   endedAt?: string;
   people?: User[];
+}
+
+/**
+ * A huddle that's over, as the Huddles page lists it for everyone in its room: the room, the huddle's
+ * message there, whose thread is the huddle's, when it started and ended, everyone who was in it, by
+ * their ids in the order they first joined, and how many replies its thread has. One that nobody else
+ * joined is listed only while its thread has a reply, as Slack lists none it kept no message of.
+ */
+export interface PastHuddle {
+  roomId: RoomId;
+  messageId: string;
+  startedAt: string;
+  endedAt: string;
+  userIds: UserId[];
+  replies: number;
+}
+
+/** How many huddles the Huddles page lists at most: the latest to have started in someone's rooms. */
+export const PAST_HUDDLES_LISTED = 50;
+
+/** What `GET /api/huddles` answers: the huddles that are over in the rooms someone is in and hasn't hidden from their sidebar, the latest to have started first. */
+export interface PastHuddles {
+  huddles: PastHuddle[];
+}
+
+/**
+ * A huddle's own sounds, which each person chooses whether to hear, on their profile: the `music` that
+ * plays to whoever is the only one in a huddle, the `chimes`, one as someone joins a huddle and another
+ * as someone leaves it, and the `ring` of an invitation into one.
+ */
+export const HUDDLE_SOUNDS = ["music", "chimes", "ring"] as const;
+export type HuddleSound = (typeof HUDDLE_SOUNDS)[number];
+
+/**
+ * Which of a huddle's sounds someone hears, wherever they're signed in: each of them until they turn it
+ * off, as Slack's preferences turn off its huddles' music and their notification sound.
+ */
+export type HuddleSounds = Record<HuddleSound, boolean>;
+
+/** A huddle's sounds as someone hears them until they turn one off: all of them. */
+export const ALL_HUDDLE_SOUNDS: HuddleSounds = { music: true, chimes: true, ring: true };
+
+/** Whether `sounds` are all of a huddle's. */
+export const hearsAllHuddleSounds = (sounds: HuddleSounds) => HUDDLE_SOUNDS.every((sound) => sounds[sound]);
+
+/** The sounds `PATCH /api/users/me/huddle-sounds` turns on or off for whoever asks, the rest staying as they are. */
+export type HuddleSoundChanges = Partial<HuddleSounds>;
+
+/** What `PATCH /api/users/me/huddle-sounds` answers: the sounds whoever asked hears now. */
+export interface HuddleSoundsChanged {
+  sounds: HuddleSounds;
+}
+
+/** Why a change to someone's huddle sounds is refused when it turns one neither on nor off. */
+export const HUDDLE_SOUNDS_REFUSED = "Each of music, chimes and ring must be true or false";
+
+/**
+ * Parses an untrusted change to someone's huddle sounds. Returns why it's refused instead of the change.
+ * A sound it doesn't name stays as it is, and it takes nothing else.
+ */
+export function parseHuddleSoundChanges(data: unknown): HuddleSoundChanges | string {
+  if (typeof data !== "object" || data === null || Array.isArray(data)) return "Expected a JSON object";
+  const changes: HuddleSoundChanges = {};
+  for (const sound of HUDDLE_SOUNDS) {
+    const on = (data as Record<string, unknown>)[sound];
+    if (on === undefined) continue;
+    if (typeof on !== "boolean") return HUDDLE_SOUNDS_REFUSED;
+    changes[sound] = on;
+  }
+  return changes;
 }
 
 /** What a tab sends on its huddle's socket. Leaving the huddle is closing the socket. */

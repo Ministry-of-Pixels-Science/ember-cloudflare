@@ -5,9 +5,10 @@
 import type { AgentProfile } from "./agents.ts";
 import type { YourApp } from "./apps.ts";
 import type { AssistantSettings, YourAssistant } from "./assistant.ts";
+import { parseBlockedWords } from "./blocked-words.ts";
 import { isActionId, isActionValue, type Card } from "./cards.ts";
 import type { StoredFile } from "./files.ts";
-import type { HuddlesSettings, LiveHuddle, MessageHuddle } from "./huddles.ts";
+import type { HuddleSounds, HuddlesSettings, LiveHuddle, MessageHuddle } from "./huddles.ts";
 import type { OutsideConnection } from "./outside.ts";
 import { MAX_ID_LENGTH } from "./pages.ts";
 import { MAX_PUSH_ENDPOINT_LENGTH } from "./push.ts";
@@ -80,7 +81,22 @@ export type {
   YourAssistantChanges,
 } from "./assistant.ts";
 // And the rest of huddles.ts, from "@ember/protocol/huddles", which only the Huddles card, its setup and the Worker's huddles use.
-export type { HuddleRelayField, HuddleRelaySetup, HuddlesField, HuddlesForgotten, HuddlesSaved, HuddlesSettings, HuddlesSetup, LiveHuddle, MessageHuddle } from "./huddles.ts";
+export type {
+  HuddleRelayField,
+  HuddleRelaySetup,
+  HuddleSoundChanges,
+  HuddleSounds,
+  HuddleSoundsChanged,
+  HuddlesField,
+  HuddlesForgotten,
+  HuddlesSaved,
+  HuddlesSettings,
+  HuddlesSetup,
+  LiveHuddle,
+  MessageHuddle,
+  PastHuddle,
+  PastHuddles,
+} from "./huddles.ts";
 export {
   FILE_NAME_NOT_KEPT,
   FILE_TOO_LARGE,
@@ -111,6 +127,7 @@ export {
   EMAIL_SIGN_UP_PATH,
   emailSignUpLink,
   huddlePath,
+  HUDDLES_PATH,
   INVITATION_PATH,
   invitationLink,
   isAppPage,
@@ -120,19 +137,24 @@ export {
   NEW_APP_PATH,
   NEW_BOT_PATH,
   NEW_DIRECT_PATH,
+  pageAfterWelcome,
   PASSWORD_RESET_PATH,
   PROFILE_PATH,
   PUSH_SUBSCRIPTIONS_PATH,
   SEARCHES_PATH,
+  signInReturnPathIn,
   SIGN_UP_PATH,
   threadPath,
   TRANSFER_PATH,
   transferLink,
   TURNSTILE_CHECK_PATH,
+  WELCOME_PATH,
+  welcomePath,
   withEmailAddress,
   WORKSPACE_PRELOADS,
   WORKSPACE_SETTINGS_PATH,
   workspacePageOf,
+  workspacePathIn,
   type RoomAccess,
   type WorkspacePage,
 } from "./pages.ts";
@@ -200,6 +222,8 @@ export type UserStatus = "active" | "deactivated" | "banned" | "suspended";
 
 /** Someone as the people directory lists them. */
 export interface DirectoryUser extends User {
+  /** The username they picked, which typing @ finds them by too, as `usernameOf` keeps one. Left out while they have none. */
+  username?: string;
   /** What they say about themselves, or null when they haven't said. */
   bio: string | null;
   role: Role;
@@ -244,6 +268,11 @@ export interface SharedRoom {
   name: string;
   /** Null for the default `#`. */
   icon: RoomIconName | null;
+  /**
+   * False while the room's settings don't allow huddles in it, as a Slack channel's can: nobody starts or
+   * joins one there, where huddles are on. Left out otherwise, which is how every room starts.
+   */
+  huddles?: false;
 }
 
 /**
@@ -257,6 +286,17 @@ export interface DirectRoom {
   members: User[];
   /** When its latest message came, or when it started, until one has, as an ISO time, which DMs are listed by, latest first. */
   activeAt: string;
+  /**
+   * Who joined the workspace, and when, for a DM started as they joined, with someone who was here
+   * already, as Slack starts one: its timeline opens with their having joined. Left out for any other DM.
+   */
+  joined?: Joined;
+}
+
+/** Someone who joined the workspace, by id, and when, as an ISO time. */
+export interface Joined {
+  userId: UserId;
+  at: string;
 }
 
 /** A room someone is in, as their room list shows it: a shared room, or a DM. */
@@ -285,10 +325,10 @@ export const startingInvolvement = (room: Room): Involvement => (room.kind === "
 /**
  * A room in someone's sidebar, with whether a message has come since they last had it open in a shown
  * tab, which marks it unread for them until they do again, when the first of those messages came, while
- * it's marked, and their level in it. A room they've hidden is listed too, since they can still open it,
- * but their sidebar leaves it out.
+ * it's marked, in a DM how many have come since, and their level in it. A room they've hidden is listed
+ * too, since they can still open it, but their sidebar leaves it out.
  */
-export type SidebarRoom = Room & { unread: boolean; unreadSince?: string; involvement: Involvement };
+export type SidebarRoom = Room & { unread: boolean; unreadSince?: string; unreadCount?: number; involvement: Involvement };
 
 /**
  * The rooms someone has starred, which their sidebar lists first, in the order they starred them.
@@ -301,10 +341,21 @@ export interface Favorites {
 }
 
 /**
+ * The people someone has blocked, in the order they blocked them. Their messages collapse for them, and
+ * their DM with one of them alone leaves the sidebar. `version` counts the changes to them, so of two
+ * lists, the newer is the one with the larger version, whichever arrives last.
+ */
+export interface Blocks {
+  userIds: UserId[];
+  version: number;
+}
+
+/**
  * What `GET /api/sidebar` answers: the rooms someone is in, in the order they were made, the ones
  * they've starred, the invitation, when they're an administrator in its room who hasn't dismissed the
- * card, and the huddles going on in their rooms. It comes with an ETag, and a request whose
- * If-None-Match names it gets 304 Not Modified instead.
+ * card, the huddles going on in their rooms, the people they've blocked, and which of a huddle's sounds
+ * they hear, once they've turned one off. It comes with an ETag, and a request whose If-None-Match names
+ * it gets 304 Not Modified instead.
  */
 export interface Sidebar {
   rooms: SidebarRoom[];
@@ -318,6 +369,18 @@ export interface Sidebar {
   invitation: Invitation | null;
   /** The huddle going on in each of `rooms` that has one, by the room's id. `room.huddle` frames keep it current. */
   huddles: Record<RoomId, LiveHuddle>;
+  /** Whom they've blocked, which `blocks.changed` frames keep current. */
+  blocks: Blocks;
+  /**
+   * For an administrator, how many open reports they see, which never include the reports of them, as
+   * `reports.changed` frames keep it. Nobody else is given it.
+   */
+  openReports?: number;
+  /**
+   * Which of a huddle's sounds they hear, as the switches on their profile leave them, left out while
+   * they hear them all. `huddle.sounds` frames keep it current.
+   */
+  huddleSounds?: HuddleSounds;
 }
 
 /**
@@ -349,6 +412,21 @@ export interface StartedDirect {
   room: DirectRoom;
 }
 
+/**
+ * Why `POST /api/directs` refuses a new DM with someone, `name`, who has blocked whoever starts it, in
+ * words that don't say so. A DM they have already opens as ever.
+ */
+export const notTakingDirects = (name: string) => `${name} isn't taking direct messages.`;
+
+/**
+ * What `POST` and `DELETE /api/users/<id>/block` answer, which block someone and unblock them: whom you've
+ * blocked now, and your level in your DM with them alone, when blocking hid it or unblocking showed it again.
+ */
+export interface ChangedBlocks {
+  blocks: Blocks;
+  direct: { roomId: RoomId; involvement: Involvement } | null;
+}
+
 /** What `GET /api/rooms/<id>/settings` answers for a room's settings page. DMs have none. */
 export interface RoomSettings {
   room: SharedRoom;
@@ -359,10 +437,11 @@ export interface RoomSettings {
 }
 
 /**
- * What `PATCH /api/rooms/<id>` changes in a room, as its settings save it: its name, its icon, and who
- * it's for, everyone or just the people `memberIds` names, which takes anyone else out of it.
+ * What `PATCH /api/rooms/<id>` changes in a room, as its settings save it: its name, its icon, whether
+ * huddles are allowed in it, and who it's for, everyone or just the people `memberIds` names, which
+ * takes anyone else out of it.
  */
-export type RoomChanges = { name?: string; icon?: RoomIconChoice } & ({ kind?: "open" } | { kind: "closed"; memberIds: UserId[] });
+export type RoomChanges = { name?: string; icon?: RoomIconChoice; huddles?: boolean } & ({ kind?: "open" } | { kind: "closed"; memberIds: UserId[] });
 
 /**
  * The rail's buttons and the appearance modes, whose icons an administrator can choose in Community
@@ -539,6 +618,8 @@ export interface WorkspaceSettings {
   invitations: EmailInvitation[];
   /** The domains Email domain lets in, as kept, whether it's on or not, for administrators, and none for anyone else. */
   emailDomains: string[];
+  /** The words and phrases Blocked words keeps out of messages, reactions, names, usernames and bios, for administrators, and none for anyone else. */
+  blockedWords: string[];
   /** The addresses Ember knows reach it besides its own, which the Custom domain card names, for administrators, and none for anyone else. */
   addresses: EmberAddresses;
   /** Ember AI as the AI assistant tab shows it, for administrators while it's on, and null otherwise. */
@@ -731,7 +812,8 @@ export interface NewJoinCode {
  * What `PATCH /api/account` changes, as workspace settings save it: the workspace's name, its tagline,
  * its settings, its custom domain, which can only be the address the request comes to, or null for
  * none, the icons of the rail's buttons and the appearance modes, the address Ember's email comes from,
- * or null for none, and the domains Email domain lets in, in place of those it had.
+ * or null for none, the domains Email domain lets in, in place of those it had, and the words and
+ * phrases Blocked words keeps out, in place of those it had too.
  */
 export interface AccountChanges {
   name?: string;
@@ -741,6 +823,7 @@ export interface AccountChanges {
   navigationIcons?: NavigationIconChanges;
   emailFrom?: string | null;
   emailDomains?: string[];
+  blockedWords?: string[];
 }
 
 /**
@@ -923,6 +1006,8 @@ export interface PersonAnswer {
 /** You, as your profile shows you. */
 export interface Profile {
   name: string;
+  /** The username you picked, which typing @ finds you by too, or null while you have none. */
+  username: string | null;
   /** Null for someone who signed in with just a name, or who took theirs out. */
   emailAddress: string | null;
   /** What you say about yourself, or null when you haven't said. */
@@ -966,6 +1051,8 @@ export interface ProfileAnswer {
  */
 export interface ProfileChanges {
   name?: string;
+  /** Your username, as typed, which is kept as `usernameOf` keeps one, or a blank one to have none. */
+  username?: string;
   emailAddress?: string;
   password?: string;
   bio?: string;
@@ -1338,6 +1425,16 @@ export interface MemberfulDisconnection {
 }
 
 /**
+ * What Delete my account on your profile sends (`DELETE /api/users/me`), saying you mean it: your
+ * password while you have one, as changing your email address takes it, or else your name, typed as
+ * your profile has it.
+ */
+export interface AccountDeletion {
+  currentPassword?: string;
+  name?: string;
+}
+
+/**
  * Where to sign in at the Memberful site, within ten minutes, to connect the account you sign in to there
  * to yours here: what connecting from your profile answers, and what signing in with a password answers a
  * member whose password checks out while Memberful is members only, until they've connected one.
@@ -1489,6 +1586,15 @@ export const CURRENT_PASSWORD_WRONG = "That isn't your current password.";
  * a password that whoever holds their session could set would be another.
  */
 export const PASSWORD_WITH_MEMBERFUL = "You sign in with Memberful, so there's no password to set.";
+
+/** What a deleted account is called from then on, wherever anything still names it. */
+export const DELETED_PERSON_NAME = "Deleted person";
+/** Why Delete my account is refused without your password, while you have one. */
+export const DELETION_PASSWORD_NEEDED = "Enter your password to delete your account.";
+/** Why it's refused to someone without a password who hasn't typed their name as their profile has it. */
+export const DELETION_NAME_NEEDED = "Type your name as your profile has it to delete your account.";
+/** Why it's refused to the only administrator, so that there's always one. */
+export const ONLY_ADMINISTRATOR = "You're the only administrator. Make someone else an administrator before you delete your account.";
 
 export interface Boost {
   id: string;
@@ -1697,27 +1803,32 @@ export type ServerFrame =
   | { type: "card.clicked"; clickId: string }
   /**
    * `failed` names the request that went wrong, when the error answers one, and `clientMessageId` or
-   * `clientMessageIds` the messages it was about, or `clickId` the click.
+   * `clientMessageIds` the messages it was about, or `clickId` the click. `rewrite` says the room won't
+   * take a message for what it says, as one with a word Blocked words keeps out, which is its writer's to
+   * change and send again.
    */
-  | { type: "error"; message: string; clientMessageId?: string; clientMessageIds?: string[]; clickId?: string; failed?: ClientFrame["type"] }
+  | { type: "error"; message: string; clientMessageId?: string; clientMessageIds?: string[]; clickId?: string; failed?: ClientFrame["type"]; rewrite?: true }
   | { type: "pong" };
 
 /**
  * What a tab sends on its workspace socket (`/api/socket`): pings, which the runtime answers without
- * waking the Workspace, and whether the tab is shown, as that changes, so that the Workspace knows
- * whether its person has Ember in view anywhere.
+ * waking the Workspace; whether its person is using it, once it's welcomed and as they stop using it or
+ * come back to it (`presence.active`), which counts the tab in use from when it connects until it says
+ * otherwise, and has it hear who's active (`presence`) once it has said; and whether the tab is shown,
+ * as that changes, so that the Workspace knows whether its person has Ember in view anywhere.
  */
-export type WorkspaceClientFrame = { type: "ping" } | { type: "presence.visible"; visible: boolean };
+export type WorkspaceClientFrame = { type: "ping" } | { type: "presence.active"; active: boolean } | { type: "presence.visible"; visible: boolean };
 
 /** What the Workspace sends on a tab's workspace socket. */
 export type WorkspaceServerFrame =
   /** Sent as the Workspace lets the socket in: who its session signs in, and the workspace as it is then. */
   | { type: "welcome"; you: Me; account: Account }
   /**
-   * A room of theirs has a message they haven't seen, which marks it unread, as of `at`, when that message
-   * came. Sent only to the person marked, as their mark changes.
+   * A room of theirs has a message they haven't seen, which marks it unread, as of `at`, when the first
+   * of those came. Sent only to the person marked, as their mark changes, and in a DM, as each message
+   * comes, with how many have come since it was marked.
    */
-  | { type: "room.unread"; roomId: RoomId; at: string }
+  | { type: "room.unread"; roomId: RoomId; at: string; count?: number }
   /** They've read a room marked unread, in this tab or another. */
   | { type: "room.read"; roomId: RoomId }
   /**
@@ -1758,8 +1869,23 @@ export type WorkspaceServerFrame =
   | { type: "huddle.invited"; roomId: RoomId; by: UserId }
   /** They've answered an invitation into a room's huddle, joining from it or declining it, in this tab or another, so it rings in none of them from now on. */
   | { type: "huddle.answered"; roomId: RoomId }
+  /** They've turned one of a huddle's sounds on or off on their profile, in this tab or another: the ones they hear now. */
+  | { type: "huddle.sounds"; sounds: HuddleSounds }
+  /**
+   * The huddles the Huddles page lists for a room of theirs have changed: one is over, or one that was
+   * goes on after all, has gained or lost a reply, or has had its message deleted. It names none, so the
+   * page loads its list again. Sent to everyone in the room.
+   */
+  | { type: "huddles.changed" }
   /** They've starred or unstarred a room, in this tab or another: their stars as they are now. */
   | { type: "favorites.changed"; favorites: Favorites }
+  /** They've blocked or unblocked someone, in this tab or another: whom they've blocked now. */
+  | { type: "blocks.changed"; blocks: Blocks }
+  /**
+   * Someone has made a report, or an administrator has handled one: how many open reports whoever it's
+   * sent to sees now, which never include the reports of them. Sent to the administrators.
+   */
+  | { type: "reports.changed"; open: number }
   /** They've given a room of theirs another notification level, in this tab or another. */
   | { type: "room.involvement"; roomId: RoomId; involvement: Involvement }
   /** They've dismissed the welcome card, in this tab or another, so their sidebar has no invitation from now on. */
@@ -1772,6 +1898,14 @@ export type WorkspaceServerFrame =
   | { type: "rooms.reordered" }
   /** An administrator changed the workspace's name, settings or custom CSS, which every page applies at once. Sent to everyone. */
   | { type: "account.updated"; account: Account }
+  /**
+   * Who's active, with a tab open that they've used in the last ten minutes, as Slack counts it, and who's
+   * away otherwise: first everyone active, as the tab first says whether it's in use, and then whoever has
+   * become active or away since the last of these. Sent only to tabs that have said, and gathered over a
+   * moment, so that a deploy's reconnects tell of everyone in a few frames rather than one each: the
+   * first may be a moment behind, as the frame that follows it brings it up to date.
+   */
+  | { type: "presence"; active: UserId[]; away: UserId[] }
   | { type: "error"; message: string }
   | { type: "pong" };
 
@@ -1942,6 +2076,32 @@ function nameAsShown(name: string): string {
   return name.normalize("NFKC").replace(/\p{Cf}/gu, "").replace(/^[\s@]+|\s+$/g, "").toLowerCase();
 }
 
+/** The most characters a username can have. */
+export const MAX_USERNAME_LENGTH = 21;
+/** What a username can be: lowercase letters, numbers, periods, hyphens and underscores, starting with a letter or number. */
+const USERNAME = /^[a-z0-9][a-z0-9._-]*$/;
+export const USERNAME_REFUSED = `Usernames have up to ${MAX_USERNAME_LENGTH} lowercase letters, numbers, periods, hyphens and underscores, and start with a letter or number.`;
+export const USERNAME_TAKEN = "That username is taken. Choose another.";
+
+/**
+ * `typed` as Ember keeps a username: in Unicode's compatible forms, as fullwidth letters become ASCII,
+ * without spaces or the @ before it, in lowercase. Whether it can be one is `isUsername`'s to say.
+ */
+export const usernameOf = (typed: string) => typed.normalize("NFKC").replace(/\s/g, "").replace(/^@+/, "").toLowerCase();
+
+/** Whether `username`, as `usernameOf` keeps it, can be someone's. */
+export const isUsername = (username: string) => username.length <= MAX_USERNAME_LENGTH && USERNAME.test(username);
+
+/**
+ * The username someone called `name` starts with, before a number makes it nobody else's: its letters
+ * and numbers, without their accents, in lowercase, leaving room for four digits after them, or "member"
+ * for a name with none, as one in another script has.
+ */
+export function usernameFrom(name: string): string {
+  const letters = name.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  return letters.slice(0, MAX_USERNAME_LENGTH - 4) || "member";
+}
+
 export const EMAIL_ADDRESS_TOO_LONG = `Email address must be at most ${MAX_EMAIL_ADDRESS_LENGTH} characters`;
 
 /** The reactions: the first three are quick reactions, the rest sit in the tray. */
@@ -2062,6 +2222,7 @@ export function parseClientFrame(raw: string): ClientFrame | null {
 export function parseWorkspaceClientFrame(raw: string): WorkspaceClientFrame | null {
   const f = parseObject(raw);
   if (f?.type === "ping") return { type: "ping" };
+  if (f?.type === "presence.active") return typeof f.active === "boolean" ? { type: "presence.active", active: f.active } : null;
   return f?.type === "presence.visible" && typeof f.visible === "boolean" ? { type: "presence.visible", visible: f.visible } : null;
 }
 
@@ -2121,7 +2282,9 @@ export function parseRoomChanges(data: unknown): RoomChanges | string {
   if (name === null) return `Name must be 1 to ${MAX_ROOM_NAME_LENGTH} characters`;
   const icon = iconChoice(r.icon);
   if (icon === null) return ICON_REFUSED;
-  const changes = { name, icon };
+  const { huddles } = r;
+  if (huddles !== undefined && typeof huddles !== "boolean") return "Huddles must be true or false";
+  const changes = { name, icon, huddles };
   if (r.kind === undefined) return changes;
   if (r.kind === "open") return { ...changes, kind: r.kind };
   if (r.kind !== "closed") return 'Kind must be "open" or "closed"';
@@ -2421,12 +2584,12 @@ function navigationIconsOf(data: unknown): NavigationIconChanges | undefined {
  * is saved as typed, even blank. The tagline is kept on one line without space at its ends, and blank is
  * none. Each setting is true or false, and one it doesn't know is refused. A custom domain is a host or
  * null, which the Worker then checks is the address the request came to. Navigation icons are as
- * `navigationIconsOf` reads them, the From address as `emailFromOf` does, and Email domain's domains as
- * `emailDomainsOf` does.
+ * `navigationIconsOf` reads them, the From address as `emailFromOf` does, Email domain's domains as
+ * `emailDomainsOf` does, and the blocked words as `parseBlockedWords` does.
  */
 export function parseAccountChanges(data: unknown): AccountChanges | string {
   if (!isJsonObject(data)) return "Expected a JSON object";
-  const { name, tagline, settings, customDomain, navigationIcons, emailFrom, emailDomains } = data;
+  const { name, tagline, settings, customDomain, navigationIcons, emailFrom, emailDomains, blockedWords } = data;
   if (name !== undefined && (typeof name !== "string" || name.length > MAX_ACCOUNT_NAME_LENGTH)) return `Name must be at most ${MAX_ACCOUNT_NAME_LENGTH} characters`;
   const kept = typeof tagline === "string" ? taglineOf(tagline) : undefined;
   if (tagline !== undefined && (kept === undefined || kept.length > MAX_TAGLINE_LENGTH)) return TAGLINE_TOO_LONG;
@@ -2438,6 +2601,8 @@ export function parseAccountChanges(data: unknown): AccountChanges | string {
   if (emailFrom !== undefined && from === undefined) return EMAIL_FROM_REFUSED;
   const domains = emailDomainsOf(emailDomains);
   if (emailDomains !== undefined && domains === undefined) return EMAIL_DOMAINS_REFUSED;
+  const blocked = blockedWords === undefined ? undefined : parseBlockedWords(blockedWords);
+  if (blocked !== undefined && "error" in blocked) return blocked.error;
   const changes: AccountChanges = {
     ...(name !== undefined && { name }),
     ...(kept !== undefined && { tagline: kept }),
@@ -2445,6 +2610,7 @@ export function parseAccountChanges(data: unknown): AccountChanges | string {
     ...(icons !== undefined && { navigationIcons: icons }),
     ...(from !== undefined && { emailFrom: from }),
     ...(domains !== undefined && { emailDomains: domains }),
+    ...(blocked !== undefined && { blockedWords: blocked }),
   };
   if (settings === undefined) return changes;
   if (!isJsonObject(settings)) return "Settings must be a JSON object";
@@ -2492,6 +2658,7 @@ export function parseInvolvementChange(data: unknown): Involvement | null {
 
 const PROFILE_FIELDS = {
   name: "Name",
+  username: "Username",
   emailAddress: "Email address",
   password: "Password",
   bio: "Bio",
@@ -2501,7 +2668,8 @@ const PROFILE_FIELDS = {
 
 /**
  * Parses an untrusted change to your profile. Returns why it's refused instead. Each field is saved as
- * typed, even a blank name. The server keeps the form's limits too: a new password from the 8 characters
+ * typed, even a blank name, but a username, which is kept as `usernameOf` keeps one, and refused unless
+ * it's blank or can be one. The server keeps the form's limits too: a new password from the 8 characters
  * first run takes, to the 72 sign-in can take, and a 200-character bio.
  */
 export function parseProfileChanges(data: unknown): ProfileChanges | string {
@@ -2514,6 +2682,10 @@ export function parseProfileChanges(data: unknown): ProfileChanges | string {
     changes[field] = value;
   }
   if (changes.name !== undefined && changes.name.length > MAX_USER_NAME_LENGTH) return NAME_TOO_LONG;
+  if (changes.username !== undefined) {
+    changes.username = usernameOf(changes.username);
+    if (changes.username !== "" && !isUsername(changes.username)) return USERNAME_REFUSED;
+  }
   if (changes.emailAddress !== undefined && changes.emailAddress.length > MAX_EMAIL_ADDRESS_LENGTH) return EMAIL_ADDRESS_TOO_LONG;
   if (changes.password !== undefined && isPasswordTooLong(changes.password)) return PASSWORD_TOO_LONG;
   // A blank one keeps the password you have.
@@ -2538,6 +2710,19 @@ export function parseMemberfulDisconnection(data: unknown): MemberfulDisconnecti
     return `Endpoint can't be longer than ${MAX_PUSH_ENDPOINT_LENGTH} characters`;
   }
   return { ...(currentPassword === undefined ? {} : { currentPassword }), ...(pushSubscriptionEndpoint === undefined ? {} : { pushSubscriptionEndpoint }) };
+}
+
+/**
+ * Parses an untrusted Delete my account. Returns why it's refused instead. Whether what's typed is your
+ * password, or your name, the server checks once it knows who's asking.
+ */
+export function parseAccountDeletion(data: unknown): AccountDeletion | string {
+  if (!isJsonObject(data)) return "Expected a JSON object";
+  const { currentPassword, name } = data;
+  if (currentPassword !== undefined && typeof currentPassword !== "string") return "Current password must be text";
+  if (name !== undefined && typeof name !== "string") return "Name must be text";
+  if (name !== undefined && name.length > MAX_USER_NAME_LENGTH) return NAME_TOO_LONG;
+  return { ...(currentPassword === undefined ? {} : { currentPassword }), ...(name === undefined ? {} : { name }) };
 }
 
 /**

@@ -2,12 +2,11 @@ import { useRef, useState } from "react";
 import { MAX_EMAIL_ADDRESS_LENGTH, MAX_PASSWORD_LENGTH, MAX_USER_NAME_LENGTH, MIN_PASSWORD_LENGTH, type Me } from "@ember/protocol";
 import { AuthAlternative } from "@/components/auth-alternative";
 import { AUTH_FORM, AuthCard, AuthHeading, AuthPage, Problem, type SignedOutWorkspace } from "@/components/auth-page";
-import avatarPlaceholder from "@/components/avatar-placeholder.svg";
 import { FIELD_INPUT, Field, SubmitButton } from "@/components/field";
-import { Camera } from "@/components/icons/iconoir";
+import { PhotoField } from "@/components/photo-field";
 import { TurnstileCheck } from "@/components/turnstile-check";
 import { Input } from "@/components/ui/input";
-import { useChosenPhoto, type PhotoChoice } from "@/hooks/use-chosen-photo";
+import { useChosenPhoto } from "@/hooks/use-chosen-photo";
 import { useTitle } from "@/hooks/use-title";
 import type { EmailLink } from "@/hooks/use-email-link";
 import { ApiError, joinWithEmailLink, joinWorkspace, signUp, type ChosenPhoto } from "@/lib/api";
@@ -21,13 +20,6 @@ import { loadPage } from "@/lib/page";
 /** What the page says when Turnstile's script doesn't load, so there's no check to pass. */
 export const TURNSTILE_UNAVAILABLE =
   "Ember couldn't load Cloudflare's check that you're a person. Check your connection, and anything that blocks challenges.cloudflare.com, then reload the page.";
-
-/**
- * Upload photo: Campfire's `.btn`, holding the file field over itself, outlined while the field has
- * focus, and 44px tall for fingers.
- */
-const UPLOAD_BUTTON =
-  "relative inline-flex cursor-pointer items-center justify-center gap-[0.5em] rounded-[9px] border bg-background px-[1.1em] py-[0.5em] font-medium text-foreground focus-within:outline-2 focus-within:outline-offset-3 focus-within:outline-solid focus-within:outline-foreground touch:min-h-11";
 
 interface Props {
   workspace: SignedOutWorkspace;
@@ -162,38 +154,5 @@ export function JoinPage({ workspace, joinCode, emailLink, onGone, onJoined }: P
         <AuthAlternative question="Already have an account?" action="Sign in" href="/session/new" />
       </AuthCard>
     </AuthPage>
-  );
-}
-
-/**
- * The photo to join with, which shows as it's chosen, over Upload photo, and says why one is refused in
- * place of "Optional". It can't change while the form is sent with it.
- */
-function PhotoField({ photo, disabled }: { photo: PhotoChoice; disabled: boolean }) {
-  return (
-    <div className="mx-auto mb-0.5 flex flex-col items-center justify-center gap-2.5">
-      <img src={photo.preview ?? avatarPlaceholder} alt="Your profile photo" width={80} height={80} className="aspect-square w-20 rounded-full object-cover" />
-      <label className={UPLOAD_BUTTON}>
-        <Camera className="h-5 w-[1.6em]" />
-        <input
-          ref={photo.input}
-          id="user_avatar"
-          type="file"
-          accept="image/*"
-          aria-invalid={photo.refusal ? true : undefined}
-          disabled={disabled}
-          onChange={photo.choose}
-          className="absolute inset-0 cursor-pointer opacity-0 disabled:cursor-default"
-        />
-        <span>Upload photo</span>
-      </label>
-      {photo.refusal ? (
-        <span role="alert" className="text-[0.8rem] text-destructive">
-          {photo.refusal}
-        </span>
-      ) : (
-        <span className="text-[0.8rem] text-muted-foreground">Optional</span>
-      )}
-    </div>
   );
 }
