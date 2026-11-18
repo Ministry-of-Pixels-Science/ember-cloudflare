@@ -173,7 +173,7 @@ export function ProfilePage({ me, rooms, askForRoom, huddleSounds, askForHuddleS
   const [saving, setSaving] = useState(false);
   const passwordInput = useRef<HTMLInputElement>(null);
   const currentPasswordInput = useRef<HTMLInputElement>(null);
-  /** Whether you've disconnected your Memberful account here, since when no answer shows it connected: connecting one reloads the page. */
+  /** Whether you've disconnected your Memberful account here, with Disconnect or a new password, since when no answer shows it connected: connecting one reloads the page. */
   const disconnectedMemberful = useRef(false);
   /** Likewise for your account at the single sign-on provider. */
   const disconnectedSso = useRef(false);
@@ -295,6 +295,12 @@ export function ProfilePage({ me, rooms, askForRoom, huddleSounds, askForHuddleS
         // The passwords leave their fields, unless others were typed meanwhile.
         if (passwordInput.current?.value === password) passwordInput.current.value = "";
         if (currentPasswordInput.current?.value === currentPassword) currentPasswordInput.current.value = "";
+        // A new password disconnects the accounts elsewhere, as Disconnect does, while your email address
+        // lets it sign you in, so an answer arriving late, as a photo's can, doesn't show them connected again.
+        if (password !== "") {
+          if (!answer.profile.memberful?.connected) disconnectedMemberful.current = true;
+          if (!answer.profile.sso?.connected) disconnectedSso.current = true;
+        }
         showAnswer(answer);
         flash("notice", "✓");
       },

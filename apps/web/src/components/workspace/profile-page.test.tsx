@@ -728,6 +728,27 @@ describe("Connect Memberful", () => {
     expect(passwordHelp()).not.toHaveTextContent("disconnects");
   });
 
+  it("keeps showing it disconnected once a new password disconnects it, when a photo's answer arrives late with the account still connected", async () => {
+    // A photo picked before the password is saved can answer after it, as the profile was before.
+    serve({
+      loaded: () => Response.json({ profile: { ...profile, memberful: CONNECTED }, transferId: LOADED_LINK } satisfies ProfileAnswer),
+      saved: () => Response.json({ profile: { ...profile, memberful: NOT_CONNECTED }, transferId: SAVED_LINK } satisfies ProfileAnswer),
+      uploaded: () => Response.json({ profile: { ...profile, avatarUrl: UPLOADED, avatar: true, memberful: CONNECTED }, transferId: SAVED_LINK } satisfies ProfileAnswer),
+    });
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:moon");
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    const { user } = showPage();
+    await loaded();
+    await user.type(field("New password"), "difference engine");
+    await user.type(field("Current password"), "analytical engine");
+    await user.click(saveButton());
+    await waitFor(() => expect(memberful()).toHaveTextContent("Connect your Memberful account to keep signing in."));
+    await user.upload(screen.getByLabelText("Upload avatar", { exact: false }), new File(["moon"], "moon.jpg", { type: "image/jpeg" }));
+    await waitFor(() => expect(screen.getByRole("img", { name: "Your avatar" })).toHaveAttribute("src", UPLOADED));
+    expect(memberful()).toHaveTextContent("Connect your Memberful account to keep signing in.");
+    expect(within(memberful()!).queryByRole("button", { name: "Disconnect Memberful" })).not.toBeInTheDocument();
+  });
+
   it("keeps offering Disconnect when a photo's answer arrives late without the email address saved since, which only the profile's own answers change", async () => {
     // A photo picked before an email address is saved can answer after it, as the profile was before.
     serve({
@@ -824,6 +845,26 @@ describe("Connect single sign-on", () => {
     await waitFor(() => expect(sso()).toHaveTextContent("Connect your Acme account to keep signing in."));
     expect(await screen.findByRole("alert")).toHaveTextContent(SSO_DISCONNECTED_NOTICE);
     expect(passwordHelp()).not.toHaveTextContent("disconnects");
+  });
+
+  it("keeps showing it disconnected once a new password disconnects it, when a photo's answer arrives late with the account still connected", async () => {
+    serve({
+      loaded: () => Response.json({ profile: { ...profile, sso: SSO_CONNECTED }, transferId: LOADED_LINK } satisfies ProfileAnswer),
+      saved: () => Response.json({ profile: { ...profile, sso: SSO_NOT_CONNECTED }, transferId: SAVED_LINK } satisfies ProfileAnswer),
+      uploaded: () => Response.json({ profile: { ...profile, avatarUrl: UPLOADED, avatar: true, sso: SSO_CONNECTED }, transferId: SAVED_LINK } satisfies ProfileAnswer),
+    });
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:moon");
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    const { user } = showPage();
+    await loaded();
+    await user.type(field("New password"), "difference engine");
+    await user.type(field("Current password"), "analytical engine");
+    await user.click(saveButton());
+    await waitFor(() => expect(sso()).toHaveTextContent("Connect your Acme account to keep signing in."));
+    await user.upload(screen.getByLabelText("Upload avatar", { exact: false }), new File(["moon"], "moon.jpg", { type: "image/jpeg" }));
+    await waitFor(() => expect(screen.getByRole("img", { name: "Your avatar" })).toHaveAttribute("src", UPLOADED));
+    expect(sso()).toHaveTextContent("Connect your Acme account to keep signing in.");
+    expect(within(sso()!).queryByRole("button", { name: "Disconnect Acme" })).not.toBeInTheDocument();
   });
 
   it("offers no password to someone without one whom single sign-on signs in, whose way in it is, nor offers to disconnect it", async () => {

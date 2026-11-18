@@ -5866,7 +5866,7 @@ export class Workspace extends DurableObject<Env> {
         // which kept a token of its own, is the provider's word after this one.
         const account = await this.joinableAccount();
         const everywhere = (account?.ssoSignIn ?? false) && !(account?.memberfulSignIn ?? false);
-        await this.endUnvouched(provider.issuer, subject, sealedToken, readAt, everywhere, failingSince);
+        await this.endUnvouched(provider.issuer, subject, sealedToken, everywhere, failingSince);
       } else if (answer.idToken === null && discovery.userinfoEndpoint === null) {
         // Taking the refresh token is all such a provider says: the account is still there.
         const given = answer.refreshToken === null ? sealedToken : await seal(this.env.SESSION_SECRET, "sso-refresh-token", answer.refreshToken);
@@ -5905,22 +5905,24 @@ export class Workspace extends DurableObject<Env> {
       await this.store.settleRefresh(issuer, subject, asked, { sealedToken: keep, dueAt: Date.now() + SSO_RETRY_MS, failingSince: since });
     } else {
       console.error("The single sign-on provider hasn't answered for an account's refresh token in a day, so the sessions it signed in end.");
-      await this.endUnvouched(issuer, subject, asked, readAt, false, since);
+      await this.endUnvouched(issuer, subject, asked, false, since);
     }
   }
 
   /**
    * Stops asking the provider at `issuer` about the account with `subject` with the refresh token `asked`,
    * and ends the sessions it signed in, or, `everywhere`, every session of a member it links, unless a
-   * sign-in has kept another token since. Should ending them fail, the token is put back, to try again in
-   * a few minutes, as having failed since `failingSince`.
+   * sign-in has kept another token since. Those it signed in while the provider was asked end too, since
+   * their sign-ins kept no token of their own, without which nothing would ask after them again. Should
+   * ending them fail, the token is put back, to try again in a few minutes, as having failed since
+   * `failingSince`.
    */
-  private endUnvouched(issuer: string, subject: string, asked: string, readAt: number, everywhere: boolean, failingSince: number | null): Promise<void> {
+  private endUnvouched(issuer: string, subject: string, asked: string, everywhere: boolean, failingSince: number | null): Promise<void> {
     // One at a time with sign-ins, so that none keeps its token between forgetting this one and ending them.
     return this.closingSockets(async () => {
       if (!(await this.store.settleRefresh(issuer, subject, asked, null))) return;
       try {
-        await this.endLoggedOut(issuer, { subject, sid: null, startedBy: readAt, everywhere });
+        await this.endLoggedOut(issuer, { subject, sid: null, startedBy: Date.now(), everywhere });
       } catch (error) {
         await this.store.restoreRefresh(issuer, subject, asked, Date.now() + SSO_RETRY_MS, failingSince);
         throw error;

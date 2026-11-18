@@ -369,7 +369,8 @@ Members only and SSO only can be on together, for a community whose paying membe
 Memberful and whose staff sign in with single sign-on: then those two, administrators and the people
 they invite are the only ones who sign in. While one of them is on, the other way lets nobody in, not
 even the people linked to it, unless it's the only way in too, so turning it on in Who can join turns
-on its only switch with it.
+on its only switch with it. Meanwhile, someone who joined with the other way has no password to reset,
+so only an administrator's sign-in link lets them in.
 
 To have open sign-up, Email domain's page and the page for a forgotten password check that whoever
 uses them is a person, an administrator sets up [Turnstile](https://developers.cloudflare.com/turnstile/),

@@ -120,7 +120,8 @@ interface SentToProvider {
  * signing in `provider.signingIn` with the provider's session `provider.sid`. Its token endpoint takes
  * each code once, with the app's secret, the redirect URI and the PKCE verifier it was given for, and
  * gives an ID token signed with `provider.signWith`, with `provider.idToken`'s claims over its own, and a
- * refresh token, which it takes once, for whoever it was given to, unless they're in `provider.revoked`.
+ * refresh token, but to a sign-in while `provider.signInWithoutRefreshToken`, which it takes once, for
+ * whoever it was given to, unless they're in `provider.revoked`.
  * Its userinfo endpoint describes whoever an access token is for, as `provider.people` has them now.
  * While `provider.down`, nothing answers.
  */
@@ -138,6 +139,8 @@ function fakeProvider() {
     revoked: new Set<string>(),
     /** Whether a refresh gives no ID token, as some providers' don't, leaving the userinfo endpoint's word. */
     refreshWithoutIdToken: false,
+    /** Whether signing in gives no refresh token, as Google gives one only when someone first consents. */
+    signInWithoutRefreshToken: false,
     /** Whether the userinfo endpoint fails, while the rest of the provider answers. */
     userinfoDown: false,
     down: false,
@@ -162,11 +165,12 @@ function fakeProvider() {
   async function tokensFor(sub: string, sid: string, nonce: string | null): Promise<Response> {
     const [accessToken, refreshToken] = [`at-${random()}`, `rt-${random()}`];
     provider.accessTokens.set(accessToken, sub);
-    provider.refreshTokens.set(refreshToken, { sub, sid });
+    const refreshes = nonce === null || !provider.signInWithoutRefreshToken;
+    if (refreshes) provider.refreshTokens.set(refreshToken, { sub, sid });
     const person = provider.people.get(sub)!;
     const claims = { ...person, iss: ISSUER, aud: CLIENT_ID, iat: now(), exp: now() + 3600, sid, ...(nonce === null ? {} : { nonce }), ...provider.idToken };
     const idToken = nonce === null && provider.refreshWithoutIdToken ? undefined : (provider.givenIdToken ?? (await signed(provider.signWith, claims)));
-    return Response.json({ access_token: accessToken, token_type: "Bearer", expires_in: 3600, id_token: idToken, refresh_token: refreshToken });
+    return Response.json({ access_token: accessToken, token_type: "Bearer", expires_in: 3600, id_token: idToken, refresh_token: refreshes ? refreshToken : undefined });
   }
 
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
@@ -1109,6 +1113,31 @@ describe("Checking accounts with their refresh tokens", () => {
     expect(await signsIn({ user: session.user, cookie: sessionCookieOf(signedIn) })).toBe(true);
     expect(await signsIn(session)).toBe(true);
     expect((await refreshed())[0]!.refresh_token).not.toBeNull();
+  });
+
+  it("ends a session signed in while the provider is asked with a token it no longer takes, once its sign-in kept none of its own", async () => {
+    await setUpWithSso();
+    const session = await ssoSession(katherine);
+    provider.revoked.add(katherine.sub);
+    provider.signInWithoutRefreshToken = true;
+    await due();
+    const { release, lined } = await holdChanges();
+    const signingIn = signInWithSso(katherine);
+    let checking: Promise<boolean>;
+    try {
+      await vi.waitFor(() => expect(lined).toHaveBeenCalledTimes(1));
+      // The refresh is answered while the sign-in waits, which leaves the token asked with in place, and
+      // nothing else to ask the provider about its session with.
+      checking = runDurableObjectAlarm(workspaceStub());
+      await vi.waitFor(() => expect(lined).toHaveBeenCalledTimes(2));
+    } finally {
+      await release();
+    }
+    const signedIn = await signingIn;
+    expect(await checking).toBe(true);
+    expect(await signsIn({ user: session.user, cookie: sessionCookieOf(signedIn) })).toBe(false);
+    expect(await signsIn(session)).toBe(false);
+    expect(await refreshed()).toEqual([{ refresh_token: null, refresh_due_at: null }]);
   });
 
   /** Joins as Grace with a password, as `join` has her, then connects her account at the provider from her profile while SSO only is on, answering her password session. */

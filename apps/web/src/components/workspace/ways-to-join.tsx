@@ -55,12 +55,13 @@ const EITHER_ONLY_OVERRIDES = "Off while Memberful and single sign-on are the on
 
 /**
  * What turning on SSO only, or Members only, adds to its question while the other way is on without
- * being the only way in too: that it closes the other way, to the people who joined with it as well.
+ * being the only way in too: that it closes the other way, to the people who joined with it as well,
+ * who have no password to reset, so only an administrator's sign-in link lets them in meanwhile.
  */
 export const CLOSES_MEMBERFUL =
-  " Memberful will be off too, even for members who joined with it, unless Members only is on as well. Those without a password reset theirs to get back in.";
+  " Memberful will be off too, even for members who joined with it, unless Members only is on as well. Those without a password will need a sign-in link from an administrator to get back in.";
 export const CLOSES_SSO =
-  " Single sign-on will be off too, even for people who joined with it, unless SSO only is on as well. Those without a password reset theirs to get back in.";
+  " Single sign-on will be off too, even for people who joined with it, unless SSO only is on as well. Those without a password will need a sign-in link from an administrator to get back in.";
 
 /** What the Memberful card says while SSO only closes it, in place of what it does, and the other way around. */
 const MEMBERFUL_CLOSED = "Off while SSO only is on, even for members who joined with it. Turn it on to let Memberful's members in alongside the provider's people.";
