@@ -2471,9 +2471,10 @@ const DEACTIVATE = `UPDATE users SET status = ${DEACTIVATED}, email_address = re
 /**
  * Deletes someone's account, ?3's, recording when, ?2: their row stays, deactivated, as a removed
  * person's does, so the rooms and DMs they were in still name somebody, but called ?1, with no email
- * address, password, bio, avatar or picks of theirs, and no longer an administrator.
+ * address, password, username, bio, avatar or picks of theirs, and no longer an administrator. Their
+ * username is free for anyone then, as their email address is.
  */
-const DELETE_ACCOUNT = `UPDATE users SET name = ?1, status = ${DEACTIVATED}, role = ${MEMBER}, email_address = NULL, password_digest = NULL, bio = NULL,
+const DELETE_ACCOUNT = `UPDATE users SET name = ?1, status = ${DEACTIVATED}, role = ${MEMBER}, email_address = NULL, password_digest = NULL, username = NULL, bio = NULL,
   avatar_key = NULL, avatar_variant = NULL, assistant_thinking = NULL, assistant_answer_length = NULL, assistant_model = NULL,
   invitation_dismissed_at = NULL, deleted_at = ?2, updated_at = ?2 WHERE id = ?3`;
 
