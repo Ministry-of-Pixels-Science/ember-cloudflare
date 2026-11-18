@@ -1,8 +1,11 @@
 import {
+  isActionId,
+  MAX_ACTION_VALUE_LENGTH,
   MAX_MESSAGE_HTML_LENGTH,
   parseParts,
   showsAnything,
   type Card,
+  type CardAction,
   type CardButton,
   type CardColumn,
   type CardContextItem,
@@ -19,7 +22,8 @@ import { anchor, emojiNamed, escapeText, linkHref, mrkdwnHtml, mrkdwnText, plain
 // read into the message a bot posts: its `text`, or, in its place, as Slack shows them, its Block Kit `blocks` as a
 // card, and its legacy `attachments`, which alerting tools still send, as cards under it (packages/protocol/src/cards.ts).
 // What Slack lets a payload change about who posts and where (`username`, `icon_emoji`, `icon_url`, `channel`,
-// `thread_ts`) is left out: the bot posts as itself, to the room whose address the payload was sent to.
+// `thread_ts`) is left out: the bot posts as itself, to the room whose address the payload was sent to. A Block Kit
+// button with an `action_id` and no `url` acts, where the room has somewhere to report its click (clicks.ts).
 
 /** Why Slack's webhooks post nothing, in their words. */
 export type SlackError = "invalid_payload" | "no_text" | "too_many_attachments" | "msg_too_long";
@@ -58,17 +62,17 @@ export function payloadOf(json: string | null): SlackPayload | null {
 /**
  * The message `payload` posts, as Slack shows it: a card of its blocks in place of its text, which Slack shows
  * beside them only in notifications, or its text when they show nothing here, with a card for each of its
- * attachments; or why it posts nothing.
+ * attachments; or why it posts nothing. With `acting`, its cards keep their buttons that act.
  */
-export function slackMessage(payload: SlackPayload): SlackMessage | SlackError {
+export function slackMessage(payload: SlackPayload, acting = false): SlackMessage | SlackError {
   const attachments = listOf(payload.attachments);
   if (attachments.length > MAX_ATTACHMENTS) return "too_many_attachments";
   const attachmentBlocks = attachments.flatMap((attachment) => (isObject(attachment) ? listOf(attachment.blocks) : []));
   if (markdownLength([...listOf(payload.blocks), ...attachmentBlocks]) > MAX_MARKDOWN_LENGTH) return "msg_too_long";
-  const blocks = blocksCard(listOf(payload.blocks));
+  const blocks = blocksCard(listOf(payload.blocks), acting);
   const formatting: Formatting = payload.mrkdwn === false ? "plain" : "mrkdwn";
   const markup = blocks ? "" : mrkdwnHtml(stringOf(payload.text), formatting);
-  const cards = [...(blocks ? [blocks] : []), ...attachments.flatMap((attachment) => attachmentCard(attachment) ?? [])];
+  const cards = [...(blocks ? [blocks] : []), ...attachments.flatMap((attachment) => attachmentCard(attachment, acting) ?? [])];
   if (!shows(markup) && cards.length === 0) return "no_text";
   const tooLong = markup.length > MAX_MESSAGE_HTML_LENGTH || JSON.stringify(cards).length > MAX_MESSAGE_HTML_LENGTH;
   return tooLong ? "msg_too_long" : { markup, cards };
@@ -80,8 +84,8 @@ function markdownLength(blocks: unknown[]): number {
 }
 
 /** A payload's blocks as a card of the parts the room keeps (`parseParts`), or null when they show nothing here but rules. */
-function blocksCard(blocks: unknown[]): Card | null {
-  const parts = parseParts(blocks.map(blockPart).filter((part) => part !== null), addressOf);
+function blocksCard(blocks: unknown[], acting: boolean): Card | null {
+  const parts = parseParts(blocks.map(blockPart).filter((part) => part !== null), addressOf, acting);
   return showsAnything(parts) ? { source: "blocks", parts } : null;
 }
 
@@ -92,7 +96,7 @@ function blocksCard(blocks: unknown[]): Card | null {
  * the parts and addresses the room keeps (`parseParts`), so one the room would leave out, such as an image whose
  * address is too long, can't hide the fallback.
  */
-function attachmentCard(attachment: unknown): Card | null {
+function attachmentCard(attachment: unknown, acting: boolean): Card | null {
   if (!isObject(attachment)) return null;
   const formatted = new Set(listOf(attachment.mrkdwn_in));
   const formattingOf = (field: string): Formatting => (formatted.has(field) ? "mrkdwn" : "plain");
@@ -106,7 +110,7 @@ function attachmentCard(attachment: unknown): Card | null {
     ...listOf(attachment.blocks).map(blockPart),
     footerPart(attachment),
   ].filter((part) => part !== null);
-  const parts = parseParts(candidates, addressOf);
+  const parts = parseParts(candidates, addressOf, acting);
   const fallback = textPart(mrkdwnHtml(stringOf(attachment.fallback), "plain"));
   const shown = showsAnything(parts) ? parts : fallback ? [fallback] : [];
   const pretext = mrkdwnHtml(stringOf(attachment.pretext), formattingOf("pretext"));
@@ -151,22 +155,31 @@ function fieldsPart(fields: unknown[], formatting: Formatting): CardPart | null 
   return shown.length === 0 ? null : { kind: "fields", fields: shown };
 }
 
-/** The buttons that link somewhere, an attachment's `actions` or an actions block's `elements`, each in its style. */
-function buttonsPart(buttons: unknown[]): CardPart | null {
-  const shown = buttons.flatMap((button) => buttonOf(button) ?? []);
+/** The buttons of an attachment's `actions` or an actions block's `elements`, the block `blockId` names, each in its style. */
+function buttonsPart(buttons: unknown[], blockId?: unknown): CardPart | null {
+  const shown = buttons.flatMap((button) => buttonOf(button, blockId) ?? []);
   return shown.length === 0 ? null : { kind: "buttons", buttons: shown };
 }
 
 /**
- * A button that links somewhere, an attachment's action, whose text is plain text, or a Block Kit button, whose
- * text is a text object; or null for any other element, or a button only an app could answer.
+ * A button, an attachment's action, whose text is plain text, or a Block Kit button, whose text is a text
+ * object, in the block `blockId` names: one that links somewhere, or, without a `url`, one that acts, which has
+ * an `action_id`; or null for any other element, or a button with neither, which only an app could answer.
  */
-function buttonOf(button: unknown): CardButton | null {
+function buttonOf(button: unknown, blockId?: unknown): CardButton | null {
   if (!isObject(button) || (button.type !== undefined && button.type !== "button")) return null;
   const text = isObject(button.text) ? textOf(button.text) : mrkdwnText(stringOf(button.text));
   const href = addressOf(button.url);
+  const action = button.url === undefined ? actionOf(button, blockId) : undefined;
   const style = button.style === "primary" || button.style === "danger" ? button.style : undefined;
-  return text === "" || href === undefined ? null : { text, href, ...(style && { style }) };
+  return text === "" || (href === undefined && !action) ? null : { text, ...(href !== undefined && { href }), ...(action && { action }), ...(style && { style }) };
+}
+
+/** What a click on `button` tells its bot, its `action_id` and `value`, in the block `blockId` names, or undefined when it has no `action_id` a card keeps. */
+function actionOf(button: SlackPayload, blockId: unknown): CardAction | undefined {
+  if (!isActionId(button.action_id)) return undefined;
+  const value = typeof button.value === "string" && button.value.length <= MAX_ACTION_VALUE_LENGTH ? button.value : undefined;
+  return { id: button.action_id, ...(isActionId(blockId) && { blockId }), ...(value !== undefined && { value }) };
 }
 
 /** An attachment's footer: its text, its icon and its time, `ts`, in seconds. */
@@ -181,7 +194,7 @@ function footerPart(attachment: SlackPayload): CardPart | null {
 /**
  * A Block Kit block (https://docs.slack.dev/reference/block-kit/blocks) as a card's part, or null when it shows
  * nothing here. A block Ember doesn't know keeps the text it carries, and what only an app could answer, such as
- * a menu, or a button without an address, goes.
+ * a menu, or a button with neither an address nor an `action_id`, goes.
  */
 function blockPart(block: unknown): CardPart | null {
   if (!isObject(block)) return null;
@@ -199,7 +212,7 @@ function blockPart(block: unknown): CardPart | null {
     case "image":
       return imageBlockPart(block);
     case "actions":
-      return buttonsPart(listOf(block.elements));
+      return buttonsPart(listOf(block.elements), block.block_id);
     case "rich_text":
       return textPart(richTextHtml(listOf(block.elements)));
     case "markdown":
@@ -217,7 +230,7 @@ function blockPart(block: unknown): CardPart | null {
   }
 }
 
-/** A section block: its text and its fields, two to a row, beside an image, or a button that links somewhere. */
+/** A section block: its text and its fields, two to a row, beside an image, or a button. */
 function sectionPart(section: SlackPayload): CardPart | null {
   const html = textHtml(section.text);
   const fields = listOf(section.fields).flatMap((field): CardField[] => {
@@ -227,7 +240,7 @@ function sectionPart(section: SlackPayload): CardPart | null {
   if (!shows(html) && fields.length === 0) return null;
   const accessory = isObject(section.accessory) ? section.accessory : undefined;
   const thumb = accessory?.type === "image" ? imageElementOf(accessory) : undefined;
-  const button = accessory?.type === "button" ? buttonOf(accessory) : null;
+  const button = accessory?.type === "button" ? buttonOf(accessory, section.block_id) : null;
   return { kind: "section", ...(shows(html) && { html }), ...(fields.length > 0 && { fields }), ...(thumb && { thumb }), ...(button && { button }) };
 }
 
@@ -287,8 +300,8 @@ function tilesPart(cards: unknown[]): CardPart | null {
 }
 
 /**
- * A card block: its hero image, its icon, title and subtitle, its body and subtext, and its buttons that link
- * somewhere, which it lists, or holds in an actions block.
+ * A card block: its hero image, its icon, title and subtitle, its body and subtext, and its buttons, which it
+ * lists, or holds in an actions block.
  */
 function tileOf(card: unknown): CardTile | null {
   if (!isObject(card) || card.type !== "card") return null;
@@ -299,7 +312,7 @@ function tileOf(card: unknown): CardTile | null {
   const body = textHtml(card.body);
   const subtext = textHtml(card.subtext);
   const actions = isObject(card.actions) ? listOf(card.actions.elements) : listOf(card.actions);
-  const buttons = actions.flatMap((button) => buttonOf(button) ?? []);
+  const buttons = actions.flatMap((button) => buttonOf(button, card.block_id) ?? []);
   if (!hero && title === "" && subtitle === "" && !shows(body) && !shows(subtext) && buttons.length === 0) return null;
   return {
     ...(hero && { hero }),

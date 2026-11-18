@@ -12,19 +12,21 @@ import {
 import { credentialsOf } from "../auth";
 import { jsonBodyOf } from "../bodies";
 import type { Env } from "../env";
-import { addressTag, MAX_ADDRESS_LENGTH, sessionTag } from "../revocations";
+import { addressTag, sessionTag, taggedAddress } from "../revocations";
 import { workspace, type Credentials } from "../workspace";
 import { objectKey, previewKey, type Identified, type RoomBlob } from "./blobs";
-import { extname, sanitizedFilename } from "./filename";
+import { sanitizedFilename } from "./filename";
 import { imageSize } from "./images";
 import { byMagic, identify } from "./marcel";
+import { isPreviewType, keepPreview, previewFromImages } from "./previews";
 
 // Uploading files to a room into R2, in parts, since a Worker takes at most 100 MB a request. The room
 // keeps each upload (blobs.ts), and the first part says what the file is, as Active Storage identifies a
 // blob, then analyzes it, once it has it all. Once R2 has all of it, the room posts it as its uploader's
 // message. R2 keeps the file with its type and name, so serving it (serving.ts) needs nothing else.
 // Before the last part, the uploader's browser may send the file's preview, an image's thumbnail or a
-// video's poster, and the message shows it.
+// video's poster, and the message shows it. Where it sends none of a picture the message would otherwise
+// show as a file, Cloudflare Images makes one (previews.ts).
 
 /** How much of a file each part but the last carries: more than R2's least, 5 MiB, and few enough parts for the largest file. */
 export const UPLOAD_PART_SIZE = 10 * 1024 * 1024;
@@ -60,19 +62,6 @@ const ALREADY_POSTED = "The file is posted already";
 /** What a request that would store a file answers without an R2 bucket bound as FILES. */
 export const NO_STORAGE = "Ember isn't set up to store files";
 
-/**
- * The types a preview can be, by its bytes, with the extension each gives its name: the formats Active
- * Storage writes thumbnails and posters in that every browser shows (`ActiveStorage::Blob#default_variant_format`).
- */
-const PREVIEW_EXTENSIONS = new Map([
-  ["image/webp", "webp"],
-  ["image/jpeg", "jpg"],
-  ["image/png", "png"],
-]);
-
-/** What the preview of a file named `name` is called, as Active Storage names a variant: the file's name with its type's extension. */
-const previewName = (name: string, contentType: string) => `${name.slice(0, name.length - extname(name).length)}.${PREVIEW_EXTENSIONS.get(contentType)}`;
-
 const problem = (status: number, message: string) => Response.json({ error: message }, { status });
 
 /** What a banned IP address's requests to change something answer, as the Worker's own check does. */
@@ -98,8 +87,8 @@ async function uploaderIn(env: Env, credentials: Credentials, roomId: RoomId): P
   if (!access) return problem(401, NOT_SIGNED_IN);
   if (!access.member) return problem(404, ROOM_NOT_FOUND);
   if (access.banned) return tooManyRequests();
-  const { ip } = credentials.client;
-  const tags = [access.user.id, sessionTag(access.sessionId), ...(ip !== null && ip.length <= MAX_ADDRESS_LENGTH ? [addressTag(ip)] : [])];
+  const address = taggedAddress(credentials.client.ip);
+  const tags = [access.user.id, sessionTag(access.sessionId), ...(address !== null ? [addressTag(address)] : [])];
   return { user: access.user, tags, authorizedAt: access.authorizedAt };
 }
 
@@ -133,12 +122,19 @@ function posted(finished: { message: Message; posted: boolean } | string | null)
 }
 
 /**
- * Has the room post `uploader`'s upload `key`, which R2 has all of now, answering as `posted` does. When
- * the room no longer has the upload, as when it deleted the upload while this request put the file
- * together, has R2 delete the file and its preview, which nothing else would.
+ * Has the room post `uploader`'s `upload`, which R2 has all of now, answering as `posted` does, once
+ * Cloudflare Images has made the preview its uploader's browser didn't send, if its message would show it
+ * only by one. When the room no longer has the upload, as when it deleted the upload while this request
+ * put the file together, has R2 delete the file and its preview, which nothing else would.
  */
-async function finish(env: Env, files: R2Bucket, roomId: RoomId, uploader: Uploader, key: string, identified?: Identified): Promise<Response> {
+async function finish(env: Env, files: R2Bucket, roomId: RoomId, uploader: Uploader, upload: RoomBlob, identified?: Identified): Promise<Response> {
   const room = env.CHAT_ROOM.getByName(roomId);
+  const key = upload.id;
+  if (upload.preview === null) {
+    const file = { filename: upload.filename, byteSize: upload.byteSize, ...(identified ?? { contentType: upload.contentType, metadata: upload.metadata! }) };
+    const preview = await previewFromImages(env, files, key, file);
+    if (preview) await room.recordUploadPreview(roomId, uploader, key, preview);
+  }
   const finished = await room.finishUpload(roomId, uploader, key, identified);
   if (!finished && !(await room.uploadOf(roomId, uploader.user.id, key))) await files.delete([objectKey(key), previewKey(key)]);
   return posted(finished);
@@ -194,7 +190,7 @@ export async function uploadPart(request: Request, env: Env, roomId: RoomId, key
   // Again, as for the first part.
   uploader = await uploaderIn(env, credentials, roomId);
   if (uploader instanceof Response) return uploader;
-  if (!part) return finish(env, files, roomId, uploader, key);
+  if (!part) return finish(env, files, roomId, uploader, upload);
   const recorded = await room.recordUploadPart(roomId, uploader, key, part);
   if (!recorded) return problem(404, UPLOAD_NOT_FOUND);
   if (recorded.completedAt) return posted(await room.finishUpload(roomId, uploader, key));
@@ -206,7 +202,7 @@ export async function uploadPart(request: Request, env: Env, roomId: RoomId, key
     // Another request put the parts together first.
     if (!(await isWhole(files, recorded))) throw error;
   }
-  return finish(env, files, roomId, uploader, key);
+  return finish(env, files, roomId, uploader, recorded);
 }
 
 /**
@@ -232,7 +228,7 @@ export async function uploadPreview(request: Request, env: Env, roomId: RoomId, 
   if (length > MAX_PREVIEW_SIZE) return problem(413, "A preview is at most 5 MiB");
   const bytes = new Uint8Array(await request.arrayBuffer());
   const contentType = byMagic(bytes) ?? "";
-  const size = PREVIEW_EXTENSIONS.has(contentType) ? imageSize(bytes, contentType) : null;
+  const size = isPreviewType(contentType) ? imageSize(bytes, contentType) : null;
   if (!size) return problem(415, "A preview is a WebP, JPEG or PNG image");
   if (size.width > PREVIEW_MAX_WIDTH || size.height > PREVIEW_MAX_HEIGHT) return problem(422, "A preview fits within 1200×800");
 
@@ -243,7 +239,7 @@ export async function uploadPreview(request: Request, env: Env, roomId: RoomId, 
   if (arrived instanceof Response) return arrived;
   if (!unposted) return problem(404, UPLOAD_NOT_FOUND);
   if (unposted.completedAt) return problem(409, ALREADY_POSTED);
-  await files.put(previewKey(key), bytes, { httpMetadata: { contentType }, customMetadata: { filename: previewName(upload.filename, contentType) } });
+  await keepPreview(files, key, upload.filename, bytes, contentType);
   const recorded = await room.recordUploadPreview(roomId, arrived, key, size);
   if (!recorded) {
     // When the room has deleted the upload meanwhile, nothing else would have R2 delete this.
@@ -272,11 +268,11 @@ async function storeFirstPart(env: Env, files: R2Bucket, roomId: RoomId, uploade
     // Only the first request to store the file does, so none can replace the file a message shows.
     // Any after posts the file R2 has, in case the first didn't live to.
     if (await files.put(key, bytes, { ...options, onlyIf: new Headers({ "If-None-Match": "*" }) })) {
-      return finish(env, files, roomId, uploader, upload.id, identified);
+      return finish(env, files, roomId, uploader, upload, identified);
     }
     const stored = await files.get(key);
     if (!stored) return problem(404, UPLOAD_NOT_FOUND);
-    return finish(env, files, roomId, uploader, upload.id, identifiedOf(new Uint8Array(await stored.arrayBuffer()), upload.filename, upload.contentType));
+    return finish(env, files, roomId, uploader, upload, identifiedOf(new Uint8Array(await stored.arrayBuffer()), upload.filename, upload.contentType));
   }
   const multipart = await files.createMultipartUpload(key, options);
   const { partNumber, etag } = await multipart.uploadPart(1, bytes);

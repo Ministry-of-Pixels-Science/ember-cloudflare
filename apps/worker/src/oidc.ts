@@ -342,9 +342,10 @@ export async function idTokenClaims(client: OidcClient, discovery: Discovery, id
 /**
  * Who a back-channel logout token signs out, once it checks out: signed by the provider, issued by it,
  * to the app, in the last ten minutes, with the logout event, no nonce, and naming someone (`sub`) or a
- * session at the provider (`sid`), or both, and the sessions started by when, in milliseconds: when it
- * was issued, give or take the clocks' skew, so that one delivered late, or again, never ends a session
- * signed in after it. Null when any of that isn't so.
+ * session at the provider (`sid`), or both, and the sessions started by when, in milliseconds: by the
+ * end of the second it was issued in, by the provider's clock, so that one delivered late, or again,
+ * never ends a session signed in after it. The clocks' skew counts toward whether a token is taken,
+ * not toward which sessions it ends. Null when any of that isn't so.
  */
 export async function logoutTokenSubject(
   client: OidcClient,
@@ -362,7 +363,9 @@ export async function logoutTokenSubject(
   if (typeof events !== "object" || events === null || !Object.hasOwn(events, BACKCHANNEL_LOGOUT) || claims.nonce !== undefined) return null;
   const subject = namesSubject(claims) ? (claims.sub as string) : null;
   const sid = typeof claims.sid === "string" && claims.sid !== "" && claims.sid.length <= 255 ? claims.sid : null;
-  return subject === null && sid === null ? null : { subject, sid, startedBy: ((claims.iat as number) + SKEW_S) * 1000 };
+  // `iat` counts whole seconds, so a session started within the second it names may have come first.
+  const startedBy = (Math.floor(claims.iat as number) + 1) * 1000;
+  return subject === null && sid === null ? null : { subject, sid, startedBy };
 }
 
 /** Forgets every discovery document and key read, as the tests do between providers. */

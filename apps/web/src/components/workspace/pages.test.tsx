@@ -1,9 +1,11 @@
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { startingInvolvement, type Me, type SharedRoom } from "@ember/protocol";
+import { startingInvolvement, type Me, type Profile, type SharedRoom } from "@ember/protocol";
 import { PUSH_ON } from "@/test-push";
 
 const ada: Me = { id: "u1", name: "Ada", administrator: false };
+// All of it, as the profile page reads every part once it loads.
+const adasProfile: Profile = { name: "Ada", username: null, emailAddress: "ada@example.com", bio: null, avatarUrl: "/users/u1/avatar?v=1", avatar: false, password: true, membershipNeeded: false, memberful: null, sso: null, assistant: null, apps: [], outsideAi: null };
 const random: SharedRoom = { id: "random", name: "random", kind: "open", icon: null };
 const ANSWERS: Record<string, () => Response> = {
   "GET /api/sidebar": () =>
@@ -12,12 +14,13 @@ const ANSWERS: Record<string, () => Response> = {
       favorites: { rooms: [], version: 0 },
       sharedOrder: [],
       invitation: null,
-      suggestions: [],
       huddles: {},
+      blocks: { userIds: [], version: 0 },
     }),
   "GET /api/users": () => Response.json({ users: [] }),
   "GET /api/searches?q=": () => Response.json({ search: null, matches: [], next: null, rooms: [], recent: [] }),
-  "GET /api/users/me/profile": () => Response.json({ profile: { name: "Ada", emailAddress: "ada@example.com", bio: null } }),
+  "GET /api/users/me/profile": () => Response.json({ profile: adasProfile }),
+  "GET /api/huddles": () => Response.json({ huddles: [] }),
 };
 
 /** A socket that never connects: these tests are about the pages around the rooms. */
@@ -45,7 +48,7 @@ async function freshWorkspace() {
     render(
       <PushContext value={PUSH_ON}>
         <FlashProvider workspace>
-          <Workspace me={ada} workspaceName="Analytical Engines" onAccountChanged={vi.fn()} onSignOut={vi.fn()} onSessionChanged={vi.fn()} />
+          <Workspace me={ada} workspaceName="Analytical Engines" onAccountChanged={vi.fn()} onSignOut={vi.fn()} onDeleteAccount={vi.fn()} onSessionChanged={vi.fn()} />
         </FlashProvider>
       </PushContext>,
     );
@@ -109,6 +112,14 @@ describe("Workspace layout", () => {
     await loadPageAhead("/searches");
     show("/searches");
     expect(searchHeading()).toBeInTheDocument();
+  });
+
+  it("loads the Huddles page ahead at its address too", async () => {
+    const { show, loadPageAhead } = await freshWorkspace();
+    await loadPageAhead("/huddles");
+    show("/huddles");
+    expect(screen.getByRole("heading", { level: 1, name: "Huddles" })).toBeInTheDocument();
+    expect(screen.queryByText("Loading…")).not.toBeInTheDocument();
   });
 
   it("loads nothing ahead for a room's address", async () => {

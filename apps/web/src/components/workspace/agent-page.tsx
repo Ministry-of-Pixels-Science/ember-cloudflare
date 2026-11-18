@@ -3,6 +3,7 @@ import { MAX_USER_NAME_LENGTH, type Me, type RoomId, type SidebarRoom, type User
 import {
   agentCannotSearchWith,
   MAX_AGENT_DESCRIPTION_LENGTH,
+  type AgentAccess,
   type AgentChanges,
   type AgentField,
   type AgentRoom,
@@ -16,26 +17,25 @@ import {
   ASSISTANT_OFF,
   DEFAULT_LEVELS,
   formatOf,
-  isWorkersAiModel,
   MAX_CONVERSATION_LENGTH,
   MAX_INSTRUCTIONS_LENGTH,
   maxTokensAt,
-  MODEL_REFUSED,
   modelName,
-  modelOf,
+  offeredModelOf,
   PAGES_READ_PER_ANSWER,
+  searchFormatOf,
   WEB_SEARCHES_PER_ANSWER,
-  WEB_TOOLS_IN,
+  webToolsOf,
   type AnswerLevels,
-  type AssistantCatalog,
-  type AssistantModel,
   type AssistantSettings as Assistant,
   type ModelFormat,
   type ModelPrice,
+  type OfferedModels,
 } from "@ember/protocol/assistant";
 import { AGENT_TEMPLATE, promptAround, templateRefusal, webPromptFor, withInstructions, type Prompt } from "@ember/protocol/prompts";
 import { displayBody, type DisplayNode } from "@ember/richtext/dom";
 import { AUTH_FORM } from "@/components/auth-page";
+import { Crown, EyeClosed } from "@/components/icons/iconoir";
 import defaultBotAvatar from "@/components/default-bot-avatar.svg";
 import { FIELD_INPUT, Field, SubmitButton } from "@/components/field";
 import { Input } from "@/components/ui/input";
@@ -43,18 +43,20 @@ import { Switch } from "@/components/ui/switch";
 import { useAccount } from "@/hooks/use-account";
 import { useChosenPhoto } from "@/hooks/use-chosen-photo";
 import { useMounted } from "@/hooks/use-mounted";
+import { offeredModelsThrough } from "@/hooks/use-offered-models";
 import { navigate } from "@/hooks/use-route";
 import { useTitle } from "@/hooks/use-title";
-import { ApiError, changeAgent, createAgent, deleteAgent, fetchAgent, fetchWorkspaceSettings, isSignedOut, listAssistantModels, removeAgentAvatar, tryAgent } from "@/lib/api";
+import { ApiError, changeAgent, createAgent, deleteAgent, fetchAgent, fetchWorkspaceSettings, isSignedOut, removeAgentAvatar, tryAgent } from "@/lib/api";
 import { dateLabel } from "@/lib/messages";
 import { cn } from "@/lib/utils";
 import { AGENTS_PATH, useAgentsOnly } from "./agent-list";
+import { AgentTools } from "./agent-tools";
 import { BotCards } from "./bot-card";
 import { BUTTON } from "./email-settings";
 import { lengthOf, searchingWith, TEXTAREA } from "./ember-settings";
 import { LevelDials } from "./level-dials";
 import { MessageBody } from "./message-body";
-import { ANOTHER_MODEL, dollars, idOf, ModelPicker, modelChoiceOf, type ModelChoice } from "./model-picker";
+import { dollars, ModelPicker, startingModelOf } from "./model-picker";
 import { PicturePicker } from "./picture-picker";
 import { PromptPreview } from "./prompt-preview";
 import { DeleteButton, isMissing } from "./room-settings-page";
@@ -65,7 +67,8 @@ import { UnsavedChanges } from "./unsaved-changes";
 // the AI assistant tab links to, as the project's owner chose in the mock-ups (2026-11-10): the agent's
 // avatar, name and what it does, its Instructions, with what Ember adds around them, which administrators
 // may modify with caution, as the project's owner asked (2026-11-11), How it answers, its
-// model and dials, with the most an answer costs at the model's prices, Search the web, its Rooms, and
+// model and dials, with the most an answer costs at the model's prices, Search the web, its Rooms, Admin
+// access, whose two switches keep it for administrators, as the project's owner asked (2026-11-15), and
 // Try it, which asks it something as the page sets it up, saved or not. Create agent and Save changes
 // ask its model a test question first when it's new, as Set up Ember AI does, and go back to the tab once
 // the agent's saved. Leaving with changes asks first. An agent's settings say who last changed it, and
@@ -88,7 +91,27 @@ export const CONFIRM_DELETE_AGENT = "Are you sure you want to delete this agent?
 export const tryExplained = (name: string) => `Ask ${name} something, as it's set up above, before you save. Nobody else sees what it says.`;
 
 /** What Search the web says for a model, called `name`, that can't search. */
-export const cannotSearch = (name: string) => `${name} can't search the web through AI Gateway, but Anthropic's and OpenAI's models can.`;
+export const cannotSearch = (name: string) => `${name} can't search the web through AI Gateway, but the other models Ember offers can.`;
+
+/** What Rooms says of the agent called `called`, by who can ask it. */
+export function roomsExplained(called: string, access: AgentAccess): string {
+  if (access === "admin-dms") return "Not in any room while it's only available in admin DMs.";
+  return access === "admins"
+    ? `Where administrators can mention ${called}. They can also write to it directly.`
+    : `Where people can mention ${called}. Anyone can also write to it directly.`;
+}
+
+/** What Admin access says of each of its switches, for the agent called `called`. */
+export const accessExplained = (called: string) => {
+  const It = called.charAt(0).toUpperCase() + called.slice(1);
+  return {
+    adminsOff: `Anyone in ${called}'s rooms can ask it. Turn this on so that only administrators can.`,
+    adminsOn: `Only administrators can ask ${called}. Everyone else sees its answers in its rooms, but it doesn't answer them.`,
+    adminsKept: "On, since only administrators can write to it.",
+    dmsOff: `Turn this on to keep ${called} out of every room: administrators write to it directly, and nobody else can see it or ask it anything.`,
+    dmsOn: `${It} isn't in any room. Administrators write to it directly, and nobody else can see it or ask it anything.`,
+  };
+};
 
 const NOTE = "text-[0.8em] text-muted-foreground max-md:text-[12px]";
 
@@ -97,31 +120,37 @@ const CARD = "flex min-w-0 flex-col gap-4 rounded-[10px] border bg-surface px-[2
 
 /**
  * A radio button or a checkbox in a list of them, on a row 44px tall, whose box sits far enough into its
- * label, for fingers, for a fingertip on it to land on the label.
+ * label, for fingers, for a fingertip on it to land on the label, as the bot form's Rooms has them too.
  */
-const CHOICE = "flex min-h-11 cursor-pointer items-center gap-2.5 has-disabled:cursor-default touch:-ms-3.5 touch:ps-3.5";
+export const CHOICE = "flex min-h-11 cursor-pointer items-center gap-2.5 has-disabled:cursor-default touch:-ms-3.5 touch:ps-3.5";
 
 /** Where leaving an agent's page goes, which is always away from what's typed there. */
 const leaves = () => false;
 
-/** What the page needs of Ember AI: its settings, whose account lists the models, and Cloudflare's catalog of them. */
+/** What the page needs of Ember AI: its settings, whose account the agents' models answer through, and the models Ember offers through it. */
 interface Setup {
   assistant: Assistant;
-  catalog: AssistantCatalog;
+  offered: OfferedModels;
 }
 
-/** An agent's page as it's filled in, its rooms every open one, or the ones chosen, which choosing every one keeps. */
+/**
+ * An agent's page as it's filled in: its rooms every open one, or the ones chosen, which choosing every one
+ * keeps, and its two admin switches, of which Only available in admin DMs means Admins only too, however
+ * that one was left, and no rooms, whichever were chosen.
+ */
 interface Fields {
   name: string;
   description: string;
   instructions: string;
   /** What Ember adds around the instructions, as the page shows it: Ember's own until it's modified. */
   promptTemplate: string;
-  choice: ModelChoice;
+  model: string;
   levels: AnswerLevels;
   webSearch: boolean;
   everyOpenRoom: boolean;
   chosenRooms: RoomId[];
+  adminsOnly: boolean;
+  adminDms: boolean;
 }
 
 /** Why what the page sends is refused, said on the field it's about, or else, with none, under Create agent or Save changes. */
@@ -130,48 +159,61 @@ interface Refusal {
   error: string;
 }
 
-const AGENT_FIELDS: readonly string[] = ["name", "description", "instructions", "promptTemplate", "model", "levels", "webSearch", "rooms", "question"] satisfies AgentField[];
+const AGENT_FIELDS: readonly string[] = ["name", "description", "instructions", "promptTemplate", "model", "levels", "webSearch", "access", "rooms", "question"] satisfies AgentField[];
 
 /** The field of the page an answer's `field` names, or null for none of them. */
 const fieldOf = (field: string | undefined) => (field !== undefined && AGENT_FIELDS.includes(field) ? (field as AgentField) : null);
 
-/** A new agent's page: nothing typed, Ember's own around it, @ember's model chosen, at the levels people start at, without the web, in every open room. */
-const newFields = ({ assistant, catalog }: Setup): Fields => ({
+/**
+ * A new agent's page: nothing typed, Ember's own around it, @ember's model chosen, or the one Ember
+ * suggests if it no longer offers that, at the levels people start at, without the web, in every open room,
+ * for everyone to ask.
+ */
+const newFields = ({ assistant, offered }: Setup): Fields => ({
   name: "",
   description: "",
   instructions: "",
   promptTemplate: AGENT_TEMPLATE,
-  choice: modelChoiceOf(assistant, catalog.models),
+  model: startingModelOf(assistant.model, offered),
   levels: DEFAULT_LEVELS,
   webSearch: false,
   everyOpenRoom: true,
   chosenRooms: [],
+  adminsOnly: false,
+  adminDms: false,
 });
 
-/** An agent's page as `agent` is saved, its model chosen from `models`, or else typed. */
-const fieldsOf = (agent: AgentSettings, models: readonly AssistantModel[]): Fields => ({
+/** An agent's page as `agent` is saved. */
+const fieldsOf = (agent: AgentSettings): Fields => ({
   name: agent.name,
   description: agent.description,
   instructions: agent.instructions,
   promptTemplate: agent.promptTemplate ?? AGENT_TEMPLATE,
-  choice: models.some(({ id }) => id === agent.model) ? { chosen: agent.model, typed: "" } : { chosen: ANOTHER_MODEL, typed: agent.model },
+  model: agent.model,
   levels: agent.levels,
   webSearch: agent.webTools.includes("search"),
   everyOpenRoom: agent.rooms === null,
   chosenRooms: agent.rooms?.map(({ id }) => id) ?? [],
+  adminsOnly: agent.access !== "everyone",
+  adminDms: agent.access === "admin-dms",
 });
 
-/** The rooms `fields` put the agent in: null for every open one. */
-const roomsChosen = ({ everyOpenRoom, chosenRooms }: Pick<Fields, "everyOpenRoom" | "chosenRooms">) => (everyOpenRoom ? null : chosenRooms);
+/** The rooms `fields` put the agent in: null for every open one, and none while only administrators' direct messages reach it. */
+const roomsChosen = ({ everyOpenRoom, chosenRooms, adminDms }: Pick<Fields, "everyOpenRoom" | "chosenRooms" | "adminDms">) =>
+  adminDms ? [] : everyOpenRoom ? null : chosenRooms;
+
+/** Who `fields` let ask the agent. */
+const accessOf = ({ adminsOnly, adminDms }: Pick<Fields, "adminsOnly" | "adminDms">): AgentAccess => (adminDms ? "admin-dms" : adminsOnly ? "admins" : "everyone");
 
 const sameRooms = (a: readonly RoomId[] | null, b: readonly AgentRoom[] | null) =>
   a === null || b === null ? a === b : a.length === b.length && b.every(({ id }) => a.includes(id));
 
 /**
- * The open rooms an agent can be kept to, by name: those in the sidebar's `rooms`, once it has them, and those
- * it's kept to already, `kept`, which the administrator may not be in, such as one made while they were banned.
+ * The open rooms an agent or a chat bot can be kept to, by name: those in the sidebar's `rooms`, once it has
+ * them, and those it's kept to already, `kept`, which the administrator may not be in, such as one made while
+ * they were banned.
  */
-function roomsToPick(rooms: readonly SidebarRoom[] | null, kept: readonly AgentRoom[]): AgentRoom[] {
+export function roomsToPick(rooms: readonly SidebarRoom[] | null, kept: readonly AgentRoom[]): AgentRoom[] {
   const open = rooms?.flatMap((room) => (room.kind === "open" ? [{ id: room.id, name: room.name }] : [])) ?? [];
   // The sidebar's last, as its names follow renames.
   const byId = new Map([...kept, ...open].map((room) => [room.id, room]));
@@ -181,13 +223,8 @@ function roomsToPick(rooms: readonly SidebarRoom[] | null, kept: readonly AgentR
 /** What Ember adds around the instructions as `template` has it, as the page sends it: null for Ember's own. */
 const templateSent = (template: string) => (template.trim() === AGENT_TEMPLATE ? null : template);
 
-/** The name of model `model` in `models`, as the Worker keeps it, if they list it. */
-const listedName = (model: string, models: readonly AssistantModel[]) => models.find(({ id }) => id === model)?.name;
-
 /** The agent `fields` set up, as New agent sends it. */
-function newAgentOf({ name, description, instructions, promptTemplate, choice, levels, webSearch, ...rooms }: Fields, models: readonly AssistantModel[]): NewAgent {
-  const model = idOf(choice);
-  const modelName = listedName(model, models);
+function newAgentOf({ name, description, instructions, promptTemplate, model, levels, webSearch, ...rest }: Fields): NewAgent {
   const template = templateSent(promptTemplate);
   return {
     name,
@@ -195,11 +232,11 @@ function newAgentOf({ name, description, instructions, promptTemplate, choice, l
     instructions,
     ...(template !== null && { promptTemplate: template }),
     model,
-    ...(modelName && { modelName }),
     thinking: levels.thinking,
     length: levels.length,
     webSearch,
-    rooms: roomsChosen(rooms),
+    access: accessOf(rest),
+    rooms: roomsChosen(rest),
   };
 }
 
@@ -207,18 +244,17 @@ function newAgentOf({ name, description, instructions, promptTemplate, choice, l
  * What `fields` change of `agent` as it's saved. Only they're sent, so that saving doesn't put back what
  * another administrator has saved since.
  */
-function changesOf(agent: AgentSettings, fields: Fields, models: readonly AssistantModel[]): AgentChanges {
+function changesOf(agent: AgentSettings, fields: Fields): AgentChanges {
   const changes: AgentChanges = {};
   if (fields.name.trim() !== agent.name) changes.name = fields.name;
   if (fields.description.trim() !== agent.description) changes.description = fields.description;
   if (fields.instructions.trim() !== agent.instructions) changes.instructions = fields.instructions;
   if (fields.promptTemplate.trim() !== (agent.promptTemplate ?? AGENT_TEMPLATE)) changes.promptTemplate = templateSent(fields.promptTemplate);
-  const model = idOf(fields.choice);
-  const name = listedName(model, models);
-  if (model !== agent.model) Object.assign(changes, { model }, name && { modelName: name });
+  if (fields.model !== agent.model) changes.model = fields.model;
   if (fields.levels.thinking !== agent.levels.thinking) changes.thinking = fields.levels.thinking;
   if (fields.levels.length !== agent.levels.length) changes.length = fields.levels.length;
   if (fields.webSearch !== agent.webTools.includes("search")) changes.webSearch = fields.webSearch;
+  if (accessOf(fields) !== agent.access) changes.access = accessOf(fields);
   const rooms = roomsChosen(fields);
   if (!sameRooms(rooms, agent.rooms)) changes.rooms = rooms;
   return changes;
@@ -243,14 +279,14 @@ function secondsOf(ms: number): string {
   return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)} seconds`;
 }
 
-/** Reads Ember AI and its catalog of models, once, for an administrator, sending the page away while Ember AI is off. */
+/** Reads Ember AI, and the models Ember offers through its account, once, for an administrator, sending the page away while Ember AI is off. */
 function useSetup(administrator: boolean, off: () => void, failed: (error: unknown) => void): Setup | null {
   const [setup, setSetup] = useState<Setup | null>(null);
   useEffect(() => {
     if (!administrator) return;
     let stopped = false;
     fetchWorkspaceSettings()
-      .then(async ({ assistant }) => assistant && { assistant, catalog: await listAssistantModels({ accountId: assistant.accountId }) })
+      .then(async ({ assistant }) => assistant && { assistant, offered: await offeredModelsThrough({ accountId: assistant.accountId }) })
       .then(
         (read) => {
           if (stopped) return;
@@ -338,8 +374,7 @@ interface FormProps {
 
 /** The agent's page: its form, with Try it, and for an agent that's saved, who last changed it and Delete agent. */
 function AgentForm({ me, saved, setup, rooms, onFailed }: FormProps) {
-  const models = setup.catalog.models;
-  const [fields, setFields] = useState(() => (saved ? fieldsOf(saved, models) : newFields(setup)));
+  const [fields, setFields] = useState(() => (saved ? fieldsOf(saved) : newFields(setup)));
   // Whether anything's been typed or chosen on a new agent's page.
   const [touched, setTouched] = useState(false);
   const photo = useChosenPhoto();
@@ -354,18 +389,26 @@ function AgentForm({ me, saved, setup, rooms, onFailed }: FormProps) {
   const name = fields.name.trim();
   // What the page calls the agent, before it has a name.
   const called = name || "the agent";
-  const model = idOf(fields.choice);
+  const model = fields.model;
   const sameModel = saved?.model === model;
-  const nameOfModel = sameModel ? saved.modelName : modelName(model, models);
-  const format: ModelFormat = sameModel ? saved.format : formatOf(model, models);
-  const canSearch = WEB_TOOLS_IN[format].includes("search");
-  // What it does on the web: what its tests found, while it has the model it has, or else what its model's format allows.
-  const webTools = !fields.webSearch || !canSearch ? [] : sameModel && saved.webTools.length > 0 ? saved.webTools : [...WEB_TOOLS_IN[format]];
+  const offered = offeredModelOf(model, setup.offered.models);
+  const nameOfModel = sameModel ? saved.modelName : (offered?.name ?? modelName(model));
+  const format: ModelFormat = sameModel ? saved.format : (offered?.format ?? formatOf(model));
+  // The format it searches in, as one of Workers AI's kept in Chat Completions does in theirs, and what it may do on the web there, of what that allows,
+  // where one of Workers AI's searches only while the model search lists it, as it lists those that take tools.
+  const searchFormat = searchFormatOf(model, format);
+  const searchIn = searchFormat === "workers" && offered?.format !== "workers" ? null : searchFormat;
+  const mayOnTheWeb = searchIn ? webToolsOf(model, searchIn, setup.offered.models) : [];
+  // One kept with its model searches as its tests found, though the model isn't listed, as while Workers AI's can't be.
+  const canSearch = mayOnTheWeb.length > 0 || (sameModel && saved.webTools.length > 0);
+  // What it does on the web: what its tests found, while it has the model it has, or else what it may do there.
+  const webTools = !fields.webSearch || !canSearch ? [] : sameModel && saved.webTools.length > 0 ? saved.webTools : [...mayOnTheWeb];
   const where = { community, roomName: null, inThread: false };
   const web = webPromptFor(me.name, webTools, webTools.length > 0);
   const prompt: Prompt = promptAround(saved?.id ?? null, name || "Agent", me.name, where, ANSWER_WORDS[fields.levels.length], web, new Date(), fields.promptTemplate.trim());
-  const price = isWorkersAiModel(model) ? undefined : models.find(({ id }) => id === model)?.price;
-  const changes = saved && changesOf(saved, fields, models);
+  const price = offered?.price;
+  const changes = saved && changesOf(saved, fields);
+  const access = accessOf(fields);
   const asksModel = !saved || changes?.model !== undefined || (changes?.webSearch === true && saved.webTools.length === 0);
   const changed = busy === null && (photo.preview !== null || (saved ? removingAvatar || Object.keys(changes ?? {}).length > 0 : touched));
   const openRooms = roomsToPick(rooms, saved?.rooms ?? []);
@@ -380,12 +423,11 @@ function AgentForm({ me, saved, setup, rooms, onFailed }: FormProps) {
 
   /**
    * Why the page can't be sent as it's filled in, before it is: what Ember adds around the instructions
-   * a template it doesn't take, a model that can't be one, or Search the web on for one that can't search.
+   * a template it doesn't take, or Search the web on for a model that can't search.
    */
   const refusalBefore = (): Refusal | null => {
     const template = templateRefusal(fields.promptTemplate.trim());
     if (template !== null) return { field: "promptTemplate", error: template };
-    if (modelOf(model) === null) return { field: "model", error: MODEL_REFUSED };
     if (fields.webSearch && !canSearch) return { field: "webSearch", error: agentCannotSearchWith(nameOfModel) };
     return null;
   };
@@ -401,7 +443,7 @@ function AgentForm({ me, saved, setup, rooms, onFailed }: FormProps) {
       throw new Error(refused.error);
     }
     const avatar = await photo.photo();
-    if (!saved) return createAgent(newAgentOf(fields, models), avatar);
+    if (!saved) return createAgent(newAgentOf(fields), avatar);
     let agent = saved;
     if (Object.keys(changes ?? {}).length > 0 || avatar) agent = await changeAgent(saved.id, changes ?? {}, avatar);
     if (removingAvatar && !avatar) agent = await removeAgentAvatar(saved.id);
@@ -567,23 +609,32 @@ function AgentForm({ me, saved, setup, rooms, onFailed }: FormProps) {
               How it answers
             </h2>
             <p className={NOTE}>
-              Every answer {called} gives runs on this model, from Cloudflare's catalog for your AI Gateway, thinking and writing as much as you set here. People can't
-              change these on their profile, as they can for @ember.
+              Every answer {called} gives runs on this model, through your AI Gateway, thinking and writing as much as you set here. People can't change these on
+              their profile, as they can for @ember.
             </p>
           </div>
           <div>
             <ModelPicker
-              models={models}
-              unread={setup.catalog.refusal}
-              choice={fields.choice}
-              onChoose={(choice) => change("model", { choice })}
+              models={setup.offered.models}
+              // The model it answers with stays in the menu once Ember no longer offers it, until another is chosen.
+              kept={saved && !offeredModelOf(saved.model, setup.offered.models) ? { id: saved.model, name: saved.modelName } : null}
+              chosen={fields.model}
+              onChoose={(model) => change("model", { model })}
               refusal={refusal?.field === "model" ? { field: "model", error: refusal.error } : null}
               disabled={busy !== null}
               accountId={setup.assistant.accountId}
+              workersAi={setup.offered.workersAi}
             />
           </div>
           <div>
-            <LevelDials name="agent-levels" levels={fields.levels} disabled={busy !== null} onChange={(levels) => change("levels", { levels: { ...fields.levels, ...levels } })} />
+            <LevelDials
+              name="agent-levels"
+              levels={fields.levels}
+              // The levels its model takes are known once it's saved with it, as saving asks it at each.
+              model={sameModel ? { name: nameOfModel, thinkingLevels: saved.thinkingLevels } : undefined}
+              disabled={busy !== null}
+              onChange={(levels) => change("levels", { levels: { ...fields.levels, ...levels } })}
+            />
             <Under id="agent-levels" field="levels" refusal={refusal} className="mt-2" />
           </div>
           {price && (
@@ -597,7 +648,7 @@ function AgentForm({ me, saved, setup, rooms, onFailed }: FormProps) {
           called={called}
           modelName={nameOfModel}
           canSearch={canSearch}
-          reads={WEB_TOOLS_IN[format].includes("read")}
+          reads={mayOnTheWeb.includes("read")}
           on={fields.webSearch}
           refusal={refusal?.field === "webSearch" ? refusal.error : null}
           disabled={busy !== null}
@@ -609,31 +660,37 @@ function AgentForm({ me, saved, setup, rooms, onFailed }: FormProps) {
               Rooms
             </h2>
             <p id="agent-rooms-description" className={NOTE}>
-              Where people can mention {called}. Anyone can also write to it directly.
+              {roomsExplained(called, access)}
             </p>
           </div>
-          <fieldset aria-labelledby="agent-rooms-heading" aria-describedby={describedBy("agent-rooms", "rooms")} disabled={busy !== null} className="flex flex-col gap-1">
+          {/* Neither choice is the agent's while only administrators' direct messages reach it, so neither is checked, and the rooms chosen wait. */}
+          <fieldset
+            aria-labelledby="agent-rooms-heading"
+            aria-describedby={describedBy("agent-rooms", "rooms")}
+            disabled={busy !== null || fields.adminDms}
+            className={cn("flex flex-col gap-1", fields.adminDms && "opacity-50")}
+          >
             <label className={CHOICE}>
               <input
                 type="radio"
                 name="agent-rooms"
-                checked={fields.everyOpenRoom}
+                checked={fields.everyOpenRoom && !fields.adminDms}
                 onChange={() => change("rooms", { everyOpenRoom: true })}
                 className="size-4 flex-none accent-foreground"
               />
-              <span>Every room open to everyone, as @ember is, new ones too</span>
+              <span>Every room</span>
             </label>
             <label className={CHOICE}>
               <input
                 type="radio"
                 name="agent-rooms"
-                checked={!fields.everyOpenRoom}
+                checked={!fields.everyOpenRoom && !fields.adminDms}
                 onChange={() => change("rooms", { everyOpenRoom: false })}
                 className="size-4 flex-none accent-foreground"
               />
               <span>Only the rooms I choose</span>
             </label>
-            {!fields.everyOpenRoom && (
+            {!fields.everyOpenRoom && !fields.adminDms && (
               <div className="ms-6 grid grid-cols-2 gap-x-[2ch] gap-y-1 upto-500px:grid-cols-1">
                 {openRooms.map((room) => (
                   <label key={room.id} className={CHOICE}>
@@ -655,11 +712,19 @@ function AgentForm({ me, saved, setup, rooms, onFailed }: FormProps) {
           </fieldset>
           <Under id="agent-rooms" field="rooms" refusal={refusal} />
         </section>
+        <AdminAccess
+          called={called}
+          adminsOnly={fields.adminsOnly}
+          adminDms={fields.adminDms}
+          refusal={refusal}
+          disabled={busy !== null}
+          onTurn={(switches) => change("access", switches)}
+        />
         <TryIt
           called={called}
           agentId={saved?.id ?? null}
           trialOf={(question) => {
-            const { description: _, rooms: __, ...agent } = newAgentOf(fields, models);
+            const { description: _, rooms: __, access: ___, ...agent } = newAgentOf(fields);
             return { ...agent, question };
           }}
           refusalBefore={refusalBefore}
@@ -676,6 +741,11 @@ function AgentForm({ me, saved, setup, rooms, onFailed }: FormProps) {
           </p>
         )}
       </form>
+      {saved && (
+        <div className="mt-6">
+          <AgentTools agentId={saved.id} name={saved.name} onFailed={onFailed} />
+        </div>
+      )}
       {saved && (
         <>
           <hr className="my-8 w-full" />
@@ -751,6 +821,67 @@ function WebSearch({
         </div>
         <Switch checked={on} onCheckedChange={onTurn} disabled={disabled} aria-labelledby="agent-search-heading" aria-describedby="agent-search-description" />
       </div>
+    </section>
+  );
+}
+
+/**
+ * Admin access: Admins only, which keeps the agent called `called` for administrators to ask, and Only
+ * available in admin DMs, which keeps it out of every room and from everyone else's sight, and so holds
+ * Admins only on, which goes back to how it was left once this is off.
+ */
+function AdminAccess({
+  called,
+  adminsOnly,
+  adminDms,
+  refusal,
+  disabled,
+  onTurn,
+}: {
+  called: string;
+  adminsOnly: boolean;
+  adminDms: boolean;
+  refusal: Refusal | null;
+  disabled: boolean;
+  onTurn: (switches: Partial<Pick<Fields, "adminsOnly" | "adminDms">>) => void;
+}) {
+  const said = accessExplained(called);
+  return (
+    <section aria-labelledby="agent-access-heading" className={CARD}>
+      <div>
+        <h2 id="agent-access-heading" className="text-base font-semibold">
+          Admin access
+        </h2>
+        <p className={NOTE}>Keep {called} for administrators.</p>
+      </div>
+      <div className="flex items-center gap-x-[1.5ch] border-t pt-4">
+        <Crown className="size-[18px] flex-none self-start" />
+        <div className="min-w-0 flex-1">
+          <div id="agent-admins-label">Admins only</div>
+          <p id="agent-admins-description" className={cn(NOTE, "wrap-anywhere")}>
+            {adminDms ? said.adminsKept : adminsOnly ? said.adminsOn : said.adminsOff}
+          </p>
+        </div>
+        <Switch
+          checked={adminsOnly || adminDms}
+          onCheckedChange={(adminsOnly) => onTurn({ adminsOnly })}
+          disabled={disabled || adminDms}
+          aria-labelledby="agent-admins-label"
+          aria-describedby="agent-admins-description"
+          className={cn(adminDms && "opacity-50")}
+        />
+      </div>
+      <div className="flex items-center gap-x-[1.5ch] border-t pt-4">
+        <EyeClosed className="size-[18px] flex-none self-start" />
+        <div className="min-w-0 flex-1">
+          <div id="agent-dms-label">Only available in admin DMs</div>
+          <p id="agent-dms-description" className={cn(NOTE, "wrap-anywhere")}>
+            {adminDms ? said.dmsOn : said.dmsOff}
+          </p>
+        </div>
+        <Switch checked={adminDms} onCheckedChange={(adminDms) => onTurn({ adminDms })} disabled={disabled} aria-labelledby="agent-dms-label" aria-describedby="agent-dms-description" />
+      </div>
+      <Under id="agent-access" field="access" refusal={refusal} />
     </section>
   );
 }

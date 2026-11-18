@@ -9,17 +9,19 @@ import {
   type Boost,
   type Message,
   type RoomId,
+  type StoredFile,
   type UserId,
 } from "@ember/protocol";
+import { BLOCKED_WORDS_REFUSED } from "@ember/protocol/blocked-words";
 import { directoryOf } from "../avatar-tokens";
 import { bodyUpTo } from "../bodies";
 import { BLANK, EMPTY, FORBIDDEN, NOT_FOUND, type BotPage } from "../chat-room";
 import { originFor } from "../custom-domain";
 import type { Env } from "../env";
 import { etagOf, isFresh } from "../etag";
-import { objectKey } from "../files/blobs";
+import { objectKey, previewKey } from "../files/blobs";
 import { FormError, formBoundaryOf, FormReader, isFormType } from "../files/form-parts";
-import { storeArriving } from "../files/streamed";
+import { storeArriving, withPreview } from "../files/streamed";
 import { NO_STORAGE } from "../files/uploads";
 import { urlOf } from "../request-url";
 import type { PageCursor } from "../store";
@@ -32,15 +34,18 @@ import { payloadOf, slackMessage, slackPayloadOf, type SlackError, type SlackPay
 // key>/messages, and edits, deletes and boosts its messages under that. The key is all a bot has, so
 // these routes never read a session cookie, which leaves another site's page nothing to forge. At
 // /rooms/<room id>/<bot key>/slack, a bot posts what a Slack incoming webhook is sent instead
-// (slack.ts), so tools that post to Slack can post to a room.
+// (slack.ts), so tools that post to Slack can post to a room, and at
+// /rooms/<room id>/<bot key>/messages/<message id>/slack, what takes the place of a message it posted, as
+// a bot that answers a click on its card later does (clicks.ts).
 
 /** A room's address for bots, `room_bot_messages`, and those of its messages, their boosts and a boost, each with or without `.json`. */
 const BOT_MESSAGES = /^\/rooms\/([^/.]+)\/([^/.]+)\/messages(?:\.json)?$/;
 const BOT_MESSAGE = /^\/rooms\/([^/.]+)\/([^/.]+)\/messages\/([^/.]+)(?:\.json)?$/;
 const BOT_BOOSTS = /^\/rooms\/([^/.]+)\/([^/.]+)\/messages\/([^/.]+)\/boosts(?:\.json)?$/;
 const BOT_BOOST = /^\/rooms\/([^/.]+)\/([^/.]+)\/messages\/([^/.]+)\/boosts\/([^/.]+)(?:\.json)?$/;
-/** A room's address for a bot's Slack-compatible webhook. */
+/** A room's address for a bot's Slack-compatible webhook, and one of its messages' there. */
 const BOT_SLACK = /^\/rooms\/([^/.]+)\/([^/.]+)\/slack$/;
+const BOT_MESSAGE_SLACK = /^\/rooms\/([^/.]+)\/([^/.]+)\/messages\/([^/.]+)\/slack$/;
 
 /** A key in a room's address for bots, as Campfire's `LogScrubbingFormatter` finds one, or in its Slack-compatible webhook's. */
 const BOT_KEY_IN_PATH = /(\/rooms\/[^/\s]+\/)[^/\s]+(?=\/(?:messages|slack)\b)/g;
@@ -80,11 +85,13 @@ export function botAction(request: Request, env: Env, pathname: string): (() => 
   if (boost && method === "DELETE") return () => deleteBoost(env, boost[1]!, boost[2]!, boost[3]!, boost[4]!);
   const slack = pathname.match(BOT_SLACK);
   if (slack && method === "POST") return () => postSlackMessage(request, env, slack[1]!, slack[2]!);
+  const slackMessage = pathname.match(BOT_MESSAGE_SLACK);
+  if (slackMessage && (method === "POST" || method === "PUT" || method === "PATCH")) return () => replaceWithSlackMessage(request, env, slackMessage[1]!, slackMessage[2]!, slackMessage[3]!);
   return null;
 }
 
 /** Whether `pathname` is one of the bot API's addresses, whose failures answer JSON. */
-export const isBotPath = (pathname: string) => [BOT_MESSAGES, BOT_MESSAGE, BOT_BOOSTS, BOT_BOOST, BOT_SLACK].some((route) => route.test(pathname));
+export const isBotPath = (pathname: string) => [BOT_MESSAGES, BOT_MESSAGE, BOT_BOOSTS, BOT_BOOST, BOT_SLACK, BOT_MESSAGE_SLACK].some((route) => route.test(pathname));
 
 /** `text` with every bot key in an address `[FILTERED]`, as Campfire's log lines have them. */
 export const withoutBotKeys = (text: string) => text.replace(BOT_KEY_IN_PATH, "$1[FILTERED]");
@@ -169,15 +176,38 @@ async function postSlackMessage(request: Request, env: Env, roomId: RoomId, key:
   if (access instanceof Response) return access;
   const payload = await slackPayloadIn(request);
   if (payload instanceof Response) return payload;
-  const message = slackMessage(payload);
-  if (typeof message === "string") return slackAnswer(400, message);
   // Again now the body has arrived, as `createMessage` checks text.
   const arrived = await slackBotIn(env, roomId, key);
   if (arrived instanceof Response) return arrived;
+  const message = slackMessage(payload, arrived.takesClicks);
+  if (typeof message === "string") return slackAnswer(400, message);
   const created = await env.CHAT_ROOM.getByName(roomId).createBotMessage(roomId, arrived, message.markup, message.cards);
   if (!created) return slackAnswer(404, "channel_not_found");
   if (typeof created === "string") return slackAnswer(400, slackReason(created));
   return slackAnswer(200, "ok");
+}
+
+/**
+ * `POST`, `PUT` or `PATCH /rooms/<room id>/<bot key>/messages/<id>/slack`: puts what a Slack incoming webhook
+ * is sent in the place of the bot's own message, its text and its cards, as a click's answer does, or, with
+ * `delete_original`, deletes the message, and answers as `postSlackMessage` does, in the words of Slack's
+ * `chat.update` for a message the room doesn't have or that's someone else's.
+ */
+async function replaceWithSlackMessage(request: Request, env: Env, roomId: RoomId, key: string, messageId: string): Promise<Response> {
+  const access = await slackBotIn(env, roomId, key);
+  if (access instanceof Response) return access;
+  const payload = await slackPayloadIn(request);
+  if (payload instanceof Response) return payload;
+  // Again now the body has arrived, as `createMessage` checks text.
+  const arrived = await slackBotIn(env, roomId, key);
+  if (arrived instanceof Response) return arrived;
+  const room = env.CHAT_ROOM.getByName(roomId);
+  const message = payload.delete_original === true ? null : slackMessage(payload, arrived.takesClicks);
+  if (typeof message === "string") return slackAnswer(400, message);
+  const refused = message ? await room.editBotMessage(roomId, arrived, messageId, message.markup, message.cards) : await room.deleteBotMessage(roomId, arrived, messageId);
+  if (refused === NOT_FOUND) return slackAnswer(404, "message_not_found");
+  if (refused === FORBIDDEN) return slackAnswer(403, "cant_update_message");
+  return typeof refused === "string" ? slackAnswer(400, slackReason(refused)) : slackAnswer(200, "ok");
 }
 
 /**
@@ -363,7 +393,7 @@ async function withForm(request: Request, answer: (form: FormReader) => Promise<
  * R2 keeping it as it arrives, a part at a time, as a browser's upload is, since a form can bring more
  * than a Worker can hold. Answers the message, why the room took nothing, as `finishBotUpload` says, or
  * what the request answers otherwise: 413 for a file larger than a browser can upload, and 422 for a name
- * too long to keep. Without an R2 bucket bound as FILES, it answers 503, as a browser's upload does.
+ * too long to keep, or with a word Blocked words keeps out. Without an R2 bucket bound as FILES, it answers 503, as a browser's upload does.
  */
 async function postFile(
   env: Env,
@@ -383,15 +413,17 @@ async function postFile(
   const file = { filename, declaredType, limit: MAX_FILE_SIZE, read: () => form.read() };
   const room = env.CHAT_ROOM.getByName(roomId);
   const started = await room.startBotUpload(roomId, access, file, messageId);
+  if (started === BLOCKED_WORDS_REFUSED) return unprocessable(started);
   if (typeof started === "string") return started;
   const stored = await storeArriving(files, objectKey(started.key), file);
   if (!stored) return exception(413);
+  const kept = { key: started.key, file: await withPreview(env, files, started.key, filename, stored) };
   // Again now the file has arrived, as `createMessage` checks text.
   const arrived = await botIn(env, roomId, key);
-  const finished = arrived instanceof Response ? arrived : await room.finishBotUpload(roomId, arrived, { key: started.key, file: stored }, messageId, threadId);
+  const finished = arrived instanceof Response ? arrived : await room.finishBotUpload(roomId, arrived, kept, messageId, threadId);
   // A file that isn't posted goes from R2 at once, since a room deleted meanwhile had R2 delete its files
   // before this one was there. The room's alarm forgets the upload, as it does a browser's never finished.
-  if (finished instanceof Response || typeof finished === "string") await files.delete(objectKey(started.key));
+  if (finished instanceof Response || typeof finished === "string") await files.delete([objectKey(started.key), previewKey(started.key)]);
   return finished;
 }
 
@@ -417,12 +449,16 @@ async function bodyText(request: Request): Promise<string | null> {
  * `index` answers it: the newest 40, or the 40 before the message `?before` names or after the one
  * `?after` does, with how many the room has in `X-Total-Count` and a `Link` to the next page when the
  * room has more beyond this one. A message deleted but kept for its thread's replies has nothing to
- * read, so the page leaves it out, though the room still counts it and pages from it.
+ * read, so the page leaves it out, though the room still counts it and pages from it. A reply that wasn't
+ * also sent to the room isn't on the page, as it isn't in the room's timeline: `?thread` reads its thread
+ * (`listThread`).
  */
 async function listMessages(request: Request, env: Env, roomId: RoomId, key: string): Promise<Response> {
   const access = await botIn(env, roomId, key);
   if (access instanceof Response) return access;
   const url = urlOf(request);
+  const thread = present(url.searchParams.get("thread"));
+  if (thread !== undefined) return listThread(request, env, roomId, access, thread);
   const cursor = { before: present(url.searchParams.get("before")), after: present(url.searchParams.get("after")) };
   const page = await env.CHAT_ROOM.getByName(roomId).botPage(roomId, cursor);
   if (!page) return exception(404);
@@ -433,6 +469,24 @@ async function listMessages(request: Request, env: Env, roomId: RoomId, key: str
   const headers = new Headers({ "X-Total-Count": String(page.total), ETag: etag, "Cache-Control": REVALIDATE });
   const next = nextPage(page, cursor);
   if (next) headers.set("Link", `<${origin}/rooms/${roomId}/${key}/messages?${next}>; rel="next"`);
+  if (isFresh(request, etag)) return new Response(null, { status: 304, headers });
+  headers.set("Content-Type", JSON_TYPE);
+  return new Response(request.method === "HEAD" ? null : body, { headers });
+}
+
+/**
+ * `GET /rooms/<room id>/<bot key>/messages?thread=<message id>`: the thread of that message as JSON, the
+ * message first and then its newest 40 replies, oldest first, as the room's messages are written, so a
+ * bot that answered in a thread can read what's been said there since. 404 when the room has no such
+ * message or it's a reply, which has no thread.
+ */
+async function listThread(request: Request, env: Env, roomId: RoomId, access: BotKeyAccess, parentId: string): Promise<Response> {
+  const messages = await env.CHAT_ROOM.getByName(roomId).botThread(roomId, parentId);
+  if (!messages) return exception(404);
+  const origin = originFor(request, access.customDomain);
+  const body = railsJson(await messagesJson(env, origin, messages.filter((message) => !message.deleted)));
+  const etag = await etagOf(body);
+  const headers = new Headers({ ETag: etag, "Cache-Control": REVALIDATE });
   if (isFresh(request, etag)) return new Response(null, { status: 304, headers });
   headers.set("Content-Type", JSON_TYPE);
   return new Response(request.method === "HEAD" ? null : body, { headers });
@@ -459,7 +513,8 @@ function nextPage({ messages, hasMore, hasNewer }: BotPage, { after }: PageCurso
 
 /**
  * Messages as `messages/_message.json.jbuilder` writes them, in its order of keys, each with its writer
- * as they are now and its addresses on `origin`, Ember's address (`originFor`).
+ * as they are now and its addresses on `origin`, Ember's address (`originFor`), and a file message with
+ * its file after its body, which Campfire leaves out.
  */
 async function messagesJson(env: Env, origin: string, messages: Message[]) {
   const writers = await peopleJson(env, origin, messages.map(({ creator }) => creator.id));
@@ -469,12 +524,24 @@ async function messagesJson(env: Env, origin: string, messages: Message[]) {
     // `message.body.to_s`, in Ember's layout for rich text, with mentions and link previews as they're
     // stored, or nothing for a file message, which has no rich text.
     body: { plain_text: message.plainText, html: message.body === "" ? "" : `<div class="lexxy-content">\n  ${message.body}\n</div>\n` },
+    ...(message.attachment && { attachment: attachmentJson(origin, message.attachment) }),
     // Nobody is ever deleted, so everyone who wrote a message is there.
     creator: writers.get(message.creator.id)!,
     room: { id: message.roomId },
     url: permalink(origin, message),
   }));
 }
+
+/**
+ * A message's file as Active Storage names a blob's columns, at its address on `origin`, which is signed
+ * and opens the file for whoever has it, as the room's links do, so the bot fetches it without its key.
+ */
+const attachmentJson = (origin: string, { name, contentType, byteSize, url }: StoredFile) => ({
+  filename: name,
+  content_type: contentType,
+  byte_size: byteSize,
+  url: `${origin}${url}`,
+});
 
 /**
  * A boost in room `roomId` as `messages/boosts/_boost.json.jbuilder` writes it, in its order of keys, with

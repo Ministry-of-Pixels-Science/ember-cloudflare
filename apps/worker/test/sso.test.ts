@@ -8,6 +8,7 @@ import {
   type MemberfulConnection,
   type NewWorkspace,
   type ProfileAnswer,
+  type Sidebar,
   type UserId,
   type UserStatus,
 } from "@ember/protocol";
@@ -18,8 +19,10 @@ import {
   CLIENT_SECRET_REFUSED,
   MEMBERFUL_OR_SSO_SIGN_IN_NEEDED,
   OPEN_WITH_SSO,
+  PASSWORD_WITH_SSO,
   SSO_CALLBACK_PATH,
   SSO_CONNECTIONS_PATH,
+  SSO_DISCONNECT_WITHOUT_PASSWORD,
   SSO_FORBIDDEN,
   SSO_LOGOUT_PATH,
   SSO_SETTINGS_PATH,
@@ -462,12 +465,16 @@ describe("Sign in with SSO", () => {
     expect(locationOf(await page(ssoSignInPath(null)))).toBe(backToSignIn("off"));
   });
 
-  it("signs in someone new as a member, linked to their account at the provider, keeping its refresh token sealed", async () => {
+  it("signs in someone new as a member by way of the welcome page, linked to their account at the provider, keeping its refresh token sealed", async () => {
     await setUpWithSso();
     const response = await signInWithSso(katherine, { returnTo: "/rooms" });
     const me = await signedInAs(response);
     expect(me).toMatchObject({ name: "Katherine Johnson", administrator: false });
-    expect(locationOf(response)).toBe(`${origin}/rooms`);
+    expect(locationOf(response)).toBe(`${origin}/welcome?return_to=%2Frooms`);
+    // With a username made from their name, as Memberful's members get, and no password.
+    expect(await workspaceSql("SELECT username, email_address, password_digest FROM users WHERE id = ?", me.id)).toEqual([
+      { username: "katherinejohnson", email_address: katherine.email, password_digest: null },
+    ]);
     expect(response.headers.getSetCookie()).toContainEqual(expect.stringMatching(/sso_state=;/));
     expect(await identities()).toEqual([{ issuer: ISSUER, subject: katherine.sub, user_id: me.id }]);
     const [identity] = (await workspaceSql("SELECT refresh_token, refresh_due_at, email_address FROM identities")) as Array<{ refresh_token: string; refresh_due_at: number; email_address: string }>;
@@ -490,9 +497,27 @@ describe("Sign in with SSO", () => {
   it("signs the same person in again by their account there, whatever its name and email address are now", async () => {
     await setUpWithSso();
     const first = await signedInAs(await signInWithSso(katherine));
-    const again = await signedInAs(await signInWithSso({ ...katherine, name: "Katherine G. Johnson", email: "kj@example.com" }));
-    expect(again.id).toBe(first.id);
+    const response = await signInWithSso({ ...katherine, name: "Katherine G. Johnson", email: "kj@example.com" }, { returnTo: "/rooms" });
+    expect((await signedInAs(response)).id).toBe(first.id);
+    // Straight to the page they signed in from: the welcome page is for someone new.
+    expect(locationOf(response)).toBe(`${origin}/rooms`);
     expect(await count("identities")).toBe(1);
+  });
+
+  it("starts the DM welcoming someone new, as joining with the join link does", async () => {
+    const administrator = await setUpWithSso();
+    const me = await signedInAs(await signInWithSso(katherine));
+    const { rooms } = (await (await api("/api/sidebar", { headers: as(administrator) })).json()) as Sidebar;
+    expect(rooms.find((room) => room.kind === "direct")).toMatchObject({ joined: { userId: me.id }, members: expect.arrayContaining([{ id: me.id, name: "Katherine Johnson" }]) });
+  });
+
+  it("passes over a name with a word Blocked words keeps out, going by the next one the provider gives", async () => {
+    const administrator = await setUpWithSso();
+    const blocked = await api("/api/account", { method: "PATCH", headers: as(administrator), body: JSON.stringify({ blockedWords: ["johnson"] }) });
+    expect(blocked.status, await blocked.clone().text()).toBe(200);
+    const me = await signedInAs(await signInWithSso(katherine));
+    expect(me.name).toBe("katherine");
+    expect(await workspaceSql("SELECT username FROM users WHERE id = ?", me.id)).toEqual([{ username: "katherine" }]);
   });
 
   it.each([
@@ -692,6 +717,44 @@ describe("SSO only", () => {
     expect(disconnected.status).toBe(200);
     expect(((await disconnected.json()) as ProfileAnswer).profile.sso).toEqual({ name: "Acme", ssoOnly: true, connected: null });
     expect(await count("identities")).toBe(0);
+  });
+});
+
+describe("A first password", () => {
+  const saveProfile = (session: Session, changes: unknown) => api("/api/users/me/profile", { method: "PATCH", headers: as(session), body: JSON.stringify(changes) });
+
+  it("is refused to someone without one whom single sign-on signs in, as it does while the provider is set up, whether or not it's on", async () => {
+    const administrator = await setUpWithSso();
+    const session = await ssoSession(katherine);
+    const elsewhere = await ssoSession(katherine);
+    for (const on of [true, false]) {
+      await turn(administrator, { ssoJoin: on });
+      for (const changes of [{ password: "a long enough password" }, { password: "a long enough password", emailAddress: "katherine@nasa.example" }]) {
+        const refused = await saveProfile(session, changes);
+        expect(refused.status).toBe(422);
+        expect(await refused.json()).toEqual({ error: PASSWORD_WITH_SSO });
+      }
+    }
+    // Nothing was saved, and their other sessions go on, as a new password would end them.
+    expect(await profileOf(session)).toMatchObject({ password: false, emailAddress: katherine.email });
+    expect(await signsIn(elsewhere)).toBe(true);
+    expect(await identities()).toEqual([{ issuer: ISSUER, subject: katherine.sub, user_id: session.user.id }]);
+    // The rest of their profile is theirs to change as before, their email address included.
+    expect((await saveProfile(session, { emailAddress: "katherine@nasa.example" })).status).toBe(200);
+    // Disconnect says it's how they sign in, since there's no password for them to set first.
+    const disconnected = await api(SSO_CONNECTIONS_PATH, { method: "DELETE", headers: as(session), body: JSON.stringify({ currentPassword: "a long enough password" }) });
+    expect(disconnected.status).toBe(422);
+    expect(await disconnected.json()).toEqual({ error: SSO_DISCONNECT_WITHOUT_PASSWORD });
+  });
+
+  it("is theirs to set once no provider signs them in, which keeps their account there connected", async () => {
+    const administrator = await setUpWithSso();
+    const session = await ssoSession(katherine);
+    expect((await api(SSO_SETTINGS_PATH, { method: "DELETE", headers: as(administrator) })).status).toBe(200);
+    const saved = await saveProfile(session, { password: "a long enough password" });
+    expect(saved.status, await saved.clone().text()).toBe(200);
+    expect(((await saved.json()) as ProfileAnswer).profile).toMatchObject({ password: true, sso: null });
+    expect(await identities()).toEqual([{ issuer: ISSUER, subject: katherine.sub, user_id: session.user.id }]);
   });
 });
 
@@ -963,6 +1026,17 @@ describe("Back-channel logout", () => {
     const replayed = await logoutToken({ sub: katherine.sub, iat: now() - 5 * 60 });
     expect((await logOut(replayed)).status).toBe(200);
     expect(await signsIn(session)).toBe(true);
+  });
+
+  it("never ends a session signed in a minute after the token was issued, though that's within the skew it's taken with, but ends one from before", async () => {
+    await setUpWithSso();
+    const before = await ssoSession(katherine);
+    // Signed in two minutes ago, signed out there a minute ago, and signed in again since.
+    await workspaceSql("UPDATE sessions SET created_at = ? WHERE identity_sid = ?", new Date(Date.now() - 2 * 60 * 1000).toISOString(), "provider-session-1");
+    provider.sid = "provider-session-2";
+    const again = await ssoSession(katherine);
+    expect((await logOut(await logoutToken({ sub: katherine.sub, iat: now() - 60 }))).status).toBe(200);
+    expect([await signsIn(before), await signsIn(again)]).toEqual([false, true]);
   });
 
   it("answers 404 while there's no provider", async () => {

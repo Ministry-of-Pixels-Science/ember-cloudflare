@@ -3,7 +3,9 @@ import { env } from "cloudflare:workers";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../src/env";
 import { objectKey } from "../src/files/blobs";
+import { imageSize } from "../src/files/images";
 import { NO_STORAGE, UPLOAD_PART_SIZE } from "../src/files/uploads";
+import { storedPng } from "./png-files";
 import {
   api,
   apiWith,
@@ -79,8 +81,8 @@ const keptFile = async (key: string) => {
   return object && new Uint8Array(await object.arrayBuffer());
 };
 
-/** The keys of the files R2 keeps. */
-const storedFiles = async () => (await files.list({ prefix: "files/" })).objects.map(({ key }) => key);
+/** The keys of the files R2 keeps, or with "previews/", of their previews. */
+const storedFiles = async (prefix = "files/") => (await files.list({ prefix })).objects.map(({ key }) => key);
 
 /** What `query` finds in room `room`'s tables, of which a room on DO SQLite has none until it's used. */
 async function roomRows<T>(room: RoomId, query: string): Promise<T[]> {
@@ -174,6 +176,20 @@ describe("Bots post messages", () => {
     inRoom.close();
   });
 
+  it("has Cloudflare Images make the preview of a picture too large to show by itself, as of a browser's upload sent without one", async () => {
+    const { administrator, bot, general } = await withBot();
+    const inRoom = await connect(general, administrator);
+
+    await postedFile(bot.key, general, new File([storedPng(1600, 1200)], "screenshot.png", { type: "image/png" }));
+    const { attachment } = (await inRoom.next("message.created")).message;
+    expect(attachment).toMatchObject({ contentType: "image/png", width: 1600, height: 1200, previewUrl: expect.stringMatching(/^\/previews\//) });
+    const preview = await api(attachment!.previewUrl!);
+    expect(preview.headers.get("Content-Type")).toBe("image/webp");
+    expect(imageSize(new Uint8Array(await preview.arrayBuffer()), "image/webp")).toEqual({ width: 1067, height: 800 });
+    expect(await roomSql(general, "SELECT preview FROM blobs WHERE id = ?", attachment!.id)).toEqual([{ preview: JSON.stringify({ width: 1067, height: 800 }) }]);
+    inRoom.close();
+  });
+
   it("keeps a file larger than an upload's part as it arrives, a part at a time", async () => {
     const { bot, general } = await withBot();
     const bytes = Uint8Array.from({ length: UPLOAD_PART_SIZE + 3 }, (_, i) => i % 251);
@@ -253,12 +269,12 @@ describe("Bots post messages", () => {
   it("checks the key again once the file has arrived, posting nothing for a bot given a new key meanwhile, and R2 keeps none of it", async () => {
     const { administrator, bot, general } = await withBot();
     const newKey = () => api(`/api/account/bots/${bot.id}/key`, { method: "PUT", headers: { Cookie: administrator.cookie } });
-    const { body, headers } = heldBackForm("build.log", new TextEncoder().encode("Build passed"), newKey);
+    const { body, headers } = heldBackForm("screenshot.png", storedPng(1600, 1200), newKey);
 
     const response = await sendAs(bot.key, general, body, { headers });
     expect([response.status, await response.json()]).toEqual([401, { error: "Unknown bot key" }]);
     expect(await storedIn(general)).toEqual([]);
-    expect(await storedFiles()).toEqual([]);
+    expect([await storedFiles(), await storedFiles("previews/")]).toEqual([[], []]);
   });
 
   it("posts nothing once the room has been deleted while the file arrives, and R2 keeps none of it", async () => {

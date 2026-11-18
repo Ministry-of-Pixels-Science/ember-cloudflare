@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MAX_CARDS, parseCards, type CardAddress } from "./cards";
+import { MAX_ACTION_ID_LENGTH, MAX_ACTION_VALUE_LENGTH, MAX_CARDS, parseCards, parseParts, type CardAddress } from "./cards";
 import { MAX_MESSAGE_HTML_LENGTH } from "./index";
 
 /** Keeps https addresses on example.com, as the room's rule keeps addresses on named hosts. */
@@ -147,6 +147,88 @@ describe("Bot cards", () => {
     ]);
     expect(parseCards([{ source: "blocks", parts: [{ kind: "divider" }, { kind: "divider" }] }, card([{ kind: "divider" }]), card([{ kind: "divider" }], { pretext: "<p>Above</p>" })], address)).toEqual([
       card([{ kind: "divider" }], { pretext: "<p>Above</p>" }),
+    ]);
+  });
+
+  it("asks its rule of each address whether it's a link someone may follow or a picture each reader's app fetches", () => {
+    const asked: Record<string, string[]> = { link: [], picture: [] };
+    // Keeps every link, but no picture, as an answer keeps a picture only at an address people wrote.
+    const linksOnly: CardAddress = (url, use) => {
+      asked[use]!.push(url);
+      return use === "link" ? url : undefined;
+    };
+    const parts = [
+      { kind: "author", name: "Ada", href: "https://example.com/ada", icon: "https://example.com/ada.png" },
+      { kind: "title", text: "Status", href: "https://example.com/status" },
+      { kind: "section", html: "<p>Up</p>", thumb: { url: "https://example.com/up.png", alt: "" }, button: { text: "Open", href: "https://example.com/open" } },
+      { kind: "image", image: { url: "https://example.com/chart.png", alt: "" } },
+      { kind: "context", items: [{ image: { url: "https://example.com/dot.png", alt: "" } }, { html: "<p>Kept</p>" }] },
+      {
+        kind: "tiles",
+        tiles: [{ hero: { url: "https://example.com/hero.png", alt: "" }, icon: { url: "https://example.com/icon.png", alt: "" }, title: "Room 1", buttons: [{ text: "Book", href: "https://example.com/book" }] }],
+      },
+      { kind: "footer", text: "Ember", icon: "https://example.com/e.png" },
+    ];
+    expect(parseCards([card(parts, { thumb: { url: "https://example.com/thumb.png", alt: "" } })], linksOnly)).toEqual([
+      card([
+        { kind: "author", name: "Ada", href: "https://example.com/ada" },
+        { kind: "title", text: "Status", href: "https://example.com/status" },
+        { kind: "section", html: "<p>Up</p>", button: { text: "Open", href: "https://example.com/open" } },
+        { kind: "context", items: [{ html: "<p>Kept</p>" }] },
+        { kind: "tiles", tiles: [{ title: "Room 1", buttons: [{ text: "Book", href: "https://example.com/book" }] }] },
+        { kind: "footer", text: "Ember" },
+      ]),
+    ]);
+    expect(asked.link!.sort()).toEqual(["https://example.com/ada", "https://example.com/book", "https://example.com/open", "https://example.com/status"]);
+    expect(asked.picture!.sort()).toEqual(["ada", "chart", "dot", "e", "hero", "icon", "thumb", "up"].map((name) => `https://example.com/${name}.png`));
+  });
+
+  it("keeps a button that acts, by what a click tells its bot, and a button with an address as a link, or not at all", () => {
+    const button = (action: unknown, rest: Record<string, unknown> = {}) => ({ text: "Approve", action, ...rest });
+    const parts = [
+      {
+        kind: "buttons",
+        buttons: [
+          button({ id: "approve", blockId: "deploy", value: '{"build":42}', extra: true }, { style: "primary", extra: true }),
+          button({ id: "reject" }),
+          button({ id: "open" }, { href: "https://example.com/open" }),
+          button({ id: "elsewhere" }, { href: "https://elsewhere.test/open" }),
+          button({ id: "" }),
+          button({ id: 7 }),
+          button({ blockId: "deploy", value: "nameless" }),
+          button("approve"),
+          button({ id: "x".repeat(MAX_ACTION_ID_LENGTH + 1) }),
+          button({ id: "long", blockId: "x".repeat(MAX_ACTION_ID_LENGTH + 1), value: "x".repeat(MAX_ACTION_VALUE_LENGTH + 1) }),
+          button({ id: "most", blockId: "x".repeat(MAX_ACTION_ID_LENGTH), value: "x".repeat(MAX_ACTION_VALUE_LENGTH) }),
+          { action: { id: "untitled" } },
+        ],
+      },
+      { kind: "section", html: "<p>Deploy?</p>", button: button({ id: "approve", value: "" }) },
+      { kind: "tiles", tiles: [{ buttons: [button({ id: "book" })] }] },
+      { kind: "buttons", buttons: [button({ id: "tool:close_issue", value: "{}", appId: "app-1" }), button({ id: "tool:close_issue", appId: 7 })] },
+    ];
+    const kept = [
+      {
+        kind: "buttons",
+        buttons: [
+          { text: "Approve", action: { id: "approve", blockId: "deploy", value: '{"build":42}' }, style: "primary" },
+          { text: "Approve", action: { id: "reject" } },
+          { text: "Approve", href: "https://example.com/open" },
+          { text: "Approve", action: { id: "long" } },
+          { text: "Approve", action: { id: "most", blockId: "x".repeat(MAX_ACTION_ID_LENGTH), value: "x".repeat(MAX_ACTION_VALUE_LENGTH) } },
+        ],
+      },
+      { kind: "section", html: "<p>Deploy?</p>", button: { text: "Approve", action: { id: "approve", value: "" } } },
+      { kind: "tiles", tiles: [{ buttons: [{ text: "Approve", action: { id: "book" } }] }] },
+      // The app whose tool a button on a tool's card calls stays with it.
+      { kind: "buttons", buttons: [{ text: "Approve", action: { id: "tool:close_issue", value: "{}", appId: "app-1" } }, { text: "Approve", action: { id: "tool:close_issue" } }] },
+    ];
+    expect(parseCards([{ source: "blocks", parts }], address)).toEqual([{ source: "blocks", parts: kept }]);
+    expect(parseParts(parts, address)).toEqual(kept);
+    // Where a click has nowhere to go, only the link is left, and a small card of nothing else goes.
+    expect(parseParts(parts, address, false)).toEqual([
+      { kind: "buttons", buttons: [{ text: "Approve", href: "https://example.com/open" }] },
+      { kind: "section", html: "<p>Deploy?</p>" },
     ]);
   });
 

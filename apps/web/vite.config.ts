@@ -1,9 +1,11 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import type { Plugin } from "vite";
 import { defineConfig } from "vitest/config";
+import { APP_VERSION_PATH, assetsInHtml, type AppVersion } from "./src/lib/updates.ts";
 
 /**
  * Serves each icon a room can have as an SVG of its own, which `RoomIcon` draws: Lucide's at
@@ -42,6 +44,34 @@ function roomIcons(): Plugin {
 }
 
 /**
+ * Serves Emojibase's English emoji data, which the emoji picker reads (emoji-panel.tsx), at
+ * /emojibase/en/, from the emojibase-data package: from Ember itself, since the page's Content-Security-Policy
+ * keeps it from asking a CDN, and a CDN would hear from everyone who opens the picker.
+ */
+function emojiData(): Plugin {
+  const FILES = ["en/data.json", "en/messages.json"];
+  const read = (file: string) => readFileSync(createRequire(import.meta.url).resolve(`emojibase-data/${file}`));
+  return {
+    name: "ember-emoji-data",
+    configureServer(server) {
+      server.middlewares.use((request, response, next) => {
+        const file = FILES.find((name) => request.url?.split("?")[0] === `/emojibase/${name}`);
+        if (!file) return next();
+        response.setHeader("Content-Type", "application/json");
+        response.end(read(file));
+      });
+    },
+    writeBundle({ dir }) {
+      for (const file of FILES) {
+        const to = path.join(dir!, "emojibase", file);
+        mkdirSync(path.dirname(to), { recursive: true });
+        writeFileSync(to, read(file));
+      }
+    },
+  };
+}
+
+/**
  * Fails the build when the app's script imports another besides Rolldown's runtime: one more for the page to
  * load before the app can run. Rolldown leaves what the main chunk shares with the pages few visits need and
  * the editor in a chunk of its own when the main chunk imports a module it doesn't use that those pages do, as
@@ -60,8 +90,27 @@ function oneAppScript(): Plugin {
   };
 }
 
+/**
+ * Writes app-version.json beside the bundle, naming the scripts and stylesheets the built page loads,
+ * which a page left open asks for to tell whether Ember has been updated since it loaded
+ * (src/lib/updates.ts).
+ */
+function appVersion(): Plugin {
+  return {
+    name: "ember-app-version",
+    apply: "build",
+    writeBundle({ dir }, bundle) {
+      const page = bundle["index.html"];
+      const html = page?.type !== "asset" ? "" : typeof page.source === "string" ? page.source : new TextDecoder().decode(page.source);
+      const version: AppVersion = { assets: assetsInHtml(html) };
+      if (version.assets.length === 0) this.error("The built page loads none of the app's scripts, so app-version.json can't name them (see appVersion).");
+      writeFileSync(path.join(dir!, APP_VERSION_PATH), `${JSON.stringify(version)}\n`);
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [react(), tailwindcss(), roomIcons(), oneAppScript()],
+  plugins: [react(), tailwindcss(), roomIcons(), emojiData(), oneAppScript(), appVersion()],
   resolve: {
     alias: {
       "@": path.resolve(import.meta.dirname, "src"),

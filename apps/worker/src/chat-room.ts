@@ -2,8 +2,10 @@ import { DurableObject } from "cloudflare:workers";
 import {
   ASSISTANT_ID,
   CloseCode,
+  DELETED_PERSON_NAME,
   HISTORY_PAGE_SIZE,
   isMessageTooLong,
+  LATE_PREVIEW_MS,
   MAX_BOOST_LENGTH,
   MAX_MESSAGE_HTML_LENGTH,
   MESSAGE_TOO_LONG,
@@ -12,6 +14,7 @@ import {
   ROOM_PROTOCOL,
   type Boost,
   type Card,
+  type CardAction,
   type ClientFrame,
   type LinkPreview,
   type Message,
@@ -22,46 +25,74 @@ import {
   type User,
   type UserId,
 } from "@ember/protocol";
+import { BLOCKED_WORDS_REFUSED } from "@ember/protocol/blocked-words";
 import { parseHuddleSocketParams } from "@ember/protocol/huddles";
-import { prepareBody, userIdFromSgid, userIdsIn, type PreparedBody } from "@ember/richtext";
+import { hasPreview, prepareBody, userIdFromSgid, userIdsIn, type PreparedBody } from "@ember/richtext";
 import {
   AGENT_NOTES,
   AnswerError,
   answerOf,
+  BLOCKED_ANSWER,
   NOTES,
   PICKED_MODEL_NOTES,
   previewAttachment,
   questionFor,
+  readable,
   ROOM_MESSAGES_READ,
   THREAD_REPLIES_READ,
   waitFor,
   writtenBy,
   type Answer,
 } from "./assistant/answers";
-import { ask, type Answered } from "./assistant/gateway";
+import { askWaiting, goOn, type Answered, type Asking, type GatewayRefusal, type Question } from "./assistant/gateway";
+import { takesEmbersTools } from "./assistant/offered";
+import { roomSearch } from "./assistant/room-search";
+import { ToolError } from "./assistant/tool-calls";
+import { saidCard, toolCallOf, toolCards, type CardCall } from "./apps/cards";
+import {
+  appTool,
+  callCard,
+  callDecisionOf,
+  CALL_OUTCOMES,
+  calledFromCard,
+  givenAs,
+  givenTools,
+  ToolGone,
+  usedCard,
+  type GivenTool,
+  type PickedTool,
+  type ShowsCall,
+  type ShowsCard,
+  type Unmade,
+} from "./apps/tools";
+import { CALL_WAITS_MS, fits, WaitingCalls, type WaitingCall } from "./apps/waiting-calls";
 import { JobQueue } from "./at-once";
-import { postWebhook, WebhookError, webhookPayload, type Reply } from "./bots/webhooks";
+import { isFresh, keptBlockedWords, NO_BLOCKED_WORDS, outdated, type KeptBlockedWords } from "./blocked-words";
+import { actingButton, clickPayload } from "./bots/clicks";
+import { payloadOf, slackMessage, type SlackMessage, type SlackPayload } from "./bots/slack";
+import { postClick, postWebhook, WebhookError, webhookPayload, type ClickAnswer, type Reply } from "./bots/webhooks";
 import { keptCards } from "./cards";
 import { Courier, ENTRIES_PER_CALL } from "./courier";
 import { openDb, type Db } from "./db";
 import type { Env } from "./env";
 import { attachedFile, Blobs, objectKey, previewKey, type Identified, type RoomBlob, type UploadedPart } from "./files/blobs";
 import type { ImageSize } from "./files/images";
-import { storeArriving, type ArrivingFile, type StreamedFile } from "./files/streamed";
+import { storeArriving, withPreview, type ArrivingFile, type StreamedFile } from "./files/streamed";
 import { NO_STORAGE, type Uploader } from "./files/uploads";
+import { HuddleMessage, type HuddleMessageFrame, type HuddleNow } from "./huddles/message";
 import { Huddle, HUDDLE_CHECK_MS, HUDDLE_TAG } from "./huddles/room";
 import { base36, sortableId } from "./ids";
 import { sendPushes } from "./push/delivery";
 import { urlOf } from "./request-url";
 import { addressTag, EVERYONE, REVOCATIONS_KEPT_MS, Revocations, sessionTag, type Revocation } from "./revocations";
-import { RoomLog } from "./room-log";
+import { RoomLog, type RoomEvent } from "./room-log";
 import { searchIndex } from "./search-index";
 import { CLOSE_REASONS, closedAtOnce, closeTooLarge, isTooLarge, MAX_ROOM_FRAME_SIZE, RESERVED_CLOSE_CODES } from "./sockets";
 import { MessageStore, type Deletion, type InThread, type PageCursor, type PostedFile, type StoredBody } from "./store";
 import { unfurler } from "./unfurl";
 import { viewersOf, type Viewing } from "./viewing";
-import { workspace, type AssistantAccess, type BotAccess, type WebhookAccess } from "./workspace";
-import type { AssistantAsk, MessagePush, MessageWebhook } from "./workspace-store";
+import { workspace, type AssistantAccess, type BotAccess, type OutsideSender, type WebhookAccess } from "./workspace";
+import type { AssistantAsk, InvitationPush, MessagePush, MessageWebhook } from "./workspace-store";
 
 /** What each socket remembers across hibernation. */
 interface Attachment extends Viewing {
@@ -90,6 +121,11 @@ export const HUDDLE_HEADER = "X-Ember-Huddle";
 
 /** What a deleted room's object keeps in its own storage until its alarm: the room's id, whose records the alarm erases. */
 const DELETED_ROOM = "deletedRoom";
+/**
+ * What it keeps beside that once its alarm has been set for sooner, to have the SFU close what's left
+ * of the room's huddle: when the alarm was to erase the room, which it doesn't before.
+ */
+const ERASE_DUE = "eraseDue";
 /** What a room's object keeps in its own storage while its alarm is to send its logs: the room's id. */
 const UNDELIVERED_ROOM = "undeliveredRoom";
 /**
@@ -98,11 +134,31 @@ const UNDELIVERED_ROOM = "undeliveredRoom";
  */
 const LOGS_DUE = "logsDue";
 
+/** What an error frame adds for a message refused for `why`: that its writer is to change it, when it's for a word Blocked words keeps out. */
+const rewriting = (why: string) => (why === BLOCKED_WORDS_REFUSED ? { rewrite: true as const } : {});
+
+/**
+ * What the writer of `body` wrote of it, which Blocked words checks: its plain text with each mention of
+ * someone `named` names read as "@" alone, since their name isn't the writer's words, nor part of a word
+ * the writer wrote beside it.
+ */
+function writtenText(body: PreparedBody, named: (sgid: string) => User | undefined): string {
+  if (body.mentions.length === 0) return body.plainText;
+  const unnamed = (sgid: string) => {
+    const person = named(sgid);
+    return person && { ...person, name: "" };
+  };
+  // Its html prepares as it did, so this reads all of it but the names, or failing that, all of it.
+  return prepareBody(body.html, unnamed)?.plainText ?? body.plainText;
+}
+
 /** Why the room keeps nothing of a message: it couldn't show it, or there's nothing in it. `MESSAGE_TOO_LONG` says when there's too much. */
 const UNREADABLE = "That message couldn't be saved.";
 export const EMPTY = "Your message is empty.";
 /** Why the room changes nothing of a bot's message with cards that a person edits, as the editor can't hold a card. */
 const HAS_CARDS = "Messages with cards can't be edited.";
+/** Why it changes nothing of a huddle's message that a person edits: the room writes it, and it shows its huddle rather than its text. */
+const OF_A_HUDDLE = "A huddle's message can't be edited.";
 /** What the room tells a tab running an app older than its protocol, whose messages and edits it refuses. */
 const OUTDATED = "Ember has been updated. Reload the page to keep chatting.";
 /**
@@ -111,9 +167,19 @@ const OUTDATED = "Ember has been updated. Reload the page to keep chatting.";
  */
 const BANNED = "Request failed (429)";
 /** The frames that change something, which a banned address's sockets can't send. */
-const CHANGES = new Set<ClientFrame["type"]>(["message.create", "message.update", "message.delete", "boost.create", "boost.delete"]);
+const CHANGES = new Set<ClientFrame["type"]>(["message.create", "message.update", "message.preview", "message.delete", "boost.create", "boost.delete", "card.click"]);
 /** Whether `ws`'s tab runs an app older than the room protocol. */
 const isOutdated = (ws: WebSocket) => ((ws.deserializeAttachment() as Attachment).protocol ?? 1) < ROOM_PROTOCOL;
+
+/**
+ * Whether `message` can still take the preview of its link that its sender's tab had once it had gone
+ * (`message.preview`): it's text, not edited since it was sent, with no preview yet, and sent within
+ * `LATE_PREVIEW_MS` of `now`.
+ */
+function takesLatePreview(message: Message, now: string): boolean {
+  if (message.deleted || message.editedAt !== null || message.attachment || message.cards || message.huddle) return false;
+  return Date.parse(now) - Date.parse(message.createdAt) <= LATE_PREVIEW_MS && !hasPreview(message.body);
+}
 
 /** Keeps in `ws`'s attachment whether its tab is typing, writing it only when that changes. */
 function markTyping(ws: WebSocket, typing: boolean): void {
@@ -134,7 +200,7 @@ export interface KeptFile {
   file: StreamedFile;
 }
 
-/** How `ChatRoom.create` posts a message: as a bot's reply to a webhook delivery, with a file, or in a thread. */
+/** How `ChatRoom.create` posts a message: as a reply, which goes to no bot, as a bot's to a webhook delivery is, with a file, or in a thread. */
 interface Posting {
   kind?: "message" | "reply";
   posted?: PostedFile;
@@ -165,6 +231,31 @@ const WEBHOOK_CHANGED = "the bot has been deleted, has left the room or its webh
 /** Why the room posts nothing of what a bot says back to a reply in a thread: the thread's message was deleted while the delivery ran. */
 const THREAD_GONE = "the thread's message has been deleted";
 
+/** How many clicks on bots' buttons each person can have waiting in a room, so that no one fills its webhook queue. */
+const CLICKS_WAITING_EACH = 3;
+/** Why a click goes nowhere: its message, or the button on it, went before the click's turn came. */
+const BUTTON_GONE = "That button is no longer there";
+const TOO_MANY_CLICKS = "Wait for your earlier clicks to be answered";
+const WEBHOOKS_FULL = "Too much is waiting for bots here. Try again in a moment.";
+/** What whoever clicked is told when the click's delivery fails without saying why. */
+const CLICK_FAILED = "That click couldn't be delivered";
+
+/** Why a click came to nothing: what the room tells whoever clicked, and what it logs. */
+class ClickError extends WebhookError {
+  constructor(
+    readonly told: string,
+    logged: string,
+  ) {
+    super(logged);
+  }
+}
+
+/** A click on a button that acts, as a socket sends it. */
+type CardClick = Extract<ClientFrame, { type: "card.click" }>;
+
+/** The button `click` says was clicked, as a card names one. */
+const clickedIn = ({ actionId, blockId, value }: CardClick): CardAction => ({ id: actionId, blockId, value });
+
 /** How many of a room's questions for @ember and the agents it answers at once, and how many more can wait, as each waits on a model. */
 const ANSWERS_AT_ONCE = 4;
 const ANSWERS_WAITING = 100;
@@ -184,6 +275,12 @@ const answererGone = (botId: UserId) => (botId === ASSISTANT_ID ? ASSISTANT_GONE
 const answererOf = (botId: UserId) => (botId === ASSISTANT_ID ? "Ember AI" : `Agent ${botId}`);
 
 /**
+ * What the room keeps of what an answerer says in place of an answer with a blocked word. They're Ember's
+ * words, so they're not checked, and the answerer always says why it didn't answer.
+ */
+const blockedAnswerBody = (): PreparedBody | string => prepareBody(answerOf(BLOCKED_ANSWER).markup, () => undefined) ?? UNREADABLE;
+
+/**
  * What @ember or an agent says to a question: its model's answer, or the note saying why it has none, the
  * pages the answer came from, if it used the web, and what people wrote in the conversation it read
  * (`writtenBy`).
@@ -191,6 +288,40 @@ const answererOf = (botId: UserId) => (botId === ASSISTANT_ID ? "Ember AI" : `Ag
 interface Said extends Pick<Answered, "text" | "sources"> {
   written?: string[];
 }
+
+/** What a question comes to: what its answerer says, or the call of an app's tool its answer waits at, with the apps' tools its model was given. */
+type Outcome = Said | { asking: Asking; given: GivenTool[] };
+
+/** What the room tells whoever clicks a call's card that isn't waiting any more, as someone answered it first. */
+const CALL_ANSWERED = "Someone has answered that already";
+/** What it tells them once the call waited too long to be allowed. */
+const CALL_LATE = "That waited too long to be allowed. Ask again";
+/** What it tells them while the room has no turn left for the answer to go on in. */
+const ROOM_BUSY = "Too many questions are waiting for answers in this room. Try again in a moment";
+/** What it tells whoever clicks a button of a tool's card while another click on the card is being answered. */
+const CARD_BUSY = "That card is answering another click. Try again in a moment";
+/** The most characters of why a click's call came to nothing that whoever clicked is told, as an app's server may write it. */
+const MAX_TOLD_LENGTH = 300;
+
+/** What whoever clicked is told of `why` a click's call came to nothing, as a model would be told: without what says so to a model, and cut short. */
+const toldOf = (why: string) => {
+  const told = why.replace(/^Not run: /, "");
+  return told.length > MAX_TOLD_LENGTH ? `${told.slice(0, MAX_TOLD_LENGTH - 1)}…` : told;
+};
+
+/** The names of the tools of the app `appId` among `picked`, an answerer's. */
+const toolsOf = (picked: readonly PickedTool[], appId: string) => new Set(picked.filter((tool) => tool.appId === appId).map(({ name }) => name));
+/** Whether `picked`, an answerer's tools in a room, have its calls of `tool`, as its model was given it, made without asking first there. */
+const isAlwaysAllowed = (picked: readonly PickedTool[], tool: GivenTool) =>
+  picked.some(({ appId, name, fingerprint, alwaysAllowed }) => alwaysAllowed && appId === tool.appId && name === tool.name && fingerprint === tool.fingerprint);
+/** Why a call made without asking first isn't shown, and so isn't made, once its answerer's calls of its tool ask first in the room, as they do in a DM or a private room. */
+const ASKS_FIRST_NOW = "each call of the tool asks first here now";
+/** `question`, asked in a room as the answerer `access` finds it: in a DM or a private room, without AI Gateway's logs keeping what's asked or answered. */
+const loggedIn = <Asked extends Omit<Question, "tools">>(question: Asked, { inPrivate }: AssistantAccess): Asked => (inPrivate ? { ...question, unlogged: true } : question);
+/** What an answerer says when its model isn't the one that made the call that waited. */
+const MODEL_CHANGED = "I can't go on from that call: my model was changed while it waited. Ask me again.";
+/** What an answerer says, by its tool's app, when what it has read is too much to keep while a call waits. */
+const tooMuchToWait = (app: string) => `I wanted to use ${app}, but this conversation is too long for me to wait while someone allows it. Ask me again in a new thread.`;
 
 /** How long an Active Storage key is: `MINIMUM_TOKEN_LENGTH`. */
 const KEY_LENGTH = 28;
@@ -216,6 +347,8 @@ interface Couriers {
   index: Courier;
   /** Has R2 delete the files the room has marked deleted. */
   files: Courier;
+  /** Sends the Workspace the huddles' messages its list of the huddles that are over has yet to hear of. */
+  huddles: Courier;
 }
 
 /**
@@ -228,12 +361,17 @@ export class ChatRoom extends DurableObject<Env> {
   private revocations: Revocations | null = null;
   private log: RoomLog | null = null;
   private blobs: Blobs | null = null;
+  private waitingCalls: WaitingCalls | null = null;
   private queue: Promise<unknown> = Promise.resolve();
   private couriers: Couriers | null = null;
   /** Whether the alarm has erased the room, whose storage no longer says it was deleted. */
   private erased = false;
   private readonly webhooks = new JobQueue(WEBHOOKS_AT_ONCE, WEBHOOKS_WAITING);
+  /** How many clicks each person has waiting on bots' webhooks. */
+  private readonly clicking = new Map<UserId, number>();
   private readonly answers = new JobQueue(ANSWERS_AT_ONCE, ANSWERS_WAITING);
+  /** The tools' cards a click's call is being made for, by their messages' ids: one at a time each, as what it answers takes the card's place. */
+  private readonly calling = new Set<string>();
   /** How many jobs each bot is typing for, by its id and the thread it's typing in, if it's in one. */
   private readonly typists = new Map<string, number>();
   /**
@@ -242,14 +380,30 @@ export class ChatRoom extends DurableObject<Env> {
    * isn't logged.
    */
   private readonly readers = new Set<UserId>();
+  /**
+   * Who was viewing the room as each of its new messages in the room came, by the message's id, until its
+   * event goes to the Workspace, with who was viewing its thread, for a reply sent to the room too.
+   * Someone who saw a message come in has seen it, though they may have left the room by the time the
+   * Workspace hears of it. Kept in memory only: a message the object restarted since is judged by who's
+   * viewing the room as it's sent, as before.
+   */
+  private readonly seenBy = new Map<string, UserId[]>();
+  /**
+   * The blocked words the room checks what it saves against, as the Workspace last gave them, or null
+   * until it asks (`hasBlockedWord`). Kept in memory only.
+   */
+  private blockedWords: KeptBlockedWords | null = null;
   /** The room's huddle, whose sockets it keeps beside the room's own. */
   private readonly huddle: Huddle;
+  /** The message the room keeps of its huddle, among its own. */
+  private readonly huddleMessage: HuddleMessage;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     // Heartbeats are answered by the runtime without waking the object.
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('{"type":"ping"}', '{"type":"pong"}'));
-    this.huddle = new Huddle(ctx, env, (time) => this.serially(() => this.checkHuddleBy(time)));
+    this.huddle = new Huddle(ctx, env, (time) => this.serially(() => this.checkHuddleBy(time)), (pushes) => this.push(pushes), (huddle) => this.serially(() => this.keepHuddleMessage(huddle)));
+    this.huddleMessage = new HuddleMessage(ctx.storage);
   }
 
   override async fetch(request: Request): Promise<Response> {
@@ -269,7 +423,7 @@ export class ChatRoom extends DurableObject<Env> {
       if (banned) return closedAtOnce(CloseCode.NotFound);
       return this.joinHuddle(user, roomId, tags, authorizedAt, parseHuddleSocketParams(urlOf(request).searchParams).muted);
     }
-    const { visible, since, around, protocol } = parseRoomSocketParams(urlOf(request).searchParams);
+    const { visible, since, around, apart, protocol } = parseRoomSocketParams(urlOf(request).searchParams);
 
     return this.serially(async () => {
       // Read side by side, so a room that has just woken waits on D1 once.
@@ -277,22 +431,26 @@ export class ChatRoom extends DurableObject<Env> {
       if (refused) return closedAtOnce(CloseCode.Reconnect);
       const { 0: client, 1: server } = new WebSocketPair();
       this.ctx.acceptWebSocket(server, tags);
-      server.serializeAttachment({ user, roomId, visible, protocol, heardAt: Date.now(), ...(banned && { banned }) } satisfies Attachment);
+      server.serializeAttachment({ user, roomId, visible, protocol, heardAt: Date.now(), ...(apart && { apart }), ...(banned && { banned }) } satisfies Attachment);
 
       this.send(server, { ...opening, you: user, present: this.present() });
       // A tab running an older app hears at once that it has to reload, rather than once it sends something.
       if (protocol < ROOM_PROTOCOL) this.send(server, { type: "error", message: OUTDATED });
-      // Everyone else has the list from their own welcome, so they only hear who's new.
-      if (!this.isPresent(user.id, server)) this.broadcast({ type: "presence.joined", user }, server);
+      // Everyone else has the list from their own welcome, so they only hear who's new: nobody is, for
+      // a socket that shows a thread apart from the room's timeline.
+      if (!apart && !this.isPresent(user.id, server)) this.broadcast({ type: "presence.joined", user }, server);
       const couriers = this.couriersFor(roomId);
       // Opening the room in a shown tab reads it, which sends the Workspace the log. Logged next,
-      // rather than before the socket is let in, so the welcome doesn't wait on it.
-      if (visible) void this.serially(() => this.read(roomId, user.id)).catch((error) => console.error("Could not log a read", error));
+      // rather than before the socket is let in, so the welcome doesn't wait on it. A socket that shows
+      // a thread apart from the room's timeline reads nothing of the room.
+      if (visible && !apart) void this.serially(() => this.read(roomId, user.id)).catch((error) => console.error("Could not log a read", error));
       // Otherwise the first socket since the object started sends whatever a restart left in the log.
       else if (!couriers.workspace.checked) couriers.workspace.deliver();
-      // And the search index's, which nothing else here sends, and the files to delete.
+      // And the search index's, which nothing else here sends, the files to delete, and the huddles
+      // there were before the Workspace listed them, which their log starts with.
       if (!couriers.index.checked) couriers.index.deliver();
       if (!couriers.files.checked) couriers.files.deliver();
+      if (!couriers.huddles.checked) couriers.huddles.deliver();
       return new Response(null, { status: 101, webSocket: client });
     });
   }
@@ -302,10 +460,12 @@ export class ChatRoom extends DurableObject<Env> {
    * room's does, so whatever ends their access to the room takes them out of its huddle. Like one of the
    * room's, it's turned away when the Workspace's word for it is too old, or older than a revocation.
    */
-  private joinHuddle(user: User, roomId: RoomId, tags: string[], authorizedAt: number, muted: boolean): Promise<Response> {
+  private async joinHuddle(user: User, roomId: RoomId, tags: string[], authorizedAt: number, muted: boolean): Promise<Response> {
+    // Cloudflare is asked for the relay's servers before the join takes its turn, so that nothing else the room does waits on its answer.
+    const iceServers = await this.huddle.iceServers(roomId);
     return this.serially(async () => {
       if (await this.revocationsFor(roomId).refuse(tags, authorizedAt)) return closedAtOnce(CloseCode.Reconnect);
-      const response = await this.huddle.join(user, roomId, tags, muted);
+      const response = await this.huddle.join(user, roomId, tags, muted, iceServers, await this.huddleMessage.resumed(user.id));
       if (this.huddle.live) await this.checkHuddleBy(Date.now() + HUDDLE_CHECK_MS);
       return response;
     });
@@ -369,10 +529,14 @@ export class ChatRoom extends DurableObject<Env> {
   private async destroy(roomId: RoomId, code: CloseCode): Promise<void> {
     this.huddle.end(code, true);
     for (const socket of this.roomSockets()) this.close(socket, code);
+    await this.huddleMessage.forget();
     while (await this.storeFor(roomId).deleteMessages(MESSAGES_DELETED_AT_ONCE));
     await this.logFor(roomId).forget();
+    await this.waitingCallsFor(roomId).forget();
     while (await searchIndex(this.env).forget(roomId, MESSAGES_DELETED_AT_ONCE));
     await this.ctx.storage.put(DELETED_ROOM, roomId);
+    // Asked again, as after a failure, the room is to be erased later than it was.
+    await this.ctx.storage.delete(ERASE_DUE);
     await this.ctx.storage.setAlarm(Date.now() + REVOCATIONS_KEPT_MS);
     this.couriersFor(roomId).files.deliver();
   }
@@ -381,17 +545,14 @@ export class ChatRoom extends DurableObject<Env> {
    * Erases what's left of a deleted room, once R2 has deleted its files. Otherwise, checks the room's
    * huddle, and comes back to check it while one goes on, and sends the room's logs. While a huddle
    * goes on, the alarm rings far more often than a log that failed is sent again, so the logs wait
-   * until they're due.
+   * until they're due, as they do while the room's message of a huddle has yet to catch up with it.
    */
   override async alarm(): Promise<void> {
     const [deleted, undelivered, logsDue] = await this.serially(() =>
       Promise.all([this.ctx.storage.get<RoomId>(DELETED_ROOM), this.ctx.storage.get<RoomId>(UNDELIVERED_ROOM), this.ctx.storage.get<number>(LOGS_DUE)]),
     );
     if (deleted !== undefined) return this.erase(deleted);
-    const nextCheck = await this.huddle.check().catch((error: unknown) => {
-      console.error("Checking the room's huddle failed:", error instanceof Error ? error.name : "unknown error");
-      return Date.now() + HUDDLE_CHECK_MS;
-    });
+    const nextCheck = await this.checkHuddle();
     const logsWait = nextCheck !== null && logsDue !== undefined && logsDue > Date.now();
     if (undelivered !== undefined && !logsWait) await this.sendLogs(undelivered);
     // Logs that waited are due before the huddle's next check, or after it. Logs just sent have set the alarm for whatever is left of them.
@@ -399,39 +560,71 @@ export class ChatRoom extends DurableObject<Env> {
   }
 
   /**
+   * Checks the room's huddle, and brings the room's message of it in step with it, which is what makes
+   * up for a message that couldn't be written, or was left saying that a huddle goes on which ended as
+   * the room's object did. Answers when to check next, or null when nothing is left to come back for.
+   */
+  private async checkHuddle(): Promise<number | null> {
+    const nextCheck = await this.huddle.check().catch((error: unknown) => {
+      console.error("Checking the room's huddle failed:", error instanceof Error ? error.name : "unknown error");
+      return Date.now() + HUDDLE_CHECK_MS;
+    });
+    const inStep = await this.serially(() => this.keepHuddleMessage(this.huddle.now()));
+    return inStep ? nextCheck : Math.min(nextCheck ?? Infinity, Date.now() + HUDDLE_CHECK_MS);
+  }
+
+  /**
    * Sends room `roomId`'s logs, which a call that failed left, or which `reindex` filled, and has R2
    * delete the files the room has marked deleted, and the uploads a day old that are still unfinished,
-   * coming back for the next of those once it's a day old.
+   * coming back for the next of those once it's a day old. Forgets the calls of apps' tools that waited
+   * too long to be allowed, too, coming back for the next of those once it has.
    */
   private async sendLogs(roomId: RoomId): Promise<void> {
     // Whatever is left to send after this says when it's due.
     await this.serially(() => this.ctx.storage.delete(LOGS_DUE));
     const couriers = this.couriersFor(roomId);
-    await Promise.all([couriers.workspace.retry(), couriers.index.retry(), couriers.files.retry()]);
+    await Promise.all([couriers.workspace.retry(), couriers.index.retry(), couriers.files.retry(), couriers.huddles.retry()]);
+    // Whatever the couriers came to, so that a call is forgotten in time while a delivery keeps failing.
+    const nextLateCall = await this.forgetLateCalls(roomId);
     // Kept until then, so an alarm cut off as it sends, as a deploy can do, sends the rest when it's
-    // retried. A courier whose last call failed has set the alarm again, for its next try.
-    if (couriers.workspace.failing || couriers.index.failing || couriers.files.failing) return;
-    const unfinished = await this.serially(() => this.blobsFor(roomId).oldestUnfinished());
-    if (unfinished === null) await this.ctx.storage.delete(UNDELIVERED_ROOM);
-    else await this.wakeAt(roomId, Date.parse(unfinished) + UNFINISHED_UPLOAD_KEPT_MS);
+    // retried. A courier whose last call failed has set the alarm again, for its next try, which comes
+    // sooner for a call that will have waited too long by then.
+    if (couriers.workspace.failing || couriers.index.failing || couriers.files.failing || couriers.huddles.failing) {
+      if (nextLateCall !== null) await this.wakeAt(roomId, nextLateCall);
+      return;
+    }
+    // Looked for and forgotten in one turn, so that a call that starts to wait meanwhile, or an upload
+    // that starts, which each set the alarm, isn't left without it.
+    const next = await this.serially(async () => {
+      const [unfinished, lateCall] = await Promise.all([this.blobsFor(roomId).oldestUnfinished(), this.waitingCallsFor(roomId).nextLate()]);
+      const next = Math.min(unfinished === null ? Infinity : Date.parse(unfinished) + UNFINISHED_UPLOAD_KEPT_MS, lateCall ?? Infinity);
+      if (next === Infinity) await this.ctx.storage.delete(UNDELIVERED_ROOM);
+      return next;
+    });
+    if (next !== Infinity) await this.wakeAt(roomId, next);
   }
 
   /**
    * Erases what's left of deleted room `roomId` once R2 has deleted its files: its revocations, and the
    * object's own storage, which on DO SQLite is everything it kept. An object with nothing stored ceases
    * to exist. Until R2 has, the alarm tries again later, since the room's record of its files goes too.
+   * So does the list of what the SFU has yet to close of the room's huddle, which the alarm comes
+   * sooner for: it asks the SFU again, and erases nothing before the room was to be erased.
    */
   private async erase(roomId: RoomId): Promise<void> {
-    const { workspace, index, files } = this.couriersFor(roomId);
+    if (await this.huddle.closeUnclosed()) return this.ctx.storage.setAlarm(Date.now() + HUDDLE_CHECK_MS);
+    const due = await this.ctx.storage.get<number>(ERASE_DUE);
+    if (due !== undefined && due > Date.now()) return this.ctx.storage.setAlarm(due);
+    const { workspace, index, files, huddles } = this.couriersFor(roomId);
     await files.retry();
     if (files.failing) return this.ctx.storage.setAlarm(Date.now() + ERASE_RETRY_MS);
     // A call still out would read its log once the tables are gone, which makes them again.
-    await Promise.all([workspace.settled(), index.settled()]);
+    await Promise.all([workspace.settled(), index.settled(), huddles.settled()]);
     await this.serially(async () => {
       await this.revocationsFor(roomId).forget();
       await this.ctx.storage.deleteAll();
       // Its tables went too, so anything after this would open the database afresh, making them again.
-      this.db = this.store = this.revocations = this.log = this.blobs = null;
+      this.db = this.store = this.revocations = this.log = this.blobs = this.waitingCalls = null;
       this.erased = true;
     });
   }
@@ -447,11 +640,39 @@ export class ChatRoom extends DurableObject<Env> {
       const ids = await store.messageIdsBy(userId, limit + 1, liftedAt);
       const removed = ids.slice(0, limit);
       if (removed.length === 0) return false;
-      this.broadcastDeletion(await store.delete(removed));
+      await this.deleteEach(store, removed);
       const couriers = this.couriersFor(roomId);
       couriers.index.deliver();
       couriers.files.deliver();
       return ids.length > limit;
+    });
+  }
+
+  /**
+   * Deletes up to `limit` of the messages here of `userId`, who deleted their account, whenever they
+   * wrote them, as `removeMessagesBy` does, then once none are left, up to `limit` of the boosts they
+   * gave others' messages, telling everyone in the room of each, and answers whether any of theirs are
+   * left. Once none are, what's kept of their messages for their threads' replies takes the name a
+   * deleted account goes by.
+   */
+  async removeEverythingBy(roomId: RoomId, userId: UserId, limit: number): Promise<boolean> {
+    return this.serially(async () => {
+      const store = this.storeFor(roomId);
+      const ids = await store.messageIdsBy(userId, limit + 1, null);
+      if (ids.length > 0) {
+        await this.deleteEach(store, ids.slice(0, limit));
+        const couriers = this.couriersFor(roomId);
+        couriers.index.deliver();
+        couriers.files.deliver();
+        if (ids.length > limit) return true;
+      }
+      const boosts = await store.boostsBy(userId, limit + 1);
+      if (boosts.length > 0) {
+        await this.removeBoosts(store, boosts.slice(0, limit));
+        if (boosts.length > limit) return true;
+      }
+      await store.renameAuthor(userId, DELETED_PERSON_NAME);
+      return false;
     });
   }
 
@@ -500,6 +721,28 @@ export class ChatRoom extends DurableObject<Env> {
   }
 
   /**
+   * Posts `markup` as a message from the person an AI app is connected as (`outside/tools`), whom the
+   * Workspace found in the room: as their socket's message.create does, in the thread of the message
+   * `threadId` names, only there, if it names one, but as a reply is posted, which goes to no bot. So
+   * an app calls neither a webhook, @ember nor an agent, even in a direct message with one, where a
+   * message needs no mention to. Answers the message, why the room keeps nothing of it, `MESSAGE_GONE`
+   * when it has no such thread, or null once the room has heard that they were taken out of it, that it
+   * was made private, for an app that reaches only open rooms, or that it was deleted, after the
+   * Workspace checked, as it turns away a socket then.
+   */
+  async createOutsideMessage(roomId: RoomId, { user, tags, authorizedAt }: OutsideSender, markup: string, threadId?: string): Promise<Message | string | null> {
+    return this.serially(async () => {
+      if (await this.revocationsFor(roomId).refuse(tags, authorizedAt)) return null;
+      const store = this.storeFor(roomId);
+      const inThread = threadId === undefined ? undefined : await this.inThread(store, threadId, false);
+      if (inThread === null) return MESSAGE_GONE;
+      const body = await this.prepare(markup);
+      if (typeof body === "string") return body;
+      return this.create(store, user, crypto.randomUUID(), body, new Date().toISOString(), { kind: "reply", inThread });
+    });
+  }
+
+  /**
    * A page of the room's messages for the bot API: the page `cursor` names, with how many messages the
    * room has, or null when the cursor isn't one of them.
    */
@@ -512,19 +755,40 @@ export class ChatRoom extends DurableObject<Env> {
   }
 
   /**
-   * Replaces the text of the bot's message `messageId` with `markup`: as a socket's message.update does,
-   * answering the message as it is now. Answers `NOT_FOUND` when the room turns the bot away, as
-   * `createBotMessage` does, or has no such message, `FORBIDDEN` when it's someone else's, then why the
-   * room keeps nothing of `markup`.
+   * A page of the room's messages for an AI app that reads it as someone in it (`outside/tools`): the
+   * page `cursor` names, or null when the cursor isn't one of them. The room isn't counted, as it is for
+   * a bot, since on D1 counting reads a row for every message.
    */
-  async editBotMessage(roomId: RoomId, { bot, authorizedAt }: BotAccess, messageId: string, markup: string): Promise<Message | string> {
+  async outsidePage(roomId: RoomId, cursor: PageCursor): Promise<Omit<TimelinePage, "around"> | null> {
+    return this.serially(() => this.storeFor(roomId).pageAt(cursor, HISTORY_PAGE_SIZE));
+  }
+
+  /**
+   * The thread of the message `parentId` names, for a bot or an AI app reading the room: the message and
+   * its newest replies, oldest first, or null when the room has no such message or it's a reply, which
+   * has no thread.
+   */
+  async botThread(roomId: RoomId, parentId: string): Promise<Message[] | null> {
+    return this.serially(async () => {
+      const { parent, messages } = await this.storeFor(roomId).thread(parentId, HISTORY_PAGE_SIZE);
+      return parent && [parent, ...messages];
+    });
+  }
+
+  /**
+   * Replaces the text of the bot's message `messageId` with `markup`, and its cards with `cards`: as a
+   * socket's message.update does, answering the message as it is now. Answers `NOT_FOUND` when the room
+   * turns the bot away, as `createBotMessage` does, or has no such message, `FORBIDDEN` when it's someone
+   * else's, then why the room keeps nothing of `markup` and `cards`.
+   */
+  async editBotMessage(roomId: RoomId, { bot, authorizedAt }: BotAccess, messageId: string, markup: string, cards: Card[] = []): Promise<Message | string> {
     return this.serially(async () => {
       const now = new Date().toISOString();
       if (await this.revocationsFor(roomId).refuse([bot.id], authorizedAt)) return NOT_FOUND;
       const store = this.storeFor(roomId);
       const message = await this.botsOwn(store, bot, messageId);
       if (typeof message === "string") return message;
-      const body = await this.prepare(markup);
+      const body = await this.prepareWithCards(markup, cards);
       return typeof body === "string" ? body : this.edit(store, message, body, now);
     });
   }
@@ -546,10 +810,22 @@ export class ChatRoom extends DurableObject<Env> {
   }
 
   /**
+   * Deletes message `messageId`, with its boosts, as an administrator's message.delete does, for an
+   * administrator who handled a report of it by deleting it, unless the room has deleted it already.
+   */
+  async deleteReportedMessage(roomId: RoomId, messageId: string): Promise<void> {
+    return this.serially(async () => {
+      const store = this.storeFor(roomId);
+      const message = await this.findUndeleted(store, messageId);
+      if (message) await this.deleteMessage(store, message);
+    });
+  }
+
+  /**
    * Adds the bot's boost of `content`, trimmed, to the message `messageId`: as a socket's boost.create
    * does, but even when the bot has added the same one, as there, answering it. Answers `NOT_FOUND` when
    * the room turns the bot away, as `createBotMessage` does, or has no such message, then `BLANK` when
-   * `content` is only spaces, or why the room keeps no boost of it.
+   * `content` is only spaces, or why the room keeps no boost of it, as when it has a blocked word.
    */
   async addBotBoost(roomId: RoomId, { bot, authorizedAt }: BotAccess, messageId: string, content: string): Promise<Boost | string> {
     return this.serially(async () => {
@@ -560,6 +836,7 @@ export class ChatRoom extends DurableObject<Env> {
       const trimmed = content.trim();
       if (trimmed === "") return BLANK;
       if (trimmed.length > MAX_BOOST_LENGTH) return BOOST_TOO_LONG;
+      if (await this.hasBlockedWord(trimmed)) return BLOCKED_WORDS_REFUSED;
       return this.addBoost(store, messageId, bot, trimmed, now);
     });
   }
@@ -583,14 +860,16 @@ export class ChatRoom extends DurableObject<Env> {
   /**
    * Starts `uploader`'s upload of `file` to the room, as a reply in the thread it names if it names one,
    * answering the file's key, or null once the room has heard that their access ended, or the room was
-   * deleted, after the Workspace checked, as it turns away a socket then, or `MESSAGE_GONE` when it has
-   * no such thread. The alarm comes back once it's a day old, to delete it from R2 if it's unfinished.
+   * deleted, after the Workspace checked, as it turns away a socket then, `MESSAGE_GONE` when it has no
+   * such thread, or `BLOCKED_WORDS_REFUSED` for a name with a word Blocked words keeps out. The alarm
+   * comes back once it's a day old, to delete it from R2 if it's unfinished.
    */
-  async startUpload(roomId: RoomId, uploader: Uploader, file: NewUpload): Promise<{ key: string } | typeof MESSAGE_GONE | null> {
+  async startUpload(roomId: RoomId, uploader: Uploader, file: NewUpload): Promise<{ key: string } | typeof MESSAGE_GONE | typeof BLOCKED_WORDS_REFUSED | null> {
     const startedAt = Date.now();
     const started = await this.serially(async () => {
       if (await this.revocationsFor(roomId).refuse(uploader.tags, uploader.authorizedAt)) return null;
       if (file.parentId !== undefined && !(await this.inThread(this.storeFor(roomId), file.parentId, false))) return MESSAGE_GONE;
+      if (await this.hasBlockedWord(file.name)) return BLOCKED_WORDS_REFUSED;
       const key = base36(KEY_LENGTH);
       const blob = {
         id: key,
@@ -690,20 +969,21 @@ export class ChatRoom extends DurableObject<Env> {
    * Starts the bot's upload of a file named `filename`, of `declaredType` as it says, to the room, for a
    * form that brings it to R2 as it arrives, as `startUpload` starts someone's, or, with `messageId`, one
    * to give the bot's message in place of its file. Answers the file's key, or `NOT_FOUND` when the room
-   * turns the bot away, as `createBotMessage` does, or has no such message, and `FORBIDDEN` when it's
-   * someone else's.
+   * turns the bot away, as `createBotMessage` does, or has no such message, `FORBIDDEN` when it's
+   * someone else's, and `BLOCKED_WORDS_REFUSED` for a name with a word Blocked words keeps out.
    */
   async startBotUpload(
     roomId: RoomId,
     { bot, authorizedAt }: BotAccess,
     file: Pick<ArrivingFile, "filename" | "declaredType">,
     messageId?: string,
-  ): Promise<{ key: string } | typeof NOT_FOUND | typeof FORBIDDEN> {
+  ): Promise<{ key: string } | typeof NOT_FOUND | typeof FORBIDDEN | typeof BLOCKED_WORDS_REFUSED> {
     const startedAt = Date.now();
     const started = await this.serially(async () => {
       if (await this.revocationsFor(roomId).refuse([bot.id], authorizedAt)) return NOT_FOUND;
       const message = messageId === undefined ? null : await this.botsOwn(this.storeFor(roomId), bot, messageId);
       if (message === NOT_FOUND || message === FORBIDDEN) return message;
+      if (await this.hasBlockedWord(file.filename)) return BLOCKED_WORDS_REFUSED;
       return { key: await this.startArriving(roomId, bot.id, file, startedAt) };
     });
     if (typeof started === "object") await this.wakeAt(roomId, startedAt + UNFINISHED_UPLOAD_KEPT_MS);
@@ -767,7 +1047,8 @@ export class ChatRoom extends DurableObject<Env> {
         console.error("ChatRoom frame failed", frame.type, error);
         const clientMessageId = frame.type === "message.create" ? frame.clientMessageId : undefined;
         const clientMessageIds = frame.type === "message.check" ? frame.clientMessageIds : undefined;
-        this.send(ws, { type: "error", message: "Something went wrong", clientMessageId, clientMessageIds, failed: frame.type });
+        const clickId = frame.type === "card.click" ? frame.clickId : undefined;
+        this.send(ws, { type: "error", message: "Something went wrong", clientMessageId, clientMessageIds, clickId, failed: frame.type });
       }
     });
   }
@@ -798,7 +1079,8 @@ export class ChatRoom extends DurableObject<Env> {
     const now = new Date().toISOString();
     if (CHANGES.has(frame.type) && (ws.deserializeAttachment() as Attachment).banned) {
       const clientMessageId = frame.type === "message.create" ? frame.clientMessageId : undefined;
-      return this.send(ws, { type: "error", message: BANNED, clientMessageId, failed: frame.type });
+      const clickId = frame.type === "card.click" ? frame.clickId : undefined;
+      return this.send(ws, { type: "error", message: BANNED, clientMessageId, clickId, failed: frame.type });
     }
 
     switch (frame.type) {
@@ -807,7 +1089,7 @@ export class ChatRoom extends DurableObject<Env> {
         const inThread = frame.parentId === undefined ? undefined : await this.inThread(store, frame.parentId, frame.alsoSend === true);
         if (inThread === null) return this.send(ws, { type: "error", message: MESSAGE_GONE, clientMessageId: frame.clientMessageId, failed: frame.type });
         const body = await this.prepare(frame.body);
-        if (typeof body === "string") return this.send(ws, { type: "error", message: body, clientMessageId: frame.clientMessageId, failed: frame.type });
+        if (typeof body === "string") return this.send(ws, { type: "error", message: body, clientMessageId: frame.clientMessageId, failed: frame.type, ...rewriting(body) });
         await this.create(store, user, frame.clientMessageId, body, now, { inThread });
         // Everyone else takes the message as its author's stop.
         markTyping(ws, false);
@@ -818,9 +1100,19 @@ export class ChatRoom extends DurableObject<Env> {
         if (!message || !(await this.canAdminister(user, message))) return this.refuse(ws, "You can only edit your own messages");
         if (isOutdated(ws)) return this.send(ws, { type: "error", message: OUTDATED, failed: frame.type });
         if (message.cards) return this.send(ws, { type: "error", message: HAS_CARDS, failed: frame.type });
+        if (message.huddle) return this.send(ws, { type: "error", message: OF_A_HUDDLE, failed: frame.type });
         const body = await this.prepare(frame.body);
         if (typeof body === "string") return this.send(ws, { type: "error", message: body, failed: frame.type });
         await this.edit(store, message, body, now);
+        return;
+      }
+      case "message.preview": {
+        // The tab sends it of its own accord, so a message that can't take it any more takes nothing, without a word.
+        const message = await store.findSent(user, frame.clientMessageId);
+        if (!message || !takesLatePreview(message, now)) return;
+        const markup = `${message.body}${previewAttachment(frame.preview)}`;
+        const body = markup.length > MAX_MESSAGE_HTML_LENGTH ? null : await this.prepare(markup);
+        if (body && typeof body !== "string") await this.addPreview(store, message, body, now);
         return;
       }
       case "message.delete": {
@@ -833,6 +1125,7 @@ export class ChatRoom extends DurableObject<Env> {
         if (!message) return this.refuse(ws, "That message no longer exists");
         // A person adds each reaction once, so one they've already added is a repeated click.
         if (message.boosts.some((b) => b.booster.id === user.id && b.content === frame.content)) return;
+        if (await this.hasBlockedWord(frame.content)) return this.send(ws, { type: "error", message: BLOCKED_WORDS_REFUSED, failed: frame.type });
         await this.addBoost(store, frame.messageId, user, frame.content, now);
         return;
       }
@@ -880,12 +1173,33 @@ export class ChatRoom extends DurableObject<Env> {
         const attachment = ws.deserializeAttachment() as Attachment;
         ws.serializeAttachment({ ...attachment, visible: frame.visible, heardAt: Date.now() } satisfies Attachment);
         // Coming back to a tab showing the room reads it.
-        if (frame.visible) await this.read(store.roomId, user.id);
+        if (frame.visible && !attachment.apart) await this.read(store.roomId, user.id);
+        return;
+      }
+      case "card.click": {
+        const message = await this.findUndeleted(store, frame.messageId);
+        const button = message?.cards && actingButton(message.cards, clickedIn(frame));
+        const waiting = this.clicking.get(user.id) ?? 0;
+        const refused = !button ? BUTTON_GONE : waiting >= CLICKS_WAITING_EACH ? TOO_MANY_CLICKS : null;
+        if (refused) return this.send(ws, { type: "error", message: refused, clickId: frame.clickId, failed: frame.type });
+        this.clicking.set(user.id, waiting + 1);
+        // The bot answers in its own time, which nothing else in the room waits for. A click that calls an app's tool waits on the app, as an answer does, not among the bots' deliveries.
+        this.ctx.waitUntil(this.deliverClick(store.roomId, ws, user, frame, button && toolCallOf(button.action) ? this.answers : this.webhooks));
         return;
       }
       case "ping":
         return this.send(ws, { type: "pong" });
     }
+  }
+
+  /**
+   * Who sees a message in the room as it comes: everyone viewing the room, and for a reply sent there
+   * from the thread it's `inThread`, everyone viewing that thread too, as someone is who has it open
+   * apart from the room, in its huddle.
+   */
+  private viewersOfNew(inThread?: InThread): UserId[] {
+    const viewers = viewersOf(this.ctx);
+    return inThread ? [...new Set([...viewers, ...viewersOf(this.ctx, undefined, inThread.parent.id)])] : viewers;
   }
 
   /**
@@ -897,11 +1211,14 @@ export class ChatRoom extends DurableObject<Env> {
     // Before the batch, which on D1 may save the message even when it fails.
     if (!inThread || inThread.alsoSend) this.readers.clear();
     const { message, seq, parent } = await store.create(sortableId(), clientMessageId, user, body, now, kind, posted, inThread);
+    if (!inThread || inThread.alsoSend) this.seenBy.set(message.id, this.viewersOfNew(inThread));
     this.broadcast({ type: "message.created", message, seq });
     if (parent) this.broadcast({ type: "message.updated", ...parent });
     const couriers = this.couriersFor(store.roomId);
     couriers.workspace.deliver();
     couriers.index.deliver();
+    // A reply in a huddle's thread is counted in the list of the huddles that are over, once it is.
+    if (inThread?.parent.huddle) couriers.huddles.deliver();
     return message;
   }
 
@@ -931,7 +1248,7 @@ export class ChatRoom extends DurableObject<Env> {
   /** `blob`, which R2 has all of now, as it came to in `file`, as the message it's posted as keeps it, at `now`. */
   private streamed(roomId: RoomId, blob: RoomBlob, file: StreamedFile, now: string): PostedFile {
     const blobs = this.blobsFor(roomId);
-    return { file: attachedFile({ ...blob, byteSize: file.byteSize }, file.identified), finished: (messageId) => blobs.streamed(blob.id, messageId, now, file) };
+    return { file: attachedFile({ ...blob, byteSize: file.byteSize, preview: file.preview ?? null }, file.identified), finished: (messageId) => blobs.streamed(blob.id, messageId, now, file) };
   }
 
   /**
@@ -949,12 +1266,12 @@ export class ChatRoom extends DurableObject<Env> {
   }
 
   /**
-   * Replaces `message`'s text with `body`, and its cards with none, telling everyone in the room and
-   * sending the search index its log, and answers the message as it is now. Saved as it was, it stays as
-   * it was, its update time included, as Rails saves nothing then.
+   * Replaces `message`'s text with `body`, and its cards with `body`'s, or none, telling everyone in the
+   * room and sending the search index its log, and answers the message as it is now. Saved as it was, it
+   * stays as it was, its update time included, as Rails saves nothing then.
    */
-  private async edit(store: MessageStore, message: Message, body: PreparedBody, now: string): Promise<Message> {
-    if (body.html === message.body && !message.cards) return message;
+  private async edit(store: MessageStore, message: Message, body: StoredBody, now: string): Promise<Message> {
+    if (body.html === message.body && JSON.stringify(body.cards) === JSON.stringify(message.cards)) return message;
     const { message: edited, seq } = await store.updateBody(message, body, now);
     this.broadcast({ type: "message.updated", message: edited, seq });
     this.couriersFor(store.roomId).index.deliver();
@@ -962,11 +1279,22 @@ export class ChatRoom extends DurableObject<Env> {
   }
 
   /**
+   * Gives `message` the text `body`, its own with the preview of its link below it, which its sender's tab
+   * had once the message had gone, telling everyone in the room, as Slack shows a link's preview a moment
+   * after its message, and sending the search index its log. It isn't marked edited.
+   */
+  private async addPreview(store: MessageStore, message: Message, body: StoredBody, now: string): Promise<void> {
+    const { message: previewed, seq } = await store.addPreview(message, body, now);
+    this.broadcast({ type: "message.updated", message: previewed, seq });
+    this.couriersFor(store.roomId).index.deliver();
+  }
+
+  /**
    * Deletes `message`, with its boosts, or keeps it for its thread's replies without them, telling
    * everyone in the room and sending the search index its log, and has R2 delete its file, if it has one.
    */
   private async deleteMessage(store: MessageStore, message: Message): Promise<void> {
-    this.broadcastDeletion(await store.delete([message.id]));
+    await this.deleteEach(store, [message.id]);
     const couriers = this.couriersFor(store.roomId);
     couriers.index.deliver();
     if (message.attachment) couriers.files.deliver();
@@ -988,8 +1316,32 @@ export class ChatRoom extends DurableObject<Env> {
     this.couriersFor(store.roomId).index.deliver();
   }
 
+  /** Deletes each of `boosts`, as `MessageStore.removeBoosts` does, telling everyone in the room. */
+  private async removeBoosts(store: MessageStore, boosts: Boost[]): Promise<void> {
+    const seq = await store.removeBoosts(boosts);
+    boosts.forEach((boost, index) => this.broadcast({ type: "boost.deleted", boostId: boost.id, messageId: boost.messageId, seq: seq + index }));
+    this.couriersFor(store.roomId).index.deliver();
+  }
+
+  /**
+   * Deletes each message `ids` names, as `MessageStore.delete` does, telling everyone in the room, and
+   * the Workspace's list of the huddles that are over when a huddle's message is deleted, or its thread
+   * loses replies. The room's message of its huddle stays deleted when it's one of them, though the room
+   * has yet to hear that it was written (./huddles/message.ts).
+   */
+  private async deleteEach(store: MessageStore, ids: string[]): Promise<void> {
+    const deletion = await store.delete(ids);
+    this.broadcastDeletion(deletion);
+    if (deletion.huddles) this.couriersFor(store.roomId).huddles.deliver();
+    await this.huddleMessage.deleted(deletion.deletedIds);
+  }
+
   /** Tells everyone in the room what deleting messages did: the deletions, then the messages it changed. */
   private broadcastDeletion({ deletedIds, changed, seq }: Deletion): void {
+    // A deleted message's event no longer names it, nor does that of one kept for its thread's replies, so
+    // their viewers are dropped here rather than when the event goes.
+    for (const messageId of deletedIds) this.seenBy.delete(messageId);
+    for (const { message } of changed) if (message.deleted) this.seenBy.delete(message.id);
     deletedIds.forEach((messageId, index) => this.broadcast({ type: "message.deleted", messageId, seq: seq + index }));
     for (const { message, seq } of changed) this.broadcast({ type: "message.updated", message, seq });
   }
@@ -1031,31 +1383,71 @@ export class ChatRoom extends DurableObject<Env> {
 
   /**
    * What the room keeps of a body a client sent, naming the people it mentions as they are now, or
-   * why it keeps nothing.
+   * why it keeps nothing, which is `BLOCKED_WORDS_REFUSED` when what its writer wrote has a blocked word.
    */
   private async prepare(markup: string): Promise<PreparedBody | string> {
+    const read = await this.readBody(markup);
+    if (typeof read === "string") return read;
+    return (await this.hasBlockedWord(read.written)) ? BLOCKED_WORDS_REFUSED : read.body;
+  }
+
+  /**
+   * A body a client sent as the room keeps it, naming the people it mentions as they are now, with what
+   * its writer wrote (`writtenText`), not yet checked for blocked words, or why the room can't keep it.
+   */
+  private async readBody(markup: string): Promise<{ body: PreparedBody; written: string } | string> {
     const ids = userIdsIn(markup);
     const people = new Map<UserId, User>(ids.length === 0 ? [] : (await workspace(this.env).mentionedPeople(ids)).map((person) => [person.id, person]));
-    const body = prepareBody(markup, (sgid) => people.get(userIdFromSgid(sgid) ?? ""));
+    const named = (sgid: string) => people.get(userIdFromSgid(sgid) ?? "");
+    const body = prepareBody(markup, named);
     if (body === null) return UNREADABLE;
     if (body.blank) return EMPTY;
-    return isMessageTooLong(body.plainText) ? MESSAGE_TOO_LONG : body;
+    if (isMessageTooLong(body.plainText)) return MESSAGE_TOO_LONG;
+    return { body, written: writtenText(body, named) };
   }
 
   /**
    * What the room keeps of a bot's message with `cards`: its text, as `prepare` keeps a body, though it may
    * be empty once the room keeps a card, and the cards, as `keptCards` keeps them, whose plain text
-   * follows the text's, together no longer than a message's, or why it keeps nothing.
+   * follows the text's, together no longer than a message's, or why it keeps nothing. The text and the
+   * cards are checked for blocked words together, so that a phrase split between them is found.
    */
   private async prepareWithCards(markup: string, cards: Card[]): Promise<StoredBody | string> {
     const kept = cards.length === 0 ? null : keptCards(cards);
     if (!kept || kept.cards.length === 0) return this.prepare(markup);
     if (JSON.stringify(kept.cards).length > MAX_MESSAGE_HTML_LENGTH) return MESSAGE_TOO_LONG;
-    const body = await this.prepare(markup);
-    if (typeof body === "string" && body !== EMPTY) return body;
-    const text = typeof body === "string" ? { html: "", plainText: "", mentions: [] } : body;
+    const read = await this.readBody(markup);
+    if (typeof read === "string" && read !== EMPTY) return read;
+    const { body: text, written } = typeof read === "string" ? { body: { html: "", plainText: "", mentions: [] }, written: "" } : read;
     const plainText = [text.plainText, kept.plainText].filter((line) => line !== "").join("\n");
-    return isMessageTooLong(plainText) ? MESSAGE_TOO_LONG : { ...text, plainText, cards: kept.cards };
+    if (isMessageTooLong(plainText)) return MESSAGE_TOO_LONG;
+    return (await this.hasBlockedWord(`${written}\n${kept.plainText}`)) ? BLOCKED_WORDS_REFUSED : { ...text, plainText, cards: kept.cards };
+  }
+
+  /**
+   * Whether `text` has a word Blocked words keeps out, as the list the room keeps has them, which it asks
+   * the Workspace for once it's a minute old, or once a message the room saved has come back from the
+   * Workspace with another version of it (`sendEvents`), so that messages don't wait on the
+   * Workspace. A change reaches a room by its next message saved, then, or within a minute.
+   */
+  private async hasBlockedWord(text: string): Promise<boolean> {
+    const now = Date.now();
+    const kept = isFresh(this.blockedWords, now) ? this.blockedWords : (this.blockedWords = await this.blockedWordsAt(now));
+    return kept.check(text);
+  }
+
+  /**
+   * The blocked words as the Workspace gives them at `now`. While it can't be reached, as when it's
+   * restarting, the room goes by the list it had, or by none, for another minute, rather than turn every
+   * message away, as its log waits for the Workspace to send it (`sendEvents`).
+   */
+  private async blockedWordsAt(now: number): Promise<KeptBlockedWords> {
+    try {
+      return keptBlockedWords(await workspace(this.env).blockedWords(), now);
+    } catch (error) {
+      console.error("Could not ask for the blocked words; going by those the room had", error);
+      return { ...(this.blockedWords ?? keptBlockedWords(NO_BLOCKED_WORDS, now)), heardAt: now };
+    }
   }
 
   /** The room's database, with its migrations applied first if its storage needs them. */
@@ -1079,6 +1471,10 @@ export class ChatRoom extends DurableObject<Env> {
     return (this.blobs ??= new Blobs(this.dbFor(), roomId));
   }
 
+  private waitingCallsFor(roomId: RoomId): WaitingCalls {
+    return (this.waitingCalls ??= new WaitingCalls(this.dbFor(), roomId));
+  }
+
   /**
    * Logs that `userId` has read the room, unless they have since its latest message, for the Workspace
    * to clear their mark, and sends it the log.
@@ -1094,13 +1490,15 @@ export class ChatRoom extends DurableObject<Env> {
    * What sends each of the room's logs. Each has a call of its own out at a time, and waits on its own
    * failures. The search index's is patient, since a search can find a message a moment late: its call
    * doesn't go with the Workspace's as a message is written, so the unread marks the Workspace sends
-   * everyone away don't wait behind its queries, as on D1 they would.
+   * everyone away don't wait behind its queries, as on D1 they would. The huddles' is too, as the list
+   * of the huddles that are over can be a moment late.
    */
   private couriersFor(roomId: RoomId): Couriers {
     return (this.couriers ??= {
       workspace: new Courier(() => this.sendEvents(roomId), (time) => this.wakeAt(roomId, time), `room ${roomId}'s log to the Workspace`),
       index: new Courier(() => this.sendMessages(roomId), (time) => this.wakeAt(roomId, time), `room ${roomId}'s messages to the search index`, true),
       files: new Courier(() => this.purgeFiles(roomId), (time) => this.wakeAt(roomId, time), `room ${roomId}'s deleted files to R2`, true),
+      huddles: new Courier(() => this.sendHuddles(roomId), (time) => this.wakeAt(roomId, time), `room ${roomId}'s huddles to the Workspace`, true),
     });
   }
 
@@ -1115,19 +1513,28 @@ export class ChatRoom extends DurableObject<Env> {
     const logged = await log.undelivered(ENTRIES_PER_CALL);
     if (logged.length === 0) return 0;
     const now = Date.now();
+    const viewers = viewersOf(this.ctx, now);
     const threads = new Map<string, UserId[]>();
     const viewingThread = (parentId: string) => {
       if (!threads.has(parentId)) threads.set(parentId, viewersOf(this.ctx, now, parentId));
       return threads.get(parentId)!;
     };
-    const events = logged.map((event) => (event.threadOnly && event.message?.parentId !== undefined ? { ...event, viewerIds: viewingThread(event.message.parentId) } : event));
-    const { pushes, webhooks, asks } = await workspace(this.env).applyRoomEvents(roomId, events, viewersOf(this.ctx, now));
+    // A message in the room goes with everyone who was viewing it as it came, as well as those viewing it now.
+    const seeing = (event: RoomEvent): RoomEvent => {
+      const seen = event.message && this.seenBy.get(event.message.id);
+      return seen ? { ...event, viewerIds: [...new Set([...seen, ...viewers])] } : event;
+    };
+    const events = logged.map((event) => (event.threadOnly && event.message?.parentId !== undefined ? { ...event, viewerIds: viewingThread(event.message.parentId) } : seeing(event)));
+    const { pushes, webhooks, asks, blockedWords } = await workspace(this.env).applyRoomEvents(roomId, events, viewers);
+    // Blocked words that have changed since the room heard of them are asked for again before the next check.
+    if (this.blockedWords && this.blockedWords.version !== blockedWords) this.blockedWords = outdated(this.blockedWords);
     // The Workspace answers a message's pushes, webhooks and question for @ember once, so they're sent
     // whatever happens next, and the log's next call doesn't wait on push services, bots or models.
     if (pushes.length > 0) this.ctx.waitUntil(this.push(pushes));
     for (const webhook of webhooks) this.ctx.waitUntil(this.deliver(roomId, webhook));
     for (const question of asks) this.ctx.waitUntil(this.answer(roomId, question));
     await log.delivered(events.at(-1)!.seq);
+    for (const { message } of events) if (message) this.seenBy.delete(message.id);
     return events.length;
   }
 
@@ -1160,6 +1567,180 @@ export class ChatRoom extends DurableObject<Env> {
   }
 
   /**
+   * Reports the click `click`, which `user` sent on `ws`, to the webhook of the bot whose message it's on,
+   * in its turn among the room's deliveries, or among its answers, as `queue` is, and does what the bot
+   * answers, then tells `ws` it's done, or why it came to nothing. Each is logged as a delivery is, and
+   * one the queue has no room for is dropped.
+   */
+  private async deliverClick(roomId: RoomId, ws: WebSocket, user: User, click: CardClick, queue: JobQueue): Promise<void> {
+    const job = `Bot::WebhookJob of ${user.id}'s click on message ${click.messageId}`;
+    let failed: string | null = null;
+    try {
+      const ran = await queue.run(async () => {
+        try {
+          console.log(`${job} performed: ${await this.reportClick(roomId, user, click)}`);
+        } catch (error) {
+          console.error(`${job} failed:`, error instanceof WebhookError ? error.message : error);
+          failed = error instanceof ClickError ? error.told : CLICK_FAILED;
+        }
+      });
+      if (!ran) {
+        console.error(`${job} dropped: the room's queue is full`);
+        failed = queue === this.answers ? ROOM_BUSY : WEBHOOKS_FULL;
+      }
+    } finally {
+      const waiting = (this.clicking.get(user.id) ?? 1) - 1;
+      if (waiting > 0) this.clicking.set(user.id, waiting);
+      else this.clicking.delete(user.id);
+      this.send(ws, failed === null ? { type: "card.clicked", clickId: click.clickId } : { type: "error", message: failed, clickId: click.clickId, failed: click.type });
+    }
+  }
+
+  /**
+   * Delivers `user`'s click to the bot's webhook, as `deliver` delivers a message: the button as its
+   * message has it by then, to the webhook as the Workspace finds it then, for whoever clicked, while
+   * they're in the room, and does what the bot answers. Answers the webhook's status, or throws why the
+   * click came to nothing. A click that answers a call that waits goes to no webhook (`decideCall`),
+   * and neither does one that calls a tool, on a tool's card (`callFromCard`).
+   */
+  private async reportClick(roomId: RoomId, user: User, click: CardClick): Promise<number | string> {
+    const message = (await this.isDeleted()) ? null : await this.findUndeleted(this.storeFor(roomId), click.messageId);
+    const button = message?.cards && actingButton(message.cards, clickedIn(click));
+    if (!message || !button) throw new ClickError(BUTTON_GONE, "the button is gone");
+    const decision = callDecisionOf(button.action);
+    const decided = decision && (await this.decideCall(roomId, user, message, decision));
+    if (decided) return decided;
+    if (toolCallOf(button.action)) return this.callFromCard(roomId, user, click);
+    const { name } = message.creator;
+    const webhook = await workspace(this.env).clickWebhook(roomId, message.creator.id, user.id);
+    if (!webhook) throw new ClickError(`${name} isn't taking clicks here`, `${NO_WEBHOOK}, or whoever clicked has left the room`);
+    const keep = (file: ArrivingFile) => this.keepReplyFile(roomId, webhook.bot, file);
+    const { status, answer } = await postClick(webhook.url, clickPayload(roomId, webhook, webhook, message, button, Date.now()), keep);
+    if (status === null) throw new ClickError(`${name} didn't answer in time`, "no answer in time");
+    if (status < 200 || status > 299) throw new ClickError(`${name} couldn't take that click`, `its webhook answered ${status}`);
+    const refused = answer && (await this.postClickAnswer(roomId, webhook, message, answer));
+    if (refused) throw new ClickError(`${name}'s answer couldn't be shown`, `its answer wasn't kept: ${refused}`);
+    return status;
+  }
+
+  /**
+   * Makes the call `user`'s `click` on a button of a tool's card asks for, one click a card at a time.
+   * The click has the card to itself before its button is looked for again, so one that waited while
+   * another's answer took the card's place calls nothing the card no longer offers. Answers what came
+   * of it, or throws why the click came to nothing, which whoever clicked is told.
+   */
+  private async callFromCard(roomId: RoomId, user: User, click: CardClick): Promise<string> {
+    if (this.calling.has(click.messageId)) throw new ClickError(CARD_BUSY, "another click on the card is being answered");
+    this.calling.add(click.messageId);
+    try {
+      const message = (await this.isDeleted()) ? null : await this.findUndeleted(this.storeFor(roomId), click.messageId);
+      const button = message?.cards && actingButton(message.cards, clickedIn(click));
+      const call = button ? toolCallOf(button.action) : undefined;
+      if (!message || !button || !call) throw new ClickError(BUTTON_GONE, "the button is gone");
+      return await this.callForClick(roomId, user, message, button.text, call);
+    } finally {
+      this.calling.delete(click.messageId);
+    }
+  }
+
+  /**
+   * Makes the call `call`, which `user`'s click on the button `label` of the tool's card `message`
+   * asks for: of a tool the card's answerer still has, of the app whose tool answered with the card,
+   * for someone in the room, while Ember AI is on and the answerer there. The card the tool answers
+   * with takes the clicked one's place, saying who clicked what, and what a tool only says is the
+   * answerer's new message beside it. Answers what came of it, or throws why the click came to nothing,
+   * which whoever clicked is told: a tool's own word for it, cut short.
+   */
+  private async callForClick(roomId: RoomId, user: User, message: Message, label: string, call: CardCall): Promise<string> {
+    const { name } = message.creator;
+    const [clicker, access] = await Promise.all([workspace(this.env).callDecider(roomId, user.id), workspace(this.env).answererIn(roomId, message.creator.id, user.id)]);
+    if (!clicker || !access) throw new ClickError(`${name} isn't answering here`, `${answererGone(message.creator.id)}, or whoever clicked has left the room`);
+    const tool = givenTools(access.appTools).find(({ appId, name }) => appId === call.appId && name === call.name);
+    if (!tool) throw new ClickError(`${name} no longer has that tool`, "the tool isn't the answerer's any more");
+    try {
+      const clicked = { who: clicker.member.name, button: label };
+      const { text, card } = await calledFromCard(this.env, access.bot.id, givenAs(tool), call.input, clicked, { roomId, askerId: user.id });
+      const cards = card && toolCards(card, tool.appId, toolsOf(access.appTools, tool.appId));
+      const unshown = await this.showCalled(roomId, access, message, cards ?? slackMessage(saidCard(tool, text, clicked)), cards !== null);
+      if (unshown !== null) throw new ClickError(`${tool.appName}'s answer couldn't be shown`, `its answer wasn't kept: ${unshown}`);
+      return cards ? "its card was replaced" : "its tool's answer was posted";
+    } catch (error) {
+      if (error instanceof ToolGone) throw new ClickError(`${name} no longer has that tool`, "the tool isn't the answerer's any more");
+      // What a server says of a call isn't logged, as it could write the token there.
+      if (error instanceof ToolError) throw new ClickError(toldOf(error.message), "the call came to nothing");
+      throw error;
+    }
+  }
+
+  /**
+   * Shows what a click's call was answered with, `shown`, for the tool's card `message`, the answerer
+   * `access` finds's own: in its place, `replacing` it, or as the answerer's new message beside it.
+   * Answers why the room keeps nothing of it, if it doesn't.
+   */
+  private showCalled(roomId: RoomId, access: AssistantAccess, message: Message, shown: SlackMessage | string, replacing: boolean): Promise<string | null> {
+    return this.serially(async () => {
+      if (typeof shown === "string") return shown;
+      if (await this.isDeleted()) return "the room is gone";
+      if (await this.revocationsFor(roomId).refuse([access.bot.id], access.authorizedAt)) return answererGone(access.bot.id);
+      const store = this.storeFor(roomId);
+      const current = await this.botsOwn(store, access.bot, message.id);
+      if (typeof current === "string") return "the card is gone";
+      if (!replacing) return this.postBeside(store, access.bot, current, shown);
+      const body = await this.prepareWithCards(shown.markup, shown.cards);
+      if (typeof body === "string") return body;
+      await this.edit(store, current, body, new Date().toISOString());
+      return null;
+    });
+  }
+
+  /**
+   * Does what a bot answers a click on its `message` with: what it says back, text or a file, is its
+   * reply, as `postReply` posts one to a delivery, and a Slack payload takes the message's place, as
+   * Slack has an interactive message's answer do, or, with `replace_original` false, is a new message
+   * beside it, and `delete_original` deletes the message. A payload that shows nothing does nothing, as an
+   * answer without one does, and as blank text does, which is a webhook's bare 200. Answers why the room
+   * keeps nothing of it, if it doesn't.
+   */
+  private async postClickAnswer(roomId: RoomId, webhook: WebhookAccess, message: Message, answer: ClickAnswer<KeptFile>): Promise<string | null> {
+    if ("text" in answer && answer.text.trim() === "") return null;
+    if (!("payload" in answer)) return this.postReply(roomId, webhook, answer, message.parentId);
+    if (answer.payload.trim() === "") return null;
+    const payload = payloadOf(answer.payload);
+    if (!payload) return "it isn't a JSON object";
+    const posted = payload.delete_original === true ? null : slackMessage(payload, true);
+    if (posted === "no_text") return null;
+    if (typeof posted === "string") return posted;
+    const found = await workspace(this.env).botWebhook(roomId, webhook.bot.id);
+    const access = found?.url === webhook.url ? found : null;
+    return this.serially(async () => {
+      if (await this.isDeleted()) return "the room is gone";
+      if (!access || (await this.revocationsFor(roomId).refuse([access.bot.id], access.authorizedAt))) return WEBHOOK_CHANGED;
+      const store = this.storeFor(roomId);
+      if (posted && payload.replace_original === false) return this.postBeside(store, access.bot, message, posted);
+      const current = await this.botsOwn(store, access.bot, message.id);
+      if (typeof current === "string") return "the message is gone";
+      if (!posted) return this.deleteMessage(store, current).then(() => null);
+      const body = await this.prepareWithCards(posted.markup, posted.cards);
+      if (typeof body === "string") return body;
+      await this.edit(store, current, body, new Date().toISOString());
+      return null;
+    });
+  }
+
+  /**
+   * Posts `posted` as `bot`'s new message beside `message`, in its thread when it's in one, only there, as
+   * a reply to a delivery goes, and to no webhook. Answers why the room keeps nothing of it, if it doesn't.
+   */
+  private async postBeside(store: MessageStore, bot: User, message: Message, { markup, cards }: SlackMessage): Promise<string | null> {
+    const inThread = message.parentId === undefined ? undefined : await this.inThread(store, message.parentId, false);
+    if (inThread === null) return THREAD_GONE;
+    const body = await this.prepareWithCards(markup, cards);
+    if (typeof body === "string") return body;
+    await this.create(store, bot, crypto.randomUUID(), body, new Date().toISOString(), { kind: "reply", inThread });
+    return null;
+  }
+
+  /**
    * Posts what a bot says back to a delivery to `webhook`, text or a file, as the bot by its name then,
    * once the Workspace has found it still in the room, delivering to the same URL: one deleted, taken
    * out of the room or sent elsewhere while the delivery ran posts nothing, where Campfire posts it
@@ -1171,7 +1752,7 @@ export class ChatRoom extends DurableObject<Env> {
     const found = await workspace(this.env)
       .botWebhook(roomId, webhook.bot.id)
       .catch(async (error: unknown) => {
-        if ("kept" in reply) await this.env.FILES?.delete(objectKey(reply.kept.key));
+        if ("kept" in reply) await this.env.FILES?.delete([objectKey(reply.kept.key), previewKey(reply.kept.key)]);
         throw error;
       });
     const access = found?.url === webhook.url ? found : null;
@@ -1213,7 +1794,7 @@ export class ChatRoom extends DurableObject<Env> {
     });
     await this.wakeAt(roomId, startedAt + UNFINISHED_UPLOAD_KEPT_MS);
     const stored = await storeArriving(files, objectKey(key), file);
-    return stored && { key, file: stored };
+    return stored && { key, file: await withPreview(this.env, files, key, file.filename, stored) };
   }
 
   /**
@@ -1234,7 +1815,7 @@ export class ChatRoom extends DurableObject<Env> {
       await this.postFile(store, access.bot, blob, this.streamed(roomId, blob, file, now), now, { kind: "reply", inThread });
       return null;
     });
-    if (refused) await this.env.FILES?.delete(objectKey(key));
+    if (refused) await this.env.FILES?.delete([objectKey(key), previewKey(key)]);
     return refused;
   }
 
@@ -1252,7 +1833,7 @@ export class ChatRoom extends DurableObject<Env> {
         if (!message) throw new AnswerError("the message is gone");
         const access = await workspace(this.env).answererIn(roomId, question.botId, question.author.id);
         if (!access) throw new AnswerError(answererGone(question.botId));
-        const refused = await this.typingWhile(access.bot, message.parentId, async () => this.postAnswer(roomId, access.bot, await this.saidTo(roomId, access, question, message), message, access.addresses));
+        const refused = await this.typingWhile(access.bot, message.parentId, async () => this.post(roomId, access, question.author, message, await this.saidTo(roomId, access, question, message)));
         if (refused) throw new AnswerError(`it wasn't posted: ${refused}`);
         console.log(`${job} posted`);
       } catch (error) {
@@ -1264,25 +1845,236 @@ export class ChatRoom extends DurableObject<Env> {
 
   /**
    * What the bot `access` finds, @ember or an agent, says to `message`, `question`'s message, with what
-   * it reads of the conversation, as its instructions say, using the web as Search the web lets it: its
-   * answer in Markdown, at its levels, @ember's the asker's, with the model they picked, if they did,
-   * ending with an ellipsis when the model was cut short, the pages it came from, and what people wrote
-   * in what it read, or the note it posts when its model doesn't answer, saying why, which the room logs.
+   * it reads of the conversation, as its instructions say, using the web as Search the web lets it, and
+   * searching the room for what was written before that, and the connected apps' tools picked for it,
+   * where its model takes Ember's tools: its answer in Markdown, at its levels, @ember's the asker's,
+   * with the model they picked, if they did (`outcomeOf`), or the call of an app's tool it waits at.
    */
-  private async saidTo(roomId: RoomId, access: AssistantAccess, { author, roomName }: AssistantAsk, message: Message): Promise<Said> {
-    const { bot, gateway, picked, instructions, promptTemplate, community, levels, webTools, webSearchOn } = access;
+  private async saidTo(roomId: RoomId, access: AssistantAccess, { author, roomName }: AssistantAsk, message: Message): Promise<Outcome> {
+    const { bot, gateway, instructions, promptTemplate, community, levels, webTools, webSearchOn } = access;
     if (!gateway) return { text: NOTES["unopened token"] };
-    const conversation = await this.conversationOf(this.storeFor(roomId), message);
+    const [conversation, takesTools] = await Promise.all([this.conversationOf(this.storeFor(roomId), message), takesEmbersTools(this.env, gateway.model)]);
     const where = { community, roomName, inThread: message.parentId !== undefined };
-    const asked = questionFor({ ...bot, instructions, promptTemplate }, conversation, author, where, levels, new Date(), webTools, webSearchOn);
-    const [answered, people] = await Promise.all([ask(this.env, gateway, asked, waitFor(asked)), this.peopleWhoWrote(conversation)]);
+    const read = readable(conversation, where.inThread).map(({ id }) => id);
+    const given = takesTools ? givenTools(access.appTools) : [];
+    const askedBy = { roomId, askerId: author.id };
+    const appTools = given.map((tool) => appTool(this.env, bot.id, tool, askedBy, { described: tool, shown: this.showsCallsOf(roomId, access, message, tool), cards: this.showsCardsOf(roomId, bot, message, tool) }));
+    const tools = takesTools ? [roomSearch(this.env, roomId, read), ...appTools] : [];
+    const asked = loggedIn({ ...questionFor({ ...bot, instructions, promptTemplate }, conversation, author, where, levels, new Date(), webTools, webSearchOn), tools }, access);
+    const [answered, people] = await Promise.all([askWaiting(this.env, gateway, asked, waitFor(asked)), this.peopleWhoWrote(conversation)]);
+    return this.outcomeOf(access, message, answered, writtenBy(people, conversation, where.inThread), given.map(givenAs));
+  }
+
+  /**
+   * What the bot `access` finds says to `message` once the call its answer waited at, `call`, is
+   * `allowed` or isn't: as `saidTo` answers, going on from where its model stopped, with the room's
+   * search and the apps' tools the model was given then, each called only while it's still picked for
+   * the bot, and without asking first where its calls of it are always allowed by now. A model changed
+   * since can't go on from another's answer, which the bot says.
+   */
+  private async wentOn(roomId: RoomId, access: AssistantAccess, message: Message, call: WaitingCall, allowed: boolean): Promise<Outcome> {
+    const { bot, gateway } = access;
+    if (!gateway) return { text: NOTES["unopened token"] };
+    if (gateway.model !== call.paused.model || gateway.format !== call.paused.format) return { text: MODEL_CHANGED };
+    const conversation = await this.conversationOf(this.storeFor(roomId), message);
+    const inThread = message.parentId !== undefined;
+    const read = readable(conversation, inThread).map(({ id }) => id);
+    const asked = { roomId, askerId: call.asker.id };
+    const appTools = call.tools.map((tool) => appTool(this.env, bot.id, tool, asked, { shown: this.showsCallsOf(roomId, access, message, tool), cards: this.showsCardsOf(roomId, bot, message, tool) }));
+    const tools = [roomSearch(this.env, roomId, read), ...appTools];
+    const paused = { ...call.paused, question: loggedIn(call.paused.question, access) };
+    const [answered, people] = await Promise.all([goOn(this.env, gateway, tools, paused, allowed, waitFor(paused.question)), this.peopleWhoWrote(conversation)]);
+    return this.outcomeOf(access, message, answered, writtenBy(people, conversation, inThread), call.tools);
+  }
+
+  /**
+   * What shows room `roomId` the calls of `tool` that the bot `access` finds makes, answering `message`,
+   * without asking first, or undefined unless its calls of it are always allowed there: a card for each,
+   * as its reply, which says what the tool was called with, and then that the call wasn't made, if it
+   * wasn't. A call isn't shown, and so isn't made, once the bot's calls of it ask first in the room, as
+   * they do once it's private.
+   */
+  private showsCallsOf(roomId: RoomId, { bot, appTools }: AssistantAccess, message: Message, tool: GivenTool): ShowsCall | undefined {
+    if (!isAlwaysAllowed(appTools, tool)) return undefined;
+    return async (input) => {
+      let cardId: string | undefined;
+      const card = ({ appTools }: AssistantAccess) => (isAlwaysAllowed(appTools, tool) ? slackMessage(usedCard(bot.name, tool, input), true) : ASKS_FIRST_NOW);
+      const unshown = await this.postCallCard(roomId, bot, message, card, async (posted) => void (cardId = posted.id));
+      return unshown ?? { unmade: (why) => this.showUnmade(roomId, cardId!, tool, input, why) };
+    };
+  }
+
+  /**
+   * What shows room `roomId` the cards that `tool` answers `bot`'s calls with, as it answers
+   * `message`: each as `bot`'s reply, where its answer goes, with the buttons that call a tool of the
+   * same app that `bot` has by then (`toolCards`).
+   */
+  private showsCardsOf(roomId: RoomId, bot: User, message: Message, tool: GivenTool): ShowsCard {
+    return (card) => this.postCallCard(roomId, bot, message, ({ appTools }) => toolCards(card, tool.appId, toolsOf(appTools, tool.appId)) ?? "it shows nothing here");
+  }
+
+  /** Has the card `messageId`, which showed the room a call of `tool` made without asking first, say the call wasn't made, and `why`. */
+  private async showUnmade(roomId: RoomId, messageId: string, tool: GivenTool, input: Record<string, unknown>, why: Unmade): Promise<void> {
+    const unchanged = await this.changeCallCard(roomId, messageId, (botName) => usedCard(botName, tool, input, why));
+    if (unchanged !== null) console.error(`The card of a call that wasn't made, message ${messageId}, wasn't changed: ${unchanged}`);
+  }
+
+  /**
+   * What `answered`, which the model of the bot `access` finds came to for `message`, has it say: its
+   * answer, ending with an ellipsis when the model was cut short, the pages it came from, and what
+   * people wrote in what it read, `written`, or the note it posts when its model doesn't answer, saying
+   * why, which the room logs, or the call it waits at, with the apps' tools it was `given`.
+   */
+  private outcomeOf(access: AssistantAccess, message: Message, answered: Answered | GatewayRefusal | Asking, written: string[], given: GivenTool[]): Outcome {
+    const { bot, gateway, picked } = access;
+    if ("asks" in answered) return { asking: answered, given };
     if (!("refusal" in answered)) {
       const text = answered.cut ? `${answered.text}\n\n…` : answered.text;
-      return { text, ...(answered.sources && { sources: answered.sources }), written: writtenBy(people, conversation, where.inThread) };
+      return { text, ...(answered.sources && { sources: answered.sources }), written };
     }
-    console.error(`${answererOf(bot.id)}'s model ${gateway.model} didn't answer message ${message.id}: ${answered.refusal}`);
+    console.error(`${answererOf(bot.id)}'s model ${gateway?.model} didn't answer message ${message.id}: ${answered.refusal}`);
     const agent = bot.id !== ASSISTANT_ID;
     return { text: (picked && PICKED_MODEL_NOTES[answered.reason]) || (agent && AGENT_NOTES[answered.reason]) || NOTES[answered.reason] };
+  }
+
+  /**
+   * Posts what a question to the bot `access` finds came to, `outcome`, for `message`, which `asker`
+   * asked: its answer (`postAnswer`), or the card that asks whether its call may run (`askFirst`).
+   * Answers why the room keeps nothing of it, if it doesn't.
+   */
+  private async post(roomId: RoomId, access: AssistantAccess, asker: User, message: Message, outcome: Outcome): Promise<string | null> {
+    if (!("asking" in outcome)) return this.postAnswer(roomId, access.bot, outcome, message, access.addresses);
+    const { asks, paused } = outcome.asking;
+    const tool = outcome.given.find(({ as }) => as === asks.name);
+    if (!tool) return `${asks.name} asks first, and is no app's tool`;
+    const call: WaitingCall = { questionId: message.id, botId: access.bot.id, asker, tool, input: asks.input, tools: outcome.given, paused, askedAt: Date.now() };
+    return fits(call) ? this.askFirst(roomId, access.bot, message, call) : this.postAnswer(roomId, access.bot, { text: tooMuchToWait(tool.appName) }, message, access.addresses);
+  }
+
+  /**
+   * Posts the card that asks whether `call`, which `bot`'s answer to `message` waits at, may run, as its
+   * reply, where `postAnswer` would post the answer and while it would, and keeps the call for the click
+   * that answers it (`decideCall`). Answers why the room keeps nothing of it, if it doesn't.
+   */
+  private async askFirst(roomId: RoomId, bot: User, message: Message, call: WaitingCall): Promise<string | null> {
+    const card = () => slackMessage(callCard(bot.name, call.asker.name, call.tool, call.input), true);
+    const refused = await this.postCallCard(roomId, bot, message, card, (posted) => this.waitingCallsFor(roomId).keep(posted.id, call));
+    // The alarm forgets it once it has waited too long (`forgetLateCalls`).
+    if (refused === null) await this.wakeAt(roomId, call.askedAt + CALL_WAITS_MS + 1);
+    return refused;
+  }
+
+  /**
+   * Posts a call's card, or the card one was answered with, as `bot`'s reply to `message`, where
+   * `postAnswer` would post the answer and while it would: what `cardFor` gives for `bot` as the
+   * Workspace finds it then, or why there's none to post. It then does `kept` with the message it is,
+   * in the same turn. Answers why the room keeps nothing of it, if it doesn't.
+   */
+  private async postCallCard(roomId: RoomId, bot: User, message: Message, cardFor: (access: AssistantAccess) => SlackMessage | string, kept?: (posted: Message) => Promise<void>): Promise<string | null> {
+    const access = await workspace(this.env).answererIn(roomId, bot.id, message.creator.id);
+    const card = access && cardFor(access);
+    if (typeof card === "string") return card;
+    return this.serially(async () => {
+      if (await this.isDeleted()) return "the room is gone";
+      if (!access || !card || (await this.revocationsFor(roomId).refuse([access.bot.id], access.authorizedAt))) return answererGone(bot.id);
+      const store = this.storeFor(roomId);
+      if (!(await this.findUndeleted(store, message.id))) return "the message is gone";
+      const inThread = message.parentId === undefined ? undefined : await this.inThread(store, message.parentId, false);
+      if (inThread === null) return THREAD_GONE;
+      const body = await this.prepareWithCards(card.markup, card.cards);
+      if (typeof body === "string") return body;
+      const posted = await this.create(store, access.bot, crypto.randomUUID(), body, new Date().toISOString(), { kind: "reply", inThread });
+      await kept?.(posted);
+      return null;
+    });
+  }
+
+  /**
+   * Forgets the calls that have waited too long to be allowed in room `roomId`, a few at a time, each
+   * card saying so in place of its buttons, and answers when the next will have, if any still waits.
+   */
+  private async forgetLateCalls(roomId: RoomId): Promise<number | null> {
+    const { late, next } = await this.serially(() => this.waitingCallsFor(roomId).takeLate(Date.now()));
+    for (const { messageId, call } of late) {
+      const unchanged = await this.showDecided(roomId, messageId, call, CALL_OUTCOMES.late());
+      if (unchanged !== null) console.error(`The card of a call that waited too long, message ${messageId}, wasn't changed: ${unchanged}`);
+    }
+    return next;
+  }
+
+  /**
+   * Answers the call that waits on the card `message` as `user`'s click on its button says, `allow` or
+   * `deny`, for whoever asked the question or an administrator, once: the card says who answered and
+   * how, in place of its buttons, and the answer goes on in its turn (`goOnFrom`). Answers what was
+   * decided, or null when no call waits on that message, and throws why the click came to nothing: with
+   * no turn left for the answer to go on in, the call waits on, to be answered again.
+   */
+  private async decideCall(roomId: RoomId, user: User, message: Message, decision: "allow" | "deny"): Promise<string | null> {
+    const calls = this.waitingCallsFor(roomId);
+    const waiting = await calls.find(message.id);
+    if (!waiting) return null;
+    const decider = await workspace(this.env).callDecider(roomId, user.id);
+    if (!decider || (!decider.administrator && user.id !== waiting.asker.id)) throw new ClickError(`Only ${waiting.asker.name} or an administrator can answer that`, "whoever clicked may not answer it");
+    const call = await this.serially(() => calls.take(message.id));
+    if (!call) throw new ClickError(CALL_ANSWERED, "the call was answered meanwhile");
+    if (Date.now() - call.askedAt > CALL_WAITS_MS) {
+      await this.showDecided(roomId, message.id, call, CALL_OUTCOMES.late());
+      throw new ClickError(CALL_LATE, "the call waited too long");
+    }
+    if (this.answers.full) {
+      // Kept to be answered again, as an answer nobody goes on with would be lost with its call allowed.
+      await this.serially(() => calls.keep(message.id, call));
+      throw new ClickError(ROOM_BUSY, "the room's queue of questions for @ember and the agents is full");
+    }
+    // The answer takes its turn before anything else can take the queue's last place.
+    const going = this.goOnFrom(roomId, call, decision === "allow");
+    const shown = await this.showDecided(roomId, message.id, call, CALL_OUTCOMES[decision](decider.member.name));
+    this.ctx.waitUntil(going);
+    return `${decision}${shown === null ? "" : `, though its card wasn't changed: ${shown}`}`;
+  }
+
+  /** Has the card `messageId`, which asked whether `call` may run, say `outcome` in place of its buttons. Answers why it's left as it was, if it is. */
+  private showDecided(roomId: RoomId, messageId: string, call: WaitingCall, outcome: string): Promise<string | null> {
+    return this.changeCallCard(roomId, messageId, (botName) => callCard(botName, call.asker.name, call.tool, call.input, outcome));
+  }
+
+  /** Has the message `messageId`, a call's card, be the card `cardFor` gives for the bot that posted it, by its name now. Answers why it's left as it was, if it is. */
+  private changeCallCard(roomId: RoomId, messageId: string, cardFor: (botName: string) => SlackPayload): Promise<string | null> {
+    return this.serially(async () => {
+      const store = this.storeFor(roomId);
+      const current = (await this.isDeleted()) ? null : await this.findUndeleted(store, messageId);
+      if (!current) return "the message is gone";
+      const card = slackMessage(cardFor(current.creator.name));
+      if (typeof card === "string") return card;
+      const body = await this.prepareWithCards(card.markup, card.cards);
+      if (typeof body === "string") return body;
+      await this.edit(store, current, body, new Date().toISOString());
+      return null;
+    });
+  }
+
+  /**
+   * Goes on with the answer that waited at `call`, once it's `allowed` or isn't, in its turn among the
+   * room's answers, as `answer` answers a question: for the message asked, as it is by then, while Ember
+   * AI is on and the bot in the room, typing while it works, and posting what the model answers, the
+   * note saying why it can't, or the card for the next call it waits at.
+   */
+  private async goOnFrom(roomId: RoomId, call: WaitingCall, allowed: boolean): Promise<void> {
+    const job = `${answererOf(call.botId)}'s answer to message ${call.questionId}, going on from a call ${allowed ? "allowed" : "not allowed"}`;
+    const ran = await this.answers.run(async () => {
+      try {
+        const message = (await this.isDeleted()) ? null : await this.findUndeleted(this.storeFor(roomId), call.questionId);
+        if (!message) throw new AnswerError("the message is gone");
+        const access = await workspace(this.env).answererIn(roomId, call.botId, call.asker.id);
+        if (!access) throw new AnswerError(answererGone(call.botId));
+        const refused = await this.typingWhile(access.bot, message.parentId, async () => this.post(roomId, access, call.asker, message, await this.wentOn(roomId, access, message, call, allowed)));
+        if (refused) throw new AnswerError(`it wasn't posted: ${refused}`);
+        console.log(`${job} posted`);
+      } catch (error) {
+        console.error(`${job} failed:`, error instanceof AnswerError ? error.message : error);
+      }
+    });
+    if (!ran) console.error(`${job} dropped: the room's queue of questions for @ember and the agents is full`);
   }
 
   /**
@@ -1312,9 +2104,10 @@ export class ChatRoom extends DurableObject<Env> {
 
   /**
    * Posts what `bot`, @ember or an agent, `said` to `message`, its answer in Markdown, as its reply: in
-   * `message`'s thread when it's in one, only there, with the pictures it shows in a card under it, the
-   * pages it came from after it, and a preview of its first web link below it, as the composer adds one,
-   * the pictures and the link only at addresses people wrote or of the pages it came from, and the link
+   * `message`'s thread when it's in one, only there, with the pictures it shows in a card under it and
+   * the cards of the Slack payloads it writes after that, the pages it came from after it, and a preview
+   * of its first web link below it, as the composer adds one, the pictures, in its cards too, and the
+   * link only at addresses people wrote or of the pages it came from, and the link
    * on none of Ember's own `addresses` (`answerOf`). Like a bot's reply, it reaches the room as any
    * message does, but goes to no bot, @ember and the agents among them. It's posted only while Ember AI
    * is on and the bot in the room, and `message` still there, so that turning Ember AI off, deleting the
@@ -1332,7 +2125,9 @@ export class ChatRoom extends DurableObject<Env> {
       if (!(await this.findUndeleted(store, message.id))) return "the message is gone";
       const inThread = message.parentId === undefined ? undefined : await this.inThread(store, message.parentId, false);
       if (inThread === null) return THREAD_GONE;
-      const body = await this.answerBody(answer, preview);
+      const answered = await this.answerBody(answer, preview);
+      // An answer with a blocked word isn't posted: the answerer says why it can't answer instead.
+      const body = answered === BLOCKED_WORDS_REFUSED ? blockedAnswerBody() : answered;
       if (typeof body === "string") return body;
       await this.create(store, access.bot, crypto.randomUUID(), body, new Date().toISOString(), { kind: "reply", inThread });
       return null;
@@ -1379,10 +2174,10 @@ export class ChatRoom extends DurableObject<Env> {
   }
 
   /**
-   * Sends new messages' pushes, as the Workspace still allows each when its turn comes, and has it forget
-   * the subscriptions they found gone.
+   * Sends new messages' pushes, or those of an invitation into the huddle, as the Workspace still allows
+   * each when its turn comes, and has it forget the subscriptions they found gone.
    */
-  private async push(pushes: MessagePush[]): Promise<void> {
+  private async push(pushes: Array<MessagePush | InvitationPush>): Promise<void> {
     const gone = await sendPushes(this.env, pushes, (id) => workspace(this.env).pushable(id));
     if (gone.length === 0) return;
     await workspace(this.env)
@@ -1406,6 +2201,21 @@ export class ChatRoom extends DurableObject<Env> {
     const seq = logged.at(-1)!.seq;
     await searchIndex(this.env).apply(roomId, seq, messages, ids.filter((id) => !kept.has(id)));
     await log.indexed(seq);
+    return logged.length;
+  }
+
+  /**
+   * Sends the Workspace the huddles' messages changed longest ago that its list of the huddles that are
+   * over hasn't taken, as many as one call takes, each once, as it is now, and forgets them once it has.
+   * Answers how many it read.
+   */
+  private async sendHuddles(roomId: RoomId): Promise<number> {
+    const log = this.logFor(roomId);
+    const logged = await log.changedHuddles(ENTRIES_PER_CALL);
+    if (logged.length === 0) return 0;
+    const changes = new Map(logged.map(({ change }) => [change.messageId, change]));
+    await workspace(this.env).applyHuddleChanges(roomId, [...changes.values()]);
+    await log.huddlesListed(logged.at(-1)!.seq);
     return logged.length;
   }
 
@@ -1453,13 +2263,49 @@ export class ChatRoom extends DurableObject<Env> {
 
   /**
    * Sets the alarm to check the room's huddle by `time`, unless it's set for sooner. A deleted room's
-   * alarm is left as it is, as `wakeAt` leaves it, and like it this runs one event at a time with
-   * deleting the room.
+   * alarm is left as it is, as `wakeAt` leaves it, unless the SFU has tracks of its huddle to close
+   * still: the alarm then comes sooner, to ask it again, and when it was to erase the room is kept.
+   * Like `wakeAt`, this runs one event at a time with deleting the room.
    */
   private async checkHuddleBy(time: number): Promise<void> {
-    if (await this.isDeleted()) return;
     const alarm = await this.ctx.storage.getAlarm();
-    if (alarm === null || alarm > time) await this.ctx.storage.setAlarm(time);
+    if (alarm !== null && alarm <= time) return;
+    if (await this.isDeleted()) {
+      if (!(await this.huddle.hasUnclosed())) return;
+      if (alarm !== null && (await this.ctx.storage.get(ERASE_DUE)) === undefined) await this.ctx.storage.put(ERASE_DUE, alarm);
+    }
+    await this.ctx.storage.setAlarm(time);
+  }
+
+  /**
+   * Brings the room's message of its huddle in step with `huddle`, the huddle as it is, or null with
+   * nobody in one, telling everyone in the room of what that writes, and sending the search index its
+   * log and the Workspace the huddles': the message as a huddle starts, and what it says once the
+   * huddle is over. The huddle has this done whenever who's in it changes, with the huddle as that left
+   * it, since someone can have left again by the time the room gets to it, and the alarm with each
+   * check of the huddle. The message of a huddle that nobody joined is deleted instead, once the huddle
+   * is over, as the room deletes any. Answers whether it could: the alarm comes back when not. A room
+   * deleted by then has forgotten the message of its last huddle, and gets no other.
+   */
+  private async keepHuddleMessage(huddle: HuddleNow | null): Promise<boolean> {
+    try {
+      if (await this.isDeleted()) return true;
+      const roomId = huddle?.roomId ?? (await this.huddleMessage.roomId());
+      // No huddle here has had a message.
+      if (roomId === undefined) return true;
+      const [store, couriers] = [this.storeFor(roomId), this.couriersFor(roomId)];
+      const tell = (frames: HuddleMessageFrame[]) => {
+        for (const frame of frames) this.broadcast(frame);
+        if (frames.length === 0) return;
+        couriers.index.deliver();
+        couriers.huddles.deliver();
+      };
+      await this.huddleMessage.keepUp(store, huddle, tell, (message) => this.deleteMessage(store, message));
+      return true;
+    } catch (error) {
+      console.error("Keeping the message of the room's huddle failed:", error instanceof Error ? error.name : "unknown error");
+      return false;
+    }
   }
 
   /**
@@ -1482,35 +2328,41 @@ export class ChatRoom extends DurableObject<Env> {
     return sockets.filter((socket) => !huddle.has(socket));
   }
 
-  /** Everyone with at least one open socket, once each. */
+  /**
+   * Everyone with at least one open socket that has them in the room, once each. A socket that shows a
+   * thread apart from the room's timeline doesn't, any more than the huddle's does whose thread it is.
+   */
   private present(): User[] {
     const users = new Map<string, User>();
     for (const socket of this.roomSockets()) {
       if (socket.readyState !== WebSocket.OPEN) continue;
-      const { user } = socket.deserializeAttachment() as Attachment;
-      users.set(user.id, user);
+      const { user, apart } = socket.deserializeAttachment() as Attachment;
+      if (!apart) users.set(user.id, user);
     }
     return [...users.values()];
   }
 
-  /** Whether someone has the room open in a socket other than `except`. */
+  /** Whether someone has the room open in a socket other than `except`, and not just a thread apart from its timeline. */
   private isPresent(userId: UserId, except?: WebSocket): boolean {
-    return this.roomSockets(userId).some((socket) => socket !== except && socket.readyState === WebSocket.OPEN);
+    return this.roomSockets(userId).some((socket) => socket !== except && socket.readyState === WebSocket.OPEN && !(socket.deserializeAttachment() as Attachment).apart);
   }
 
-  /** Closes `socket` with `code` for a revocation, if it's open, and answers whose it was. */
+  /** Closes `socket` with `code` for a revocation, if it's open, and answers whose it was, if it had them in the room. */
   private close(socket: WebSocket, code: CloseCode): User | null {
     if (socket.readyState !== WebSocket.OPEN) return null;
     const attachment = socket.deserializeAttachment() as Attachment;
     socket.serializeAttachment({ ...attachment, revoked: true } satisfies Attachment);
     socket.close(code, CLOSE_REASONS[code]);
-    return attachment.user;
+    return attachment.apart ? null : attachment.user;
   }
 
-  /** Lets everyone know a socket has closed, unless the room closed it for a revocation and said so already. */
+  /**
+   * Lets everyone know a socket has closed, unless the room closed it for a revocation and said so
+   * already, or it never had its person in the room, showing a thread apart from the room's timeline.
+   */
   private leave(ws: WebSocket): void {
-    const { user, revoked, typing } = ws.deserializeAttachment() as Attachment;
-    if (!revoked) this.depart(user, ws, typing === true);
+    const { user, revoked, typing, apart } = ws.deserializeAttachment() as Attachment;
+    if (!revoked && !apart) this.depart(user, ws, typing === true);
   }
 
   /**

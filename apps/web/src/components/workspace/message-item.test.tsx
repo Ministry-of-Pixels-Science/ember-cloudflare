@@ -2,14 +2,16 @@ import type { Boost, Card, DirectoryUser, Message, StoredFile, User } from "@emb
 import { bodyFromPlainText } from "@ember/richtext/dom";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent, { type UserEvent } from "@testing-library/user-event";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { FlashProvider } from "@/components/flash";
+import { BlockingContext } from "@/hooks/use-blocking";
+import { ReportingContext } from "@/hooks/use-reporting";
 import { DirectoryLoaded, PeopleContext, type People } from "@/hooks/use-directory";
 import { RefusedUnboosts, RoomConnection } from "@/hooks/use-room";
 import { timeLabel } from "@/lib/messages";
 import type { PendingMessage, PendingUpload } from "@/lib/room-state";
-import { MessageItem, type ThreadPlace } from "./message-item";
+import { BLOCKED_MESSAGE, MessageItem, type ThreadPlace } from "./message-item";
 
 const ada: User = { id: "u1", name: "Ada" };
 const grace: User = { id: "u2", name: "Grace" };
@@ -56,25 +58,33 @@ const fileMessage = (overrides: Partial<Message> = {}) => message({ body: "", pl
 /**
  * Renders one message, opening and closing its editor as the room does, seen by `me`, who's an
  * administrator if `administrator`, in a thread's panel if `thread` says where, and marked as the open
- * thread's if `open`. `sent` is what a reaction, edit or deletion reports: false when there's no
- * connection. `update` hands it a new copy of the message, as the room does when the message changes,
- * `reconnect` lets the page into the room again, and `refuse` has the room refuse to delete a reaction.
+ * thread's if `open`, who has blocked the people `blocked` names. `sent` is what a reaction, edit or
+ * deletion reports: false when there's no connection. `update` hands it a new copy of the message, as the
+ * room does when the message changes, `reconnect` lets the page into the room again, `refuse` has the
+ * room refuse to delete a reaction, `setBlocked` is what Block and Unblock call, `block` has the
+ * sidebar hear that the people it names are the ones blocked, and `openReport` is what Report message opens.
  */
 function show(
   m: Message | PendingMessage,
-  { me = ada, administrator = false, threaded = false, sent = true, thread = undefined as ThreadPlace | undefined, open = false } = {},
+  { me = ada, administrator = false, threaded = false, sent = true, thread = undefined as ThreadPlace | undefined, open = false, blocked = [] as string[] } = {},
 ) {
-  const actions = { boost: vi.fn(() => sent), unboost: vi.fn(() => sent), edit: vi.fn(() => sent), remove: vi.fn(() => sent) };
+  const actions = { boost: vi.fn(() => sent), unboost: vi.fn(() => sent), edit: vi.fn(() => sent), remove: vi.fn(() => sent), click: vi.fn(() => Promise.resolve(sent)) };
+  const setBlocked = vi.fn((_person: User, _blocked: boolean) => Promise.resolve(true));
+  const openReport = vi.fn();
   let setEditing: (editing: boolean) => void = () => {};
   let setMessage: (message: Message | PendingMessage) => void = () => {};
   let setConnections: (update: (connections: number) => number) => void = () => {};
   let setRefusals: (update: (refusals: number) => number) => void = () => {};
+  let setBlockedIds: (blocked: string[]) => void = () => {};
   const editors = { open: vi.fn(() => setEditing(true)), close: vi.fn(() => setEditing(false)), returnFocus: vi.fn(), attach: vi.fn(), reply: vi.fn() };
   function Room() {
     const [editing, set] = useState(false);
     const [shown, setShown] = useState(m);
     const [connections, setConnected] = useState(1);
     const [refusals, setRefused] = useState(0);
+    const [blockedIds, setBlockedNow] = useState(blocked);
+    const blocking = useMemo(() => ({ blocked: new Set(blockedIds), setBlocked }), [blockedIds]);
+    setBlockedIds = setBlockedNow;
     setEditing = set;
     setMessage = setShown;
     setConnections = setConnected;
@@ -83,7 +93,11 @@ function show(
       <FlashProvider workspace>
         <RoomConnection value={connections}>
           <RefusedUnboosts value={refusals}>
-            <MessageItem message={shown} me={{ ...me, administrator }} threaded={threaded} editing={editing} actions={actions} editors={editors} thread={thread} open={open} />
+            <BlockingContext value={blocking}>
+              <ReportingContext value={openReport}>
+                <MessageItem message={shown} me={{ ...me, administrator }} threaded={threaded} editing={editing} actions={actions} editors={editors} thread={thread} open={open} />
+              </ReportingContext>
+            </BlockingContext>
           </RefusedUnboosts>
         </RoomConnection>
       </FlashProvider>
@@ -93,8 +107,9 @@ function show(
   const update = (next: Message | PendingMessage) => act(() => setMessage(next));
   const reconnect = () => act(() => setConnections((connections) => connections + 1));
   const refuse = () => act(() => setRefusals((refusals) => refusals + 1));
+  const block = (blockedNow: string[]) => act(() => setBlockedIds(blockedNow));
   // The message's article, which holds a bot's cards' own.
-  return { actions, editors, update, reconnect, refuse, user: userEvent.setup(), article: within(container).getAllByRole("article")[0]! };
+  return { actions, editors, update, reconnect, refuse, setBlocked, block, openReport, user: userEvent.setup(), article: within(container).getAllByRole("article")[0]! };
 }
 
 /** The editor Edit opens, test-setup.ts's stand-in for Lexxy, which shows a message's text. */
@@ -158,6 +173,24 @@ const withMouse = () => {
   vi.stubGlobal("matchMedia", (media: string) => ({ matches: media === "(hover: hover) and (pointer: fine)", media, addEventListener() {}, removeEventListener() {} }));
 };
 
+/**
+ * Puts the message `article` is in inside the page's main content, which takes focus from the skip link,
+ * and answers how to press a button as Safari does: it doesn't focus a button that's clicked or tapped,
+ * but what holds it and can take focus, the main content, before the click lands.
+ */
+function inMainContent(article: HTMLElement) {
+  const main = Object.assign(document.createElement("main"), { tabIndex: -1 });
+  document.body.append(main);
+  main.append(article.closest("body > div")!);
+  onTestFinished(() => main.remove());
+  return (button: HTMLElement) => {
+    act(() => main.focus());
+    // The click lands on the button only where it's still there, under the pointer.
+    expect(button).toBeVisible();
+    fireEvent.click(button);
+  };
+}
+
 describe("Send a message", () => {
   it("shows the author, the time and the text", () => {
     const { article } = show(message({ plainText: "Line one\nLine two" }));
@@ -176,6 +209,7 @@ describe("Image, video and file previews", () => {
       // Hidden in Ember added to an iPhone's or iPad's home screen, which can't download.
       const download = within(article).getByRole("link", { name: "Download Q3 report.pdf" });
       expect(download).toHaveAttribute("href", report.downloadUrl);
+      expect(download).toHaveAttribute("download", "");
       expect(download).toHaveClass("ios-pwa:hidden");
       cleanup();
     }
@@ -238,9 +272,10 @@ describe("Download and share files", () => {
   it("offers Download in place of Quote among a file message's actions", async () => {
     const { user } = show(fileMessage(), { me: grace });
     await user.click(optionsOn("Q3 report.pdf"));
-    expect(barNames()).toEqual(["👍Thumbs up", "👏Clapping", "👋Waving hand", "More reactions", "Reply in thread", "Download", "Copy link"]);
+    expect(barNames()).toEqual(["👍Thumbs up", "👏Clapping", "👋Waving hand", "More reactions", "Reply in thread", "Download", "Copy link", "Block Ada", "Report message"]);
     const download = within(actionBar()).getByRole("link", { name: "Download" });
     expect(download).toHaveAttribute("href", report.downloadUrl);
+    expect(download).toHaveAttribute("download", "");
     expect(download).toHaveClass("ios-pwa:hidden");
   });
 
@@ -384,7 +419,7 @@ describe("Message rows", () => {
   it("follows the name of every agent the people directory lists with the badge, deleted ones too, and no other bot's", () => {
     const bot = (id: string, name: string, changes: Partial<DirectoryUser> = {}): DirectoryUser => ({ id, name, bio: null, role: "bot", status: "active", avatarUrl: "", ...changes });
     const authors = [bot("u4", "Recap", { agent: true }), bot("u5", "Scout", { agent: true, status: "deactivated" }), bot("u6", "Build Bot")];
-    const actions = { boost: vi.fn(), unboost: vi.fn(), edit: vi.fn(), remove: vi.fn() };
+    const actions = { boost: vi.fn(), unboost: vi.fn(), edit: vi.fn(), remove: vi.fn(), click: vi.fn() };
     const editors = { open: vi.fn(), close: vi.fn(), returnFocus: vi.fn(), attach: vi.fn(), reply: vi.fn() };
     render(
       <PeopleContext value={new Map(authors.map((author) => [author.id, author]))}>
@@ -405,7 +440,7 @@ describe("Message rows", () => {
 
   it("titles the author with their bio as the people directory lists it, or with just their name", () => {
     const listed = (user: User, name: string, bio: string | null) => [user.id, { ...user, name, bio, role: "member", status: "active", avatarUrl: "" }] as const;
-    const actions = { boost: vi.fn(), unboost: vi.fn(), edit: vi.fn(), remove: vi.fn() };
+    const actions = { boost: vi.fn(), unboost: vi.fn(), edit: vi.fn(), remove: vi.fn(), click: vi.fn() };
     const editors = { open: vi.fn(), close: vi.fn(), returnFocus: vi.fn(), attach: vi.fn(), reply: vi.fn() };
     const by = (creator: User) => message({ id: creator.id, clientMessageId: creator.id, creator });
     render(
@@ -452,7 +487,7 @@ describe("Edit a message", () => {
   it("puts Edit last, as Slack does, and Delete in the editor", async () => {
     const { user } = show(message({ creator: grace }), { administrator: true });
     await user.click(optionsOn("Hello"));
-    expect(barNames()).toEqual(["👍Thumbs up", "👏Clapping", "👋Waving hand", "More reactions", "Reply in thread", "Quote", "Copy link", "Edit"]);
+    expect(barNames()).toEqual(["👍Thumbs up", "👏Clapping", "👋Waving hand", "More reactions", "Reply in thread", "Quote", "Copy link", "Block Grace", "Report message", "Edit"]);
   });
 
   it("edits in place of the message, starting from its text, and Ctrl or Cmd+Enter saves", async () => {
@@ -567,7 +602,7 @@ describe("Message action bar", () => {
     await user.click(options);
     expect(options).toHaveAttribute("aria-expanded", "true");
     expect(options).toHaveAttribute("aria-controls", actionBar().id);
-    expect(barNames()).toEqual(["👍Thumbs up", "👏Clapping", "👋Waving hand", "More reactions", "Reply in thread", "Quote", "Copy link"]);
+    expect(barNames()).toEqual(["👍Thumbs up", "👏Clapping", "👋Waving hand", "More reactions", "Reply in thread", "Quote", "Copy link", "Block Ada", "Report message"]);
 
     await user.click(options);
     expect(options).toHaveAttribute("aria-expanded", "false");
@@ -615,6 +650,16 @@ describe("Message action bar", () => {
     await user.keyboard("{Escape}");
     expect(optionsOn("Hello")).toHaveAttribute("aria-expanded", "false");
     expect(optionsOn("Hello")).toHaveFocus();
+  });
+
+  it("sends a reaction from the tray in Safari, which moves focus to the main content as a button is pressed", async () => {
+    withMouse();
+    const { actions, article, user } = show(message());
+    const pressInSafari = inMainContent(article);
+    fireEvent.pointerEnter(article, { pointerType: "mouse" });
+    await user.click(within(actionBar()).getByRole("button", { name: "More reactions" }));
+    pressInSafari(within(screen.getByRole("group", { name: "More reactions" })).getByRole("button", { name: "Party popper" }));
+    expect(actions.boost).toHaveBeenCalledWith("m1", "🎉");
   });
 
   it("keeps actions the pointer opened as focus moves elsewhere, as when the composer takes it once it's ready", () => {
@@ -768,7 +813,7 @@ describe("More actions on a message", () => {
     expect(screen.getByRole("tooltip")).toHaveTextContent("More actions");
 
     await user.click(options);
-    expect(items()).toEqual(["Quote", "Copy text", "Copy link"]);
+    expect(items()).toEqual(["Quote", "Copy text", "Copy link", "Block Ada", "Report message"]);
     expect(within(moreActions()).getByRole("button", { name: "Quote" })).toHaveFocus();
     expect(options).toHaveClass("bg-hover");
     // The pointer leaving no longer closes the bar.
@@ -792,13 +837,82 @@ describe("More actions on a message", () => {
 
     const file = show(fileMessage(), { me: grace, administrator: true });
     await openMoreActions(file.user, file.article);
-    expect(items()).toEqual(["Copy link", "Delete message"]);
+    expect(items()).toEqual(["Copy link", "Block Ada", "Report message", "Delete message"]);
     cleanup();
 
     // A bot's cards can't be edited either, but their text can be quoted and copied.
     const cards = show(cardMessage(), { me: grace, administrator: true });
     await openMoreActions(cards.user, cards.article);
-    expect(items()).toEqual(["Quote", "Copy text", "Copy link", "Delete message"]);
+    expect(items()).toEqual(["Quote", "Copy text", "Copy link", "Block Ada", "Report message", "Delete message"]);
+  });
+
+  it("offers Block on touch screens on the bar, after Copy link, where More actions doesn't open", async () => {
+    const { setBlocked, user } = show(message(), { me: grace });
+    await user.click(optionsOn("Hello"));
+    const block = within(actionBar()).getByRole("button", { name: "Block Ada" });
+    expect(block.querySelector("svg")).toHaveClass("iconoir-user-xmark");
+    await user.click(block);
+    expect(setBlocked).toHaveBeenCalledExactlyOnceWith(ada, true);
+    expect(optionsOn("Hello")).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("blocks the author of someone else's message, or unblocks them once they're blocked, handing focus to the composer", async () => {
+    withMouse();
+    const { article, editors, setBlocked, user } = show(message(), { me: grace });
+    await openMoreActions(user, article);
+    await user.click(within(moreActions()).getByRole("button", { name: "Block Ada" }));
+    expect(setBlocked).toHaveBeenCalledExactlyOnceWith(ada, true);
+    expect(editors.returnFocus).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("group", { name: "More actions" })).not.toBeInTheDocument();
+    cleanup();
+
+    const blocked = show(message(), { me: grace, blocked: [ada.id] });
+    await blocked.user.click(within(blocked.article).getByRole("button", { name: BLOCKED_MESSAGE }));
+    await openMoreActions(blocked.user, screen.getByRole("article"));
+    expect(items()).toEqual(["Quote", "Copy text", "Copy link", "Unblock Ada", "Report message"]);
+    await blocked.user.click(within(moreActions()).getByRole("button", { name: "Unblock Ada" }));
+    expect(blocked.setBlocked).toHaveBeenCalledExactlyOnceWith(ada, false);
+  });
+
+  it("reports someone else's message from More actions, and on touch screens from the bar, the composer taking focus once Report closes", async () => {
+    withMouse();
+    const shown = message();
+    const { article, editors, openReport, user } = show(shown, { me: grace });
+    await openMoreActions(user, article);
+    const item = within(moreActions()).getByRole("button", { name: "Report message" });
+    expect(item.querySelector("svg")).toHaveClass("iconoir-triangle-flag");
+    await user.click(item);
+    expect(openReport).toHaveBeenCalledExactlyOnceWith({ kind: "message", message: shown }, editors.returnFocus);
+    expect(screen.queryByRole("group", { name: "More actions" })).not.toBeInTheDocument();
+    cleanup();
+    vi.unstubAllGlobals();
+
+    const touch = show(shown, { me: grace });
+    await touch.user.click(optionsOn("Hello"));
+    await touch.user.click(within(actionBar()).getByRole("button", { name: "Report message" }));
+    expect(touch.openReport).toHaveBeenCalledExactlyOnceWith({ kind: "message", message: shown }, touch.editors.returnFocus);
+    expect(optionsOn("Hello")).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("offers no Report on your own messages", async () => {
+    withMouse();
+    const { article, user } = show(message());
+    await openMoreActions(user, article);
+    expect(within(moreActions()).queryByRole("button", { name: "Report message" })).not.toBeInTheDocument();
+  });
+
+  it("names the author as the people directory lists them in Block", async () => {
+    withMouse();
+    const actions = { boost: vi.fn(), unboost: vi.fn(), edit: vi.fn(), remove: vi.fn(), click: vi.fn() };
+    const editors = { open: vi.fn(), close: vi.fn(), returnFocus: vi.fn(), attach: vi.fn(), reply: vi.fn() };
+    const king: DirectoryUser = { ...ada, name: "Ada King", bio: null, role: "member", status: "active", avatarUrl: "" };
+    render(
+      <PeopleContext value={new Map([[ada.id, king]])}>
+        <MessageItem message={message()} me={{ ...grace, administrator: false }} threaded={false} editing={false} actions={actions} editors={editors} />
+      </PeopleContext>,
+    );
+    await openMoreActions(userEvent.setup(), screen.getByRole("article"));
+    expect(items()).toContain("Block Ada King");
   });
 
   it("copies the message's text, or its address, turning the item green and leaving the actions open", async () => {
@@ -814,6 +928,18 @@ describe("More actions on a message", () => {
     await user.click(copyLink);
     expect(await navigator.clipboard.readText()).toBe(`${location.origin}/rooms/general/@m1`);
     expect(copyLink).toHaveClass("text-positive");
+    expect(moreActions()).toBeVisible();
+  });
+
+  it("copies the message's text in Safari, which moves focus to the main content as a button is pressed, leaving the actions open", async () => {
+    withMouse();
+    const { article, user } = show(message({ plainText: "Copy me, please" }));
+    const pressInSafari = inMainContent(article);
+    await openMoreActions(user, article);
+    const copyText = within(moreActions()).getByRole("button", { name: "Copy text" });
+    pressInSafari(copyText);
+    await vi.waitFor(() => expect(copyText).toHaveClass("text-positive"));
+    expect(await navigator.clipboard.readText()).toBe("Copy me, please");
     expect(moreActions()).toBeVisible();
   });
 
@@ -948,7 +1074,7 @@ describe("Quote a message", () => {
     const listed = (user: User, name: string) => [user.id, { ...user, name, bio: null, role: "member", status: "active", avatarUrl: "" }] as const;
     const body = `<p>Thanks <action-text-attachment content-type="application/vnd.campfire.mention" sgid="0123456789abcdef"></action-text-attachment>!</p>`;
     const editors = { open: vi.fn(), close: vi.fn(), returnFocus: vi.fn(), attach: vi.fn(), reply: vi.fn() };
-    const actions = { boost: vi.fn(), unboost: vi.fn(), edit: vi.fn(), remove: vi.fn() };
+    const actions = { boost: vi.fn(), unboost: vi.fn(), edit: vi.fn(), remove: vi.fn(), click: vi.fn() };
     render(
       <PeopleContext value={new Map([listed(ada, "Ada King"), listed({ id: "0123456789abcdef", name: "Grace" }, "Grace Hopper")])}>
         <MessageItem message={message({ body, plainText: "Thanks @Grace!" })} me={{ ...grace, administrator: false }} threaded={false} editing={false} actions={actions} editors={editors} />
@@ -976,6 +1102,57 @@ describe("Quote a message", () => {
     const { editors, user } = show(message({ id: "r1", parentId: "m0", plainText: "In the thread" }), { me: grace, thread: { roomName: "general", direct: false } });
     await pressAction(user, "Quote", "In the thread");
     expect(editors.reply.mock.lastCall![0]).toContain(`<a href="${location.origin}/rooms/general/threads/m0/@r1">#</a>`);
+  });
+});
+
+describe("Messages from someone you've blocked", () => {
+  const replies = { count: 2, latestAt: new Date().toISOString(), people: [grace, ada] };
+
+  it("collapses to a button that shows the message, keeping its thread's summary", async () => {
+    const { article, user } = show(message({ thread: replies }), { me: grace, blocked: [ada.id] });
+    expect(article).toHaveTextContent(BLOCKED_MESSAGE);
+    expect(article).not.toHaveTextContent("Hello");
+    expect(within(article).queryByText("Ada")).not.toBeInTheDocument();
+    expect(within(article).queryByRole("button", { name: "Message options" })).not.toBeInTheDocument();
+    expect(within(article).getByRole("link", { name: /^2 replies/ })).toHaveAttribute("href", "/rooms/general/threads/m1");
+
+    await user.click(within(article).getByRole("button", { name: BLOCKED_MESSAGE }));
+    const shown = screen.getByRole("article");
+    expect(shown).toHaveTextContent("Hello");
+    expect(within(shown).getByRole("button", { name: "Message options" })).toBeInTheDocument();
+  });
+
+  it("says whose a message is once it's shown, even where it follows on from the one before", async () => {
+    const { user } = show(message(), { me: grace, blocked: [ada.id], threaded: true });
+    await user.click(screen.getByRole("button", { name: BLOCKED_MESSAGE }));
+    expect(screen.getByRole("heading", { level: 3 })).toHaveTextContent("Ada");
+  });
+
+  it("leaves the messages of anyone else, and your own, as they are", () => {
+    show(message(), { me: grace, blocked: ["u3"] });
+    expect(screen.getByRole("article")).toHaveTextContent("Hello");
+    cleanup();
+
+    show(message(), { me: ada, blocked: [grace.id] });
+    expect(screen.getByRole("article")).toHaveTextContent("Hello");
+  });
+
+  it("collapses as its author is blocked, and shows again as they're unblocked", () => {
+    const { block } = show(message(), { me: grace });
+    block([ada.id]);
+    expect(screen.getByRole("article")).toHaveTextContent(BLOCKED_MESSAGE);
+    block([]);
+    expect(screen.getByRole("article")).toHaveTextContent("Hello");
+  });
+
+  it("stays shown while its author stays blocked, but collapses again once they're unblocked and blocked again", async () => {
+    const { block, user } = show(message(), { me: grace, blocked: [ada.id] });
+    await user.click(screen.getByRole("button", { name: BLOCKED_MESSAGE }));
+    block([ada.id, "u3"]);
+    expect(screen.getByRole("article")).toHaveTextContent("Hello");
+    block([]);
+    block([ada.id]);
+    expect(screen.getByRole("article")).toHaveTextContent(BLOCKED_MESSAGE);
   });
 });
 
@@ -1381,7 +1558,7 @@ describe("How mentions look", () => {
 
   /** A message open in its editor, seen by Ada with `people` in the people directory, which has `loaded`. */
   const editing = (m: Message, people: People, loaded = true) => {
-    const actions = { boost: vi.fn(), unboost: vi.fn(), edit: vi.fn(), remove: vi.fn() };
+    const actions = { boost: vi.fn(), unboost: vi.fn(), edit: vi.fn(), remove: vi.fn(), click: vi.fn() };
     const editors = { open: vi.fn(), close: vi.fn(), returnFocus: vi.fn(), attach: vi.fn(), reply: vi.fn() };
     return (
       <PeopleContext value={people}>
@@ -1442,7 +1619,7 @@ describe("Edit your profile", () => {
   it("names the author and whoever reacted as the people directory lists them now, so a rename shows on messages sent before it", () => {
     const listed = (user: User, name: string) => [user.id, { ...user, name, bio: null, role: "member", status: "active", avatarUrl: `/users/${user.id}/avatar` }] as const;
     const m = message({ boosts: [boost("b1", grace, "👍"), boost("b2", { id: "u3", name: "Linus" }, "👍")] });
-    const actions = { boost: vi.fn(), unboost: vi.fn(), edit: vi.fn(), remove: vi.fn() };
+    const actions = { boost: vi.fn(), unboost: vi.fn(), edit: vi.fn(), remove: vi.fn(), click: vi.fn() };
     const editors = { open: vi.fn(), close: vi.fn(), returnFocus: vi.fn(), attach: vi.fn(), reply: vi.fn() };
     render(
       <PeopleContext value={new Map([listed(ada, "Ada King"), listed(grace, "Grace Hopper")])}>

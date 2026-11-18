@@ -16,6 +16,7 @@ import {
   type User,
 } from "@ember/protocol";
 import { writtenBody } from "@ember/richtext/dom";
+import type { AddPreview } from "@/components/workspace/composer";
 import type { MessageActions } from "@/components/workspace/message-item";
 import { ApiError, fetchMe, roomSocketUrl } from "@/lib/api";
 import { handOver, leftUnsent, takeBack } from "@/lib/outbox";
@@ -57,11 +58,11 @@ export interface RoomFrames {
 }
 
 /**
- * What can be done to a room's messages over `send`. Unlike new messages, these aren't kept to send later,
+ * What can be done to a room's messages over `frames`. Unlike new messages, these aren't kept to send later,
  * so `warn` says when one couldn't go. An edit longer than the room takes isn't sent either, so its editor
  * keeps it.
  */
-export function messageActionsOf(send: RoomFrames["send"], warn: (message: string) => void): MessageActions {
+export function messageActionsOf({ send, listen }: RoomFrames, warn: (message: string) => void): MessageActions {
   const sendOrWarn = (frame: ClientFrame) => {
     const sent = send(frame);
     if (!sent) warn("Not connected. Try again once you're reconnected.");
@@ -76,6 +77,24 @@ export function messageActionsOf(send: RoomFrames["send"], warn: (message: strin
     remove: (messageId) => sendOrWarn({ type: "message.delete", messageId }),
     boost: (messageId, content) => sendOrWarn({ type: "boost.create", messageId, content }),
     unboost: (boostId) => sendOrWarn({ type: "boost.delete", boostId }),
+    click: (messageId, { id: actionId, blockId, value }) => {
+      const clickId = crypto.randomUUID();
+      const button = { actionId, ...(blockId !== undefined && { blockId }), ...(value !== undefined && { value }) };
+      if (!sendOrWarn({ type: "card.click", clickId, messageId, ...button })) return Promise.resolve(false);
+      return new Promise((resolve) => {
+        const answered = (went: boolean) => {
+          stop();
+          resolve(went);
+        };
+        // The room answers once the bot has, or says why it didn't, which the timeline shows. A room that
+        // lets the page in again has lost the click's answer, if not the click.
+        const stop = listen((frame) => {
+          if (frame.type === "card.clicked" && frame.clickId === clickId) answered(true);
+          else if (frame.type === "error" && frame.clickId === clickId) answered(false);
+          else if (frame.type === "welcome" || frame.type === "resumed") answered(false);
+        });
+      });
+    },
   };
 }
 
@@ -281,13 +300,14 @@ export function useRoom(roomId: string, me: User, onSessionChanged: (me: Me | nu
     if (awayFromNewest.current && send({ type: "history.around" })) dispatch({ type: "loading-page" });
   }, [send]);
 
-  // Answers whether the message went. One longer than the room takes doesn't, and stays where it was written.
+  // Answers how to add a link's preview to the message once it has gone, or null when it didn't go. One
+  // longer than the room takes doesn't, and stays where it was written.
   const postMessage = useCallback(
     (body: string) => {
       const { plainText: text, mentions } = writtenBody(body);
       if (isTooLong(body, text)) {
         warn(MESSAGE_TOO_LONG);
-        return false;
+        return null;
       }
       const message = pendingMessage(crypto.randomUUID(), roomId, me, body, text, mentions, new Date().toISOString());
       toNewest();
@@ -295,7 +315,7 @@ export function useRoom(roomId: string, me: User, onSessionChanged: (me: Me | nu
       // sent once the page is offline.
       if (!send({ type: "message.create", clientMessageId: message.clientMessageId, body })) message.queued = true;
       dispatch({ type: "pending", message });
-      return true;
+      return previewAdderOf(send, message.clientMessageId);
     },
     [me, roomId, send, warn, toNewest],
   );
@@ -369,11 +389,20 @@ export function useRoom(roomId: string, me: User, onSessionChanged: (me: Me | nu
     [send, state.messages, state.hasNewer, state.loadingPage],
   );
 
-  const messageActions = useMemo(() => messageActionsOf(send, warn), [send, warn]);
+  const messageActions = useMemo(() => messageActionsOf(frames, warn), [frames, warn]);
 
   const dismissNotice = useCallback(() => dispatch({ type: "dismiss-notice" }), []);
+  const givenBack = useCallback((clientMessageId: string, taken: boolean) => dispatch({ type: "given-back", clientMessageId, taken }), []);
 
-  return { state, frames, postMessage, postFiles, typing, loadOlder, loadNewer, jump, messageActions, dismissNotice };
+  return { state, frames, postMessage, postFiles, typing, loadOlder, loadNewer, jump, messageActions, dismissNotice, givenBack };
+}
+
+/**
+ * Adds the preview of a link in the message sent as `clientMessageId`, which came after it went, as Slack
+ * adds one a moment after its message. One the tab can't send now, while it's offline, is left out.
+ */
+export function previewAdderOf(send: RoomFrames["send"], clientMessageId: string): AddPreview {
+  return (preview) => void send({ type: "message.preview", clientMessageId, preview });
 }
 
 /** A message `me` is sending to `roomId` as `clientMessageId`, as the timeline shows it until the room has it. */

@@ -20,9 +20,11 @@ import {
 } from "@ember/protocol";
 import { MODEL_NOT_LISTED, type YourAssistant, type YourAssistantChanged, type YourAssistantChanges } from "@ember/protocol/assistant";
 import { SSO_CONNECTIONS_PATH, SSO_DISCONNECTED_NOTICE, type SsoStatus } from "@ember/protocol/sso";
+import type { HuddleSounds, HuddleSoundsChanged } from "@ember/protocol/huddles";
 import { FlashProvider } from "@/components/flash";
 import { Sheet } from "@/components/ui/sheet";
 import { AccountContext } from "@/hooks/use-account";
+import { BlockingContext } from "@/hooks/use-blocking";
 import { PeopleContext, type People } from "@/hooks/use-directory";
 import { PushContext } from "@/hooks/use-push";
 import { navigate } from "@/hooks/use-route";
@@ -30,13 +32,14 @@ import { CHROME_MAC, SAFARI_MAC } from "@/test-platforms";
 import { PUSH_ON } from "@/test-push";
 import { DEFAULT_MODEL_EXPLAINED } from "./answer-levels";
 import { AVATAR_CHANGED, ProfilePage } from "./profile-page";
+import { NOTHING_CONNECTED } from "./your-outside-ai";
 
 vi.mock("@/lib/previews", () => ({ avatarVariantOf: vi.fn(async () => new Blob(["variant"], { type: "image/webp" })) }));
 
 const ada = { id: "u1", name: "Ada Lovelace", administrator: false };
 /** Ada's avatar as the profile loads it: her initials, until she uploads one. */
 const INITIALS = "/users/t0k3n/avatar?v=1";
-const profile: Profile = { name: "Ada Lovelace", emailAddress: "ada@example.com", bio: "Wrote the first program", avatarUrl: INITIALS, avatar: false, password: true, membershipNeeded: true, memberful: null, sso: null, assistant: null };
+const profile: Profile = { name: "Ada Lovelace", username: null, emailAddress: "ada@example.com", bio: "Wrote the first program", avatarUrl: INITIALS, avatar: false, password: true, membershipNeeded: true, memberful: null, sso: null, assistant: null, apps: [], outsideAi: null };
 /** Ada's levels of @ember's dials while Ember AI is on: where they start, up to Medium thinking, with the one model people can pick, which she leaves to administrators. */
 const LEVELS: YourAssistant = {
   levels: { thinking: "low", length: "medium" },
@@ -45,7 +48,7 @@ const LEVELS: YourAssistant = {
   defaultModel: "@cf/zai-org/glm-4.7-flash",
   models: [{ id: "@cf/zai-org/glm-4.7-flash", name: "GLM-4.7 Flash", format: "chat" }],
 };
-const account: Account = { name: "Analytical Engines", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, ssoJoin: false, ssoSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false };
+const account: Account = { name: "Analytical Engines", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, ssoJoin: false, ssoSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true };
 /** The sign-in links loading and saving the profile give. */
 const [LOADED_LINK, SAVED_LINK] = ["u1.mgk3x2a9.loaded", "u1.mgk3x2b0.saved"];
 
@@ -112,30 +115,50 @@ function serve({
   });
 }
 
-/** The profile, with Ada's rooms as the sidebar's list has them, or none while it loads, on `platform`. */
-function showPage(shown = account, rooms: SidebarRoom[] | null = null, platform: Platform = CHROME_MAC) {
-  const [onSignOut, onFailed, answered] = [vi.fn(), vi.fn(), vi.fn()];
-  const page = (listed: SidebarRoom[] | null, people: People = new Map()) => (
+/**
+ * The profile, with Ada's rooms as the sidebar's list has them, or none while it loads, on `platform`,
+ * and with the huddle sounds she hears as the list has them, or none while huddles are off.
+ */
+function showPage(shown = account, rooms: SidebarRoom[] | null = null, platform: Platform = CHROME_MAC, huddleSounds: HuddleSounds | null = null) {
+  const [onSignOut, onFailed, answered, soundsAnswered] = [vi.fn(), vi.fn(), vi.fn(), vi.fn()];
+  const onDeleteAccount = vi.fn(async () => {});
+  const setBlocked = vi.fn(async () => true);
+  const page = (listed: SidebarRoom[] | null, people: People = new Map(), blocked: string[] = []) => (
     <AccountContext value={shown}>
       <PeopleContext value={people}>
-        <PushContext value={{ ...PUSH_ON, platform }}>
-          <FlashProvider workspace>
-            <Sheet>
-              <ProfilePage me={ada} rooms={listed} askForRoom={() => answered} onSignOut={onSignOut} onFailed={onFailed} />
-            </Sheet>
-          </FlashProvider>
-        </PushContext>
+        <BlockingContext value={{ blocked: new Set(blocked), setBlocked }}>
+          <PushContext value={{ ...PUSH_ON, platform }}>
+            <FlashProvider workspace>
+              <Sheet>
+                <ProfilePage
+                  me={ada}
+                  rooms={listed}
+                  askForRoom={() => answered}
+                  huddleSounds={huddleSounds}
+                  askForHuddleSounds={() => soundsAnswered}
+                  onSignOut={onSignOut}
+                  onDeleteAccount={onDeleteAccount}
+                  onFailed={onFailed}
+                />
+              </Sheet>
+            </FlashProvider>
+          </PushContext>
+        </BlockingContext>
       </PeopleContext>
     </AccountContext>
   );
   const { rerender } = render(page(rooms));
   return {
     onSignOut,
+    onDeleteAccount,
     onFailed,
     answered,
+    soundsAnswered,
     user: userEvent.setup(),
     showRooms: (listed: SidebarRoom[]) => rerender(page(listed)),
     showPeople: (people: People) => rerender(page(rooms, people)),
+    /** Has the sidebar list the people `blocked` names as blocked, with the people directory listing `people`. */
+    showBlocked: (blocked: string[], people: People) => rerender(page(rooms, people, blocked)),
   };
 }
 
@@ -192,7 +215,7 @@ describe("Edit your profile", () => {
   });
 
   it("shows no email address or bio as blank fields", async () => {
-    serve({ loaded: () => Response.json({ profile: { name: "Grace Hopper", emailAddress: null, bio: null } }) });
+    serve({ loaded: () => Response.json({ profile: { ...profile, name: "Grace Hopper", emailAddress: null, bio: null } }) });
     showPage();
     await loaded();
     expect(field("Email address")).toHaveValue("");
@@ -245,6 +268,25 @@ describe("Edit your profile", () => {
     expect(field("Bio")).toHaveValue("");
     expect(field("New password")).toHaveValue("");
     expect(onFailed).not.toHaveBeenCalled();
+  });
+
+  it("saves your username as Ember keeps one, in lowercase without spaces or an @, which you can leave blank", async () => {
+    serve({ loaded: () => Response.json({ profile: { ...profile, username: "ada" }, transferId: LOADED_LINK } satisfies ProfileAnswer) });
+    const { user } = showPage();
+    await loaded();
+    const username = field("Username");
+    expect(username).toHaveValue("ada");
+    expect(username).not.toBeRequired();
+    expect(username).toHaveAttribute("maxlength", "21");
+    expect(username).toHaveAccessibleDescription("People find you by typing @ and your username.");
+    await user.clear(username);
+    await user.type(username, "@Ada Lovelace");
+    expect(username).toHaveValue("adalovelace");
+    await user.click(saveButton());
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Changes saved");
+    expect(saved()).toEqual([{ username: "adalovelace" }]);
+    expect(username).toHaveValue("adalovelace");
   });
 
   it("sends only what you changed, then shows what's saved, so it doesn't undo another tab's save", async () => {
@@ -419,6 +461,94 @@ describe("Private sign-in link", () => {
   });
 });
 
+describe("Delete my account", () => {
+  const deleteButton = () => screen.queryByRole("button", { name: "Delete my account" });
+
+  it("ends with Delete my account once your profile loads, after your sign-in link", async () => {
+    showPage();
+    expect(deleteButton()).toBeNull();
+    await loaded();
+    const link = screen.getByRole("textbox", { name: "Use this link to login automatically on another device" });
+    expect(link.compareDocumentPosition(deleteButton()!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+
+  it("asks for your password while you have one, and deletes your account with it", async () => {
+    const { onDeleteAccount, user } = showPage();
+    await loaded();
+    await user.click(deleteButton()!);
+    await user.type(screen.getByLabelText("Your password"), "analytical engine");
+    await user.click(deleteButton()!);
+    expect(onDeleteAccount).toHaveBeenCalledExactlyOnceWith({ currentPassword: "analytical engine" });
+  });
+
+  it("asks someone without one to type their name", async () => {
+    serve({ loaded: () => Response.json({ profile: { ...profile, password: false }, transferId: LOADED_LINK } satisfies ProfileAnswer) });
+    const { onDeleteAccount, user } = showPage();
+    await loaded();
+    await user.click(deleteButton()!);
+    await user.type(screen.getByLabelText("Type your name, Ada Lovelace, to delete your account"), "Ada Lovelace");
+    await user.click(deleteButton()!);
+    expect(onDeleteAccount).toHaveBeenCalledExactlyOnceWith({ name: "Ada Lovelace" });
+  });
+
+  it("asks for the name you saved last, as the server has it, before the workspace's socket brings it", async () => {
+    const without = { ...profile, password: false };
+    serve({
+      loaded: () => Response.json({ profile: without, transferId: LOADED_LINK } satisfies ProfileAnswer),
+      saved: () => Response.json({ profile: { ...without, name: "Ada King" }, transferId: SAVED_LINK } satisfies ProfileAnswer),
+    });
+    const { user } = showPage();
+    await loaded();
+    await user.clear(screen.getByLabelText("Name"));
+    await user.type(screen.getByLabelText("Name"), "Ada King");
+    await user.click(saveButton());
+    await user.click(await screen.findByRole("button", { name: "Delete my account" }));
+    expect(await screen.findByLabelText("Type your name, Ada King, to delete your account")).toBeInTheDocument();
+  });
+
+  it("keeps asking for the name saved last when a photo's answer comes after it, with the name from before", async () => {
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:moon");
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    const without = { ...profile, password: false };
+    let answerUpload = (_: Response) => {};
+    serve({
+      loaded: () => Response.json({ profile: without, transferId: LOADED_LINK } satisfies ProfileAnswer),
+      saved: () => Response.json({ profile: { ...without, name: "Ada King" }, transferId: SAVED_LINK } satisfies ProfileAnswer),
+      uploaded: () => new Promise((resolve) => (answerUpload = resolve)),
+    });
+    const { user } = showPage();
+    await loaded();
+    await user.upload(screen.getByLabelText("Upload avatar", { exact: false }), new File(["moon"], "moon.jpg", { type: "image/jpeg" }));
+    await user.clear(screen.getByLabelText("Name"));
+    await user.type(screen.getByLabelText("Name"), "Ada King");
+    await user.click(saveButton());
+    await waitFor(() => expect(screen.getByLabelText("Name")).toHaveValue("Ada King"));
+    await waitFor(() => expect(saveButton()).toBeEnabled());
+
+    await act(async () => answerUpload(Response.json({ profile: { ...without, avatarUrl: UPLOADED, avatar: true }, transferId: SAVED_LINK } satisfies ProfileAnswer)));
+    await user.click(screen.getByRole("button", { name: "Delete my account" }));
+    expect(await screen.findByLabelText("Type your name, Ada King, to delete your account")).toBeInTheDocument();
+  });
+});
+
+describe("Blocked people on your profile", () => {
+  it("lists whom you've blocked after Conversation notifications, before Delete my account, once you've blocked anyone", async () => {
+    serve();
+    const room: SidebarRoom = { id: "design", name: "Design", kind: "open", icon: null, unread: false, involvement: "mentions" };
+    const { showBlocked } = showPage(account, [room]);
+    await loaded();
+    expect(screen.queryByRole("region", { name: "Blocked people" })).toBeNull();
+
+    const grace: DirectoryUser = { id: "u2", name: "Grace Hopper", bio: null, role: "member", status: "active", avatarUrl: "/users/u2/avatar" };
+    showBlocked([grace.id], new Map([[grace.id, grace]]));
+    const blocked = screen.getByRole("region", { name: "Blocked people" });
+    expect(within(blocked).getByRole("button", { name: "Unblock Grace Hopper" })).toBeVisible();
+    const sections = [screen.getByRole("heading", { name: "Conversation notifications" }), blocked, screen.getByRole("region", { name: "Delete my account" })];
+    expect(sections[0]!.compareDocumentPosition(sections[1]!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(sections[1]!.compareDocumentPosition(sections[2]!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+});
+
 describe("Levels on your profile", () => {
   const design: SidebarRoom = { id: "design", name: "Design", kind: "open", icon: null, unread: false, involvement: "mentions" };
   const notifications = () => screen.queryByRole("list", { name: "Conversation notifications" });
@@ -446,6 +576,44 @@ describe("Levels on your profile", () => {
     await user.click(screen.getByRole("checkbox", { name: "Notifying about @ mentions" }));
     expect(onFailed).toHaveBeenCalledOnce();
     expect(answered).not.toHaveBeenCalled();
+  });
+});
+
+describe("Huddle sounds on your profile", () => {
+  const design: SidebarRoom = { id: "design", name: "Design", kind: "open", icon: null, unread: false, involvement: "mentions" };
+  const NO_CHIMES: HuddleSounds = { music: true, chimes: false, ring: true };
+  const section = () => screen.queryByRole("region", { name: "Huddle sounds" });
+  const switched = () => within(section()!).getAllByRole("switch").map((each) => each.getAttribute("aria-checked") === "true");
+
+  it("has a switch for each of a huddle's sounds while huddles are on, between the form and your rooms' levels, each as the sidebar's list has it", async () => {
+    showPage(account, [design], CHROME_MAC, NO_CHIMES);
+    await loaded();
+    expect(switched()).toEqual([true, false, true]);
+    expect(saveButton().compareDocumentPosition(section()!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(section()!.compareDocumentPosition(screen.getByRole("list", { name: "Conversation notifications" }))).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+
+  it("has none while huddles are off, or the list hasn't said which you hear", async () => {
+    showPage(account, [design]);
+    await loaded();
+    expect(section()).toBeNull();
+    expect(screen.getByRole("list", { name: "Conversation notifications" })).toBeVisible();
+  });
+
+  it("hands the sounds a switch saves to the sidebar's list, and says why one couldn't save", async () => {
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      if (String(input) !== "/api/users/me/huddle-sounds") return Response.json({ profile, transferId: LOADED_LINK } satisfies ProfileAnswer);
+      return init?.body === JSON.stringify({ chimes: true }) ? Response.json({ sounds: { ...NO_CHIMES, chimes: true } } satisfies HuddleSoundsChanged) : Response.json({ error: "Something went wrong" }, { status: 500 });
+    });
+    const { soundsAnswered, onFailed, user } = showPage(account, [design], CHROME_MAC, NO_CHIMES);
+    await loaded();
+    await user.click(within(section()!).getByRole("switch", { name: "Play a sound when someone joins or leaves" }));
+    expect(soundsAnswered).toHaveBeenCalledExactlyOnceWith({ music: true, chimes: true, ring: true });
+    expect(onFailed).not.toHaveBeenCalled();
+
+    await user.click(within(section()!).getByRole("switch", { name: "Ring when someone invites you to a huddle" }));
+    expect(onFailed).toHaveBeenCalledOnce();
+    expect(soundsAnswered).toHaveBeenCalledOnce();
   });
 });
 
@@ -482,11 +650,32 @@ describe("Connect Memberful", () => {
     expect(passwordHelp()).toHaveTextContent("Leave blank to keep your current password. Changing it disconnects Memberful.");
   });
 
-  it("says nothing of a new password disconnecting it to someone without a password, whose first keeps it", async () => {
-    serve({ loaded: () => Response.json({ profile: { ...profile, password: false, memberful: CONNECTED }, transferId: LOADED_LINK } satisfies ProfileAnswer) });
+  it("offers no password to someone without one whom Memberful signs in, whose way in it is, and saves the rest without one", async () => {
+    const theirs = { ...profile, password: false, memberful: CONNECTED };
+    serve({
+      loaded: () => Response.json({ profile: theirs, transferId: LOADED_LINK } satisfies ProfileAnswer),
+      saved: () => Response.json({ profile: { ...theirs, emailAddress: "countess@example.com" }, transferId: SAVED_LINK } satisfies ProfileAnswer),
+    });
+    const { user } = showPage();
+    await loaded();
+    expect(memberful()).toHaveTextContent("Connected as Ada Lovelace (ada@example.com). You sign in with Memberful.");
+    expect(screen.queryByLabelText("New password")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Current password")).not.toBeInTheDocument();
+    expect(within(memberful()!).queryByRole("button", { name: "Disconnect Memberful" })).not.toBeInTheDocument();
+
+    await user.clear(field("Email address"));
+    await user.type(field("Email address"), "countess@example.com");
+    await user.click(saveButton());
+    expect(await screen.findByRole("alert")).toHaveTextContent("Changes saved");
+    expect(saved()).toEqual([{ emailAddress: "countess@example.com" }]);
+    expect(screen.queryByLabelText("New password")).not.toBeInTheDocument();
+  });
+
+  it("offers a first password to someone without one once Memberful doesn't sign them in, as at a deployment without its keys", async () => {
+    serve({ loaded: () => Response.json({ profile: { ...profile, password: false, memberful: null }, transferId: LOADED_LINK } satisfies ProfileAnswer) });
     showPage();
     await loaded();
-    expect(memberful()).toHaveTextContent("To disconnect, set a password above so you can still sign in.");
+    expect(memberful()).toBeNull();
     expect(passwordHelp()).toHaveTextContent("Leave blank to keep signing in without a password.");
     expect(passwordHelp()).not.toHaveTextContent("disconnects");
   });
@@ -635,6 +824,16 @@ describe("Connect single sign-on", () => {
     await waitFor(() => expect(sso()).toHaveTextContent("Connect your Acme account to keep signing in."));
     expect(await screen.findByRole("alert")).toHaveTextContent(SSO_DISCONNECTED_NOTICE);
     expect(passwordHelp()).not.toHaveTextContent("disconnects");
+  });
+
+  it("offers no password to someone without one whom single sign-on signs in, whose way in it is, nor offers to disconnect it", async () => {
+    serve({ loaded: () => Response.json({ profile: { ...profile, password: false, sso: SSO_CONNECTED }, transferId: LOADED_LINK } satisfies ProfileAnswer) });
+    showPage();
+    await loaded();
+    expect(sso()).toHaveTextContent("Connected as Ada Lovelace (ada@example.com). You sign in with Acme.");
+    expect(sso()).not.toHaveTextContent(/password|disconnect/i);
+    expect(screen.queryByLabelText("New password")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Current password")).not.toBeInTheDocument();
   });
 
   it("has none while there's nothing to show", async () => {
@@ -798,6 +997,50 @@ describe("Your model on your profile", () => {
     expect(sent).toEqual([{ model: "openai/gpt-6.1-sol" }, { model: null }, { model: "@cf/zai-org/glm-4.7-flash" }]);
   });
 
+  it("offers only the levels of thinking your model took when it was added, saying which it can't be set to, and each for one that took none, which decides itself", async () => {
+    let yours: YourAssistant = {
+      ...PICKING,
+      model: "openai/gpt-6.1-sol",
+      levels: { thinking: "off", length: "medium" },
+      models: [
+        { id: "@cf/zai-org/glm-4.7-flash", name: "GLM-4.7 Flash", format: "chat" },
+        { id: "openai/gpt-6.1-sol", name: "GPT-6.1 Sol", format: "responses", thinkingLevels: ["low", "medium", "high"] },
+        { id: "xai/grok-4.20-0309-reasoning", name: "Grok 4.20 Reasoning", format: "chat", thinkingLevels: [] },
+      ],
+    };
+    serve({
+      loaded: () => Response.json({ profile: { ...profile, assistant: yours }, transferId: LOADED_LINK } satisfies ProfileAnswer),
+      leveled: ({ model, ...levels }) => {
+        yours = { ...yours, model: model === undefined ? yours.model : model, levels: { ...yours.levels, ...levels } };
+        return Response.json({ assistant: yours } satisfies YourAssistantChanged);
+      },
+    });
+    const { user } = showPage();
+    await loaded();
+    const thinking = () => within(section()).getByRole("group", { name: "Thinking" });
+    const level = (name: string) => within(thinking()).getByRole("radio", { name });
+
+    expect(level("Off")).toBeChecked();
+    expect(level("Off")).toBeDisabled();
+    for (const name of ["Low", "Medium"]) expect(level(name)).toBeEnabled();
+    expect(level("High")).toBeDisabled();
+    expect(thinking()).toHaveAccessibleDescription("GPT-6.1 Sol can't be set to Off, so it thinks at Low instead.");
+    await user.click(level("Low"));
+    await waitFor(() => expect(menu()).toBeEnabled());
+    expect(thinking()).toHaveAccessibleDescription("Thinks a little first, up to about 4,000 tokens. GPT-6.1 Sol can't be set to Off.");
+
+    await user.selectOptions(menu(), "Grok 4.20 Reasoning");
+    await waitFor(() => expect(menu()).toBeEnabled());
+    for (const name of ["Off", "Low", "Medium"]) expect(level(name)).toBeEnabled();
+    expect(thinking()).toHaveAccessibleDescription("Grok 4.20 Reasoning can't be told how much to think, so it decides for itself, up to about 4,000 tokens.");
+
+    // A model added before Ember asked models at each level is offered at every one.
+    await user.selectOptions(menu(), "Default (GLM-4.7 Flash)");
+    await waitFor(() => expect(menu()).toBeEnabled());
+    for (const name of ["Off", "Low", "Medium"]) expect(level(name)).toBeEnabled();
+    expect(thinking()).toHaveAccessibleDescription("Thinks a little first, up to about 4,000 tokens.");
+  });
+
   it("says why a model wasn't saved, showing yours as it was", async () => {
     picking(() => Response.json({ error: MODEL_NOT_LISTED }, { status: 422 }));
     const { user, onFailed } = showPage();
@@ -959,5 +1202,51 @@ describe("Custom CSS", () => {
       expect(field(label)).toHaveValue("difference engine");
       expect(field(label)).not.toHaveAttribute("value");
     }
+  });
+});
+
+describe("AI apps on your profile", () => {
+  const CLAUDE = { id: "0mgk3x2a9b4c70", name: "Claude", comesBackTo: "claude.example", scopes: ["read" as const], connectedAt: "2026-11-14T09:00:00.000Z", usedAt: null };
+
+  it("aren't shown while AI apps can't connect as you", async () => {
+    serve();
+    showPage();
+    await waitFor(() => expect(screen.getByLabelText("Name")).toHaveValue("Ada Lovelace"));
+    expect(screen.queryByRole("heading", { level: 2, name: "AI apps" })).not.toBeInTheDocument();
+  });
+
+  it("lists the AI apps connected as you, as the profile loads them, and as disconnecting one leaves them", async () => {
+    const fetch = serve({ loaded: () => Response.json({ profile: { ...profile, outsideAi: [CLAUDE] }, transferId: LOADED_LINK } satisfies ProfileAnswer) });
+    const { user } = showPage();
+
+    expect(await screen.findByRole("heading", { level: 2, name: "AI apps" })).toBeVisible();
+    fetch.mockImplementationOnce(async () => Response.json({ connections: [] }));
+    await user.click(screen.getByRole("button", { name: "Disconnect Claude" }));
+    expect(await screen.findByText(NOTHING_CONNECTED)).toBeVisible();
+    expect(fetch).toHaveBeenLastCalledWith(`/api/users/me/outside/${CLAUDE.id}`, expect.objectContaining({ method: "DELETE" }));
+    expect(screen.getByRole("heading", { level: 2, name: "AI apps" })).toBeVisible();
+  });
+});
+
+describe("Apps on your profile", () => {
+  const LINEAR = { id: "0mgk3x2a9b4c70", name: "Linear", signedInAt: "2026-11-14T09:00:00.000Z", ended: false, wantsMore: false };
+
+  it("aren't shown while there's no app to sign in to yourself", async () => {
+    serve();
+    showPage();
+    await waitFor(() => expect(screen.getByLabelText("Name")).toHaveValue("Ada Lovelace"));
+    expect(screen.queryByRole("heading", { level: 2, name: "Apps" })).not.toBeInTheDocument();
+  });
+
+  it("lists the apps you can sign in to yourself, as the profile loads them, and as signing out of one leaves them", async () => {
+    const fetch = serve({ loaded: () => Response.json({ profile: { ...profile, apps: [LINEAR] }, transferId: LOADED_LINK } satisfies ProfileAnswer) });
+    const signedOut = { apps: [{ ...LINEAR, signedInAt: null }], revoked: true };
+    const { user } = showPage();
+
+    expect(await screen.findByRole("heading", { level: 2, name: "Apps" })).toBeVisible();
+    fetch.mockImplementationOnce(async () => Response.json(signedOut));
+    await user.click(screen.getByRole("button", { name: "Sign out of Linear" }));
+    expect(await screen.findByRole("button", { name: "Sign in to Linear" })).toBeVisible();
+    expect(fetch).toHaveBeenLastCalledWith(`/api/users/me/apps/${LINEAR.id}/sign-in`, expect.objectContaining({ method: "DELETE" }));
   });
 });

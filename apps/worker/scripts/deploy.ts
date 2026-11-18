@@ -13,22 +13,23 @@
 // meant to be read: the deploy prints the setup link that carries it, which is spent once Ember is set
 // up. The secrets go up with the code in one `wrangler deploy --secrets-file`, from a file only this
 // deploy can read, and nothing else here prints them: Cloudflare's build logs mask nothing, as GitHub's
-// would. A CI log can be public, as a public repository's Actions logs are, so there the deploy makes no
-// setup token, and says so, unless EMBER_SETUP_TOKEN in its environment brings one the deployer keeps as
-// a secret of their own. Workers Builds' log is the account's own, so it can carry the link. The keys of
-// a Memberful custom app, for its members to sign in (apps/worker/src/memberful.ts), and of a Turnstile
-// widget, for open sign-up's check, in place of any given in Set up Turnstile (apps/worker/src/turnstile.ts),
-// go up with every deploy whose environment gives them, as the Preview workflow's does from the
-// repository's secrets. So does the ID of the Cloudflare account the Worker goes to, as
-// CLOUDFLARE_ACCOUNT_ID, which a Worker can't learn by itself, for Set up Ember AI to fill in. Deploy
-// to Cloudflare's copy of Ember leaves out the .github folder, and with it the Update Ember workflow
-// that offers the copy Ember's releases, so a deploy without that workflow ends by saying how to add it.
-// A copy on GitHub tells the Worker its repository, the branch that deploys, and whether it has the
-// workflow, as vars, for General's release card to link to running the workflow, or to adding it.
-// Where STORAGE_BACKEND keeps messages in D1, the deploy makes the database the config names if the
-// account has none, refuses one in which an Ember the Worker isn't bound to is set up, and applies
-// Ember's migrations to it before the Worker that reads it deploys; on DO SQLite, it deploys without the
-// D1 database that Deploy to Cloudflare's form makes for every copy.
+// would. A CI log can be public, as a public repository's Actions logs are, and not every CI says it's
+// one, so there, and wherever its output isn't a terminal's, the deploy makes no setup token, and says
+// so, unless EMBER_SETUP_TOKEN in its environment brings one the deployer keeps as a secret of their
+// own. Workers Builds' log is the account's own, so it can carry the link. The keys of
+// a Memberful custom app, for its members to sign in, in place of any given in Set up Memberful
+// (apps/worker/src/memberful.ts), and of a Turnstile widget, for open sign-up's check, in place of any
+// given in Set up Turnstile (apps/worker/src/turnstile.ts), go up with every deploy whose environment
+// gives them, as the Preview workflow's does from the repository's secrets. So does the ID of the
+// Cloudflare account the Worker goes to, as CLOUDFLARE_ACCOUNT_ID, which a Worker can't learn by itself,
+// for Set up Ember AI to fill in. Deploy to Cloudflare's copy of Ember leaves out the .github folder,
+// and with it the Update Ember workflow that offers the copy Ember's releases, so a deploy without that
+// workflow ends by saying how to add it. A copy on GitHub tells the Worker its repository, the branch
+// that deploys, and whether it has the workflow, as vars, for General's release card to link to running
+// the workflow, or to adding it. Where STORAGE_BACKEND keeps messages in D1, the deploy makes the
+// database the config names if the account has none, refuses one in which an Ember the Worker isn't
+// bound to is set up, and applies Ember's migrations to it before the Worker that reads it deploys; on
+// DO SQLite, it deploys without the D1 database that Deploy to Cloudflare's form makes for every copy.
 
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -90,8 +91,11 @@ function secretNames(target: string[]): string[] {
 /** The shape of EMBER_SETUP_TOKEN, as the Worker checks it (apps/worker/src/secrets.ts): `openssl rand -hex 32`. */
 const SETUP_TOKEN = /^[0-9a-f]{64}$/;
 
-/** Whether this deploy's output may be public: a CI log, except Workers Builds', which is the account's own. */
-const inPublicLog = () => !!process.env.CI && !process.env.WORKERS_CI;
+/**
+ * Whether this deploy's output may be public: a CI log, or whatever else isn't a terminal, as the log of a
+ * CI that doesn't say it's one, except Workers Builds', which is the account's own.
+ */
+const inPublicLog = () => (!!process.env.CI || !process.stdout.isTTY) && !process.env.WORKERS_CI;
 
 /**
  * The keys of a Memberful custom app, and the secret its site signs webhooks with, then the single

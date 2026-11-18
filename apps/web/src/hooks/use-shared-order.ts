@@ -6,7 +6,7 @@ import { isSignedOut, setSharedOrder } from "@/lib/api";
 import { inSidebarOrder } from "@/lib/room-list";
 
 interface Options {
-  /** The rooms in this administrator's sidebar, but their DMs, in any order. */
+  /** The rooms in this administrator's sidebar, but their DMs, in the order they were put in them. */
   rooms: SharedRoom[];
   /** The ones of them the shared order ranks, in its order. */
   sharedOrder: RoomId[];
@@ -30,8 +30,9 @@ function stillStaged(staged: RoomId[], rooms: RoomId[]): RoomId[] {
  * The order an administrator puts their rooms in for everyone, staged on workspace settings (`staged`):
  * a row is dragged at once by its handle, or moved with Alt and an arrow (`useRoomDrag`), and each move
  * is only staged until Save order saves the whole list as the shared order, or Cancel puts it back as
- * saved. The rooms the shared order doesn't rank come after the rest, by name, as they do in the
- * sidebar. A room that comes or goes meanwhile joins or leaves what's staged, at its end.
+ * saved. The rooms the shared order doesn't rank come after the ones it does, in the order the
+ * administrator was put in them, as they do in the sidebar. A room that comes or goes meanwhile joins or
+ * leaves what's staged, at its end.
  */
 export function useSharedOrder({ rooms, sharedOrder, onSaved, onSessionChanged }: Options) {
   const [staged, setStaged] = useState<RoomId[] | null>(null);

@@ -1,13 +1,17 @@
-import type { LiveHuddle } from "@ember/protocol";
-import { act, render, screen } from "@testing-library/react";
+import type { DirectoryUser, LiveHuddle, User } from "@ember/protocol";
+import { act, render, renderHook, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { PeopleContext } from "@/hooks/use-directory";
 import { showHuddle, type JoinedHuddle } from "@/lib/huddle-store";
-import { HuddleButton, HuddlesContext } from "./huddle-button";
+import { HuddleButton, HuddlesContext, joinsNoHuddle, useJoinsNoHuddle } from "./huddle-button";
 
 const huddleOf = (...userIds: string[]): LiveHuddle => ({ startedAt: "2026-11-10T09:00:00.000Z", userIds });
 /** The huddle this tab is in, in room `roomId`. */
-const joined = (roomId: string): JoinedHuddle => ({ roomId, connected: true, you: { id: "ada", name: "Ada" }, people: [], muted: false, microphone: true });
+const joined = (roomId: string): JoinedHuddle => ({ roomId, connected: true, you: { id: "ada", name: "Ada" }, people: [], muted: false, sticker: null, microphone: true, microphoneId: "", speakerId: "", camera: null, watched: new Map(), screen: null, screens: new Map(), open: false, thread: true });
+/** What the tab's huddle is asked to do, `leave` among it. */
+const controlsWith = (leave = vi.fn()) => ({ leave, setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setThread: vi.fn(), setDevice: vi.fn(), setSmall: vi.fn(), switchCamera: vi.fn(), invite: vi.fn(), setSticker: vi.fn(), react: vi.fn() });
 
 /** The keyboard of a device whose `navigator.platform` is `platform`. */
 const on = (platform: string) => vi.stubGlobal("navigator", { ...navigator, platform, clipboard: navigator.clipboard });
@@ -47,7 +51,7 @@ describe("The huddle button", () => {
   it("leaves the huddle this tab is in, green all over, without counting who's in it", async () => {
     const leave = vi.fn();
     const { preview, user } = renderButton({ general: huddleOf("ada", "grace") });
-    act(() => showHuddle(joined("general"), { leave, setMuted: vi.fn() }));
+    act(() => showHuddle(joined("general"), controlsWith(leave)));
     const button = screen.getByRole("button", { name: "Leave huddle" });
     expect(button.parentElement).toHaveClass("bg-positive", "text-white");
     expect(button.parentElement).not.toHaveClass("ring-positive");
@@ -58,7 +62,7 @@ describe("The huddle button", () => {
 
   it("starts or joins this room's while the tab is in another room's huddle", () => {
     renderButton();
-    act(() => showHuddle(joined("other"), { leave: vi.fn(), setMuted: vi.fn() }));
+    act(() => showHuddle(joined("other"), controlsWith()));
     expect(screen.getByRole("button", { name: "Start huddle" })).toBeInTheDocument();
   });
 
@@ -74,7 +78,7 @@ describe("The huddle button", () => {
       </HuddlesContext>,
     );
     expect(screen.getByRole("button", { name: "Join huddle, 1 in it" })).toBeInTheDocument();
-    act(() => showHuddle(joined("general"), { leave: vi.fn(), setMuted: vi.fn() }));
+    act(() => showHuddle(joined("general"), controlsWith()));
     expect(screen.getByRole("button", { name: "Leave huddle" })).toBeInTheDocument();
     act(() => showHuddle(null));
     expect(screen.getByRole("button", { name: "Join huddle, 1 in it" })).toBeInTheDocument();
@@ -139,5 +143,33 @@ describe("Copy huddle link", () => {
     const copy = screen.getByRole("button", { name: "Copy huddle link" });
     await user.click(copy);
     expect(copy).not.toHaveClass("text-positive");
+  });
+});
+
+describe("Who joins no huddle", () => {
+  const grace: User = { id: "grace", name: "Grace" };
+  /** Grace as the people directory lists her, a member who can sign in, but for `changes`. */
+  const listed = (changes: Partial<DirectoryUser> = {}): DirectoryUser => ({ ...grace, bio: null, role: "member", status: "active", avatarUrl: "/users/grace/avatar", ...changes });
+
+  it("is a bot, an AI agent among them, and @ember before the directory lists anyone", () => {
+    expect(joinsNoHuddle(grace, listed({ role: "bot" }))).toBe(true);
+    expect(joinsNoHuddle(grace, listed({ role: "bot", agent: true }))).toBe(true);
+    expect(joinsNoHuddle({ id: "ember", name: "Ember" }, undefined)).toBe(true);
+  });
+
+  it("is whoever can no longer sign in: someone deactivated, banned or suspended", () => {
+    for (const status of ["deactivated", "banned", "suspended"] as const) expect(joinsNoHuddle(grace, listed({ status })), status).toBe(true);
+  });
+
+  it("is nobody else, as the directory lists them or before it does", () => {
+    expect(joinsNoHuddle(grace, listed())).toBe(false);
+    expect(joinsNoHuddle(grace, listed({ role: "administrator" }))).toBe(false);
+    expect(joinsNoHuddle(grace, undefined)).toBe(false);
+  });
+
+  it("goes by the people directory as it lists them now", () => {
+    const directory = (people: DirectoryUser[]) => ({ children }: { children: ReactNode }) => <PeopleContext value={new Map(people.map((person) => [person.id, person]))}>{children}</PeopleContext>;
+    expect(renderHook(useJoinsNoHuddle, { wrapper: directory([listed()]) }).result.current(grace)).toBe(false);
+    expect(renderHook(useJoinsNoHuddle, { wrapper: directory([listed({ status: "banned" })]) }).result.current(grace)).toBe(true);
   });
 });

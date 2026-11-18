@@ -17,7 +17,6 @@ import {
   LEVELS_REFUSED,
   MAX_INSTRUCTIONS_LENGTH,
   MODEL_REFUSED,
-  modelNameOf,
   modelOf,
   THINKING_LEVELS,
   type AnswerLength,
@@ -45,23 +44,54 @@ export interface AgentRoom {
 }
 
 /**
+ * Who can ask an agent, as Admin access on its page sets it: "everyone", "admins", for one only
+ * administrators can ask, which everyone else still reads in its rooms, or "admin-dms", for one only
+ * administrators can ask, in their direct messages with it: it's in no other room, and nobody else is
+ * told of it.
+ */
+export const AGENT_ACCESS = ["everyone", "admins", "admin-dms"] as const;
+export type AgentAccess = (typeof AGENT_ACCESS)[number];
+
+/**
  * An agent as the AI assistant tab lists it to administrators: as the people directory lists it, with
  * what it does, the model it answers with and what that's called, what it does on the web, nothing while
- * Search the web is off, and the open rooms it's kept to, by name, or null while it's in every one, new
- * ones too.
+ * Search the web is off, who can ask it, and the open rooms it's kept to, by name, or null while it's in
+ * every one, new ones too.
  */
 export interface Agent extends DirectoryUser {
   description: string;
   model: string;
   modelName: string;
   webTools: WebTool[];
+  access: AgentAccess;
   rooms: AgentRoom[] | null;
+}
+
+/** What Available Agents says @ember does, which has no description of its own. */
+export const EMBER_DOES = "Answers anything people ask.";
+
+/**
+ * An agent as Available Agents lists it to someone who can ask it, @ember among them: as the people
+ * directory lists it, with what it does, who can ask it, and the rooms it shares with them, by name, but
+ * DMs, or null while it's in every open room, new ones too. Anyone who isn't an administrator is listed
+ * only the ones everyone can ask.
+ */
+export interface AvailableAgent extends DirectoryUser {
+  description: string;
+  access: AgentAccess;
+  rooms: AgentRoom[] | null;
+}
+
+/** What `GET /api/agents` answers: the agents whoever asks can ask, @ember first, then by name, and none while Ember AI is off. */
+export interface AvailableAgents {
+  agents: AvailableAgent[];
 }
 
 /**
  * An agent as its page shows it: as the tab lists it, with its instructions and what Ember adds around
- * them, the format its model took its test question in, how much it thinks and how long it answers,
- * whether an administrator uploaded its avatar, and who last changed it, and when.
+ * them, the format its model took its test question in, how much it thinks and how long it answers, the
+ * levels of thinking its model takes, whether an administrator uploaded its avatar, and who last changed
+ * it, and when.
  */
 export interface AgentSettings extends Agent {
   instructions: string;
@@ -69,6 +99,8 @@ export interface AgentSettings extends Agent {
   promptTemplate: string | null;
   format: ModelFormat;
   levels: AnswerLevels;
+  /** The levels of thinking its model takes (`AssistantModel.thinkingLevels`), or null for one Ember hasn't asked at each, which is asked at any. */
+  thinkingLevels: ThinkingLevel[] | null;
   /** Whether an administrator uploaded its avatar, which `DELETE /api/account/agents/<id>/avatar` takes away. */
   avatar: boolean;
   changedBy: User;
@@ -103,9 +135,9 @@ export interface AgentAnswer {
 /**
  * What `POST /api/account/agents` takes, as New agent sends it: the agent's name, what it does, its
  * instructions, and what Ember adds around them, if an administrator changed it, the ID of the model it
- * answers with and that model's name, as Cloudflare's catalog gives it, if it does, how much it thinks
- * and how long it answers, whether it searches the web, and the open rooms it's in, or null for every
- * one, new ones too.
+ * answers with, how much it thinks and how long it answers, whether it searches the web, who can ask it,
+ * and the open rooms it's in, or null for every one, new ones too. One only administrators' direct
+ * messages reach is in none, whatever rooms are sent.
  */
 export interface NewAgent {
   name: string;
@@ -114,10 +146,11 @@ export interface NewAgent {
   /** What Ember adds around the instructions (`promptAround`), or null, or left out, for Ember's own. */
   promptTemplate?: string | null;
   model: string;
-  modelName?: string;
   thinking: ThinkingLevel;
   length: AnswerLength;
   webSearch: boolean;
+  /** Who can ask it, or left out for everyone. */
+  access?: AgentAccess;
   rooms: RoomId[] | null;
 }
 
@@ -126,10 +159,10 @@ export type AgentChanges = Partial<NewAgent>;
 
 /**
  * What `POST /api/account/agents/trials` takes, and `POST /api/account/agents/<id>/trials` for an agent
- * that's saved, as Try it sends it: the agent as its page sets it up, saved or not, but for what it does
- * and its rooms, which it doesn't answer by, and the question to ask it.
+ * that's saved, as Try it sends it: the agent as its page sets it up, saved or not, but for what it does,
+ * who can ask it and its rooms, which it doesn't answer by, and the question to ask it.
  */
-export interface AgentTrial extends Omit<NewAgent, "description" | "rooms"> {
+export interface AgentTrial extends Omit<NewAgent, "description" | "access" | "rooms"> {
   question: string;
 }
 
@@ -145,7 +178,7 @@ export interface AgentTrialAnswer {
 }
 
 /** A field of an agent's page, which a refusal can be about. */
-export type AgentField = "name" | "description" | "instructions" | "promptTemplate" | "model" | "levels" | "webSearch" | "rooms" | "question";
+export type AgentField = "name" | "description" | "instructions" | "promptTemplate" | "model" | "levels" | "webSearch" | "access" | "rooms" | "question";
 
 /** Why what an agent's page sent is refused, on the field it's about. */
 export interface AgentRefusal {
@@ -171,15 +204,16 @@ export const AGENT_CHANGED = "The agent was changed while its model answered. Tr
 /** Why an agent wasn't saved: Ember AI was set up again, with another account or API token, while its model answered. */
 export const AGENT_SET_UP_AGAIN = "Ember AI was set up again while the model answered, so nothing was saved. Try again.";
 
-/** Why Search the web can't be on for an agent whose model, called `name`, has no tool for it that AI Gateway passes on. */
+/** Why Search the web can't be on for an agent whose model, called `name`, has no tool for it that AI Gateway passes on, or Ember gives it. */
 export const agentCannotSearchWith = (name: string) =>
-  `${name} can't search the web through AI Gateway, but Anthropic's and OpenAI's models can. Choose one of theirs, or leave Search the web off.`;
+  `${name} can't search the web through AI Gateway, but the other models Ember offers can. Choose one of those, or leave Search the web off.`;
 
 /** Why an agent's fields are refused before anything's saved. */
 export const NAME_REFUSED = `Give it a name of one line, at most ${MAX_USER_NAME_LENGTH} characters, which people mention it by.`;
 export const DESCRIPTION_REFUSED = `Say what it does in one line of at most ${MAX_AGENT_DESCRIPTION_LENGTH} characters, so people know when to ask it.`;
 export const INSTRUCTIONS_NEEDED = "Give it instructions: its task, how to go about it, and what to leave alone.";
 export const WEB_SEARCH_UNSAID = "Say whether it searches the web.";
+export const ACCESS_REFUSED = "Say who can ask it: everyone, administrators, or administrators in their direct messages with it.";
 export const ROOMS_REFUSED = "Choose rooms open to everyone, or every one.";
 export const QUESTION_NEEDED = "Ask it something.";
 
@@ -188,9 +222,10 @@ export const QUESTION_NEEDED = "Ask it something.";
  * field it's about: a name, which can't be @ember's (`isReservedName`), and what it does have to be one
  * line with more than spaces, no longer than Ember keeps, instructions more than spaces, no longer than
  * Ember takes (`MAX_INSTRUCTIONS_LENGTH`), what Ember adds around them a template Ember takes, or null
- * for its own (`parseTemplate`), a model one's ID, levels ones the dials have, and rooms a list of
- * rooms' IDs, each once, or null for every open room. Text is saved without the spaces around it, and a
- * name that can't be a model's is left out.
+ * for its own (`parseTemplate`), a model one's ID, which needn't be one Ember offers, as an agent may
+ * keep the one it has (`changeAgent`), levels ones the dials have, who can ask it one of `AGENT_ACCESS`,
+ * and rooms a list of rooms' IDs, each once, or null for every open room. Text is saved without the
+ * spaces around it.
  */
 export function parseAgentChanges(data: unknown): AgentChanges | AgentRefusal {
   const given = typeof data === "object" && data !== null && !Array.isArray(data) ? (data as Record<string, unknown>) : {};
@@ -221,8 +256,6 @@ export function parseAgentChanges(data: unknown): AgentChanges | AgentRefusal {
     const model = typeof given.model === "string" ? modelOf(given.model) : null;
     if (model === null) return { error: MODEL_REFUSED, field: "model" };
     changes.model = model;
-    const modelName = modelNameOf(given.modelName);
-    if (modelName !== null) changes.modelName = modelName;
   }
   if (given.thinking !== undefined) {
     if (!(THINKING_LEVELS as readonly unknown[]).includes(given.thinking)) return { error: LEVELS_REFUSED, field: "levels" };
@@ -236,6 +269,10 @@ export function parseAgentChanges(data: unknown): AgentChanges | AgentRefusal {
     if (typeof given.webSearch !== "boolean") return { error: WEB_SEARCH_UNSAID, field: "webSearch" };
     changes.webSearch = given.webSearch;
   }
+  if (given.access !== undefined) {
+    if (!(AGENT_ACCESS as readonly unknown[]).includes(given.access)) return { error: ACCESS_REFUSED, field: "access" };
+    changes.access = given.access as AgentAccess;
+  }
   if (given.rooms !== undefined) {
     const rooms = roomsIn(given.rooms);
     if (rooms === undefined) return { error: ROOMS_REFUSED, field: "rooms" };
@@ -246,7 +283,9 @@ export function parseAgentChanges(data: unknown): AgentChanges | AgentRefusal {
 
 /**
  * Parses an untrusted new agent, as New agent sends it, as `parseAgentChanges` does a change, which leaves
- * out nothing but the model's name and what Ember adds around the instructions, which is then its own.
+ * out nothing but what Ember adds around the instructions, which is then its own, and who can ask it,
+ * which is then everyone. Whether Ember offers its model is the Worker's to say, as the models it offers
+ * change.
  */
 export function parseNewAgent(data: unknown): NewAgent | AgentRefusal {
   const agent = parseAgentChanges(data);
@@ -264,12 +303,13 @@ export function parseNewAgent(data: unknown): NewAgent | AgentRefusal {
 
 /**
  * Parses an untrusted trial, as Try it sends it: the agent as `parseNewAgent` takes one, but for what it
- * does and its rooms, which are left out, and a question of more than spaces, no longer than a message,
- * without the spaces around it.
+ * does, who can ask it and its rooms, which are left out, and its model, which may be one Ember no
+ * longer offers that the agent has (`tryAgent`), and a question of more than spaces, no longer than a
+ * message, without the spaces around it.
  */
 export function parseAgentTrial(data: unknown): AgentTrial | AgentRefusal {
   const given = typeof data === "object" && data !== null && !Array.isArray(data) ? (data as Record<string, unknown>) : {};
-  const { description: _, rooms: __, question: asked, ...setup } = given;
+  const { description: _, rooms: __, access: ___, question: asked, ...setup } = given;
   const agent = parseAgentChanges(setup);
   if ("error" in agent) return agent;
   const { name, instructions, promptTemplate = null, model, thinking, length, webSearch } = agent;
@@ -290,8 +330,8 @@ function oneLineIn(text: unknown): string {
   return /[\p{Cc}\p{Zl}\p{Zp}]/u.test(line) ? "" : line;
 }
 
-/** The rooms `given` lists, each once, or null for every open room, or undefined when it's neither. */
-function roomsIn(given: unknown): RoomId[] | null | undefined {
+/** The rooms `given` lists, each once, or null for every open room, or undefined when it's neither, as an agent's and a chat bot's are picked. */
+export function roomsIn(given: unknown): RoomId[] | null | undefined {
   if (given === null) return null;
   if (!Array.isArray(given) || given.length > MAX_SHARED_ORDER) return undefined;
   const ids = given.filter((id): id is RoomId => typeof id === "string" && isRoomId(id));

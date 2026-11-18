@@ -105,7 +105,7 @@ function indexSearchOf(search: Search, sort: SearchSort, cursor: number | null, 
  * sent it, as a match does. A hit the index has no message for, from before it kept them or too big to
  * keep, is read from its room as it is now, and left out if its room no longer has it.
  */
-async function matchesOf(env: Env, hits: SearchHit[]): Promise<SearchMatch[]> {
+export async function matchesOf(env: Env, hits: SearchHit[]): Promise<SearchMatch[]> {
   const kept = hits.flatMap(({ message }) => message ?? []);
   const [indexed, read] = await Promise.all([indexedMessages(kept, env.SESSION_SECRET), readNow(env, hits.filter(({ message }) => message === null))]);
   const found = new Map<string, Message>([...indexed, ...read].map((message) => [message.id, message]));

@@ -1,5 +1,5 @@
 import { AVATAR_TOO_LARGE, MAX_AVATAR_SIZE, PASSWORD_TOO_SHORT } from "@ember/protocol";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadPage } from "@/lib/page";
@@ -8,6 +8,17 @@ import { SetupPage } from "./setup-page";
 
 vi.mock("@/lib/page", () => ({ loadPage: vi.fn() }));
 vi.mock("@/lib/previews", () => ({ avatarVariantOf: vi.fn(async () => new Blob(["variant"], { type: "image/webp" })) }));
+// The question about huddles has tests of its own (setup-huddles.test.tsx). Here, what opens Ember from it
+// stands in for it, among the pages it loads with. Where those can't load is setup-page-unloaded.test.tsx's.
+vi.mock("@/components/workspace/pages", () => ({
+  SetupHuddles: ({ onOpen }: { onOpen: () => void }) => (
+    <section aria-label="The question about huddles">
+      <button type="button" onClick={onOpen}>
+        Open Ember
+      </button>
+    </section>
+  ),
+}));
 
 const workspace = { user: { id: "u1", name: "Ada Lovelace" }, room: { id: "r1", kind: "open", name: "general", icon: null } };
 /** The placeholders the Worker suggests unless the deployment names its own. */
@@ -35,6 +46,11 @@ afterEach(() => {
   vi.mocked(loadPage).mockClear();
   history.replaceState(null, "", "/");
 });
+
+/** The question about huddles, which the form goes on to once it has made the workspace. */
+const huddlesQuestion = () => screen.findByRole("region", { name: "The question about huddles" });
+/** Opens Ember from it. */
+const openEmber = async () => userEvent.click(within(await huddlesQuestion()).getByRole("button", { name: "Open Ember" }));
 
 const preview = () => screen.getByRole("img", { name: "Avatar preview" });
 const photoField = () => screen.getByLabelText("Upload profile image (optional)", { exact: false });
@@ -83,7 +99,7 @@ describe("Set up the workspace", () => {
     expect(toggle).toHaveAccessibleName("Show password");
   });
 
-  it("sets up the workspace and opens general in this page's place", async () => {
+  it("sets up the workspace, asks about huddles in the form's place, and opens general in this page's from there", async () => {
     history.replaceState(null, "", "/first_run");
     const length = history.length;
     const fetch = answer(201, workspace);
@@ -91,13 +107,34 @@ describe("Set up the workspace", () => {
     render(<SetupPage placeholders={DEFAULTS} access="open" onSetUp={onSetUp} />);
     await fillIn("correct horse");
 
-    await waitFor(() => expect(onSetUp).toHaveBeenCalledWith(workspace));
-    expect(location.pathname).toBe("/rooms/r1");
-    expect(history.length).toBe(length);
+    // Still setting Ember up, at its address, until the question is answered.
+    expect(await huddlesQuestion()).toBeInTheDocument();
+    expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
+    expect(onSetUp).not.toHaveBeenCalled();
+    expect(location.pathname).toBe("/first_run");
+    expect(document.title).toBe("Set up Ember");
     const [path, init] = fetch.mock.calls[0]!;
     expect(path).toBe("/api/first_run");
     expect(init).toMatchObject({ method: "POST" });
     expect(JSON.parse(String(init!.body))).toEqual({ name: "Ada Lovelace", emailAddress: "ada@example.com", password: "correct horse" });
+
+    await openEmber();
+    expect(onSetUp).toHaveBeenCalledExactlyOnceWith(workspace);
+    expect(location.pathname).toBe("/rooms/r1");
+    expect(history.length).toBe(length);
+  });
+
+  it("goes on asking about huddles when the address's fragment changes, the workspace being made", async () => {
+    history.replaceState(null, "", "/first_run");
+    answer(201, workspace);
+    render(<SetupPage placeholders={DEFAULTS} access="open" onSetUp={() => {}} />);
+    await fillIn("correct horse");
+    const question = await huddlesQuestion();
+
+    history.replaceState(null, "", "/first_run#token=again");
+    act(() => void dispatchEvent(new HashChangeEvent("hashchange")));
+    expect(question).toBeInTheDocument();
+    expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
   });
 
   it("starts the password over when it's too short, keeping the name and email", async () => {
@@ -153,7 +190,8 @@ describe("Set up the workspace", () => {
     await userEvent.upload(photoField(), moon());
     await fillIn("correct horse");
 
-    await waitFor(() => expect(onSetUp).toHaveBeenCalledWith(workspace));
+    await openEmber();
+    expect(onSetUp).toHaveBeenCalledWith(workspace);
     const form = sent() as FormData;
     expect(JSON.parse(String(form.get("user")))).toEqual({ name: "Ada Lovelace", emailAddress: "ada@example.com", password: "correct horse" });
     expect(form.get("avatar")).toMatchObject({ name: "moon.jpg", type: "image/jpeg" });
@@ -229,7 +267,8 @@ describe("Installer-protected setup link", () => {
     expect(screen.getByLabelText("Name")).toHaveFocus();
     await fillIn("correct horse");
 
-    await waitFor(() => expect(onSetUp).toHaveBeenCalledWith(workspace));
+    await openEmber();
+    expect(onSetUp).toHaveBeenCalledWith(workspace);
     expect(new Headers(fetch.mock.calls[0]![1]!.headers).get("Authorization")).toBe(`Bearer ${token}`);
   });
 
@@ -355,7 +394,8 @@ describe("Setup password", () => {
     expect(screen.getByText("Create the admin account for your workspace.")).toBeInTheDocument();
 
     await fillIn("correct horse");
-    await waitFor(() => expect(onSetUp).toHaveBeenCalledWith(workspace));
+    await openEmber();
+    expect(onSetUp).toHaveBeenCalledWith(workspace);
     expect(fetch.mock.calls[1]![0]).toBe("/api/first_run");
     expect(authorizationOf(fetch.mock.calls[1]!)).toBe(`Bearer ${encodeURIComponent(typed)}`);
     expect(JSON.parse(String(sent()))).toEqual({ name: "Ada Lovelace", emailAddress: "ada@example.com", password: "correct horse" });
@@ -426,7 +466,8 @@ describe("Setup password", () => {
     render(<SetupPage placeholders={DEFAULTS} access="password" onSetUp={onSetUp} />);
     expect(await screen.findByLabelText("Name")).toBeInTheDocument();
     await fillIn("correct horse");
-    await waitFor(() => expect(onSetUp).toHaveBeenCalledWith(workspace));
+    await openEmber();
+    expect(onSetUp).toHaveBeenCalledWith(workspace);
     expect(authorizationOf(fetch.mock.calls[1]!)).toBe(`Bearer ${token}`);
   });
 

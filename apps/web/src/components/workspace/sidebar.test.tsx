@@ -1,11 +1,12 @@
-import type { Account, DirectoryUser, Favorites, SidebarRoom, User } from "@ember/protocol";
+import type { Account, DirectoryUser, Favorites, LiveHuddle, SidebarRoom, User, UserId } from "@ember/protocol";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AccountContext } from "@/hooks/use-account";
-import { PeopleContext } from "@/hooks/use-directory";
-import { guardLeaving } from "@/hooks/use-route";
+import { ActivePeople, PeopleContext } from "@/hooks/use-directory";
+import { activeStore } from "@/lib/presence";
+import type { DirectSidebarRoom } from "@/lib/room-list";
 import { Sidebar } from "./sidebar";
 
 const rooms = [
@@ -21,50 +22,61 @@ type Props = ComponentProps<typeof Sidebar>;
 const agent = (id: string, name: string): DirectoryUser => ({ id, name, bio: null, role: "bot", status: "active", avatarUrl: `/users/${id}/avatar`, agent: true });
 
 /** The workspace, as it's set up. */
-const EMBER: Account = { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, ssoJoin: false, ssoSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false };
+const EMBER: Account = { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, ssoJoin: false, ssoSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true };
 
 /**
  * The sidebar, with `props` in place of an unstarred one listing `rooms` with none open, in `account`'s
- * workspace, with the people directory listing `people`.
+ * workspace, with the people directory listing `people`, and the workspace socket having said who's
+ * `active`, if it has. `hearActive` has it say who is next.
  */
-function renderSidebar(props: Partial<Props> = {}, account = EMBER, people: readonly DirectoryUser[] = []) {
+function renderSidebar(props: Partial<Props> = {}, account = EMBER, people: readonly DirectoryUser[] = [], active: UserId[] | null = null) {
   const all: Props = {
     workspaceName: "Ember",
     meId: "u1",
     rooms,
     favorites: unstarred,
     sharedOrder: [],
+    huddles: {},
+    onHuddles: false,
     loaded: true,
-    suggestions: [],
     currentRoomId: null,
     unreadOnly: false,
+    agents: 0,
+    agentsOpen: false,
     onSelect: vi.fn(),
     onNewDirect: vi.fn(),
-    onStartDirect: vi.fn(async () => true),
+    onOpenAgents: vi.fn(),
     onStarred: vi.fn(),
     onSessionChanged: vi.fn(),
     ...props,
   };
   const listed = new Map(people.map((person) => [person.id, person]));
+  const heard = activeStore();
+  const hearActive = (userIds: UserId[]) => heard.hear({ type: "presence", active: userIds, away: [] }, true);
+  if (active) hearActive(active);
   const sidebar = (changes: Partial<Props>, shown: Account) => (
     <PeopleContext value={listed}>
-      <AccountContext value={shown}>
-        <Sidebar {...all} {...changes} />
-      </AccountContext>
+      <ActivePeople value={heard}>
+        <AccountContext value={shown}>
+          <Sidebar {...all} {...changes} />
+        </AccountContext>
+      </ActivePeople>
     </PeopleContext>
   );
   const view = render(sidebar({}, account));
-  return { ...view, ...all, rerender: (changes: Partial<Props>, changed = account) => view.rerender(sidebar(changes, changed)) };
+  return {
+    ...view,
+    ...all,
+    rerender: (changes: Partial<Props>, changed = account) => view.rerender(sidebar(changes, changed)),
+    hearActive: (userIds: UserId[]) => act(() => hearActive(userIds)),
+  };
 }
 
 const [ada, grace, linus, alan, edsger, barbara]: User[] = ["Ada", "Grace", "Linus", "Alan", "Edsger", "Barbara"].map((name, i) => ({ id: `u${i + 1}`, name }));
 /** `minutes` past noon, on the day these tests take place. */
 const at = (minutes: number) => new Date(Date.UTC(2026, 9, 15, 12, minutes)).toISOString();
 /** A DM between `members`, as the sidebar lists it to Ada, who's always in it, last active `activeAt`. */
-const direct = (id: string, members: User[], unread = false, activeAt = at(0)): SidebarRoom => ({ id, kind: "direct", members, activeAt, unread, involvement: "everything" });
-
-/** The rows suggesting people to start a DM with, top to bottom. */
-const suggestionRows = () => within(screen.getByRole("region", { name: "DMs" })).queryAllByRole("button", { name: /^Start a direct message with / });
+const direct = (id: string, members: User[], unread = false, activeAt = at(0)): DirectSidebarRoom => ({ id, kind: "direct", members, activeAt, unread, involvement: "everything" });
 
 /** The DM rows, top to bottom. */
 const directRows = () => within(screen.getByRole("region", { name: "DMs" })).queryAllByRole("link", { name: /^Direct message with / });
@@ -156,16 +168,16 @@ describe("Unread rooms", () => {
 describe("Activity filter", () => {
   const marked = [{ ...rooms[0]!, unread: true }, rooms[1]!, { id: "design", name: "design", kind: "open" as const, icon: null, unread: true, involvement: "mentions" as const }];
 
-  it("shows only the rows marked unread, without the people suggested for DMs", () => {
-    const { rerender } = renderSidebar({ rooms: marked, suggestions: [grace!], unreadOnly: true });
-    expect(listed()).toEqual(["#design", "#general"]);
-    expect(suggestionRows()).toEqual([]);
+  it("shows only the rows marked unread", () => {
+    const { rerender } = renderSidebar({ rooms: [...marked, direct("d1", [ada!, grace!], true), direct("d2", [ada!, linus!])], unreadOnly: true });
+    expect(listed()).toEqual(["#general", "#design"]);
+    expect(directRows()).toHaveLength(1);
     expect(screen.getByRole("heading", { name: "DMs" })).toBeInTheDocument();
     expect(screen.queryByText("You’re all caught up. No unread conversations.")).not.toBeInTheDocument();
 
     rerender({ unreadOnly: false });
-    expect(listed()).toEqual(["#design", "#general", "#random"]);
-    expect(suggestionRows()).toHaveLength(1);
+    expect(listed()).toEqual(["#general", "#random", "#design"]);
+    expect(directRows()).toHaveLength(2);
   });
 
   it("leaves out the room the tab shows, which is never marked", () => {
@@ -181,15 +193,21 @@ describe("Activity filter", () => {
 });
 
 describe("Room order", () => {
-  it("lists your starred rooms first, in the order you starred them, then the rest by name", () => {
+  it("lists your starred rooms first, in the order you starred them, then the rest in the order you were put in them", () => {
     const more = [...rooms, { id: "design", name: "Design", kind: "open" as const, icon: null, unread: false, involvement: "mentions" as const }, { id: "ops", name: "ops", kind: "open" as const, icon: null, unread: false, involvement: "mentions" as const }];
     renderSidebar({ rooms: more, favorites: { rooms: ["random", "ops"], version: 2 } });
-    expect(listed()).toEqual(["#random", "#ops", "#Design", "#general"]);
+    expect(listed()).toEqual(["#random", "#ops", "#general", "#Design"]);
+  });
+
+  it("lists a room you've just been put in below every other room, whatever its name", () => {
+    const { rerender } = renderSidebar();
+    rerender({ rooms: [...rooms, { id: "annex", name: "Annex", kind: "open", icon: null, unread: false, involvement: "mentions" }] });
+    expect(listed()).toEqual(["#general", "#random", "#Annex"]);
   });
 });
 
 describe("Shared room order", () => {
-  it("lists the rooms the shared order ranks after your stars, in its order, then the rest by name", () => {
+  it("lists the rooms the shared order ranks after your stars, in its order, then the rest in the order you were put in them", () => {
     const more = [...rooms, { id: "design", name: "Design", kind: "open" as const, icon: null, unread: false, involvement: "mentions" as const }, { id: "ops", name: "ops", kind: "open" as const, icon: null, unread: false, involvement: "mentions" as const }];
     renderSidebar({ rooms: more, favorites: { rooms: ["ops"], version: 1 }, sharedOrder: ["random", "ops", "gone", "general"] });
     expect(listed()).toEqual(["#ops", "#random", "#general", "#Design"]);
@@ -231,6 +249,209 @@ describe("Star rooms", () => {
     expect(within(row("general")).queryByRole("img")).not.toBeInTheDocument();
     expect(row("general").querySelector("svg")).toBeNull();
     expect(within(row("random")).getByRole("img", { name: "Favorite" })).toBeInTheDocument();
+  });
+});
+
+describe("Rooms with a huddle", () => {
+  /** Someone as the people directory lists them. */
+  const inDirectory = (user: User): DirectoryUser => ({ ...user, bio: null, role: "member", status: "active", avatarUrl: `/users/${user.id}/avatar` });
+  const everyone = [ada!, grace!, linus!, alan!].map(inDirectory);
+  /** A huddle with those people in it, in the order they joined. */
+  const huddleOf = (...people: User[]): LiveHuddle => ({ startedAt: at(0), userIds: people.map(({ id }) => id) });
+  /** What a room's row ends with while a huddle is going on in it. */
+  const mark = (row: HTMLElement) => row.querySelector<HTMLElement>("[title]");
+  const faces = (row: HTMLElement) => [...mark(row)!.querySelectorAll("img")].map((face) => face.getAttribute("src"));
+
+  it("ends the row with the faces of the first two people in it, the headphones and how many are in it, in green", () => {
+    renderSidebar({ huddles: { general: huddleOf(grace!, linus!, alan!) } }, EMBER, everyone);
+    const [general, random] = rows();
+    // Nothing shows after it: the words that follow it are hidden.
+    expect(mark(general!)!.nextElementSibling).toBe(general!.lastElementChild);
+    expect(general!.lastElementChild).not.toBeVisible();
+    expect(mark(general!)).toHaveClass("ml-auto", "shrink-0", "text-positive");
+    expect(faces(general!)).toEqual(["/users/u2/avatar", "/users/u3/avatar"]);
+    for (const face of mark(general!)!.querySelectorAll("img")) expect(face).toHaveClass("size-4", "rounded-full", "ring-1", "ring-surface");
+    expect(mark(general!)!.querySelector("svg")).toHaveClass("iconoir-headset", "size-3.5");
+    expect(within(mark(general!)!).getByText("3")).toHaveClass("tabular-nums");
+
+    expect(mark(random!)).toBeNull();
+    expect(random!.querySelector("svg")).toBeNull();
+  });
+
+  it("says who's in it under a pointer, and to screen readers as the row's description, calling you you", () => {
+    const { rerender } = renderSidebar({ huddles: { general: huddleOf(grace!, linus!) } }, EMBER, everyone);
+    const general = () => rows()[0]!;
+    expect(mark(general())).toHaveAttribute("title", "Grace and Linus are in the huddle");
+    // The mark is the eye's, and the row keeps its room's name.
+    expect(mark(general())).toHaveAttribute("aria-hidden", "true");
+    expect(general()).toHaveAccessibleName("general");
+    expect(general()).toHaveAccessibleDescription(`Grace and Linus are in the huddle ${HELP}`);
+    expect(rows()[1]).toHaveAccessibleDescription(HELP);
+
+    rerender({ huddles: { general: huddleOf(grace!, ada!) } });
+    expect(mark(general())).toHaveAttribute("title", "Grace and you are in the huddle");
+    expect(general()).toHaveAccessibleDescription(`Grace and you are in the huddle ${HELP}`);
+    expect(faces(general())).toEqual(["/users/u2/avatar", "/users/u1/avatar"]);
+
+    rerender({ huddles: { general: huddleOf(ada!) } });
+    expect(mark(general())).toHaveAttribute("title", "Just you in the huddle");
+    expect(within(mark(general())!).getByText("1")).toBeInTheDocument();
+  });
+
+  it("counts the people the directory doesn't list, whose faces it can't show", () => {
+    const { rerender } = renderSidebar({ huddles: { general: huddleOf(linus!, grace!, alan!) } }, EMBER, [inDirectory(grace!)]);
+    const general = () => rows()[0]!;
+    expect(mark(general())).toHaveAttribute("title", "Grace and 2 others are in the huddle");
+    expect(faces(general())).toEqual(["/users/u2/avatar"]);
+    expect(within(mark(general())!).getByText("3")).toBeInTheDocument();
+
+    // With you in it, everyone is counted.
+    rerender({ huddles: { general: huddleOf(linus!, ada!) } });
+    expect(mark(general())).toHaveAttribute("title", "2 people are in the huddle");
+    expect(faces(general())).toEqual([]);
+  });
+
+  it("comes before the row's unread dot and its star, and takes the space before them", () => {
+    const starred: Favorites = { rooms: ["general", "random"], version: 2 };
+    renderSidebar({ rooms: [{ ...rooms[0]!, unread: true }, rooms[1]!], favorites: starred, huddles: { general: huddleOf(grace!), random: huddleOf(linus!) } }, EMBER, everyone);
+    const [general, random] = rows();
+    const [first, words, dot, star] = Array.from(general!.children).slice(-4);
+    expect(first).toBe(mark(general!));
+    expect(first).toHaveClass("ml-auto");
+    expect(words).not.toBeVisible();
+    expect(dot).toHaveClass("size-[7px]", "rounded-full");
+    expect(dot).not.toHaveClass("ml-auto");
+    expect(star).toHaveAccessibleName("Favorite");
+    expect(star).not.toHaveClass("ml-auto");
+    expect(general).toHaveAccessibleDescription(`Grace is in the huddle Unread ${HELP}`);
+
+    const [its, , itsStar] = Array.from(random!.children).slice(-3);
+    expect(its).toBe(mark(random!));
+    expect(its).toHaveClass("ml-auto");
+    expect(itsStar).toHaveAccessibleName("Favorite");
+    expect(itsStar).not.toHaveClass("ml-auto");
+  });
+
+  it("follows the huddle as people join and leave it, and goes when it ends", () => {
+    const { rerender } = renderSidebar({ huddles: { random: huddleOf(grace!) } }, EMBER, everyone);
+    const random = () => rows()[1]!;
+    /** How many it says are in it, and who under a pointer. */
+    const says = () => [mark(random())!.textContent, mark(random())!.title];
+    expect(says()).toEqual(["1", "Grace is in the huddle"]);
+
+    rerender({ huddles: { random: huddleOf(grace!, linus!, alan!) } });
+    expect(says()).toEqual(["3", "Grace, Linus, and Alan are in the huddle"]);
+    rerender({ huddles: { random: huddleOf(linus!) } });
+    expect(says()).toEqual(["1", "Linus is in the huddle"]);
+    expect(faces(random())).toEqual(["/users/u3/avatar"]);
+
+    // The row is as it was, its words gone with its mark.
+    rerender({ huddles: {} });
+    expect(mark(random())).toBeNull();
+    expect(random()).toHaveAccessibleDescription(HELP);
+    expect(listed()).toEqual(["#general", "#random"]);
+  });
+
+  it("ends a DM's row with it too, before its unread dot, and says who's in its huddle", () => {
+    const withGrace = direct("d1", [ada!, grace!], true);
+    const { rerender } = renderSidebar({ rooms: [...rooms, withGrace], huddles: { d1: huddleOf(grace!, ada!) } }, EMBER, everyone);
+    const row = () => directRows()[0]!;
+    const [its, words, dot] = Array.from(row().children).slice(-3);
+    expect(its).toBe(mark(row()));
+    expect(its).toHaveAttribute("title", "Grace and you are in the huddle");
+    expect(its).toHaveClass("shrink-0", "text-positive");
+    expect(faces(row())).toEqual(["/users/u2/avatar", "/users/u1/avatar"]);
+    expect(its!.querySelector("svg")).toHaveClass("iconoir-headset", "size-3.5");
+    expect(within(its as HTMLElement).getByText("2")).toHaveClass("tabular-nums");
+    expect(words).not.toBeVisible();
+    expect(dot).toHaveClass("size-[7px]", "rounded-full");
+    expect(row()).toHaveAccessibleDescription("Grace and you are in the huddle Unread");
+
+    // The row is as it was once the huddle has ended.
+    rerender({ rooms: [...rooms, withGrace], huddles: {} });
+    expect(mark(row())).toBeNull();
+    expect(row()).toHaveAccessibleDescription("Unread");
+    rerender({ rooms: [...rooms, { ...withGrace, unread: false }], huddles: {} });
+    expect(row()).not.toHaveAttribute("aria-describedby");
+  });
+});
+
+describe("Huddles, over the rooms", () => {
+  const WITH_HUDDLES: Account = { ...EMBER, huddles: true };
+  /** A huddle with Grace in it. */
+  const huddle: LiveHuddle = { startedAt: at(0), userIds: ["u2"] };
+  const huddlesRow = () => screen.queryByRole("link", { name: /^Huddles/ });
+
+  afterEach(() => history.replaceState(null, "", "/"));
+
+  it("is a row between the workspace's name and the rooms, where huddles are on, with the headphones, which goes to the Huddles page", async () => {
+    renderSidebar({}, WITH_HUDDLES);
+    const row = huddlesRow()!;
+    expect(row).toHaveAttribute("href", "/huddles");
+    expect(row).toHaveAccessibleName("Huddles");
+    expect(row.querySelector("svg")).toHaveClass("iconoir-headset", "text-muted-foreground");
+    expect(row).not.toHaveAttribute("aria-current");
+    expect(row.previousElementSibling?.tagName).toBe("HGROUP");
+    expect(row.nextElementSibling).toBe(screen.getByRole("region", { name: "Rooms" }));
+    // As tall as a room's row, and for a fingertip.
+    expect(row).toHaveClass("min-h-9", "touch:min-h-11");
+
+    await userEvent.click(row);
+    expect(location.pathname).toBe("/huddles");
+  });
+
+  it("isn't there where huddles are off, whatever huddles the sidebar has heard of, nor while Activity lists only what's unread", () => {
+    const { rerender } = renderSidebar({ huddles: { general: huddle } });
+    expect(huddlesRow()).toBeNull();
+    rerender({ huddles: { general: huddle } }, WITH_HUDDLES);
+    expect(huddlesRow()).toBeInTheDocument();
+    rerender({ huddles: { general: huddle }, unreadOnly: true }, WITH_HUDDLES);
+    expect(huddlesRow()).toBeNull();
+  });
+
+  it("is marked as the page that's open while the Huddles page is", () => {
+    const { rerender } = renderSidebar({ onHuddles: true }, WITH_HUDDLES);
+    expect(huddlesRow()).toHaveAttribute("aria-current", "page");
+    expect(huddlesRow()).toHaveClass("aria-[current=page]:bg-hover", "aria-[current=page]:font-semibold");
+    rerender({ onHuddles: false });
+    expect(huddlesRow()).not.toHaveAttribute("aria-current");
+  });
+
+  it("ends with how many huddles are going on in your rooms and DMs, on green, which its name says too, and with nothing while none is", () => {
+    const withGrace = direct("d1", [ada!, grace!]);
+    const { rerender } = renderSidebar({ rooms: [...rooms, withGrace], huddles: { general: huddle, d1: huddle } }, WITH_HUDDLES);
+    expect(huddlesRow()).toHaveAccessibleName("Huddles, 2 happening now");
+    const count = huddlesRow()!.lastElementChild!;
+    expect(count).toHaveTextContent(/^2$/);
+    expect(count).toHaveClass("ml-auto", "rounded-full", "bg-positive", "text-white", "tabular-nums");
+    // The name says what the number counts, so the number itself is the eye's.
+    expect(count).toHaveAttribute("aria-hidden", "true");
+
+    rerender({ rooms: [...rooms, withGrace], huddles: { d1: huddle } });
+    expect(huddlesRow()).toHaveAccessibleName("Huddles, 1 happening now");
+    expect(huddlesRow()!.lastElementChild).toHaveTextContent(/^1$/);
+
+    rerender({ rooms: [...rooms, withGrace], huddles: {} });
+    expect(huddlesRow()).toHaveAccessibleName("Huddles");
+    expect(huddlesRow()).not.toHaveAttribute("aria-label");
+    expect(Array.from(huddlesRow()!.children).map((child) => child.textContent)).toEqual(["", "Huddles"]);
+  });
+
+  it("counts neither the huddle of a room you've hidden nor one of a room the sidebar doesn't list", () => {
+    const hidden = { ...rooms[1]!, involvement: "invisible" as const };
+    renderSidebar({ rooms: [rooms[0]!, hidden], huddles: { general: huddle, random: huddle, elsewhere: huddle } }, WITH_HUDDLES);
+    expect(huddlesRow()).toHaveAccessibleName("Huddles, 1 happening now");
+    expect(huddlesRow()!.lastElementChild).toHaveTextContent(/^1$/);
+  });
+
+  it("counts as far as 99 huddles, shows 99+ past that, and still says how many there are", () => {
+    const many = Array.from({ length: 100 }, (_, i) => ({ ...rooms[0]!, id: `room-${i}`, name: `room ${i}` }));
+    const goingOnIn = (listed: SidebarRoom[]) => Object.fromEntries(listed.map((room) => [room.id, huddle]));
+    const { rerender } = renderSidebar({ rooms: many, huddles: goingOnIn(many.slice(0, 99)) }, WITH_HUDDLES);
+    expect(huddlesRow()!.lastElementChild).toHaveTextContent(/^99$/);
+    rerender({ rooms: many, huddles: goingOnIn(many) });
+    expect(huddlesRow()!.lastElementChild).toHaveTextContent(/^99\+$/);
+    expect(huddlesRow()).toHaveAccessibleName("Huddles, 100 happening now");
   });
 });
 
@@ -504,8 +725,8 @@ describe("Group DMs and DM names", () => {
     render(
       <PeopleContext value={new Map([[renamed.id, renamed]])}>
         <Sidebar
-          {...{ workspaceName: "Ember", meId: ada!.id, loaded: true, suggestions: [], favorites: unstarred, sharedOrder: [], currentRoomId: null, unreadOnly: false }}
-          {...{ onSelect: vi.fn(), onNewDirect: vi.fn(), onStartDirect: vi.fn(), onStarred: vi.fn(), onSessionChanged: vi.fn() }}
+          {...{ workspaceName: "Ember", meId: ada!.id, loaded: true, favorites: unstarred, sharedOrder: [], huddles: {}, onHuddles: false, currentRoomId: null, unreadOnly: false }}
+          {...{ agents: 0, agentsOpen: false, onSelect: vi.fn(), onNewDirect: vi.fn(), onOpenAgents: vi.fn(), onStarred: vi.fn(), onSessionChanged: vi.fn() }}
           rooms={[direct("d1", [ada!, grace!])]}
         />
       </PeopleContext>,
@@ -545,12 +766,12 @@ describe("Conversations sidebar", () => {
 });
 
 describe("Conversations sidebar", () => {
-  it("says it found no conversations once the list has come with nothing in it, nor anyone to suggest", () => {
+  it("says it found no conversations once the list has come with nothing in it", () => {
     const { rerender } = renderSidebar({ rooms: [], loaded: false });
     expect(screen.queryByText("No conversations found.")).not.toBeInTheDocument();
     rerender({ loaded: true });
     expect(screen.getByText("No conversations found.")).toHaveClass("text-[13px]", "text-muted-foreground");
-    rerender({ suggestions: [grace!] });
+    rerender({ rooms: [direct("d1", [ada!, grace!])] });
     expect(screen.queryByText("No conversations found.")).not.toBeInTheDocument();
   });
 });
@@ -565,58 +786,12 @@ describe("DM order", () => {
   });
 });
 
-describe("Suggested people", () => {
-  it("suggests people for DMs after the DMs, by avatar and name, saying to screen readers that it starts one", () => {
-    renderSidebar({ rooms: [...rooms, direct("d1", [ada!, grace!])], suggestions: [linus!, alan!] });
-    expect(suggestionRows().map((row) => row.textContent)).toEqual(["Start a direct message with Linus", "Start a direct message with Alan"]);
-    expect(suggestionRows()[0]).toHaveAccessibleName("Start a direct message with Linus");
-    expect(directRows()[0]!.compareDocumentPosition(suggestionRows()[0]!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
-    expect([...suggestionRows()[0]!.querySelectorAll("img")].map((img) => img.getAttribute("class"))).toEqual([expect.stringContaining("size-6")]);
-  });
-
-  it("leaves out the people in your DMs, suggesting one fewer for each, as soon as a DM lists them", () => {
-    const many: User[] = Array.from({ length: 20 }, (_, i) => ({ id: `p${i}`, name: `Person ${i}` }));
-    const { rerender } = renderSidebar({ suggestions: many });
-    expect(suggestionRows()).toHaveLength(19);
-    // Ada and Person 0 are in DMs now, leaving room for 17.
-    rerender({ rooms: [...rooms, direct("d1", [ada!, many[0]!])] });
-    expect(suggestionRows().map((row) => row.textContent)).toEqual(many.slice(1, 18).map(({ name }) => `Start a direct message with ${name}`));
-  });
-
-  it("starts a DM with someone suggested, only once while it starts", async () => {
-    let started = (_: boolean) => {};
-    const onStartDirect = vi.fn(() => new Promise<boolean>((resolve) => (started = resolve)));
-    renderSidebar({ suggestions: [grace!], onStartDirect });
-    const suggestion = suggestionRows()[0]!;
-    await userEvent.click(suggestion);
-    expect(onStartDirect).toHaveBeenCalledExactlyOnceWith(grace);
-    expect(suggestion).toHaveAttribute("aria-disabled", "true");
-    await userEvent.click(suggestion);
-    expect(onStartDirect).toHaveBeenCalledOnce();
-
-    // One that didn't start can be tried again.
-    await act(async () => started(false));
-    expect(suggestion).not.toHaveAttribute("aria-disabled");
-    await userEvent.click(suggestion);
-    expect(onStartDirect).toHaveBeenCalledTimes(2);
-  });
-
-  it("asks before a page with changes to lose is left for the DM, starting it only once the page lets it", async () => {
-    let proceed = () => {};
-    const release = guardLeaving((_, go) => {
-      proceed = () => void go();
-      return true;
-    });
-    try {
-      const { onStartDirect } = renderSidebar({ suggestions: [grace!] });
-      await userEvent.click(suggestionRows()[0]!);
-      expect(onStartDirect).not.toHaveBeenCalled();
-      expect(suggestionRows()[0]).not.toHaveAttribute("aria-disabled");
-      await act(async () => proceed());
-      expect(onStartDirect).toHaveBeenCalledExactlyOnceWith(grace);
-    } finally {
-      release();
-    }
+describe("DMs", () => {
+  it("lists only the DMs you're in, with nobody else to start one with, however many people there are", () => {
+    renderSidebar({ rooms: [...rooms, direct("d1", [ada!, grace!])] }, EMBER, [linus!, alan!].map((person) => ({ ...person, bio: null, role: "member", status: "active", avatarUrl: `/users/${person.id}/avatar` })));
+    const dms = screen.getByRole("region", { name: "DMs" });
+    expect(within(dms).getAllByRole("link").map((link) => link.getAttribute("aria-label") ?? link.textContent)).toEqual(["New direct message", "Direct message with Grace"]);
+    expect(within(dms).queryAllByRole("button")).toEqual([]);
   });
 });
 
@@ -649,6 +824,77 @@ describe("Unread rooms", () => {
   });
 });
 
+describe("Unread rooms", () => {
+  it("counts the messages that have come in an unread DM on a pill in place of its dot, past 99 as 99+, saying how many to screen readers", () => {
+    const counted = (room: SidebarRoom, unreadCount: number): SidebarRoom => ({ ...room, unreadCount });
+    renderSidebar({ rooms: [counted(direct("d1", [ada!, grace!], true, at(3)), 1), counted(direct("d2", [ada!, linus!], true, at(2)), 120), direct("d3", [ada!, alan!], true, at(1))] });
+    const [one, many, uncounted] = directRows();
+    expect(within(one!).getByText("1")).toHaveClass("rounded-full", "bg-foreground", "text-background", "tabular-nums");
+    expect(one).toHaveClass("font-[650]");
+    expect(one).toHaveAccessibleDescription("1 unread message");
+    expect(within(many!).getByText("99+")).toHaveClass("rounded-full");
+    expect(many).toHaveAccessibleDescription("120 unread messages");
+    // A DM marked before it counted shows the dot.
+    expect(uncounted!.lastElementChild).toHaveClass("size-[7px]", "rounded-full", "bg-foreground");
+    expect(uncounted).toHaveAccessibleDescription("Unread");
+  });
+});
+
+describe("Who's active", () => {
+  /** What the dot at each DM row's avatar says of the person in it, top to bottom, or null for none. */
+  const presences = () => directRows().map((row) => row.querySelector("[data-presence]")?.getAttribute("data-presence") ?? null);
+
+  it("marks the other person in a DM with a green dot at their avatar's corner while they're active, or a ring while they're away, saying which to screen readers", () => {
+    renderSidebar({ rooms: [direct("d1", [ada!, grace!], false, at(2)), direct("d2", [ada!, linus!], true, at(1))] }, EMBER, [], [grace!.id]);
+    const [withGrace, withLinus] = directRows();
+    expect(presences()).toEqual(["active", "away"]);
+    expect(withGrace!.querySelector("[data-presence]")).toHaveClass("absolute", "rounded-full", "bg-positive", "ring-2", "ring-surface");
+    expect(withGrace!.querySelector("[data-presence]")!.parentElement!.firstElementChild).toHaveClass("size-6");
+    expect(withGrace).toHaveAccessibleDescription("Active");
+    expect(withLinus!.querySelector("[data-presence]")).toHaveClass("border-muted-foreground", "bg-surface", "ring-surface");
+    expect(withLinus).toHaveAccessibleDescription("Away Unread");
+  });
+
+  it("follows who's active as the workspace socket says, marking nobody until it has", () => {
+    const { hearActive } = renderSidebar({ rooms: [direct("d1", [ada!, grace!])] });
+    expect(presences()).toEqual([null]);
+    expect(directRows()[0]).toHaveAccessibleDescription("");
+    hearActive([grace!.id]);
+    expect(presences()).toEqual(["active"]);
+    hearActive([]);
+    expect(presences()).toEqual(["away"]);
+  });
+
+  it("marks nobody in a group DM, or in a DM with an AI agent or a bot, which have no presence", () => {
+    const recap = agent("u8", "Recap");
+    const bot: DirectoryUser = { id: "u9", name: "Build Bot", bio: null, role: "bot", status: "active", avatarUrl: "/users/u9/avatar" };
+    const listing = [direct("d1", [ada!, grace!, linus!], false, at(3)), direct("d2", [ada!, recap], false, at(2)), direct("d3", [ada!, bot], false, at(1))];
+    renderSidebar({ rooms: listing }, EMBER, [recap, bot], [grace!.id, linus!.id, recap.id, bot.id]);
+    expect(presences()).toEqual([null, null, null]);
+  });
+});
+
+describe("Welcome someone who joins", () => {
+  /** A DM started as `newcomer` joined, at noon, last active `activeAt`. */
+  const welcome = (id: string, members: User[], newcomer: User, activeAt = at(0)): SidebarRoom => ({ ...direct(id, members, false, activeAt), joined: { userId: newcomer.id, at: at(0) } });
+
+  it("lists the DM that welcomed you once a message comes in it, or while it's open, but the one you're welcoming someone in at once", () => {
+    const { rerender } = renderSidebar({ rooms: [welcome("d1", [ada!, grace!], ada!), welcome("d2", [ada!, linus!], linus!)] });
+    expect(directRows().map((row) => row.getAttribute("href"))).toEqual(["/rooms/d2"]);
+    rerender({ currentRoomId: "d1" });
+    expect(directRows().map((row) => row.getAttribute("href"))).toEqual(["/rooms/d2", "/rooms/d1"]);
+    rerender({ currentRoomId: null, rooms: [welcome("d1", [ada!, grace!], ada!, at(5)), welcome("d2", [ada!, linus!], linus!)] });
+    expect(directRows().map((row) => row.getAttribute("href"))).toEqual(["/rooms/d1", "/rooms/d2"]);
+  });
+
+  it("lists the DM that welcomed you while a huddle is going on in it, as someone in it invites you into the huddle", () => {
+    const { rerender } = renderSidebar({ rooms: [welcome("d1", [ada!, grace!], ada!)], huddles: { d1: { startedAt: at(0), userIds: [grace!.id] } } });
+    expect(directRows().map((row) => row.getAttribute("href"))).toEqual(["/rooms/d1"]);
+    rerender({ huddles: {} });
+    expect(directRows()).toEqual([]);
+  });
+});
+
 describe("Activity filter", () => {
   it("shows only the DMs marked unread, and says everything's read only once no room or DM is", () => {
     const { rerender } = renderSidebar({ rooms: [...rooms, direct("d1", [ada!, grace!], true), direct("d2", [ada!, linus!])], unreadOnly: true });
@@ -659,6 +905,34 @@ describe("Activity filter", () => {
     rerender({ currentRoomId: "d1" });
     expect(directRows()).toEqual([]);
     expect(screen.getByText("You’re all caught up. No unread conversations.")).toBeInTheDocument();
+  });
+});
+
+describe("Available Agents", () => {
+  const row = () => screen.queryByRole("button", { name: /^Available Agents/ });
+
+  it("says how many AI agents there are to ask, under the DMs, and opens the list of them from its row", async () => {
+    const { onOpenAgents, rerender } = renderSidebar({ rooms: [...rooms, direct("d1", [ada!, grace!])], agents: 6 });
+    expect(row()).toHaveAccessibleName("Available Agents, 6 to ask");
+    expect(within(screen.getByRole("region", { name: "Agents" })).getByText("6")).toHaveAttribute("aria-hidden", "true");
+    expect(row()).toHaveAttribute("aria-haspopup", "dialog");
+    expect(row()).toHaveAttribute("aria-expanded", "false");
+    // After the DMs.
+    expect(screen.getByRole("region", { name: "DMs" }).compareDocumentPosition(row()!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    await userEvent.click(row()!);
+    expect(onOpenAgents).toHaveBeenCalledExactlyOnceWith(row());
+    rerender({ agents: 6, agentsOpen: true });
+    expect(row()).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("isn't there while there are none to ask, as while Ember AI is off, nor while Activity shows only what's unread", () => {
+    const { rerender } = renderSidebar();
+    expect(row()).toBeNull();
+    rerender({ agents: 2, unreadOnly: true });
+    expect(row()).toBeNull();
+    rerender({ agents: 2 });
+    expect(row()).toHaveAccessibleName("Available Agents, 2 to ask");
   });
 });
 

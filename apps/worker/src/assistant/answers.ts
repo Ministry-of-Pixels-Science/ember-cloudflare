@@ -1,4 +1,4 @@
-import { ASSISTANT_NAME, isMessageTooLong, MAX_MESSAGE_HTML_LENGTH, type Card, type CardImage, type LinkPreview, type Message, type User, type UserId } from "@ember/protocol";
+import { ASSISTANT_NAME, isMessageTooLong, MAX_MESSAGE_HTML_LENGTH, parseCards, type Card, type CardAddress, type CardImage, type LinkPreview, type Message, type User, type UserId } from "@ember/protocol";
 import { ANSWER_WORDS, MAX_CONVERSATION_LENGTH, maxTokensAt, type AnswerLevels, type WebTool } from "@ember/protocol/assistant";
 import { AI_SETTINGS, promptAround, webPromptFor, withInstructions, type AskedIn } from "@ember/protocol/prompts";
 import { linkedUrls, OPENGRAPH_EMBED_CONTENT_TYPE, prepareBody, previewContent } from "@ember/richtext";
@@ -6,6 +6,8 @@ import { decodeHTMLStrict } from "entities/decode";
 import { Marked } from "marked";
 import { markdownHtml } from "../bots/markdown";
 import { anchor, escapeText, linkHref } from "../bots/mrkdwn";
+import { payloadOf, slackMessage } from "../bots/slack";
+import { keptCards } from "../cards";
 import { isOnHost } from "../unfurl";
 import { MAX_SOURCES, type Question, type RefusalReason, type Source, type Turn } from "./gateway";
 
@@ -14,7 +16,8 @@ import { MAX_SOURCES, type Question, type RefusalReason, type Source, type Turn 
 // Markdown, as its instructions say, thinking and writing as much as its levels allow, @ember's the
 // asker's, and searching the web and reading pages while Search the web lets it, which it posts as the
 // rich text people write (`markdownHtml`), the pictures it shows in a card under it, as bots' image cards
-// are, the pages it came from after it, and a preview of its first link, as the composer adds one below
+// are, the cards of the Slack payloads it writes in ```slack blocks after that, as a bot's webhook posts
+// them, the pages it came from after it, and a preview of its first link, as the composer adds one below
 // a link, the pictures and the link only at addresses people wrote there, or the pages it came from
 // (`fetchableIn`). When it can't answer, it says why, in words that say who can do something about it.
 
@@ -107,7 +110,7 @@ const WEB_TOOLS_REFUSED =
  * as fit in `MAX_CONVERSATION_LENGTH` characters, the newest first, but for a thread's first message, which
  * comes before them all.
  */
-function readable<T extends ReadMessage>(conversation: T[], inThread: boolean): T[] {
+export function readable<T extends ReadMessage>(conversation: T[], inThread: boolean): T[] {
   const question = conversation.at(-1)!;
   const before = conversation.slice(0, -1);
   const [first, ...replies] = before;
@@ -146,8 +149,8 @@ export function writtenBy(people: ReadonlySet<UserId>, conversation: Message[], 
 }
 
 /**
- * @ember's answer as the room posts it: its Markdown as markup, a card of the pictures it shows, and the
- * first web link it may have a preview of.
+ * @ember's answer as the room posts it: its Markdown as markup, a card of the pictures it shows, then the
+ * cards of the Slack payloads it writes, and the first web link it may have a preview of.
  */
 export interface Answer {
   markup: string;
@@ -178,16 +181,25 @@ const MAX_SOURCE_LINK_LENGTH = MAX_MESSAGE_HTML_LENGTH / (2 * MAX_SOURCES);
 /**
  * `text`, the model's answer in Markdown, as the answerer called `name`, @ember unless it's an agent,
  * posts it, without its name in front, where the conversation's form leads some models to write it,
- * then the `sources` it came from, all cut to what one message holds, which cuts the answer, as its
- * sources are what it says it came from. Only the addresses people wrote in the conversation it read,
- * `written`, and its sources' are fetched for it, and none on Ember's own `ownHosts` for its preview.
+ * with the cards of the Slack payloads it writes (`cardsIn`), then the `sources` it came from, all cut
+ * to what one message holds, which cuts the answer, as its sources are what it says it came from: to as
+ * many of its cards as fit, each whole, and as much of its Markdown as fits beside them. Only the
+ * addresses people wrote in the conversation it read, `written`, and its sources' are fetched for it,
+ * and none on Ember's own `ownHosts` for its preview.
  */
 export function answerOf(text: string, sources: readonly Source[] = [], written: readonly string[] = [], ownHosts: readonly string[] = [], name = ASSISTANT_NAME): Answer {
   const named = literally(name);
   const answer = text.replace(new RegExp(`^\\s*(?:${named}:|\\*\\*${named}:\\*\\*|\\*\\*${named}\\*\\*:)\\s*(?=\\S)`, "i"), "");
   const fetchable = fetchableIn(written, sources, ownHosts);
-  const whole = answerIn(answer, sources, fetchable);
-  return fits(whole) ? whole : cutToFit(answer, sources, fetchable);
+  const { prose, cards } = cardsIn(answer, fetchable);
+  const whole = answerIn(prose, sources, fetchable, cards);
+  if (fits(whole)) return whole;
+  const kept = cards.slice(0, largest(cards.length, (count) => fits(cutAt(prose, 0, sources, fetchable, cards.slice(0, count)))));
+  if (kept.length < cards.length) {
+    const fewer = answerIn(prose, sources, fetchable, kept);
+    if (fits(fewer)) return fewer;
+  }
+  return cutToFit(prose, sources, fetchable, kept);
 }
 
 /** A regular expression's source that matches `text` as it's written. */
@@ -207,15 +219,59 @@ function fetchableIn(written: readonly string[], sources: readonly Source[], own
   return { picture, preview: (url) => picture(url) && !isOnHost(url, ownHosts) };
 }
 
+/** The language of a fenced code block in which an answer writes a Slack payload, for its cards. */
+const CARDS_LANGUAGE = "slack";
+
 /**
- * The answer `text`, in Markdown, makes, followed by the `sources` it came from that it doesn't link to
- * itself: its rich text, a card of the web pictures it shows that are `fetchable`, and the first of its
- * own web links, not a source's, that may have a preview.
+ * The Markdown answer `text` writes outside its ```slack blocks, its prose, and the cards of the Slack
+ * payloads they hold, as a bot's webhook posts them (`slackMessage`), with only the pictures that are
+ * `fetchable`. A payload's own text goes, as the prose is the answer's text. A block whose payload
+ * doesn't parse, or posts no card the room keeps, stays the code it's written as, as does one inside a
+ * list or a quote.
  */
-function answerIn(text: string, sources: readonly Source[], fetchable: Fetchable): Answer {
+function cardsIn(text: string, fetchable: Fetchable): { prose: string; cards: Card[] } {
+  const tokens = markdown.lexer(text);
+  const posted = tokens.map((token) => (token.type === "code" && languageOf(token.lang) === CARDS_LANGUAGE ? slackCardsOf(token.text, fetchable) : null));
+  if (posted.every((cards) => cards === null)) return { prose: text, cards: [] };
+  // The lexer's blocks are the text as it's written, a block at a time. A blank line in place of each
+  // payload keeps the blocks around it apart, as a line after a paragraph or a table would join it.
+  const prose = tokens.map(({ raw }, index) => (posted[index] === null ? raw : "\n\n")).join("");
+  return { prose, cards: posted.flatMap((cards) => cards ?? []) };
+}
+
+/** A fenced code block's language: the first word after its fence, in lowercase, as `slack` in ```Slack json. */
+const languageOf = (info: string | undefined) => (info ?? "").trim().split(/\s/)[0]?.toLowerCase();
+
+/**
+ * The cards the Slack payload `json` posts, with only the pictures that are `fetchable`, or null when it
+ * posts none the room would keep, as when its only part is a picture nobody wrote.
+ */
+function slackCardsOf(json: string, fetchable: Fetchable): Card[] | null {
+  const payload = payloadOf(json);
+  const posted = payload && slackMessage(payload);
+  if (!posted || typeof posted === "string") return null;
+  const cards = parseCards(posted.cards, answerAddress(fetchable));
+  return keptCards(cards).cards.length > 0 ? cards : null;
+}
+
+/** An address in an answer's card as the answer keeps it: a link wherever it goes, as its Markdown's do, but a picture only when it's `fetchable`. */
+const answerAddress =
+  (fetchable: Fetchable): CardAddress =>
+  (url, use) => {
+    if (use === "link") return url;
+    const address = webAddress(url);
+    return address !== null && fetchable.picture(address) ? address : undefined;
+  };
+
+/**
+ * The answer `text`, in Markdown, makes, with `cards`, followed by the `sources` it came from that it
+ * doesn't link to itself: its rich text, a card of the web pictures it shows that are `fetchable`, then
+ * `cards`, and the first of its own web links, not a source's, that may have a preview.
+ */
+function answerIn(text: string, sources: readonly Source[], fetchable: Fetchable, cards: readonly Card[]): Answer {
   const { images, links, previewed } = webPartsOf(text, fetchable);
-  const cards: Card[] = images.length === 0 ? [] : [{ source: "blocks", parts: images.map((image) => ({ kind: "image", image })) }];
-  return { markup: `${markdownHtml(text)}${sourcesHtml(sources, links)}`, cards, firstLink: previewed };
+  const pictures: Card[] = images.length === 0 ? [] : [{ source: "blocks", parts: images.map((image) => ({ kind: "image", image })) }];
+  return { markup: `${markdownHtml(text)}${sourcesHtml(sources, links)}`, cards: [...pictures, ...cards], firstLink: previewed };
 }
 
 /**
@@ -271,31 +327,34 @@ function webAddress(address: string): string | null {
 }
 
 /**
- * Whether `answer` fits in a message, as the room measures one (`prepareWithCards`), its markup and its
- * card no longer than a message's markup may be. The card adds no plain text, as its pictures have no titles.
+ * Whether `answer` fits in a message, as the room measures one (`prepareWithCards`): its markup, and its
+ * cards as the room keeps them, each no longer than a message's markup may be, and its plain text, with
+ * its cards' after it, no longer than a message's.
  */
 function fits({ markup, cards }: Answer): boolean {
-  if (markup.length > MAX_MESSAGE_HTML_LENGTH || JSON.stringify(cards).length > MAX_MESSAGE_HTML_LENGTH) return false;
+  const kept = keptCards(cards);
+  if (markup.length > MAX_MESSAGE_HTML_LENGTH || JSON.stringify(kept.cards).length > MAX_MESSAGE_HTML_LENGTH) return false;
   const body = prepareBody(markup, () => undefined);
-  return body !== null && !isMessageTooLong(body.plainText);
+  return body !== null && !isMessageTooLong([body.plainText, kept.plainText].filter((text) => text !== "").join("\n"));
 }
 
 /**
- * The answer as much of `text` makes as fits in a message with the `sources` it came from after it: its
- * first lines, or the start of its first line when even that doesn't fit, ending with an ellipsis where
- * it's cut. Its Markdown can show more than it's written in, as a numbered list counts up, or a
- * picture's address shows for each reference to it, and a source whose link the cut leaves out is
- * named after it, so each cut is measured as it shows.
+ * The answer as much of `text` makes as fits in a message with `cards` and the `sources` it came from
+ * after it: its first lines, or the start of its first line when even that doesn't fit, ending with an
+ * ellipsis where it's cut. Its Markdown can show more than it's written in, as a numbered list counts
+ * up, or a picture's address shows for each reference to it, and a source whose link the cut leaves out
+ * is named after it, so each cut is measured as it shows.
  */
-function cutToFit(text: string, sources: readonly Source[], fetchable: Fetchable): Answer {
-  const cutFits = (length: number) => fits(cutAt(text, length, sources, fetchable));
+function cutToFit(text: string, sources: readonly Source[], fetchable: Fetchable, cards: readonly Card[]): Answer {
+  const cutFits = (length: number) => fits(cutAt(text, length, sources, fetchable, cards));
   const lineEnds = Array.from(text.matchAll(/\n/g), ({ index }) => index);
   const lines = largest(lineEnds.length, (count) => cutFits(lineEnds[count - 1]!));
-  return cutAt(text, lines > 0 ? lineEnds[lines - 1]! : largest(lineEnds[0] ?? text.length, cutFits), sources, fetchable);
+  return cutAt(text, lines > 0 ? lineEnds[lines - 1]! : largest(lineEnds[0] ?? text.length, cutFits), sources, fetchable, cards);
 }
 
-/** The answer `text`'s first `length` characters make, ending with an ellipsis to say it's cut, and then the `sources` they don't link to. */
-const cutAt = (text: string, length: number, sources: readonly Source[], fetchable: Fetchable) => answerIn(`${text.slice(0, length).trimEnd()}\n\n…`, sources, fetchable);
+/** The answer `text`'s first `length` characters make, ending with an ellipsis to say it's cut, with `cards`, and then the `sources` they don't link to. */
+const cutAt = (text: string, length: number, sources: readonly Source[], fetchable: Fetchable, cards: readonly Card[]) =>
+  answerIn(`${text.slice(0, length).trimEnd()}\n\n…`, sources, fetchable, cards);
 
 /** The largest count from 0 to `most` that `holds` is true of, as it is of every count below one it's true of. */
 function largest(most: number, holds: (count: number) => boolean): number {
@@ -322,9 +381,12 @@ const YOUR_LEVELS = "Ember AI on your profile";
 export const NOTES: Record<RefusalReason | "unopened token", string> = {
   token: `I can't answer right now: Cloudflare didn't take Ember AI's API token. An administrator can give it another under ${AI_SETTINGS}.`,
   account: `I can't answer right now: Cloudflare can't find Ember AI's account. An administrator can set it up again under ${AI_SETTINGS}.`,
-  credits: "I can't answer right now: the AI Gateway credits that pay for my model have run out. An administrator can top them up in AI Gateway, or choose a Workers AI model.",
+  credits: "I can't answer right now: the AI Gateway credits that pay for my model have run out. An administrator can top them up in AI Gateway.",
   model: `I can't answer right now: AI Gateway didn't take my question for its model. An administrator can choose another model under ${AI_SETTINGS}.`,
+  retired: `I can't answer right now: Cloudflare no longer runs my model. An administrator can choose another model under ${AI_SETTINGS}.`,
   busy: "I can't answer right now: AI Gateway is turning requests away, or a spend limit was reached. Try again later.",
+  neurons:
+    "I can't answer right now: Ember AI's Cloudflare account has used the Neurons Workers AI runs my model on free each day, which start again at midnight UTC. An administrator can move the account to Workers Paid, or have AI Gateway's credits pay for Workers AI, to go on before then.",
   "too long": "I can't answer that here: the conversation is longer than my model reads at once. Try asking in a new thread.",
   unanswered: "I couldn't answer: AI Gateway didn't answer in time. Try again in a moment.",
   nothing: "I couldn't answer: my model answered with nothing. Try asking again.",
@@ -336,6 +398,9 @@ export const NOTES: Record<RefusalReason | "unopened token", string> = {
   "unopened token": `I can't answer right now: Ember AI's API token no longer opens here. An administrator can set it up again under ${AI_SETTINGS}.`,
 };
 
+/** What @ember or an agent says in place of an answer with a word Blocked words keeps out, which isn't posted. */
+export const BLOCKED_ANSWER = "I can't answer that here: my answer had a word this community doesn't allow.";
+
 /** What an agent says instead, for the reasons only administrators, who set it up, can do something about. */
 export const AGENT_NOTES: Partial<Record<RefusalReason, string>> = {
   "out of room": `I couldn't answer: my model thought for as long as it may before it wrote anything. Try asking again, or an administrator can choose less Thinking for me under ${AI_SETTINGS}.`,
@@ -345,4 +410,6 @@ export const AGENT_NOTES: Partial<Record<RefusalReason, string>> = {
 export const PICKED_MODEL_NOTES: Partial<Record<RefusalReason, string>> = {
   credits: `I can't answer right now: the AI Gateway credits that pay for the model you picked have run out. An administrator can top them up in AI Gateway, or you can pick another model under ${YOUR_LEVELS}.`,
   model: `I can't answer right now: AI Gateway didn't take my question for the model you picked. Pick another model under ${YOUR_LEVELS}.`,
+  retired: `I can't answer right now: Cloudflare no longer runs the model you picked. Pick another model under ${YOUR_LEVELS}.`,
+  neurons: `I can't answer right now: Ember AI's Cloudflare account has used the Neurons Workers AI runs the model you picked on free each day, which start again at midnight UTC. Pick a model Workers AI doesn't run under ${YOUR_LEVELS}, or an administrator can move the account to Workers Paid, or have AI Gateway's credits pay for Workers AI.`,
 };

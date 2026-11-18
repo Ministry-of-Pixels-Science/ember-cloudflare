@@ -1,7 +1,7 @@
 import type { Message } from "@ember/protocol";
 import { evictDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { CHANGES_KEPT, LATEST_CHANGE, MESSAGES_CHANGED_SINCE, MESSAGES_DELETED_SINCE } from "../src/store";
+import { CHANGES_KEPT, DELETION_OF, LATEST_CHANGE, MESSAGES_CHANGED_SINCE, MESSAGES_DELETED_SINCE } from "../src/store";
 import { connect, freshRoom, post, reconnect, roomSql, roomStub, signIn, type Socket } from "./support";
 
 /** Posts a message as `client` and answers it with the change's number. */
@@ -158,6 +158,8 @@ describe("Catch up after a reconnect", () => {
     expect(changed).toContain("SEARCH messages USING INDEX index_messages_on_room_id_and_change_seq (room_id=? AND change_seq>?)");
     expect(changed).not.toContain("TEMP B-TREE");
     expect(await planOf(room, MESSAGES_DELETED_SINCE, room, 0)).toMatch(/^SEARCH message_deletions USING (COVERING )?INDEX sqlite_autoindex_message_deletions_1 \(room_id=\? AND seq>\?\)$/);
+    // One message's deletion is found among its room's, which are few, not among every room's.
+    expect(await planOf(room, DELETION_OF, room, "a-message")).toMatch(/^SEARCH message_deletions USING (COVERING )?INDEX sqlite_autoindex_message_deletions_1 \(room_id=\?\)$/);
     const latest = await planOf(room, LATEST_CHANGE, room, room);
     expect(latest).toContain("SEARCH messages USING COVERING INDEX index_messages_on_room_id_and_change_seq (room_id=?)");
     expect(latest).toContain("SEARCH message_deletions USING COVERING INDEX sqlite_autoindex_message_deletions_1 (room_id=?)");

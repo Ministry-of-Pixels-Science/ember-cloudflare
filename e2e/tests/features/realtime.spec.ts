@@ -17,6 +17,54 @@ test.describe("Who's here", () => {
   });
 });
 
+test.describe("New line", () => {
+  test("draws New over the first message that came while a room was unread, and none on the next visit", async ({ members }) => {
+    const ada = await members.signIn("Ada");
+    await ada.send("Before you left");
+    // Grace reads general, then leaves it before the rest comes. The Workspace hears of a message a
+    // moment after it's sent, so one sent just before someone joins can mark the room unread for them as
+    // of it, unless they read the room after it.
+    const grace = await members.signIn("Grace");
+    await expect(grace.message("Before you left")).toBeVisible();
+    await expect(ada.presence()).toHaveText("2 here now");
+    const rows = grace.page.getByRole("region", { name: "Rooms" });
+    const general = rows.getByRole("link", { name: "general" });
+    const leaveGeneral = async () => {
+      await rows.getByRole("link", { name: "random" }).click();
+      await expect(ada.presence()).toHaveText("1 here now");
+    };
+    await leaveGeneral();
+
+    await ada.send("While you were away");
+    await ada.send("And another");
+    await expect(general).toHaveAccessibleDescription(/^Unread/);
+    await general.click();
+    const newLine = grace.page.getByRole("separator", { name: "New messages" });
+    const firstNew = grace.page.locator("[data-message-id]").filter({ has: newLine });
+    await expect(newLine).toBeVisible();
+    await expect(firstNew).toContainText("While you were away");
+
+    // Opening it read it, so the next visit draws none, once Grace's sidebar has heard of the read.
+    await leaveGeneral();
+    await expect(general).not.toHaveAccessibleDescription(/^Unread/);
+    await general.click();
+    await expect(grace.message("And another")).toBeVisible();
+    await expect(newLine).toHaveCount(0);
+
+    // A line stays while the room is open, as more messages come. The test ends there: a room tells the
+    // Workspace of a message a moment after it's sent, with who is viewing the room then, so someone who
+    // leaves just after one comes can find the room unread as of it.
+    await leaveGeneral();
+    await ada.send("Back again");
+    await expect(general).toHaveAccessibleDescription(/^Unread/);
+    await general.click();
+    await expect(firstNew).toContainText("Back again");
+    await ada.send("Still here");
+    await expect(grace.message("Still here")).toBeVisible();
+    await expect(newLine).toHaveCount(1);
+  });
+});
+
 test.describe("Presence", () => {
   test("counts someone with two tabs open once", async ({ members, rooms }) => {
     const ada = await members.signIn("Ada");

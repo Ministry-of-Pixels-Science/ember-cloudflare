@@ -95,8 +95,8 @@ describe("Image viewer", () => {
     expect(screen.getByRole("img", { name: "moon.jpg" })).toHaveAttribute("src", moon);
     const download = screen.getByRole("link", { name: "Download file" });
     expect(download).toHaveAttribute("href", `${moon}?disposition=attachment`);
-    // The server names the file it downloads.
-    expect(download).not.toHaveAttribute("download");
+    // Downloaded, never opened, under the name the server gives it.
+    expect(download).toHaveAttribute("download", "");
     await userEvent.click(screen.getByRole("button", { name: "Share file" }));
     await vi.waitFor(() => expect(share).toHaveBeenCalledOnce());
     expect(fetch).toHaveBeenCalledWith(`${moon}?disposition=attachment`);

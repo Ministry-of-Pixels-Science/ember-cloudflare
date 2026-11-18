@@ -4,9 +4,11 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Sheet } from "@/components/ui/sheet";
+import { BlockingContext } from "@/hooks/use-blocking";
 import { PeopleContext, type People } from "@/hooks/use-directory";
+import { ReportingContext } from "@/hooks/use-reporting";
 import { guardLeaving, navigate } from "@/hooks/use-route";
-import { CONFIRM_BAN, CONFIRM_UNBAN, PersonPage } from "./person-page";
+import { adminsOnlyAsk, CONFIRM_BAN, CONFIRM_UNBAN, PersonPage } from "./person-page";
 
 const ada: Me = { id: "u1", name: "Ada Lovelace", administrator: false };
 const grace: Person = { id: "u2", name: "Grace Hopper", bio: "Wrote the first compiler", role: "member", status: "active", avatarUrl: "/users/t2/avatar?v=1" };
@@ -24,29 +26,39 @@ interface Shown {
   people?: People;
   /** What starting a DM settles with, rather than that it did. */
   started?: () => Promise<boolean>;
+  /** Whom `me` has blocked, as the sidebar last heard. */
+  blocked?: string[];
+  /** What blocking or unblocking settles with, rather than that it did. */
+  changedBlock?: () => Promise<boolean>;
 }
 
 /** Someone's page as `me` sees it, opened from general. */
-function showPage(person: Person | string, { me = ada, people = new Map(), started = async () => true }: Shown = {}) {
+function showPage(person: Person | string, { me = ada, people = new Map(), started = async () => true, blocked = [], changedBlock = async () => true }: Shown = {}) {
   const userId = typeof person === "string" ? person : person.id;
   const [onMissing, onFailed] = [vi.fn(), vi.fn()];
   const onStartDirect = vi.fn<(person: User) => Promise<boolean>>(started);
   const onPersonChanged = vi.fn<(person: DirectoryUser) => void>();
   const reloadPeople = vi.fn(async () => {});
-  let shown = { me, people };
+  const setBlocked = vi.fn<(person: User, blocked: boolean) => Promise<boolean>>(changedBlock);
+  const openReport = vi.fn();
+  let shown = { me, people, blocking: { blocked: new Set(blocked), setBlocked } };
   const view = () => (
     <PeopleContext value={shown.people}>
-      <Sheet>
-        <PersonPage
-          userId={userId}
-          me={shown.me}
-          onStartDirect={onStartDirect}
-          onPersonChanged={onPersonChanged}
-          reloadPeople={reloadPeople}
-          onMissing={onMissing}
-          onFailed={onFailed}
-        />
-      </Sheet>
+      <BlockingContext value={shown.blocking}>
+        <ReportingContext value={openReport}>
+          <Sheet>
+            <PersonPage
+              userId={userId}
+              me={shown.me}
+              onStartDirect={onStartDirect}
+              onPersonChanged={onPersonChanged}
+              reloadPeople={reloadPeople}
+              onMissing={onMissing}
+              onFailed={onFailed}
+            />
+          </Sheet>
+        </ReportingContext>
+      </BlockingContext>
     </PeopleContext>
   );
   const { rerender } = render(view());
@@ -60,8 +72,11 @@ function showPage(person: Person | string, { me = ada, people = new Map(), start
     reloadPeople,
     onMissing,
     onFailed,
+    setBlocked,
+    openReport,
     list: (people: People) => show({ people }),
     become: (me: Me) => show({ me }),
+    block: (blockedNow: string[]) => show({ blocking: { blocked: new Set(blockedNow), setBlocked } }),
     user: userEvent.setup(),
   };
 }
@@ -96,6 +111,21 @@ describe("Someone's profile page", () => {
     // Only your own page has the pencil, and only administrators are told an email address.
     expect(screen.queryByRole("link", { name: "Edit my profile" })).toBeNull();
     expect(mailLink()).toBeNull();
+  });
+
+  it("shows someone's @username under their name, if they have one, as the people directory lists them now", async () => {
+    const amazing = { ...grace, username: "amazing.grace" };
+    serve(found(amazing));
+    const { list } = showPage(amazing, { people: new Map([[grace.id, amazing]]) });
+    expect(await heading()).toHaveTextContent("Grace Hopper");
+    expect(screen.getByText("@amazing.grace")).toBeVisible();
+
+    list(new Map([[grace.id, { ...amazing, username: "grace" }]]));
+    expect(await screen.findByText("@grace")).toBeVisible();
+    // The directory leaves out a username they've taken away.
+    list(new Map([[grace.id, grace]]));
+    expect(await heading()).toHaveTextContent("Grace Hopper");
+    expect(screen.queryByText(/^@/)).toBeNull();
   });
 
   it("goes back home when the app didn't open it, and asks for ids escaped", async () => {
@@ -343,6 +373,31 @@ describe("A bot's profile", () => {
       expect(directButton("Recap")).toBeNull();
     });
 
+    it("says only administrators can ask one kept for them, in place of the DM button, which an administrator has", async () => {
+      const kept: Person = { ...recap, adminsOnly: true };
+      const { onStartDirect, become, user } = showAgent(HAIKU, {}, kept);
+      expect(await heading()).toHaveTextContent(/^Recap$/);
+      expect(screen.getByText(adminsOnlyAsk("Recap"))).toBeVisible();
+      expect(directButton("Recap")).toBeNull();
+
+      become(administrator);
+      await waitFor(() => expect(directButton("Recap")).toBeVisible());
+      expect(screen.queryByText(adminsOnlyAsk("Recap"))).toBeNull();
+      await user.click(directButton("Recap")!);
+      expect(onStartDirect).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: recap.id }));
+    });
+
+    it("has the DM button again once the directory says anyone can ask one that was kept for administrators", async () => {
+      const kept: Person = { ...recap, adminsOnly: true };
+      const { list } = showAgent(HAIKU, { people: new Map([[kept.id, kept]]) }, kept);
+      expect(await screen.findByText(adminsOnlyAsk("Recap"))).toBeVisible();
+
+      // The directory's entry leaves out that it's kept, which what the page was answered mustn't put back.
+      list(new Map([[recap.id, recap]]));
+      await waitFor(() => expect(directButton("Recap")).toBeVisible());
+      expect(screen.queryByText(adminsOnlyAsk("Recap"))).toBeNull();
+    });
+
     it("badges an agent the people directory lists, deleted ones too, with only their avatar, as a bot's page", async () => {
       const deleted = { ...recap, status: "deactivated" as const };
       serve(found(deleted));
@@ -571,6 +626,112 @@ describe("Ban and unban people", () => {
     await act(async () => answer(banned));
     await waitFor(() => expect(reloadPeople).toHaveBeenCalledOnce());
     expect(onPersonChanged).not.toHaveBeenCalled();
+  });
+});
+
+describe("Block and unblock people", () => {
+  const blockButton = (name = grace.name) => screen.queryByRole("button", { name: `Block ${name}` });
+  const unblockButton = (name = grace.name) => screen.queryByRole("button", { name: `Unblock ${name}` });
+
+  it("offers Block for anyone else active, bots too, with a person with an x, and none on your own page or for removed people", async () => {
+    serve(found(grace));
+    showPage(grace);
+    await heading();
+    const button = blockButton()!;
+    expect(button).toHaveClass("bg-background");
+    expect(button.querySelector("svg")).toHaveClass("iconoir-user-xmark");
+    // Below Ping.
+    expect(directButton(grace.name)!.compareDocumentPosition(button)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    cleanup();
+
+    serve(found(bender));
+    showPage(bender);
+    await avatar();
+    expect(blockButton("Bender")).toBeVisible();
+    cleanup();
+
+    for (const person of [{ ...grace, id: ada.id, name: ada.name }, { ...grace, status: "deactivated" }, { ...bender, status: "deactivated" }] as const) {
+      serve(found(person));
+      showPage(person);
+      await avatar();
+      expect(screen.queryByRole("button", { name: /block/i }), JSON.stringify(person)).toBeNull();
+      cleanup();
+    }
+  });
+
+  it("blocks them, waiting for the answer before another click, then offers Unblock in place of Ping", async () => {
+    serve(found(grace));
+    let answer: (done: boolean) => void = () => {};
+    const { setBlocked, block, user } = showPage(grace, { changedBlock: () => new Promise((resolve) => (answer = resolve)) });
+    await heading();
+    await user.click(blockButton()!);
+    expect(blockButton()).toHaveAttribute("aria-disabled", "true");
+    await user.click(blockButton()!);
+    expect(setBlocked).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: grace.id, name: grace.name }), true);
+
+    // The sidebar hears of the block as the answer comes.
+    block([grace.id]);
+    await act(async () => answer(true));
+    expect(unblockButton()).not.toHaveAttribute("aria-disabled");
+    expect(directButton(grace.name)).toBeNull();
+
+    await user.click(unblockButton()!);
+    expect(setBlocked).toHaveBeenLastCalledWith(expect.objectContaining({ id: grace.id }), false);
+    block([]);
+    await act(async () => answer(true));
+    expect(directButton(grace.name)).toBeVisible();
+    expect(blockButton()).toBeVisible();
+  });
+
+  it("offers Unblock for someone removed, or a bot, that you'd blocked, and no Ping for a bot you've blocked", async () => {
+    serve(found({ ...grace, status: "deactivated" }));
+    showPage(grace, { blocked: [grace.id] });
+    await avatar();
+    expect(unblockButton()).toBeVisible();
+    cleanup();
+
+    serve(found(bender));
+    showPage(bender, { blocked: [bender.id] });
+    await avatar();
+    expect(unblockButton("Bender")).toBeVisible();
+    expect(directButton("Bender")).toBeNull();
+  });
+});
+
+describe("Report people", () => {
+  const reportButton = (name = grace.name) => screen.queryByRole("button", { name: `Report ${name}` });
+
+  it("offers Report for anyone else active, bots too, with a flag, below Block, and none on your own page or for removed people", async () => {
+    serve(found(grace));
+    showPage(grace);
+    await heading();
+    const button = reportButton()!;
+    expect(button).toHaveClass("bg-background");
+    expect(button.querySelector("svg")).toHaveClass("iconoir-triangle-flag");
+    expect(screen.getByRole("button", { name: `Block ${grace.name}` }).compareDocumentPosition(button)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    cleanup();
+
+    serve(found(bender));
+    showPage(bender);
+    await avatar();
+    expect(reportButton("Bender")).toBeVisible();
+    cleanup();
+
+    for (const person of [{ ...grace, id: ada.id, name: ada.name }, { ...grace, status: "deactivated" }, { ...grace, status: "banned" }, { ...grace, status: "suspended" }] as const) {
+      serve(found(person));
+      showPage(person);
+      await avatar();
+      expect(screen.queryByRole("button", { name: /^Report/ }), JSON.stringify(person)).toBeNull();
+      cleanup();
+    }
+  });
+
+  it("opens Report for them, someone you've blocked too", async () => {
+    serve(found(grace));
+    const { openReport, user } = showPage(grace, { blocked: [grace.id] });
+    await heading();
+    await user.click(reportButton()!);
+    expect(openReport).toHaveBeenCalledExactlyOnceWith({ kind: "person", person: expect.objectContaining({ id: grace.id, name: grace.name }) });
   });
 });
 

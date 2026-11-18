@@ -249,14 +249,16 @@ export class Blobs {
 
   /**
    * What records that R2 has all of file `id`, which it was sent as it arrived, `byteSize` bytes that
-   * their first part identified as `identified` says, as `finished` records a file the uploader sized first.
+   * their first part identified as `identified` says, with the size of its preview, if it has one, as
+   * `finished` records a file the uploader sized first.
    */
-  streamed(id: string, messageId: string, completedAt: string, { byteSize, identified }: StreamedFile): Statement {
+  streamed(id: string, messageId: string, completedAt: string, { byteSize, identified, preview }: StreamedFile): Statement {
     return statement(
-      `UPDATE blobs SET byte_size = ?, content_type = ?, metadata = ?, completed_at = ?, message_id = ? WHERE room_id = ? AND id = ?`,
+      `UPDATE blobs SET byte_size = ?, content_type = ?, metadata = ?, preview = ?, completed_at = ?, message_id = ? WHERE room_id = ? AND id = ?`,
       byteSize,
       identified.contentType,
       identified.metadata,
+      preview ? JSON.stringify({ width: preview.width, height: preview.height }) : null,
       completedAt,
       messageId,
       this.roomId,

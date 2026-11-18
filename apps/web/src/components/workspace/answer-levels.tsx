@@ -33,6 +33,7 @@ export function AnswerLevels({ assistant, onChanged, onFailed }: Props) {
   const [saving, setSaving] = useState(false);
   const mounted = useMounted();
   const picking = assistant.models.length > 1;
+  const answering = assistant.models.find(({ id }) => id === (assistant.model ?? assistant.defaultModel));
 
   const change = (changes: YourAssistantChanges) => {
     const { model, ...levels } = changes;
@@ -90,7 +91,7 @@ export function AnswerLevels({ assistant, onChanged, onFailed }: Props) {
             </p>
           </div>
         )}
-        <LevelDials name="answer-levels" levels={assistant.levels} most={assistant.most} disabled={saving} onChange={change} />
+        <LevelDials name="answer-levels" levels={assistant.levels} most={assistant.most} model={answering} disabled={saving} onChange={change} />
       </div>
     </section>
   );

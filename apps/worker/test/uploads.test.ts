@@ -4,8 +4,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../src/env";
 import { fileSigner } from "../src/files/addresses";
 import { objectKey, type UploadedPart } from "../src/files/blobs";
+import { imageSize } from "../src/files/images";
 import { keptAs, UPLOAD_PART_SIZE } from "../src/files/uploads";
 import { heifFile, hvcC, irot, ispe } from "./heif-files";
+import { storedPng } from "./png-files";
 import {
   api,
   apiWith,
@@ -96,6 +98,36 @@ function pngHeader(width: number, height: number): Uint8Array {
   bytes.set([8, 6, 0, 0, 0], 24);
   return bytes;
 }
+
+/**
+ * Sends `bytes`, upload `upload`, in its parts as `session`, the last to a Worker whose Cloudflare Images
+ * binding is `images`, answering the message the room posts it as.
+ */
+async function finishWith(images: ImagesBinding | undefined, session: Session, room: RoomId, upload: Upload, bytes: Uint8Array): Promise<FileMessage> {
+  for (let n = 1; n < upload.parts; n++) expect((await sendPart(session, room, upload.id, n, partOf(bytes, upload, n))).status).toBe(204);
+  const last = partOf(bytes, upload, upload.parts);
+  const headers = { Cookie: session.cookie, "Content-Length": String(last.length) };
+  const response = await apiWith({ IMAGES: images }, uploadPartPath(room, upload.id, upload.parts), { method: "PUT", headers, body: last });
+  expect(response.status, await response.clone().text()).toBe(201);
+  return (await response.json()) as FileMessage;
+}
+
+/** Cloudflare Images as the suite binds it, with what reads each picture it's asked to make something of. */
+function watchedImages() {
+  const images = (env as unknown as Env).IMAGES!;
+  const input = vi.fn((stream: ReadableStream<Uint8Array>) => images.input(stream));
+  return { images: { input } as unknown as ImagesBinding, input };
+}
+
+/** Cloudflare Images once the account has made as many pictures as its plan has this month, when it fails with error 9422. */
+const usedUpImages = {
+  input: () => ({
+    transform() {
+      return this;
+    },
+    output: () => Promise.reject(Object.assign(new Error("IMAGES_TRANSFORM_ERROR 9422: usage limit reached"), { code: 9422 })),
+  }),
+} as unknown as ImagesBinding;
 
 beforeEach(freshDeploy);
 afterEach(() => vi.restoreAllMocks());
@@ -486,6 +518,85 @@ describe("Image, video and file previews", () => {
 
     expect((await sendPreview(ada, room, upload.id, pngHeader(1200, 800))).status).toBe(204);
     expect(await blobOf(room, upload.id)).toMatchObject({ preview: JSON.stringify({ width: 1200, height: 800 }) });
+  });
+
+  it("has Cloudflare Images make the preview of a picture too large to show by itself that came without one, as a WebP within 1200×800", async () => {
+    const ada = await signIn("Ada");
+    const room = await freshRoom("lobby");
+    const screenshot = storedPng(1600, 1200);
+    expect(screenshot.length).toBeGreaterThan(MAX_PREVIEW_SIZE);
+
+    const file = await uploadFile(ada, room, "Screenshot on 2026-11-03.png", screenshot, "image/png");
+    expect(file).toMatchObject({ contentType: "image/png", width: 1600, height: 1200, previewUrl: expect.stringMatching(/^\/previews\//) });
+    const preview = await fetchFile(file.previewUrl!);
+    expect(Object.fromEntries(preview.headers)).toMatchObject({
+      "content-type": "image/webp",
+      "content-disposition": `inline; filename="Screenshot on 2026-11-03.webp"; filename*=UTF-8''Screenshot%20on%202026-11-03.webp`,
+    });
+    expect(imageSize(new Uint8Array(await preview.arrayBuffer()), "image/webp")).toEqual({ width: 1067, height: 800 });
+    expect(await blobOf(room, file.id)).toMatchObject({ preview: JSON.stringify({ width: 1067, height: 800 }) });
+
+    // A picture in parts has its preview made once they're put together.
+    const larger = storedPng(2400, 1600);
+    expect(larger.length).toBeGreaterThan(UPLOAD_PART_SIZE);
+    const inParts = await uploadFile(ada, room, "larger.png", larger);
+    expect(inParts).toMatchObject({ width: 2400, height: 1600, previewUrl: expect.any(String) });
+    expect(imageSize(new Uint8Array(await (await fetchFile(inParts.previewUrl!)).arrayBuffer()), "image/webp")).toEqual({ width: 1200, height: 800 });
+  });
+
+  it("asks Cloudflare Images only for a picture that would otherwise show as a file, and that it reads", async () => {
+    const ada = await signIn("Ada");
+    const room = await freshRoom("lobby");
+    const { images, input } = watchedImages();
+    const finished = async (name: string, bytes: Uint8Array) => (await finishWith(images, ada, room, await started(ada, room, name, bytes), bytes)).attachment;
+
+    // A picture every browser shows that's small enough shows by itself.
+    expect(await finished("moon.jpg", recordedImage("moon-thumb.jpg"))).not.toHaveProperty("previewUrl");
+    // A browser's preview stands.
+    const thumbnail = recordedImage("moon-avatar.webp");
+    const screenshot = storedPng(1600, 1200);
+    const upload = await started(ada, room, "screenshot.png", screenshot, "image/png");
+    expect((await sendPreview(ada, room, upload.id, thumbnail)).status).toBe(204);
+    const previewed = (await finishWith(images, ada, room, upload, screenshot)).attachment;
+    expect(new Uint8Array(await (await fetchFile(previewed.previewUrl!)).arrayBuffer())).toEqual(thumbnail);
+    // Images reads at most 20 MB, 100 megapixels and 12,000 pixels a side, and Ember previews no picture of an unknown size.
+    const large = (header: Uint8Array, length: number) => {
+      const bytes = new Uint8Array(length);
+      bytes.set(header);
+      return bytes;
+    };
+    for (const [name, bytes] of [
+      ["more than 20 MB.png", large(pngHeader(1600, 1200), 20_000_001)],
+      ["more than 100 megapixels.png", large(pngHeader(10_000, 10_001), MAX_PREVIEW_SIZE + 1)],
+      ["more than 12,000 pixels wide.png", large(pngHeader(12_001, 100), MAX_PREVIEW_SIZE + 1)],
+      ["unsized.png", large(pngHeader(1600, 1200).subarray(0, 16), MAX_PREVIEW_SIZE + 1)],
+    ] as const) {
+      expect(await finished(name, bytes), name).not.toHaveProperty("previewUrl");
+    }
+    expect(input).not.toHaveBeenCalled();
+  });
+
+  it("posts a picture without a preview, logging why, when Cloudflare Images can't make one, or isn't bound", async () => {
+    const ada = await signIn("Ada");
+    const room = await freshRoom("lobby");
+    const warnings = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const screenshot = storedPng(1600, 1200);
+
+    const usedUp = await started(ada, room, "screenshot.png", screenshot);
+    expect((await finishWith(usedUpImages, ada, room, usedUp, screenshot)).attachment).not.toHaveProperty("previewUrl");
+    expect(warnings).toHaveBeenCalledWith(`Cloudflare Images didn't preview file ${usedUp.id}:`, "IMAGES_TRANSFORM_ERROR 9422: usage limit reached");
+    expect(await blobOf(room, usedUp.id)).toMatchObject({ preview: null });
+    // A PNG whose pixels can't be read.
+    const unreadable = fileOf(MAX_PREVIEW_SIZE + 1, pngHeader(1600, 1200));
+    const broken = await started(ada, room, "broken.png", unreadable);
+    expect((await finishWith((env as unknown as Env).IMAGES, ada, room, broken, unreadable)).attachment).not.toHaveProperty("previewUrl");
+    expect(warnings).toHaveBeenCalledWith(`Cloudflare Images didn't preview file ${broken.id}:`, expect.any(String));
+    expect((await (env as unknown as Env).FILES!.list({ prefix: "previews/" })).objects).toEqual([]);
+
+    warnings.mockClear();
+    const unbound = await started(ada, room, "screenshot.png", screenshot);
+    expect((await finishWith(undefined, ada, room, unbound, screenshot)).attachment).toMatchObject({ width: 1600, height: 1200 });
+    expect(warnings).not.toHaveBeenCalled();
   });
 });
 

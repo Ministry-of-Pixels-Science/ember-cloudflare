@@ -6,9 +6,11 @@ import { devices, type PlaywrightTestOptions, type PlaywrightWorkerOptions, type
 // regenerating the join link would stop another's new person joining through it.
 
 export const SETTINGS_SERVER_PORT = Number(process.env.E2E_SETTINGS_PORT ?? 8789);
-/** Where the Memberful site the Memberful specs fake listens, which the second server's MEMBERFUL_URL names. */
+/** Where the Memberful site the Memberful specs fake listens. */
 export const MEMBERFUL_SITE_PORT = Number(process.env.E2E_MEMBERFUL_PORT ?? 8790);
-/** The second server's Memberful keys, which that site checks. None is a secret. */
+/** That site's address, which the Memberful specs give Ember in Set up Memberful. */
+export const MEMBERFUL_SITE = `http://127.0.0.1:${MEMBERFUL_SITE_PORT}`;
+/** The keys of that site's custom app and webhook, which the specs give Ember with it, and which the site checks. None is a secret. */
 export const MEMBERFUL_KEYS = {
   clientId: "e2e",
   clientSecret: "e2e-only-not-a-secret",
@@ -29,8 +31,12 @@ export const AI_GATEWAY_ACCOUNT = { accountId: "e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0
 export const SFU_PORT = Number(process.env.E2E_SFU_PORT ?? 8794);
 /** The SFU app that SFU knows, by its ID and its secret, which the huddles spec gives Ember. Neither is real. */
 export const SFU_APP = { appId: "ca11".repeat(8), appSecret: "e2e0".repeat(16) };
+/** The TURN key it knows as Cloudflare's TURN service, by its ID and its API token, which the huddles spec gives Ember too. Neither is real. */
+export const TURN_KEY = { keyId: "7e1a".repeat(8), apiToken: "e2e-only-not-a-turn-key-api-token" };
+/** The port the relay's servers it makes for that key are at, on this machine, where nothing listens. */
+export const TURN_PORT = Number(process.env.E2E_TURN_PORT ?? 8795);
 /** The project that sets the second server up. */
-const SETTINGS_FIRST_RUN = "workspace-settings-first-run";
+export const SETTINGS_FIRST_RUN = "workspace-settings-first-run";
 
 /** A desktop Chromium on the second server, which is served over HTTPS, as a deployment is. */
 const ON_SETTINGS_SERVER: Project<PlaywrightTestOptions, PlaywrightWorkerOptions>["use"] = {
@@ -44,8 +50,9 @@ const ON_SETTINGS_SERVER: Project<PlaywrightTestOptions, PlaywrightWorkerOptions
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined,
     args: [
       "--ignore-certificate-errors",
-      // For the huddles spec: a microphone that beeps, which a page may use without asking anyone.
-      "--use-fake-device-for-media-stream",
+      // For the huddles spec: microphones that beep, speakers, and three cameras with a made-up picture, which a page
+      // may use without asking anyone. The second camera's picture is a depth camera's, which no connection sends.
+      "--use-fake-device-for-media-stream=device-count=3",
       "--use-fake-ui-for-media-stream",
     ],
   },

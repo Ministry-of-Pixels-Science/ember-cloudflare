@@ -24,6 +24,7 @@ const grace: MemberfulAccount = { name: "Grace Hopper", emailAddress: "grace@exa
 const DISCONNECTED: ProfileAnswer = {
   profile: {
     name: "Grace Hopper",
+    username: null,
     emailAddress: "grace@example.com",
     bio: null,
     avatarUrl: "/users/t0k3n/avatar?v=1",
@@ -33,6 +34,8 @@ const DISCONNECTED: ProfileAnswer = {
     memberful: { membersOnly: true, connected: null },
     sso: null,
     assistant: null,
+    apps: [],
+    outsideAi: null,
   },
   transferId: "u2.mgk3x2b0.saved",
 };
@@ -207,10 +210,11 @@ describe("Disconnect Memberful", () => {
   it.each([
     ["while Memberful is members only", {}],
     ["even while it isn't, since nothing else signs them in", { membersOnly: false, membershipNeeded: false }],
-  ])("asks someone without a password to set one first, so that they can still sign in, %s", (_, settings) => {
+  ])("offers someone without a password nothing to disconnect, Memberful being how they sign in, %s", (_, settings) => {
     showSection({ connected: grace, hasPassword: false, ...settings });
     expect(section()).toHaveTextContent("Connected as Grace Hopper (grace@example.com). You sign in with Memberful.");
-    expect(section()).toHaveTextContent("To disconnect, set a password above so you can still sign in.");
+    // Nothing asks them for a password, which they're given none of, nor offers to disconnect it.
+    expect(section()).not.toHaveTextContent(/password|disconnect/i);
     expect(screen.queryByRole("button", { name: "Disconnect Memberful" })).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
   });

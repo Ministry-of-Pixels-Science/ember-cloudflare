@@ -1,6 +1,7 @@
 import { threadPath, type RoomId, type RoomKind } from "@ember/protocol";
+import { REPORTS_PATH, type ReportReason, type ReportSubject } from "@ember/protocol/reports";
 
-// What a push of a new message says, for the service worker to show as it is.
+// What a push says, of a new message or of an invitation into a huddle, for the service worker to show as it is.
 
 /**
  * How long a push's title and text may be, counted as the bytes they take in its JSON: a push service
@@ -16,7 +17,7 @@ export interface PushPayload {
   path: string;
 }
 
-/** What a message's push says of the room it's in and who wrote it. */
+/** What a push says of the room its message is in, or its huddle. */
 export interface PushedRoom {
   kind: RoomKind;
   /** Null for a DM. */
@@ -43,6 +44,37 @@ export function messagePayload(roomId: RoomId, room: PushedRoom, senderName: str
   const body = direct ? plainText : `${senderName}: ${plainText}`;
   const path = reply === undefined ? `/rooms/${roomId}` : threadPath(roomId, reply.parentId, reply.replyId);
   return { title: truncated(title, MAX_TITLE_BYTES), body: truncated(body, MAX_BODY_BYTES), path };
+}
+
+/**
+ * How long a push service keeps an invitation's push for a browser that's away, in seconds: a minute,
+ * where it keeps a message's for weeks, since one that comes much later asks into a huddle that may be over.
+ */
+export const INVITATION_TTL_SECONDS = 60;
+
+/**
+ * The push of an invitation into a room's huddle, which reads as the invitation does where Ember is
+ * open: titled with whoever invites, "Invites you to a huddle", and in which room for any but a DM,
+ * whose huddle is with them. Opening it opens the room, where the huddle is to join.
+ */
+export function invitationPayload(roomId: RoomId, room: PushedRoom, inviterName: string): PushPayload {
+  const body = room.kind === "direct" ? "Invites you to a huddle" : `Invites you to a huddle in ${room.name ?? ""}`;
+  return { title: truncated(inviterName, MAX_TITLE_BYTES), body: truncated(body, MAX_BODY_BYTES), path: `/rooms/${roomId}` };
+}
+
+/** How a report's push says why, after what it reports. */
+const REPORTED_AS: Record<ReportReason, string> = { spam: " as spam", harassment: " for harassment", other: "" };
+
+/**
+ * The push of a report to an administrator, titled "New report", which reads who reported whom and why,
+ * and of a message, where it is, naming no DM: "Ada reported Grace's message in general for harassment",
+ * "Ada reported Grace's message in a direct message as spam", or "Ada reported Grace". `subjectName` is
+ * whoever wrote the message, or the person reported. Opening it opens the Reports list.
+ */
+export function reportPayload(reporterName: string, subjectName: string, subject: ReportSubject, reason: ReportReason): PushPayload {
+  const where = subject.kind === "person" ? "" : subject.room.kind === "direct" ? "'s message in a direct message" : `'s message in ${subject.room.name ?? ""}`;
+  const body = `${reporterName} reported ${subjectName}${where}${REPORTED_AS[reason]}`;
+  return { title: "New report", body: truncated(body, MAX_BODY_BYTES), path: REPORTS_PATH };
 }
 
 /**

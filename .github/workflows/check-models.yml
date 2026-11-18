@@ -1,0 +1,43 @@
+name: Check models
+
+# Checks models.json, the models every copy of Ember reads from main once a day besides Workers AI's
+# (docs/models.md), against models.dev's and LiteLLM's lists of models: once a week, and whenever it's
+# run from the Actions tab. It opens a pull request with the prices both say have changed and the days
+# LiteLLM says models stop running, listing what to look at and the makers' newer models in it, or, with
+# nothing to change but something to look at, an issue. apps/worker/scripts/check-models.ts does the work.
+on:
+  schedule:
+    - cron: "41 13 * * 1"
+  workflow_dispatch:
+
+# To push the change's branch and open its pull request, or the issue, and close those it replaces.
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: check-models
+  cancel-in-progress: false
+
+jobs:
+  check:
+    # Only Ember's own repository has the file every copy reads.
+    if: github.repository == 'NYLLON-SOFTWARE/ember-cloudflare'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Pinned to commits, not tags, because this job can push to the repository: a moved tag can't
+      # change what runs. These are the commits the tags beside them pointed at.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+      - name: Check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: node apps/worker/scripts/check-models.ts --publish

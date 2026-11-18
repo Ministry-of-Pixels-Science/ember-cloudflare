@@ -6,7 +6,7 @@ import { isQueued, unconfirmed, type ConnectionStatus, type PendingMessage } fro
 import { initialThreadState, threadReducer } from "@/lib/thread-state";
 import { UPLOAD_FAILED, UploadError, uploadFile } from "@/lib/uploads";
 import { useLatestReducer } from "./use-latest-reducer";
-import { isTooLong, messageActionsOf, pendingMessage, TYPING_TTL_MS, type RoomFrames } from "./use-room";
+import { isTooLong, messageActionsOf, pendingMessage, previewAdderOf, TYPING_TTL_MS, type RoomFrames } from "./use-room";
 
 /**
  * A thread's live state, the message `parentId` names in `roomId` and its replies, over the room's socket,
@@ -89,18 +89,19 @@ export function useThread(roomId: string, frames: RoomFrames, status: Connection
     [me, roomId, parentId],
   );
 
-  // Answers whether the reply went, as useRoom's postMessage does.
+  // Answers how to add a link's preview to the reply once it has gone, or null when it didn't go, as
+  // useRoom's postMessage does.
   const postReply = useCallback(
     (body: string, alsoSend: boolean) => {
       const { plainText: text, mentions } = writtenBody(body);
       if (isTooLong(body, text)) {
         warn(MESSAGE_TOO_LONG);
-        return false;
+        return null;
       }
       const reply = pendingReply(crypto.randomUUID(), body, text, mentions, alsoSend);
       if (!send({ type: "message.create", clientMessageId: reply.clientMessageId, body, parentId, alsoSend })) reply.queued = true;
       dispatch({ type: "pending", message: reply });
-      return true;
+      return previewAdderOf(send, reply.clientMessageId);
     },
     [send, warn, pendingReply, parentId],
   );
@@ -147,8 +148,9 @@ export function useThread(roomId: string, frames: RoomFrames, status: Connection
    */
   const jump = useCallback((replyId: string | null) => dispatch(replyId === null ? { type: "focus", messageId: null } : { type: "open-at", replyId }), []);
 
-  const messageActions = useMemo(() => messageActionsOf(send, warn), [send, warn]);
+  const messageActions = useMemo(() => messageActionsOf(frames, warn), [frames, warn]);
   const dismissNotice = useCallback(() => dispatch({ type: "dismiss-notice" }), []);
+  const givenBack = useCallback((clientMessageId: string, taken: boolean) => dispatch({ type: "given-back", clientMessageId, taken }), []);
 
-  return { state, postReply, postFiles, loadOlder, jump, messageActions, dismissNotice };
+  return { state, postReply, postFiles, loadOlder, jump, messageActions, dismissNotice, givenBack };
 }

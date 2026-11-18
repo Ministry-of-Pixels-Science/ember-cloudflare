@@ -1,5 +1,5 @@
-import { useId, useMemo, useState } from "react";
-import type { Card, CardButton, CardColumn, CardContextItem, CardField, CardImage, CardPart, CardTile } from "@ember/protocol";
+import { createContext, useContext, useId, useMemo, useState, type ComponentProps, type ReactNode } from "react";
+import type { Card, CardAction, CardButton, CardColumn, CardContextItem, CardField, CardImage, CardPart, CardTile } from "@ember/protocol";
 import { cardAddress, displayBody, type DisplayElement, type DisplayNode } from "@ember/richtext/dom";
 import { Button } from "@/components/ui/button";
 import { dateTimeLabel } from "@/lib/messages";
@@ -12,7 +12,7 @@ import { Marked } from "./search-marks";
 // lays out an attachment and its blocks. The room kept only addresses on named hosts, and each is checked again
 // here against the page's own host, which a card can't aim at, as a link preview can't, since every reader's
 // browser would fetch it signed in. A search's results mark what it matched in all of a card's text, as it
-// searched all of it.
+// searched all of it. A button that acts tells the room it was clicked, which reports the click to the card's bot.
 
 /** The bars of Slack's named colors, in Ember's: a notice's green, the warning amber and an alert's red. */
 const BARS = new Map([
@@ -31,14 +31,22 @@ const BLOCKS = new Set(["p", "div", "li", "blockquote", "pre", "h1", "h2", "h3",
 /** How a table's column lines up its cells. */
 const ALIGNS = { left: "text-start", center: "text-center", right: "text-end" } as const;
 
-/** A message's cards, one under another. */
-export function BotCards({ cards, className }: { cards: Card[]; className?: string }) {
+/** What a click on a button that acts does, answering once its bot has taken the click, or hasn't. */
+export type CardClick = (action: CardAction) => Promise<boolean>;
+
+/** What the buttons that act do when they're clicked, where the cards are a message's in a room. Elsewhere, they're disabled. */
+const OnAction = createContext<CardClick | undefined>(undefined);
+
+/** A message's cards, one under another, whose buttons that act do `onAction`. */
+export function BotCards({ cards, className, onAction }: { cards: Card[]; className?: string; onAction?: CardClick }) {
   return (
-    <div className={cn("flex flex-col gap-2 pt-1", className)}>
-      {cards.map((card, index) => (
-        <BotCard key={index} card={card} />
-      ))}
-    </div>
+    <OnAction value={onAction}>
+      <div className={cn("flex flex-col gap-2 pt-1", className)}>
+        {cards.map((card, index) => (
+          <BotCard key={index} card={card} />
+        ))}
+      </div>
+    </OnAction>
   );
 }
 
@@ -151,7 +159,7 @@ function CardText({ html, folds = false, small = false, className }: { html: str
 }
 
 /**
- * A section: its text over its fields, with a thumbnail, or a link button, at their right, as Slack shows a
+ * A section: its text over its fields, with a thumbnail, or a button, at their right, as Slack shows a
  * section's accessory. In a card under 400px wide, the button goes under them, leaving the text room.
  */
 function Section({ html, fields, thumb, button }: { html?: string; fields?: CardField[]; thumb?: CardImage; button?: CardButton }) {
@@ -318,31 +326,57 @@ function Tile({ tile, inRow }: { tile: CardTile; inRow: boolean }) {
   );
 }
 
-/** A card's link buttons, bordered, filled for `primary`, and red for `danger`, as Delete is in both modes. */
+/** A card's buttons, bordered, filled for `primary`, and red for `danger`, as Delete is in both modes: links, and those that act. */
 function Buttons({ buttons, className }: { buttons: CardButton[]; className?: string }) {
-  const shown = buttons.flatMap((button) => {
-    const href = shownAddress(button.href);
+  const shown = buttons.flatMap((button): CardButton[] => {
+    if (button.action) return [button];
+    const href = button.href === undefined ? undefined : shownAddress(button.href);
     return href ? [{ ...button, href }] : [];
   });
   if (shown.length === 0) return null;
   return (
     <div className={cn("flex flex-wrap gap-2 pt-1", className)}>
-      {shown.map(({ text, href, style }, index) => (
-        <Button
-          key={index}
-          asChild
-          size="sm"
-          variant={style ? "default" : "outline"}
-          className={cn("max-w-full touch:min-h-11", style === "danger" && "bg-negative-button text-white hover:bg-negative-button/90")}
-        >
-          <MessageLink href={href}>
-            <span className="truncate">
-              <Marked>{text}</Marked>
-            </span>
-          </MessageLink>
-        </Button>
-      ))}
+      {shown.map(({ text, href, action, style }, index) => {
+        const label = (
+          <span className="truncate">
+            <Marked>{text}</Marked>
+          </span>
+        );
+        const look = {
+          size: "sm",
+          variant: style ? "default" : "outline",
+          className: cn("max-w-full touch:min-h-11", style === "danger" && "bg-negative-button text-white hover:bg-negative-button/90"),
+        } as const;
+        return action ? (
+          <ActionButton key={index} action={action} {...look}>
+            {label}
+          </ActionButton>
+        ) : (
+          <Button key={index} asChild {...look}>
+            <MessageLink href={href!}>{label}</MessageLink>
+          </Button>
+        );
+      })}
     </div>
+  );
+}
+
+/**
+ * A button that acts: a click tells its bot, and it waits, disabled, until the room says the bot has answered,
+ * or why it hasn't, which the room shows. It's disabled where a click has nowhere to go.
+ */
+function ActionButton({ action, children, ...look }: { action: CardAction; children: ReactNode } & Pick<ComponentProps<typeof Button>, "size" | "variant" | "className">) {
+  const onAction = useContext(OnAction);
+  const [waiting, setWaiting] = useState(false);
+  const click = () => {
+    if (!onAction) return;
+    setWaiting(true);
+    void onAction(action).finally(() => setWaiting(false));
+  };
+  return (
+    <Button type="button" disabled={!onAction || waiting} aria-busy={waiting || undefined} onClick={click} {...look}>
+      {children}
+    </Button>
   );
 }
 

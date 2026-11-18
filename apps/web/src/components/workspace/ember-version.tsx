@@ -1,12 +1,17 @@
+import { useState, type ReactNode } from "react";
 import { TRYING_BETAS, UPDATING_EMBER, type CopyOnGitHub, type ReleaseCheck } from "@ember/protocol";
 // Ember's beta workflow, which the card offers a copy without one.
 import BETA_WORKFLOW from "../../../../worker/scripts/update-ember-beta.yml?raw";
 // Ember's Update Ember workflow, as the deploy offers it to a copy without one (apps/worker/scripts/deploy.ts).
 import UPDATE_WORKFLOW from "../../../../worker/scripts/update-ember.yml?raw";
+import { useMounted } from "@/hooks/use-mounted";
+import { isSignedOut } from "@/lib/api";
+import { lastReplyLabel } from "@/lib/messages";
 import { betaToTryOf, updateOf, type NamedRelease } from "@/lib/release-check";
+import { cn } from "@/lib/utils";
 import { BUTTON } from "./email-settings";
 
-// The Ember version card at the end of General, for administrators: the release this Ember is, and once
+// The Ember version card at the top of General, for administrators: the release this Ember is, and once
 // GitHub names a newer one, that it's out, with its notes and how to update, as the project's owner
 // asked (2026-10-31), while the rail's Admin has a dot. A copy made with Deploy to Cloudflare gets a pull
 // request for each release once it has the Update Ember workflow, which Cloudflare's copy leaves out
@@ -18,6 +23,9 @@ import { BUTTON } from "./email-settings";
 // takes only when asked: a box of its own under the card links to running the copy's beta workflow, Update
 // Ember to its newest beta, or to adding it, as the project's owner chose (2026-11-10), and the rail's Admin
 // has no dot for it. The box is a little red, as he asked the same day, so the beta reads as experimental.
+// Check for updates, which he asked for (2026-11-11), has the Worker ask GitHub again, as opening Admin
+// does, and under it the card says when GitHub last named the newest release. He moved the card from the
+// end of General to its top (2026-11-17), so that it isn't missed.
 
 const NOTE = "text-[0.8em] text-muted-foreground max-md:text-[12px]";
 
@@ -73,16 +81,28 @@ function trying(copy: CopyOnGitHub | null): { says: string; link: string; href: 
   return { says: HOW_TO_ADD_THE_BETA_WORKFLOW, link: "Add GitHub action to try betas", href: addBetaWorkflowLinkOf(copy) };
 }
 
-/** What the card says of this Ember under its heading: which release it is while a newer one is out, else whether it's the newest, or a beta ahead of it. */
+/**
+ * What the card says of this Ember under its heading: which release it is while a newer one is out, else
+ * whether it's the newest, or a beta ahead of it, which is the newest beta where the tags name one that
+ * isn't newer.
+ */
 function noteOf(check: ReleaseCheck): string {
-  const { release, beta, newest } = check;
+  const { release, beta, newest, newestBeta } = check;
   if (updateOf(check)) return `This is Ember ${release}.`;
-  if (beta) return newest ? `This is a beta, ahead of Ember ${newest.release}, the newest release.` : "This is a beta. GitHub didn't say whether its release is out.";
+  if (beta) return newest ? `This is ${newestBeta ? "the newest beta" : "a beta"}, ahead of Ember ${newest.release}, the newest release.` : "This is a beta. GitHub didn't say whether its release is out.";
   return newest ? "This is the newest release." : "GitHub didn't say whether a newer release is out.";
 }
 
+interface Props {
+  check: ReleaseCheck | null;
+  /** Has the Worker ask GitHub again, as Check for updates does, settling once it's answered, which `check` then says. */
+  onCheckForUpdates: () => Promise<void>;
+  /** Says why asking failed, as the workspace's alerts do. */
+  onFailed: (error: unknown) => void;
+}
+
 /** The release this Ember is, and whether a newer one is out, or a beta to try, once the Worker has said, as it does only for administrators. */
-export function EmberVersion({ check }: { check: ReleaseCheck | null }) {
+export function EmberVersion({ check, onCheckForUpdates, onFailed }: Props) {
   if (!check) return null;
   const { release, copy } = check;
   const newer = updateOf(check);
@@ -97,22 +117,62 @@ export function EmberVersion({ check }: { check: ReleaseCheck | null }) {
           </h2>
           <p className={NOTE}>{noteOf(check)}</p>
         </div>
-        {newer && (
-          <>
-            <p className={NOTE}>{update.says}</p>
-            <div className="flex flex-wrap gap-[1ch]">
+        {newer && <p className={NOTE}>{update.says}</p>}
+        <CheckForUpdates checkedAt={check.checkedAt} onCheck={onCheckForUpdates} onFailed={onFailed}>
+          {newer && (
+            <>
               <a href={newer.notes} target="_blank" rel="noopener" className={BUTTON}>
                 What's new
               </a>
               <a href={update.href} target="_blank" rel="noopener" className={BUTTON}>
                 {update.link}
               </a>
-            </div>
-          </>
-        )}
+            </>
+          )}
+        </CheckForUpdates>
       </section>
       {beta && <BetaToTry beta={beta} copy={copy} />}
     </>
+  );
+}
+
+/** When GitHub last named the newest release, said as a thread's summary says when its newest reply came. */
+const lastCheckedOf = (checkedAt: string) => `Last checked ${lastReplyLabel(new Date(checkedAt)).long}.`;
+
+/**
+ * Check for updates, after the links in `children`, and under it, while the Worker asks GitHub again,
+ * that it's checking, else when GitHub last named the newest release, `checkedAt`, if it has.
+ */
+function CheckForUpdates({ checkedAt, onCheck, onFailed, children }: { checkedAt: string | null; onCheck: () => Promise<void>; onFailed: (error: unknown) => void; children: ReactNode }) {
+  const [checking, setChecking] = useState(false);
+  const mounted = useMounted();
+
+  const check = () => {
+    setChecking(true);
+    onCheck().then(
+      () => {
+        if (mounted.current) setChecking(false);
+      },
+      (error: unknown) => {
+        if (!mounted.current && !isSignedOut(error)) return;
+        setChecking(false);
+        onFailed(error);
+      },
+    );
+  };
+
+  return (
+    <div>
+      <div className="flex flex-wrap gap-[1ch]">
+        {children}
+        <button type="button" onClick={check} disabled={checking} className={BUTTON}>
+          Check for updates
+        </button>
+      </div>
+      <p role="status" className={cn(NOTE, "mt-2 empty:mt-0")}>
+        {checking ? "Checking for updates…" : checkedAt && lastCheckedOf(checkedAt)}
+      </p>
+    </div>
   );
 }
 

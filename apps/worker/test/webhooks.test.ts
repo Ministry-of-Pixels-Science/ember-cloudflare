@@ -9,8 +9,10 @@ import type { ChatRoom } from "../src/chat-room";
 import type { WebhookAccess } from "../src/workspace";
 import type { Env } from "../src/env";
 import { objectKey } from "../src/files/blobs";
+import { imageSize } from "../src/files/images";
 import type { RoomEvent } from "../src/room-log";
-import { BOT_WEBHOOK, MESSAGE_BOTS, type BotWebhook, type MessageWebhook } from "../src/workspace-store";
+import { BOT_WEBHOOK, MESSAGE_BOTS, type MessageWebhook } from "../src/workspace-store";
+import { storedPng } from "./png-files";
 import {
   api,
   closeOf,
@@ -71,6 +73,13 @@ async function keepOnly(administrator: Session, room: RoomId, memberIds: UserId[
   await vi.waitFor(async () => expect(await workspaceSql("SELECT count(*) AS n FROM pending_revocations")).toEqual([{ n: 0 }]), { timeout: 5_000 });
 }
 
+/** The key a delivery to `bot`'s webhook gives it in room `room`'s address now, as the Workspace finds it. */
+async function webhookKeyIn(room: RoomId, bot: Pick<BotSettings, "id">): Promise<string> {
+  const webhook = await workspaceStub().botWebhook(room, bot.id);
+  expect(webhook).not.toBeNull();
+  return webhook!.key;
+}
+
 /** `bot` as `direct` takes the people it starts a DM with. */
 const asSession = (bot: Pick<BotSettings, "id" | "name">): Session => ({ user: { id: bot.id, name: bot.name }, cookie: "" });
 
@@ -108,18 +117,18 @@ function bots(answer: (delivery: Delivery) => Promise<Response> = async () => ne
  * Stands in for every webhook, answering with an image it sends only once `send` is called, waiting in
  * the room's own I/O context. `reading` says whether the room has begun reading it.
  */
-function sendingFileWhenLet(): { reading: () => boolean; send: () => void } {
+function sendingFileWhenLet(file = recordedImage("moon-thumb.jpg"), type = "image/jpeg"): { reading: () => boolean; send: () => void } {
   let [reading, sending] = [false, false];
   bots(async () => {
     const body = new ReadableStream<Uint8Array>({
       async pull(controller) {
         reading = true;
         while (!sending) await new Promise((resolve) => setTimeout(resolve, 10));
-        controller.enqueue(recordedImage("moon-thumb.jpg"));
+        controller.enqueue(file);
         controller.close();
       },
     });
-    return new Response(body, { headers: { "Content-Type": "image/jpeg" } });
+    return new Response(body, { headers: { "Content-Type": type } });
   });
   return { reading: () => reading, send: () => (sending = true) };
 }
@@ -140,7 +149,11 @@ const noFile: Keep<never> = () => expect.unreachable("The answer brings no file"
 
 /** What the request `delivery` sent, read as JSON. */
 const payloadOf = (delivery: Delivery) =>
-  JSON.parse(delivery.init.body as string) as { user: User; room: { id: RoomId; name: string | null; path: string }; message: { id: string; body: { html: string | null; plain: string }; path: string } };
+  JSON.parse(delivery.init.body as string) as {
+    user: User;
+    room: { id: RoomId; name: string | null; path: string };
+    message: { id: string; body: { html: string | null; plain: string }; attachment?: { filename: string; content_type: string; byte_size: number; path: string }; path: string };
+  };
 
 /** `text` as ActiveSupport::JSON escapes it: `<`, `>` and `&` as JSON's escapes for them. */
 const escaped = (text: string) => text.replace(/[<>&]/g, (c) => `${"\\"}u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
@@ -202,7 +215,7 @@ describe("Webhooks", () => {
     // Campfire's keys, in its order, with HTML's characters escaped. `plain` is the plain text without the bot's mentions.
     const expected = {
       user: { id: ada.user.id, name: "Ada Lovelace" },
-      room: { id: general, name: "general", path: `/rooms/${general}/${bot.key}/messages` },
+      room: { id: general, name: "general", path: `/rooms/${general}/${await webhookKeyIn(general, bot)}/messages` },
       message: { id: sent.id, body: { html: sent.body, plain: "Hey , ship it & tell  <3" }, path: `/rooms/${general}/@${sent.id}` },
     };
     expect(init.body).toBe(escaped(JSON.stringify(expected)));
@@ -219,13 +232,13 @@ describe("Webhooks", () => {
     expect(botsOf(await webhooksFor(room.id, [message(builder, builder)]))).toEqual([deployer.id]);
     const [delivery] = await webhooksFor(room.id, [message(ada.user)]);
     expect(delivery).toMatchObject({ author: { id: ada.user.id, name: "Ada Lovelace" }, roomName: null, botId: builder.id });
-    // The bot's webhook is read as the delivery runs.
+    // The bot's webhook is read as the delivery runs, with a key of its own for the room, not the bot's.
     const webhook = await workspaceStub().botWebhook(room.id, builder.id);
     expect(webhook).toMatchObject({ bot: { id: builder.id, name: "Build Bot" }, url: "https://bots.example.com/build" });
-    expect(`${webhook!.bot.id}-${webhook!.token}`).toBe(builder.key);
+    expect(webhook!.key).toMatch(new RegExp(`^${builder.id}-[0-9a-f]{32}$`));
   });
 
-  it("delivers a file message with no HTML and its file's name as its plain text, as Campfire delivers a message without rich text", async () => {
+  it("delivers a file message with no HTML and its file's name as its plain text, as Campfire delivers a message without rich text, and its file", async () => {
     const { ada } = await setUp();
     const bot = await addBot(ada, "Build Bot", "https://bots.example.com/build");
     const room = await direct(ada, asSession(bot));
@@ -233,7 +246,19 @@ describe("Webhooks", () => {
 
     const message = await upload(ada, room.id, "moon.jpg", recordedImage("moon-thumb.jpg"));
     await vi.waitFor(() => expect(delivered).toHaveLength(1));
-    expect(payloadOf(delivered[0]!).message).toEqual({ id: message.id, body: { html: null, plain: "moon.jpg" }, path: `/rooms/${room.id}/@${message.id}` });
+    const body = delivered[0]!.init.body as string;
+    expect(payloadOf(delivered[0]!).message).toEqual({
+      id: message.id,
+      body: { html: null, plain: "moon.jpg" },
+      attachment: { filename: "moon.jpg", content_type: "image/jpeg", byte_size: message.attachment.byteSize, path: message.attachment.url },
+      path: `/rooms/${room.id}/@${message.id}`,
+    });
+    expect(body.indexOf('"attachment"')).toBeGreaterThan(body.indexOf('"body"'));
+
+    // Its path opens the file for the bot, which has no session, and needs no key.
+    const file = await api(payloadOf(delivered[0]!).message.attachment!.path);
+    expect(file.status).toBe(200);
+    expect(new Uint8Array(await file.arrayBuffer())).toEqual(recordedImage("moon-thumb.jpg"));
   });
 
   it("delivers to none but the active bots with webhooks that a message mentions in its room: never a person, a bot without one, a deleted bot or one outside the room", async () => {
@@ -285,7 +310,7 @@ describe("Webhooks", () => {
     expect(delivered[0]!.url).toBe("https://bots.example.com/deploy");
     expect(payloadOf(delivered[0]!)).toMatchObject({
       user: { id: builder.id, name: "Build Bot" },
-      room: { path: `/rooms/${general}/${deployer.key}/messages` },
+      room: { path: `/rooms/${general}/${await webhookKeyIn(general, deployer)}/messages` },
       message: { id, body: { plain: "Build passed," } },
     });
   });
@@ -313,7 +338,7 @@ describe("Webhooks", () => {
   it("takes only the bot's own @mentions out of the plain text, case for case, then whitespace at either end", () => {
     const space = String.fromCodePoint(0xa0, 0x2003, 0x3000);
     const delivery: MessageWebhook = { messageId: "m1", author: { id: "u1", name: "Ada" }, roomName: "general", botId: "b1" };
-    const webhook: BotWebhook = { bot: { id: "b1", name: "Build Bot" }, token: "AbC123", url: "https://bots.example.com" };
+    const webhook = { bot: { id: "b1", name: "Build Bot" }, key: "b1-AbC123" };
     const plain = (plainText: string, mentions: User[] = []) =>
       (JSON.parse(webhookPayload("r1", delivery, webhook, { id: "m1", body: "", plainText, mentions })) as { message: { body: { plain: string } } }).message.body.plain;
 
@@ -325,7 +350,7 @@ describe("Webhooks", () => {
 
   it("trims the plain text in a moment, however long a run of whitespace it holds", () => {
     const delivery: MessageWebhook = { messageId: "m1", author: { id: "u1", name: "Ada" }, roomName: "general", botId: "b1" };
-    const webhook: BotWebhook = { bot: { id: "b1", name: "Build Bot" }, token: "AbC123", url: "https://bots.example.com" };
+    const webhook = { bot: { id: "b1", name: "Build Bot" }, key: "b1-AbC123" };
     const plainText = `a${" ".repeat(300_000)}b`;
     const started = Date.now();
     const payload = JSON.parse(webhookPayload("r1", delivery, webhook, { id: "m1", body: "", plainText, mentions: [] })) as { message: { body: { plain: string } } };
@@ -336,7 +361,7 @@ describe("Webhooks", () => {
 
   it("writes the payload as Campfire does, with HTML's characters escaped, and a DM's name null", () => {
     const delivery: MessageWebhook = { messageId: "m1", author: { id: "u1", name: "Ada <3" }, roomName: null, botId: "b1" };
-    const webhook: BotWebhook = { bot: { id: "b1", name: "Build Bot" }, token: "AbC123", url: "https://bots.example.com" };
+    const webhook = { bot: { id: "b1", name: "Build Bot" }, key: "b1-AbC123" };
     const payload = webhookPayload("r1", delivery, webhook, { id: "m1", body: "<p>A &amp; B</p>", plainText: "A & B", mentions: [] });
 
     expect(payload).toBe(
@@ -506,6 +531,22 @@ describe("Webhook replies", () => {
     client.close();
   });
 
+  it("posts a picture a bot says back that's too large to show by itself with the preview Cloudflare Images makes of it", async () => {
+    const { ada, general } = await setUp();
+    const bot = await addBot(ada, "Build Bot", "https://bots.example.com/build");
+    bots(async () => new Response(storedPng(1600, 1200), { headers: { "Content-Type": "image/png" } }));
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const client = await connect(general, ada);
+
+    await post(client, `<p>Hey ${mention(bot)}</p>`);
+    const { attachment } = (await client.next("message.created")).message;
+    expect(attachment).toMatchObject({ name: "attachment.png", contentType: "image/png", width: 1600, height: 1200, previewUrl: expect.stringMatching(/^\/previews\//) });
+    const preview = await api(attachment!.previewUrl!);
+    expect(preview.headers.get("Content-Type")).toBe("image/webp");
+    expect(imageSize(new Uint8Array(await preview.arrayBuffer()), "image/webp")).toEqual({ width: 1067, height: 800 });
+    client.close();
+  });
+
   it("posts nothing for an error page a bot's webhook answers, keeping nothing in R2, as Campfire 1.5.2 doesn't", async () => {
     const { ada, general } = await setUp();
     const bot = await addBot(ada, "Build Bot", "https://bots.example.com/build");
@@ -609,10 +650,10 @@ describe("Webhook replies", () => {
     expect(left).toEqual({ tables: [], keys: [], alarm: null });
   });
 
-  it("keeps none of a file a bot says back once the bot is deleted while it arrives", async () => {
+  it("keeps none of a file a bot says back once the bot is deleted while it arrives, nor its preview", async () => {
     const { ada, general } = await setUp();
     const bot = await addBot(ada, "Build Bot", "https://bots.example.com/build");
-    const file = sendingFileWhenLet();
+    const file = sendingFileWhenLet(storedPng(1600, 1200), "image/png");
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     const client = await connect(general, ada);
 
@@ -622,15 +663,16 @@ describe("Webhook replies", () => {
     file.send();
     await vi.waitFor(() => expect(errors).toHaveBeenCalledWith(`Bot::WebhookJob of message ${sent.id} to bot ${bot.id} failed:`, REPLY_REFUSED));
     expect((await files().list({ prefix: "files/" })).objects).toEqual([]);
+    expect((await files().list({ prefix: "previews/" })).objects).toEqual([]);
     await settle(client);
     expect(client.pending("message.created")).toEqual([]);
     client.close();
   });
 
-  it("keeps none of a file a bot says back when the Workspace can't be asked about the bot once it has arrived", async () => {
+  it("keeps none of a file a bot says back when the Workspace can't be asked about the bot once it has arrived, nor its preview", async () => {
     const { ada, general } = await setUp();
     const bot = await addBot(ada, "Build Bot", "https://bots.example.com/build");
-    const file = sendingFileWhenLet();
+    const file = sendingFileWhenLet(storedPng(1600, 1200), "image/png");
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     const client = await connect(general, ada);
 
@@ -645,14 +687,16 @@ describe("Webhook replies", () => {
     file.send();
     await vi.waitFor(() => expect(errors).toHaveBeenCalledWith(`Bot::WebhookJob of message ${sent.id} to bot ${bot.id} failed:`, unreachable));
     expect((await files().list({ prefix: "files/" })).objects).toEqual([]);
+    expect((await files().list({ prefix: "previews/" })).objects).toEqual([]);
     client.close();
   });
 });
 
 describe("Generate a new bot key", () => {
-  it("gives the bot's new key in the room's path once it's reset", async () => {
+  it("gives the room's path a new key once it's reset, the old one opening nothing", async () => {
     const { ada, general } = await setUp();
     const bot = await addBot(ada, "Build Bot", "https://bots.example.com/build");
+    const before = await webhookKeyIn(general, bot);
     const reset = await api(`/api/account/bots/${bot.id}/key`, { method: "PUT", headers: { Cookie: ada.cookie } });
     const { key } = ((await reset.json()) as BotAnswer).bot;
     const delivered = bots();
@@ -661,8 +705,89 @@ describe("Generate a new bot key", () => {
     await post(client, `<p>Hey ${mention(bot)}</p>`);
     await vi.waitFor(() => expect(delivered).toHaveLength(1));
     expect(key).not.toBe(bot.key);
-    expect(payloadOf(delivered[0]!).room.path).toBe(`/rooms/${general}/${key}/messages`);
+    const { path } = payloadOf(delivered[0]!).room;
+    expect(path).toBe(`/rooms/${general}/${await webhookKeyIn(general, bot)}/messages`);
+    expect(path).not.toContain(before);
+    expect((await api(`/rooms/${general}/${before}/messages`, { method: "POST", body: "Stale" })).status).toBe(401);
+    expect((await api(path, { method: "POST", body: "Fresh" })).status).toBe(201);
     client.close();
+  });
+});
+
+/** Posts `body` at `path`, a room's address for bots, answering the status: 201 once posted, 401 for a key that opens nothing. */
+const postedAt = async (path: string, body: string) => (await api(path, { method: "POST", body, headers: { "Content-Type": "text/plain" } })).status;
+
+describe("A webhook's own key", () => {
+  it("is what a delivery gives the bot in the room's address, never the bot's own key, and posts and reads as the bot there", async () => {
+    const { ada, general } = await setUp();
+    const bot = await addBot(ada, "Build Bot", "https://bots.example.com/build");
+    const delivered = bots();
+    const client = await connect(general, ada);
+
+    const sent = await post(client, `<p>Hey ${mention(bot)}</p>`);
+    await vi.waitFor(() => expect(delivered).toHaveLength(1));
+    expect(delivered[0]!.init.body).not.toContain(bot.key);
+    const { path } = payloadOf(delivered[0]!).room;
+    expect(path).toMatch(new RegExp(`^/rooms/${general}/${bot.id}-[0-9a-f]{32}/messages$`));
+
+    expect(await postedAt(path, "On it")).toBe(201);
+    expect((await client.next("message.created")).message).toMatchObject({ creator: { id: bot.id, name: "Build Bot" }, plainText: "On it" });
+    const read = await api(path);
+    expect(read.status).toBe(200);
+    expect(((await read.json()) as Array<{ id: string }>).map(({ id }) => id)).toContain(sent.id);
+    client.close();
+  });
+
+  it("stays the same while the webhook does, and opens the bot API in its own room alone", async () => {
+    const { ada, general } = await setUp();
+    const bot = await addBot(ada, "Build Bot", "https://bots.example.com/build");
+    const ops = await createRoom("ops", { as: ada });
+    const delivered = bots();
+    const client = await connect(general, ada);
+
+    for (const n of ["One", "Two"]) await post(client, `<p>${n} ${mention(bot)}</p>`);
+    await vi.waitFor(() => expect(delivered).toHaveLength(2));
+    const [first, second] = delivered.map((delivery) => payloadOf(delivery).room.path);
+    expect(second).toBe(first);
+    // The bot is in ops too, where its own key posts, but general's key opens nothing there.
+    const key = first!.split("/")[3]!;
+    expect(await webhookKeyIn(ops.id, bot)).not.toBe(key);
+    expect(await postedAt(`/rooms/${ops.id}/${key}/messages`, "Wrong room")).toBe(401);
+    expect(await postedAt(`/rooms/${ops.id}/${bot.key}/messages`, "Right key")).toBe(201);
+    client.close();
+  });
+
+  it("opens nothing once the webhook delivers elsewhere or is removed, even once it's added again with the same URL, while the bot's own key goes on working", async () => {
+    const { ada, general } = await setUp();
+    const bot = await addBot(ada, "Build Bot", "https://bots.example.com/build");
+    const first = await webhookKeyIn(general, bot);
+    expect(await postedAt(`/rooms/${general}/${first}/messages`, "Before")).toBe(201);
+
+    await changeBot(ada, bot, { webhookUrl: "https://bots.example.com/deploy" });
+    const second = await webhookKeyIn(general, bot);
+    expect(second).not.toBe(first);
+    expect(await postedAt(`/rooms/${general}/${first}/messages`, "From the old server")).toBe(401);
+    expect(await postedAt(`/rooms/${general}/${second}/messages`, "From the new one")).toBe(201);
+
+    await changeBot(ada, bot, { webhookUrl: "" });
+    expect(await workspaceStub().botWebhook(general, bot.id)).toBeNull();
+    expect(await postedAt(`/rooms/${general}/${second}/messages`, "After it was removed")).toBe(401);
+
+    await changeBot(ada, bot, { webhookUrl: "https://bots.example.com/deploy" });
+    expect(await webhookKeyIn(general, bot)).not.toBe(second);
+    expect(await postedAt(`/rooms/${general}/${second}/messages`, "From before it was removed")).toBe(401);
+    expect(await postedAt(`/rooms/${general}/${bot.key}/messages`, "Still the bot")).toBe(201);
+  });
+
+  it("opens the bot API as its own bot alone, and nothing once that bot is deleted", async () => {
+    const { ada, general } = await setUp();
+    const [builder, deployer] = [await addBot(ada, "Build Bot", "https://bots.example.com/build"), await addBot(ada, "Deploy Bot", "https://bots.example.com/build")];
+    const key = await webhookKeyIn(general, builder);
+    // Both bots deliver to the same server, but what it's given for one doesn't open the other.
+    expect(await postedAt(`/rooms/${general}/${deployer.id}-${key.split("-")[1]}/messages`, "Borrowed")).toBe(401);
+
+    await deleteBot(ada, builder);
+    expect(await postedAt(`/rooms/${general}/${key}/messages`, "Deleted")).toBe(401);
   });
 });
 
@@ -770,7 +895,8 @@ describe("Webhooks run in the background", () => {
     answered = 3;
     expect((await client.next("message.created")).message).toMatchObject({ creator: { id: bot.id, name: "Deploy Bot" }, plainText: "On it" });
     expect(delivered.map(({ url }) => url)).toEqual(["https://bots.example.com/build", "https://bots.example.com/build", "https://bots.example.com/deploy"]);
-    expect(payloadOf(delivered[2]!).room.path).toBe(`/rooms/${general}/${key}/messages`);
+    expect(key).not.toBe(bot.key);
+    expect(payloadOf(delivered[2]!).room.path).toBe(`/rooms/${general}/${await webhookKeyIn(general, bot)}/messages`);
     client.close();
   });
 
@@ -824,12 +950,15 @@ describe("Webhooks run in the background", () => {
         finish.set(name, resolve);
       });
 
-    const ran = ["a", "b", "c", "d"].map((name) => queue.run(job(name)));
+    const ran = ["a", "b", "c"].map((name) => queue.run(job(name)));
     expect(started).toEqual(["a", "b"]);
+    expect(queue.full).toBe(true);
+    ran.push(queue.run(job("d")));
     expect(await ran[3]).toBe(false);
 
     finish.get("b")!();
     await vi.waitFor(() => expect(started).toEqual(["a", "b", "c"]));
+    expect(queue.full).toBe(false);
     finish.get("a")!();
     finish.get("c")!();
     expect(await Promise.all(ran.slice(0, 3))).toEqual([true, true, true]);

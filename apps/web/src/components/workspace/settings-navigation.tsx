@@ -1,5 +1,5 @@
 import { createContext, useLayoutEffect, useRef, type ComponentType } from "react";
-import { BrainElectricity, Group, Hashtag, Internet, Palette, Settings, Sparks } from "@/components/icons/iconoir";
+import { BrainElectricity, Group, Hashtag, Headset, Internet, Palette, Settings, Sparks } from "@/components/icons/iconoir";
 import { PageLink } from "@/components/page-link";
 import { BOTS_PATH, CUSTOM_STYLES_PATH, WORKSPACE_SETTINGS_PATH, type Route } from "@/hooks/use-route";
 import { cn } from "@/lib/utils";
@@ -7,8 +7,8 @@ import { cn } from "@/lib/utils";
 // Community settings: the pages that set the workspace up share a layout whose column of links to them
 // takes the conversations' place, and workspace settings show one of their sections at a time, the one
 // the address's fragment names: General, Rooms and permissions, Membership, and Domain settings, where
-// administrators give Ember a custom domain, and AI assistant, where they set up Ember AI and its agents,
-// whose pages are part of it.
+// administrators give Ember a custom domain, AI assistant, where they set up Ember AI and its agents,
+// whose pages are part of it, and Huddles, where they turn huddles on.
 
 /** The sections of community settings, by their ids. */
 export type SettingsSection =
@@ -18,9 +18,10 @@ export type SettingsSection =
   | "domain-settings"
   | "chat-bots"
   | "assistant-settings"
+  | "huddles-settings"
   | "custom-styles";
 
-const WORKSPACE_SECTIONS = ["community-settings", "channel-settings", "membership-settings", "domain-settings", "assistant-settings"] as const;
+const WORKSPACE_SECTIONS = ["community-settings", "channel-settings", "membership-settings", "domain-settings", "assistant-settings", "huddles-settings"] as const;
 
 /** Workspace settings' own sections, which `/account/edit` shows one at a time. */
 export type WorkspaceSection = (typeof WORKSPACE_SECTIONS)[number];
@@ -47,6 +48,9 @@ export function settingsSectionOf(route: Route, hash: string): SettingsSection |
       return "chat-bots";
     case "new-agent":
     case "agent-settings":
+    case "new-app":
+    case "app-settings":
+    case "app-signed-in":
       return "assistant-settings";
     case "custom-styles":
       return "custom-styles";
@@ -55,11 +59,20 @@ export function settingsSectionOf(route: Route, hash: string): SettingsSection |
   }
 }
 
-/** On a page of community settings, its section, and whether whoever's looking administers the workspace. */
+/**
+ * On a page of community settings, its section, whether whoever's looking administers the workspace, and
+ * if they do, how many open reports they see, which Membership counts, and how many times that count has
+ * come, which its Reports list loads again on.
+ */
 export interface SettingsPlace {
   section: SettingsSection;
   administrator: boolean;
+  openReports?: number;
+  reportsHeard?: number;
 }
+
+/** What says how many reports are open: Membership's count, and the rail's dot on Admin. */
+export const openReportsNamed = (open: number) => `${open} open ${open === 1 ? "report" : "reports"}`;
 
 /** The page of community settings shown, which the layout around it follows, or null on any other page. */
 export const SettingsLayout = createContext<SettingsPlace | null>(null);
@@ -82,6 +95,7 @@ const ADMINISTRATOR_LINKS: SectionLink[] = [
   { section: "domain-settings", href: workspaceSectionPath("domain-settings"), icon: Internet, label: "Domain settings" },
   { section: "chat-bots", href: BOTS_PATH, icon: BrainElectricity, label: "Chat bots" },
   { section: "assistant-settings", href: workspaceSectionPath("assistant-settings"), icon: Sparks, label: "AI assistant" },
+  { section: "huddles-settings", href: workspaceSectionPath("huddles-settings"), icon: Headset, label: "Huddles" },
   { section: "custom-styles", href: CUSTOM_STYLES_PATH, icon: Palette, label: "Custom styles" },
 ];
 
@@ -94,16 +108,22 @@ const LINK = cn(
   "mb-2 flex min-h-11 items-center gap-2.5 rounded-lg px-3 py-[11px] text-[13px] leading-[1.4] text-muted-foreground",
   "hover:bg-surface hover:text-foreground aria-[current=page]:bg-hover aria-[current=page]:font-semibold aria-[current=page]:text-foreground",
   "max-md:m-0 max-md:flex-[1_0_auto] max-md:justify-center max-md:px-2 max-md:py-2.5 max-md:text-center",
-  "upto-500px:flex-col upto-500px:gap-[5px] upto-500px:text-[11px]",
+  "upto-500px:relative upto-500px:flex-col upto-500px:gap-[5px] upto-500px:text-[11px]",
+);
+
+/** Membership's count: a pill in ink after its label, as Activity counts what's unread, and at 500px and below a badge on its icon's corner. */
+const COUNT = cn(
+  "ms-auto min-w-5 rounded-full bg-foreground px-1.5 text-center text-[11px] leading-5 font-semibold text-background max-md:ms-0",
+  "upto-500px:absolute upto-500px:top-1 upto-500px:start-[calc(50%+3px)] upto-500px:min-w-[17px] upto-500px:px-[3px] upto-500px:text-[10px] upto-500px:leading-[17px]",
 );
 
 /**
  * The links to community settings' sections, the current one marked: a 244px column beside the page,
  * or at 900px and below, a strip under the header that scrolls sideways when they don't all fit, keeping
- * the current one in view. Domain settings, Chat bots, AI assistant and Custom styles are for
- * administrators alone.
+ * the current one in view. Domain settings, Chat bots, AI assistant, Huddles and Custom styles are for
+ * administrators alone, and Membership counts their open reports, whose list it holds.
  */
-export function SettingsNavigation({ section, administrator }: SettingsPlace) {
+export function SettingsNavigation({ section, administrator, openReports = 0 }: SettingsPlace) {
   const navigation = useRef<HTMLElement>(null);
   useLayoutEffect(() => {
     const strip = navigation.current;
@@ -118,12 +138,20 @@ export function SettingsNavigation({ section, administrator }: SettingsPlace) {
         "max-md:flex max-md:gap-1.5 max-md:overflow-x-auto max-md:border-r-0 max-md:border-b max-md:py-2 max-md:pr-[max(12px,env(safe-area-inset-right))] max-md:pl-[max(12px,env(safe-area-inset-left))]",
       )}
     >
-      {(administrator ? [...LINKS, ...ADMINISTRATOR_LINKS] : LINKS).map(({ section: linked, href, icon: Icon, label }) => (
-        <PageLink key={linked} href={href} aria-current={linked === section ? "page" : undefined} className={LINK}>
-          <Icon className="size-[18px] shrink-0" />
-          <span>{label}</span>
-        </PageLink>
-      ))}
+      {(administrator ? [...LINKS, ...ADMINISTRATOR_LINKS] : LINKS).map(({ section: linked, href, icon: Icon, label }) => {
+        const count = administrator && linked === "membership-settings" && openReports > 0 ? openReports : 0;
+        return (
+          <PageLink key={linked} href={href} aria-current={linked === section ? "page" : undefined} aria-description={count > 0 ? openReportsNamed(count) : undefined} className={LINK}>
+            <Icon className="size-[18px] shrink-0" />
+            <span>{label}</span>
+            {count > 0 && (
+              <span aria-hidden="true" className={COUNT}>
+                {count}
+              </span>
+            )}
+          </PageLink>
+        );
+      })}
     </nav>
   );
 }

@@ -7,7 +7,7 @@ import { statement, type Db } from "./db";
 
 /** The sockets one revocation closes in a room, and what it closes them with. */
 export interface Revocation {
-  /** A person's id, for all their sockets, `sessionTag(id)` for one session's, `addressTag(ip)` for those from an IP address, or `EVERYONE`. */
+  /** A person's id, for all their sockets, `sessionTag(id)` for one session's, `addressTag(ip)` for those from an IP address, `EVERYONE`, or `OPEN_ROOMS_ONLY`. */
   tag: string;
   code: CloseCode;
 }
@@ -28,10 +28,23 @@ export const addressTag = (ipAddress: string) => `${ADDRESS_TAG_PREFIX}${ipAddre
 export const MAX_ADDRESS_LENGTH = "ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255".length;
 
 /**
+ * The IP address a request comes from, `ip`, as the tag on its sockets names it: none for one longer
+ * than any IP address, which isn't one a ban can hold, and would make too long a tag.
+ */
+export const taggedAddress = (ip: string | null): string | null => (ip !== null && ip.length <= MAX_ADDRESS_LENGTH ? ip : null);
+
+/**
  * The tag a revocation names to close every socket in a room, which deleting the room does. No socket
  * carries it, and no person's id or session's tag can be it.
  */
 export const EVERYONE = "*";
+
+/**
+ * The tag a revocation names once a room open to everyone is made private, for the AI apps that reach
+ * only open rooms (`outside/tools`), as they send as someone still in it: the room turns away what the
+ * Workspace let them send before. No socket carries it, and no person's id or session's tag can be it.
+ */
+export const OPEN_ROOMS_ONLY = "*open";
 
 /**
  * How long the Workspace's word that someone may open a room holds. The Worker passes it on at once,

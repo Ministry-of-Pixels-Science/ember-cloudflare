@@ -40,6 +40,9 @@ test("Reply in thread and Quote fit the phone in a message's actions", async ({ 
   await actions.getByRole("link", { name: "Reply in thread" }).tap();
   const thread = page.getByRole("complementary", { name: "Thread" });
   await expect(thread.getByRole("article").filter({ hasText: "Reply to me in a thread" })).toBeVisible();
-  await expect(thread.getByRole("checkbox", { name: `Also send to #${room.name}` })).toBeVisible();
+  const alsoSend = thread.getByRole("checkbox", { name: `Also send to #${room.name}` });
+  await expect(alsoSend).toBeVisible();
+  // Its label is never cut short: where the buttons leave it too little room, it takes a line of its own above them.
+  expect(await alsoSend.evaluate((box) => box.nextElementSibling!.scrollWidth <= box.nextElementSibling!.clientWidth)).toBe(true);
   await screenIsFine();
 });

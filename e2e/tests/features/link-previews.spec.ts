@@ -18,6 +18,21 @@ async function previewWith(member: Member, preview: LinkPreview) {
   await member.page.route(preview.image!, (route) => route.fulfill({ contentType: "image/png", body: PIXEL }));
 }
 
+/**
+ * Answers the links `member` writes with `preview` only once the function it answers is called, as a
+ * page that takes seconds to answer does, and serves its image.
+ */
+async function slowPreviewWith(member: Member, preview: LinkPreview): Promise<() => void> {
+  let answer!: () => void;
+  const answered = new Promise<void>((resolve) => (answer = resolve));
+  await member.page.route("**/api/unfurl", async (route) => {
+    await answered;
+    await route.fulfill({ json: preview });
+  });
+  await member.page.route(preview.image!, (route) => route.fulfill({ contentType: "image/png", body: PIXEL }));
+  return answer;
+}
+
 const box = async (locator: Locator) => {
   const rect = await locator.boundingBox();
   if (!rect) throw new Error("Not visible");
@@ -57,6 +72,38 @@ test.describe("Link previews while writing", () => {
     await expect(message).toContainText("(edited)");
     await expect(message.getByRole("link", { name: "https://basecamp.com/" })).toBeVisible();
     await expect(message.getByRole("link", { name: "Basecamp", exact: true })).toBeVisible();
+  });
+});
+
+test.describe("Link previews after sending", () => {
+  test("adds a pasted link's preview that comes once the message has gone, for everyone, without marking it edited", async ({ members }) => {
+    const ada = await members.signIn("Ada");
+    const grace = await members.signIn("Grace");
+    const answer = await slowPreviewWith(ada, basecamp);
+    await paste(ada, "https://basecamp.com/");
+    await ada.page.keyboard.type(" is calm");
+    await ada.composer().press("Enter");
+    const message = grace.message("is calm");
+    await expect(message.getByRole("link", { name: "https://basecamp.com/" })).toBeVisible();
+    await expect(message.getByRole("link", { name: "Basecamp", exact: true })).toHaveCount(0);
+
+    answer();
+    await expect(message.getByRole("link", { name: "Basecamp", exact: true })).toHaveAttribute("href", "https://basecamp.com/");
+    await expect(message).toContainText("The calm, organized way to manage projects");
+    await expect(message).not.toContainText("(edited)");
+    await expect(ada.message("is calm").getByRole("link", { name: "Basecamp", exact: true })).toBeVisible();
+    await expect(ada.composer().locator("action-text-attachment")).toHaveCount(0);
+  });
+
+  test("adds the preview of a link typed rather than pasted once the message has gone, as Slack does", async ({ members }) => {
+    const ada = await members.signIn("Ada");
+    const grace = await members.signIn("Grace");
+    await previewWith(ada, basecamp);
+    await ada.send("We moved to https://basecamp.com/ today");
+    const message = grace.message("We moved to");
+    await expect(message.getByRole("link", { name: "Basecamp", exact: true })).toHaveAttribute("href", "https://basecamp.com/");
+    await expect(message.getByRole("link", { name: "https://basecamp.com/" })).toBeVisible();
+    await expect(message).not.toContainText("(edited)");
   });
 });
 

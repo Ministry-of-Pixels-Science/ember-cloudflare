@@ -41,6 +41,33 @@ describe("Live sidebar updates", () => {
     await heardNothing(gracesTab);
   });
 
+  it("shows everyone in a room that its settings no longer allow huddles there, whoever a change puts in it too, and that they do again, and nobody else", async () => {
+    const [ada, grace, linus] = [await signIn("Ada"), await signIn("Grace"), await signIn("Linus")];
+    // An administrator, as whoever turns a room's huddles on or off is.
+    await workspaceSql("UPDATE users SET role = 1 WHERE id = ?", ada.user.id);
+    const room = await createRoom("Plans", { closedTo: [ada.user.id], as: ada });
+    const [adasTab, gracesTab, linussTab] = [await openWorkspaceSocket(ada), await openWorkspaceSocket(grace), await openWorkspaceSocket(linus)];
+
+    expect((await change(room.id, ada, { huddles: false })).status).toBe(200);
+    expect(await adasTab.next()).toEqual({ type: "room.saved", room: { ...room, huddles: false } });
+    // Saved again, the room is as it was, so nobody hears anything.
+    expect((await change(room.id, ada, { huddles: false })).status).toBe(200);
+    await heardNothing(adasTab);
+
+    // Grace, put in the room, is shown it without huddles.
+    expect((await change(room.id, ada, { kind: "closed", memberIds: [ada.user.id, grace.user.id] })).status).toBe(200);
+    expect(await gracesTab.next()).toEqual({ type: "room.saved", room: { ...room, huddles: false } });
+    await heardNothing(adasTab);
+
+    expect((await change(room.id, ada, { huddles: true })).status).toBe(200);
+    for (const tab of [adasTab, gracesTab]) {
+      const saved = await tab.next();
+      expect(saved).toEqual({ type: "room.saved", room });
+      expect((saved as { room: Room }).room).not.toHaveProperty("huddles");
+    }
+    await heardNothing(linussTab);
+  });
+
   it("takes a room out of the sidebars of the people a change takes out, and shows it to those it puts in", async () => {
     const [ada, grace, linus] = [await signIn("Ada"), await signIn("Grace"), await signIn("Linus")];
     const room = await createRoom("Plans", { closedTo: [ada.user.id, grace.user.id], as: ada });

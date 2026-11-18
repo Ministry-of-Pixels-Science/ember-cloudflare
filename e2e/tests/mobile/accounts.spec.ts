@@ -1,9 +1,10 @@
 import type { Locator, Page } from "@playwright/test";
-import type { BotAnswer, Bots, BotSettings } from "@ember/protocol";
+import type { BotAnswer, Bots, BotSettings, WorkspaceSettings } from "@ember/protocol";
 import type { AgentAnswer, Agents, AgentSettings, AgentTrialAnswer } from "@ember/protocol/agents";
-import { TOP_LEVELS, type AssistantCatalog, type AssistantSettings } from "@ember/protocol/assistant";
+import type { AgentTools } from "@ember/protocol/apps";
+import { THINKING_LEVELS, TOP_LEVELS, type AssistantSettings } from "@ember/protocol/assistant";
 import { AGENT_TEMPLATE } from "@ember/protocol/prompts";
-import { changeTheWorkspace, fakeTurnstile, isolateRoom, listing, openRoom, signInAs, signInAsAdministrator, TURNSTILE_WIDGET, useOwnAddress, type Passes } from "../../fixtures";
+import { answerChanged, changeTheWorkspace, fakeTurnstile, isolateRoom, listing, openRoom, signInAs, signInAsAdministrator, TURNSTILE_WIDGET, useOwnAddress, type Passes } from "../../fixtures";
 import { auditScreen, settle } from "./audits";
 import { expect, hasDrawerLayout, SWITCHES, test } from "./fixtures";
 
@@ -74,18 +75,17 @@ test("an administrator's Set up Turnstile, with the widget's check, fits the pho
   await screenIsFine({ denseTargets: [SWITCHES] });
 });
 
-test("an administrator's Huddles card and Set up huddles, with a key refused, fit the phone", async ({ page, screenIsFine }) => {
+test("an administrator's Huddles tab and Set up huddles, with a key refused, fit the phone", async ({ page, screenIsFine }) => {
   await useOwnAddress(page);
-  await page.goto("/account/edit#channel-settings");
+  await page.goto("/account/edit#huddles-settings");
   await signInAsAdministrator(page);
-  const card = page.getByRole("region", { name: "Huddles", exact: true });
-  await card.scrollIntoViewIfNeeded();
-  await expect(card.getByRole("switch", { name: "Huddles" })).toBeInViewport();
+  const card = page.getByRole("region", { name: "Audio and video chat", exact: true });
+  await expect(card.getByRole("switch", { name: "Audio and video chat" })).toBeInViewport();
   await screenIsFine({ denseTargets: [SWITCHES] });
 
-  await card.getByRole("switch", { name: "Huddles" }).tap();
+  await card.getByRole("switch", { name: "Audio and video chat" }).tap();
   const setup = page.getByRole("dialog", { name: "Set up huddles" });
-  await expect(setup.getByRole("list", { name: "Steps to make a Realtime SFU app" })).toBeVisible();
+  await expect(setup.getByRole("list", { name: "Steps to set up huddles" })).toBeVisible();
   await screenIsFine({ denseTargets: [SWITCHES] });
 
   // Keys that can't be an app's are refused on their field, before Cloudflare is asked anything.
@@ -96,19 +96,44 @@ test("an administrator's Huddles card and Set up huddles, with a key refused, fi
   await screenIsFine({ denseTargets: [SWITCHES] });
 });
 
-test("an administrator's Huddles card, naming the app huddles run through, fits the phone", async ({ page, screenIsFine }) => {
+test("an administrator's Huddles tab, naming the app huddles run through, its card of Cameras and Screen sharing under that, and the relay's, with Set up the relay and a key refused, fit the phone", async ({ page, screenIsFine }) => {
   await useOwnAddress(page);
-  // The settings as they are once an app's keys are given, without giving the test server any, which every other test shows.
-  await page.route("**/api/account", async (route) => {
-    const response = await route.fetch();
-    if (!response.ok()) return route.fulfill({ response });
-    await route.fulfill({ response, json: { ...(await response.json()), huddles: { appId: "ca11".repeat(8) } } });
-  });
-  await page.goto("/account/edit#channel-settings");
+  // The settings as they are once an app's keys are given, and a TURN key's, without giving the test server any, which every other test shows.
+  const relayKeyId = "7e1a".repeat(8);
+  await page.route("**/api/account", (route) => answerChanged<WorkspaceSettings>(route, (settings) => ({ ...settings, huddles: { appId: "ca11".repeat(8), relayKeyId } })));
+  await page.goto("/account/edit#huddles-settings");
   await signInAsAdministrator(page);
-  const card = page.getByRole("region", { name: "Huddles", exact: true });
+  const card = page.getByRole("region", { name: "Audio and video chat", exact: true });
   await card.getByRole("button", { name: "Change keys" }).scrollIntoViewIfNeeded();
-  await expect(card.getByRole("switch", { name: "Huddles" })).toBeChecked();
+  await expect(card.getByRole("switch", { name: "Audio and video chat" })).toBeChecked();
+  await screenIsFine({ denseTargets: [SWITCHES] });
+
+  // What people may do in a huddle comes with huddles: turn their camera on and share their screen, which are both on.
+  const cameras = page.getByRole("region", { name: "Cameras", exact: true });
+  const screens = page.getByRole("region", { name: "Screen sharing", exact: true });
+  await screens.getByRole("switch", { name: "Screen sharing" }).scrollIntoViewIfNeeded();
+  await expect(cameras.getByRole("switch", { name: "Cameras" })).toBeChecked();
+  await expect(cameras).toContainText("People can turn their camera on in a huddle.");
+  await expect(screens.getByRole("switch", { name: "Screen sharing" })).toBeChecked();
+  await expect(screens).toContainText("People can share their screen in a huddle, from a computer.");
+  await screenIsFine({ denseTargets: [SWITCHES] });
+
+  // Under them, the relay's card names the TURN key it goes by.
+  const relay = page.getByRole("region", { name: "Relay for strict networks", exact: true });
+  await relay.getByRole("button", { name: "Change key" }).scrollIntoViewIfNeeded();
+  await expect(relay.getByRole("switch", { name: "Relay for strict networks" })).toBeChecked();
+  await expect(relay).toContainText(`by the TURN key ${relayKeyId} in your Cloudflare account.`);
+  await screenIsFine({ denseTargets: [SWITCHES] });
+
+  // Change key opens Set up the relay, which refuses what can't be a TURN key's on its field, before Cloudflare is asked anything.
+  await relay.getByRole("button", { name: "Change key" }).tap();
+  const setup = page.getByRole("dialog", { name: "Set up the relay" });
+  await expect(setup.getByRole("list", { name: "Steps to set up the relay" })).toBeVisible();
+  await screenIsFine({ denseTargets: [SWITCHES] });
+  await setup.getByRole("textbox", { name: "TURN Token ID" }).fill("my TURN key");
+  await setup.getByRole("textbox", { name: "API Token" }).fill("f".repeat(64));
+  await setup.getByRole("button", { name: "Save" }).tap();
+  await expect(setup.getByRole("alert")).toBeVisible();
   await screenIsFine({ denseTargets: [SWITCHES] });
 });
 
@@ -227,6 +252,7 @@ const BOT: BotSettings = {
   key: "0mgk3x2a9b4c5e-Ab3dEf5hiJ7k",
   rooms: [{ id: "0mgk3x2a9b4c5a", name: LONG_NAME }],
   webhookUrl: "https://ci.example.com/hook",
+  pickedRooms: null,
 };
 
 /** Shows `page` `BOT` as the only bot, without adding one to the test server, where it would join every other test's rooms. */
@@ -240,6 +266,11 @@ test("the Chat bots page, with a bot's commands, fits the phone", async ({ page,
   await showTheBot(page);
   await page.goto("/account/bots");
   await signInAsAdministrator(page);
+  // The bot's row, folded away, then open, with its only room open too.
+  const bot = page.getByRole("button", { name: BOT.name, exact: true });
+  await expect(bot).toBeVisible();
+  await screenIsFine();
+  await bot.click();
   await expect(page.getByRole("textbox", { name: "curl command for posting messages" })).toHaveValue(/^curl -d 'Hello!' /);
   await screenIsFine();
 });
@@ -254,8 +285,8 @@ test("a bot's settings fit the phone", async ({ page, screenIsFine }) => {
   await expect(page.getByRole("textbox", { name: "Bot name" })).toHaveValue(BOT.name);
   await expect(page.getByRole("button", { name: "Generate a new key" })).toBeVisible();
   await screenIsFine();
-  // Incoming, whose menu names a room as long as names go, then Outgoing, each scrolled to.
-  for (const name of ["Incoming", "Outgoing"]) {
+  // Rooms, then Incoming, whose menu names a room as long as names go, then Outgoing, each scrolled to.
+  for (const name of ["Rooms", "Incoming", "Outgoing"]) {
     await page.getByRole("region", { name }).scrollIntoViewIfNeeded();
     await screenIsFine();
   }
@@ -265,23 +296,13 @@ test("a bot's settings fit the phone", async ({ page, screenIsFine }) => {
 const ASSISTANT: AssistantSettings = {
   accountId: "0123456789abcdef0123456789abcdef",
   model: "anthropic/claude-sonnet-5.5",
-  models: [{ id: "anthropic/claude-sonnet-5.5", name: "Claude Sonnet 5.5", format: "messages" }],
+  models: [{ id: "anthropic/claude-sonnet-5.5", name: "Claude Sonnet 5.5", format: "anthropic" }],
   most: TOP_LEVELS,
   webTools: [],
   instructions: "",
   promptTemplate: null,
   avatarUrl: "/assistant-avatar.svg",
   avatar: false,
-};
-
-/** Cloudflare's catalog, as the Worker lists it, with what other companies' models cost. */
-const CATALOG: AssistantCatalog = {
-  models: [
-    { id: "@cf/zai-org/glm-4.7-flash", name: "GLM-4.7 Flash", format: "chat" },
-    { id: "anthropic/claude-sonnet-5.5", name: "Claude Sonnet 5.5", format: "messages", price: { input: 3, output: 15 } },
-    { id: "openai/gpt-6.1-sol", name: "GPT-6.1 Sol", format: "responses", price: { input: 2, output: 10 } },
-  ],
-  refusal: null,
 };
 
 /**
@@ -300,11 +321,13 @@ const AGENT: AgentSettings = {
   model: "anthropic/claude-sonnet-5.5",
   modelName: "Claude Sonnet 5.5",
   webTools: ["search", "read"],
+  access: "everyone",
   rooms: [1, 2, 3, 4].map((n) => ({ id: `0mgk3x2a9b4c5${n}`, name: `${LONG_NAME}-${n}` })),
   instructions: "You sum up conversations for the team.\n\nList the decisions made, then the questions still open, then the to-dos, each with who took it on.",
   promptTemplate: `${AGENT_TEMPLATE}\n\nSign off as ${LONG_NAME}.`,
-  format: "messages",
+  format: "anthropic",
   levels: { thinking: "medium", length: "long" },
+  thinkingLevels: [...THINKING_LEVELS],
   avatar: true,
   changedBy: { id: "0mgk3x2a9b4c5d", name: LONG_NAME },
   changedAt: "2026-11-09T12:00:00.000Z",
@@ -313,17 +336,28 @@ const AGENT: AgentSettings = {
 /** What Try it's model says. */
 const TRIED: AgentTrialAnswer = { body: `<p>Two decisions so far, and one to-do for ${LONG_NAME}.</p>`, cards: [], ms: 2345 };
 
+/** The tools an agent's page offers: an app named as long as names go, with a tool named as long as the protocol takes, one picked, which can be always allowed, one set aside, and one its app says nothing of. */
+const TOOLS: AgentTools = {
+  apps: [
+    {
+      id: "0mgk3x2a9b4c70",
+      name: LONG_NAME,
+      tools: [
+        { name: "search_issues", title: "Search issues", description: "Finds issues by their words, in every project the token can read.", fingerprint: "f-search", picked: true, changed: false, alwaysAllowed: false },
+        { name: `create_${"issue_".repeat(20)}now`, title: null, description: "Opens an issue.", fingerprint: "f-create", picked: false, changed: true, alwaysAllowed: false },
+        { name: "close_issue", title: null, description: "", fingerprint: "f-close", picked: false, changed: false, alwaysAllowed: false },
+      ],
+    },
+  ],
+};
+
 /** Shows `page` Ember AI on, with `AGENT` its only agent, without turning on the test server's, which would put @ember in every other test's rooms. */
 async function showTheAgents(page: Page): Promise<void> {
-  await page.route("**/api/account", async (route) => {
-    const response = await route.fetch();
-    if (!response.ok()) return route.fulfill({ response });
-    await route.fulfill({ response, json: { ...(await response.json()), assistant: ASSISTANT } });
-  });
+  await page.route("**/api/account", (route) => answerChanged<WorkspaceSettings>(route, (settings) => ({ ...settings, assistant: ASSISTANT })));
   await page.route("**/api/account/agents", (route) => route.fulfill({ json: { agents: [AGENT] } satisfies Agents }));
   await page.route(`**/api/account/agents/${AGENT.id}`, (route) => route.fulfill({ json: { agent: AGENT } satisfies AgentAnswer }));
-  await page.route("**/api/account/assistant/catalog", (route) => route.fulfill({ json: CATALOG }));
   await page.route("**/api/account/agents/trials", (route) => route.fulfill({ json: TRIED }));
+  await page.route("**/api/account/agents/*/tools", (route) => route.fulfill({ json: TOOLS }));
 }
 
 /** Scrolls to each of the agent's page's cards in turn, which fit the phone. */
@@ -343,8 +377,8 @@ async function modifyingFits(scope: Page | Locator, screenIsFine: (options?: { d
   }
 }
 
-async function eachCardFits(page: Page, screenIsFine: (options?: { denseTargets?: string[] }) => Promise<void>) {
-  for (const name of ["Instructions", "How it answers", "Search the web", "Rooms", "Try it"]) {
+async function eachCardFits(page: Page, screenIsFine: (options?: { denseTargets?: string[] }) => Promise<void>, saved = false) {
+  for (const name of ["Instructions", "How it answers", "Search the web", "Rooms", "Try it", ...(saved ? ["Tools"] : [])]) {
     await page.getByRole("region", { name, exact: true }).scrollIntoViewIfNeeded();
     await screenIsFine({ denseTargets: [SWITCHES] });
   }
@@ -391,7 +425,7 @@ test("an agent's settings fit the phone, with what Ember adds around its instruc
   await expect(page.getByRole("button", { name: "Remove avatar" })).toBeVisible();
   await screenIsFine({ denseTargets: [SWITCHES] });
   await modifyingFits(page, screenIsFine, true);
-  await eachCardFits(page, screenIsFine);
+  await eachCardFits(page, screenIsFine, true);
   await page.getByRole("button", { name: `Delete ${LONG_NAME}` }).scrollIntoViewIfNeeded();
   await screenIsFine({ denseTargets: [SWITCHES] });
 });
@@ -409,6 +443,11 @@ test("@ember's page fits the phone", async ({ page, screenIsFine }) => {
     await ember.getByRole("heading", { name: heading, exact: true }).scrollIntoViewIfNeeded();
     await screenIsFine({ denseTargets: [SWITCHES] });
   }
+  const tools = page.getByRole("region", { name: "Tools", exact: true });
+  await expect(tools.getByRole("checkbox")).toHaveCount(4);
+  await expect(tools.getByRole("checkbox", { name: "Always allow search_issues" })).toBeVisible();
+  await tools.scrollIntoViewIfNeeded();
+  await screenIsFine({ denseTargets: [SWITCHES] });
 });
 
 test("your profile, opened from the rail, fits the phone with Log out in the top bar and a translation button by each field", async ({ page, room, session, screenIsFine }) => {

@@ -4,9 +4,9 @@ import { prepareBody, writtenBody, type PreparedBody } from "./body";
 import { displayBody, displayMarkup, type DisplayNode, type DisplayPreview } from "./display";
 import { editableBody, mentionSgid } from "./mentions";
 import { parseHtml } from "./parse";
-import { normalizeTweetUrl, previewContent } from "./previews";
+import { hasPreview, MAX_PREVIEW_COPIES_LENGTH, normalizeTweetUrl, previewContent } from "./previews";
 import { htmlEscape } from "./ruby";
-import { innerHtml } from "./serialize";
+import { innerHtml, toHtml } from "./serialize";
 import { corpus, corpusUser, RailsError } from "./testing/corpus";
 import { testUserId, testUsers } from "./testing/users";
 import { descendants, getAttr, isElement, removeAttr, type Element } from "./tree";
@@ -177,6 +177,19 @@ describe("Link previews in messages", () => {
       expect(nodes).toEqual([{ kind: "element", name: "div", attrs: {}, children: [expect.objectContaining({ kind: "preview" })] }]);
     });
 
+    it("puts it in the first div and as many more as MAX_PREVIEW_COPIES_LENGTH has room for, and nothing in the rest", () => {
+      const previewsByDiv = (nodes: DisplayNode[]) => nodes.map((node) => previewsIn([node]).length);
+      const beforeEmptyDivs = (details: Parameters<typeof preview>[0], divs: number) =>
+        shown(`<div>https://basecamp.com/${preview(details)}</div>${"<div></div>".repeat(divs)}`);
+      const copies = Math.floor(MAX_PREVIEW_COPIES_LENGTH / toHtml(parseHtml(stored(preview(basecamp)).html)).length);
+      const nodes = beforeEmptyDivs(basecamp, copies + 1);
+      expect(previewsByDiv(nodes)).toEqual([...Array<number>(copies).fill(1), 0, 0]);
+      expect(textShown(nodes)).toBe("<div></div>".repeat(copies + 2));
+      expect(previewsByDiv(beforeEmptyDivs(basecamp, 1))).toEqual([1, 1]);
+      const long = { ...basecamp, url: `https://example.com/${"a".repeat(MAX_PREVIEW_COPIES_LENGTH)}` };
+      expect(previewsByDiv(beforeEmptyDivs(long, 1))).toEqual([1, 0]);
+    });
+
     it("keeps the link with other text, or more than one preview", () => {
       const withText = `<p>Hello <a href="https://basecamp.com/">https://basecamp.com/</a></p>${preview(basecamp)}`;
       expect(textShown(shown(withText))).toBe('<p>Hello <a href="https://basecamp.com/">https://basecamp.com/</a></p>');
@@ -275,6 +288,15 @@ describe("Link previews in messages", () => {
     it("with the link's text, which goes as the message shows", () => {
       const body = `<p><a href="https://basecamp.com/">https://basecamp.com/</a></p>${preview({ href: "https://basecamp.com/", filename: "B" })}`;
       expect(stored(body).html).toBe(body);
+    });
+
+    it("tells a body with one from a body without, by its content type alone", () => {
+      const link = `<p><a href="https://basecamp.com/">https://basecamp.com/</a></p>`;
+      expect(hasPreview(parseHtml, `${link}${preview({ href: "https://basecamp.com/", filename: "B" })}`)).toBe(true);
+      expect(hasPreview(parseHtml, `<div>${trixPreview("https://basecamp.com/", "B")}</div>`)).toBe(true);
+      expect(hasPreview(parseHtml, link)).toBe(false);
+      expect(hasPreview(parseHtml, `<p>${OPENGRAPH_EMBED_CONTENT_TYPE}</p>`)).toBe(false);
+      expect(hasPreview(parseHtml, `<action-text-attachment content-type="${OPENGRAPH_EMBED_CONTENT_TYPE}; x=1"></action-text-attachment>`)).toBe(false);
     });
 
     it("but not one that raises as Rails reads it", () => {

@@ -1,15 +1,15 @@
 import { startTransition, useCallback, useEffect, useEffectEvent, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { joinsWithLink, type Invitation, type Me } from "@ember/protocol";
+import { joinsWithLink, type Invitation, type Me, type Message, type User } from "@ember/protocol";
 import { ArrowDown } from "@/components/icons/iconoir";
 import { useAccount } from "@/hooks/use-account";
 import { RefusedUnboosts, RoomConnection } from "@/hooks/use-room";
 import { ScrollIntoViewContext } from "@/hooks/use-scroll-into-view";
 import { dropTarget } from "@/lib/drop-target";
-import { dateLabel, dateTimeLabel, timeline } from "@/lib/messages";
+import { dateLabel, dateTimeLabel, sameDay, timeline } from "@/lib/messages";
 import type { Focus, RoomState } from "@/lib/room-state";
 import { cn } from "@/lib/utils";
 import { InvitationCard } from "./invitation-card";
-import { MessageItem, type MessageActions, type MessageEditors, type ThreadPlace } from "./message-item";
+import { JoinedItem, MessageItem, type MessageActions, type MessageEditors, type ThreadPlace } from "./message-item";
 
 /**
  * How near the end of the room's messages a reader can be and still be at it, which keeps them there as
@@ -88,6 +88,22 @@ function DaySeparator({ at }: { at: string }) {
   );
 }
 
+/**
+ * The New line, over the first message that came while the room was marked unread: in the negative red,
+ * with its word at the end.
+ */
+function NewSeparator() {
+  return (
+    <div
+      role="separator"
+      aria-label="New messages"
+      className="mb-1.5 flex items-center gap-2 text-xs leading-4 font-bold text-negative before:flex-1 before:border-t before:border-negative"
+    >
+      <span aria-hidden="true">New</span>
+    </div>
+  );
+}
+
 interface Props {
   /** The room's name as the reader reads it, which a DM's names the others in it. */
   roomName: string;
@@ -117,6 +133,13 @@ interface Props {
   thread?: { header: ReactNode; place: ThreadPlace };
   /** The message whose thread is open beside the room. */
   openThread?: string;
+  /**
+   * When the room was marked unread as of, as it was opened: the first message from someone else that came
+   * since gets the New line, unless the messages loaded may not reach back to it.
+   */
+  newSince?: string | null;
+  /** Who joined the workspace, and when, for a DM started as they did, which opens with their having joined. */
+  joined?: { user: User; at: string } | null;
 }
 
 /**
@@ -124,7 +147,25 @@ interface Props {
  * else, it keeps the reader's place, loads the pages before and after as they near either end, and
  * offers Jump to newest message when new ones come.
  */
-export function MessageList({ roomName, direct = false, invitation, onDismissInvitation, state, me, actions, editing, editors, onLoadOlder, onLoadNewer, onJumpToNewest, onDropFiles = () => {}, thread, openThread }: Props) {
+export function MessageList({
+  roomName,
+  direct = false,
+  invitation,
+  onDismissInvitation,
+  state,
+  me,
+  actions,
+  editing,
+  editors,
+  onLoadOlder,
+  onLoadNewer,
+  onJumpToNewest,
+  onDropFiles = () => {},
+  thread,
+  openThread,
+  newSince = null,
+  joined = null,
+}: Props) {
   const scroller = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
   const top = useRef<HTMLDivElement>(null);
@@ -135,6 +176,8 @@ export function MessageList({ roomName, direct = false, invitation, onDismissInv
   const open = useRef(0);
   const viewHeight = useRef(0);
   const viewWidth = useRef(0);
+  // The timeline's scroll height when it last settled, which differs while a resize waits for the resize observer.
+  const settledHeight = useRef(0);
   const focused = useRef<Focus | null>(null);
   const arrivals = useRef(state.arrivals);
   // Whether new messages have come that the reader isn't at the end to see.
@@ -144,6 +187,10 @@ export function MessageList({ roomName, direct = false, invitation, onDismissInv
   const [drawnAll, setDrawnAll] = useState(false);
   const items = timeline(state.messages);
   const newestFirst = !drawnAll && !state.focus?.messageId && items.length > FIRST_DRAWN;
+  const firstNew = newSince === null ? -1 : items.findIndex(({ message }) => message.createdAt >= newSince && message.creator.id !== me.id);
+  // A page that doesn't reach back before `newSince` may have older new messages before it that aren't loaded yet,
+  // whoever wrote its first one.
+  const newLineAt = firstNew === -1 || (state.hasMore && items[0]!.message.createdAt >= newSince!) ? null : items[firstNew]!.message;
 
   const nearEnd = (el: HTMLElement) => !state.hasNewer && el.scrollHeight - el.scrollTop - el.clientHeight <= AT_END_PX;
 
@@ -158,6 +205,7 @@ export function MessageList({ roomName, direct = false, invitation, onDismissInv
     atEnd.current = nearEnd(el);
     if (atEnd.current) setBehind(false);
     place.current = placeIn(el);
+    settledHeight.current = el.scrollHeight;
   });
 
   // Goes to a message, centred and outlined, as a permalink opens it, or, for none, to the end, as
@@ -175,6 +223,7 @@ export function MessageList({ roomName, direct = false, invitation, onDismissInv
     }
     atEnd.current = nearEnd(el);
     place.current = placeIn(el);
+    settledHeight.current = el.scrollHeight;
     setBehind(false);
   });
 
@@ -256,9 +305,13 @@ export function MessageList({ roomName, direct = false, invitation, onDismissInv
     const el = scroller.current!;
     // A resize scrolls the timeline to keep its end in view for a reader at it, and that scroll can arrive once
     // the timeline has resized again, before the resize observer has caught up, leaving them at the end of the
-    // view as it was. They didn't move, so they're still at the end. Any other scroll is the reader's, even one
-    // that comes as the timeline resizes, as it does while the composer's editor loads.
-    const stillAtEnd = atEnd.current && !state.hasNewer && el.scrollHeight - el.scrollTop - viewHeight.current <= 1;
+    // view as it was. What it shows can resize before the resize observer has caught up, too, as a message does
+    // when its file's text loads, and the browser scroll it on its own then, as Chrome's scroll anchoring does to
+    // put back what was in view before the end moved up. Either way they didn't move, so they're still at the
+    // end. Any other scroll is the reader's, even one that comes as the timeline resizes, as it does while the
+    // composer's editor loads.
+    const resizing = el.scrollHeight !== settledHeight.current;
+    const stillAtEnd = atEnd.current && !state.hasNewer && (resizing || el.scrollHeight - el.scrollTop - viewHeight.current <= 1);
     atEnd.current = nearEnd(el) || stillAtEnd;
     if (atEnd.current) setBehind(false);
     place.current = placeIn(el);
@@ -272,6 +325,10 @@ export function MessageList({ roomName, direct = false, invitation, onDismissInv
   // Until the room lets the socket in, which brings its messages afresh. The timeline is busy then, and while it
   // draws a page newest first, so screen readers read the page once it's whole.
   const waiting = state.status === "connecting" || state.status === "reconnecting";
+  // The line a DM started as someone joined opens with, once the room has said the timeline reaches back
+  // to its start. It dates its day, which the first message then dates only if it came on another.
+  const joinedLine = !thread && joined !== null && state.paged !== null && !state.hasMore ? joined : null;
+  const datedFirst = (message: Message) => joinedLine === null || message !== items[0]!.message || !sameDay(joinedLine.at, message.createdAt);
 
   return (
     <div className="min-h-0 flex-1" {...dropTarget(onDropFiles)}>
@@ -306,13 +363,21 @@ export function MessageList({ roomName, direct = false, invitation, onDismissInv
                   </div>
                 )}
 
+                {joinedLine && (
+                  <div data-row="joined">
+                    <DaySeparator at={joinedLine.at} />
+                    <JoinedItem user={joinedLine.user} at={joinedLine.at} />
+                  </div>
+                )}
+
                 {(newestFirst ? items.slice(-FIRST_DRAWN) : items).map(({ message, firstOfDay, threaded }) => {
                   // Stable from optimistic copy to stored message, and distinct across senders.
                   const key = `${message.creator.id}:${message.clientMessageId}`;
                   return (
                     <div key={key} data-row={key} data-message-id={message.id}>
                       {/* A thread's replies start under its message, without a day's heading between them. */}
-                      {firstOfDay && (!thread || message !== items[0]!.message) && <DaySeparator at={message.createdAt} />}
+                      {firstOfDay && (!thread || message !== items[0]!.message) && datedFirst(message) && <DaySeparator at={message.createdAt} />}
+                      {message === newLineAt && <NewSeparator />}
                       <MessageItem
                         message={message}
                         me={me}

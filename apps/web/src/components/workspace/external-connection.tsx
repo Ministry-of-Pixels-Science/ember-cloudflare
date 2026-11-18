@@ -13,7 +13,8 @@ import { pushEndpoint } from "@/lib/push";
 // there to it, with their password, as changing their email address takes it, and signs in with it from
 // then on. Once one is connected, it names the account, and Disconnect, with their password again,
 // unlinks it and ends their other sessions, as a new password does, while they have a password and an
-// email address to sign in with instead. Boxed as workspace settings' Memberful section is.
+// email address to sign in with instead. Someone who joined with it has no password, and is given none
+// while it signs them in, so theirs stays connected. Boxed as workspace settings' Memberful section is.
 
 export interface ConnectionProps {
   /** The account elsewhere you've connected, as it describes itself, or null while you haven't. */
@@ -156,10 +157,8 @@ export function ExternalConnection({
               {passwordField(`${id}-disconnection-help`)}
               <SubmitButton disabled={busy}>Disconnect {name}</SubmitButton>
             </form>
-          ) : hasPassword ? (
-            <p>To disconnect, add an email address above so you can still sign in with your password.</p>
           ) : (
-            <p>To disconnect, set a password above so you can still sign in.</p>
+            hasPassword && <p>To disconnect, add an email address above so you can still sign in with your password.</p>
           )}
         </>
       ) : (

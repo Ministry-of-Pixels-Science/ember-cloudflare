@@ -9,12 +9,14 @@ import {
   MAX_INSTRUCTIONS_LENGTH,
   MODELS_FULL,
   modelName,
+  noLongerOffered,
   PAGES_READ_PER_ANSWER,
   WEB_SEARCHES_PER_ANSWER,
   withinMost,
   type AssistantChanges,
   type AssistantModel,
   type AssistantSettings as Assistant,
+  type OfferedModels,
   type WebTool,
 } from "@ember/protocol/assistant";
 import { EMBER_TEMPLATE, promptAround, templateRefusal, webPromptFor, type Prompt } from "@ember/protocol/prompts";
@@ -24,6 +26,7 @@ import { Switch } from "@/components/ui/switch";
 import { useAccount } from "@/hooks/use-account";
 import { PeopleContext } from "@/hooks/use-directory";
 import { useMounted } from "@/hooks/use-mounted";
+import { useOfferedModels } from "@/hooks/use-offered-models";
 import { useTitle } from "@/hooks/use-title";
 import {
   ApiError,
@@ -37,11 +40,13 @@ import {
 } from "@/lib/api";
 import { avatarVariantOf } from "@/lib/previews";
 import { cn } from "@/lib/utils";
-import { AddAssistantModel } from "./add-assistant-model";
+import { AddAssistantModel, modelsToAddTo } from "./add-assistant-model";
 import { AGENTS_PATH, useAgentsOnly } from "./agent-list";
+import { AgentTools } from "./agent-tools";
 import { AssistantSetup, searchTurnedOff } from "./assistant-setup";
 import { BUTTON } from "./email-settings";
 import { LevelDials } from "./level-dials";
+import { NO_LONGER_OFFERED } from "./model-picker";
 import { PictureField } from "./picture-picker";
 import { PromptPreview } from "./prompt-preview";
 import { CHANGES_SAVED, PageHeading, Panel, SettingsPage } from "./settings-page";
@@ -74,6 +79,9 @@ export const INSTRUCTIONS_UNSAVED = "You’ve changed @ember’s instructions. S
 /** What the page says of its models. */
 export const MODELS_EXPLAINED = "People can pick any of these on their profile for @ember to answer them with. The one chosen here answers everyone else.";
 
+/** What it says under Add a model once people can pick every model Ember offers. */
+export const EVERY_MODEL_ADDED = "People can pick every model Ember offers.";
+
 /** What the page says of its dials. */
 export const LIMITS_EXPLAINED =
   "The most @ember may think and write for anyone's question. Each person picks their own levels on their profile, up to these. AI Gateway's spend limits can cap what each person's questions cost, as every request says who asked.";
@@ -84,7 +92,7 @@ export const WEB_SEARCH_OFF = `@ember answers from what its model learned in tra
 /** What the page says of Search the web while it's on, letting @ember do `webTools` on the web, while people can pick from `models`. */
 export function webSearchOn(webTools: WebTool[], models: readonly AssistantModel[]): string {
   const reads = webTools.includes("read") ? `, and reads the pages people link to or its searches find, at most ${PAGES_READ_PER_ANSWER}` : "";
-  const picked = models.length > 1 ? " A model someone picks searches too, if it's Anthropic's or OpenAI's." : "";
+  const picked = models.length > 1 ? " A model someone picks searches too, if it can." : "";
   return `@ember searches the web when a question needs it, at most ${WEB_SEARCHES_PER_ANSWER} times an answer${reads}, and lists the pages it used under its answer.${picked} AI Gateway's credits pay for each search.`;
 }
 
@@ -152,6 +160,7 @@ export function EmberPage({ me, onFailed }: { me: Me; onFailed: (error: unknown)
         {settings && assistant && (
           <>
             <EmberSettings me={me} assistant={assistant} onSetUp={() => setSettingUp(true)} onStopped={off} onChanged={show} onFailed={failed} />
+            <AgentTools agentId={ASSISTANT_ID} name="@ember" onFailed={failed} />
             {settingUp && (
               <AssistantSetup assistant={assistant} deployedAccountId={settings.cloudflareAccountId} onSaved={show} onClose={() => setSettingUp(false)} onFailed={failed} />
             )}
@@ -206,6 +215,8 @@ export function EmberSettings({ me, assistant, onSetUp, onStopped, onChanged, on
   const [pickedAvatar, setPickedAvatar] = useState<string | null>(null);
   const [savingAvatar, setSavingAvatar] = useState(false);
   const busy = saving || savingAvatar || turningWeb !== null;
+  // The models Ember offers through Ember AI's account, for Add a model and for saying which people can pick that it no longer offers.
+  const offered = useOfferedModels(true, { accountId: assistant.accountId }, onFailed);
   const people = useContext(PeopleContext);
   const community = useAccount().name;
   const flash = useFlash();
@@ -362,6 +373,7 @@ export function EmberSettings({ me, assistant, onSetUp, onStopped, onChanged, on
       />
       <Models
         assistant={assistant}
+        offered={offered}
         disabled={busy}
         onChoose={(model) => change(assistant, { model })}
         onRemove={(model) => remove(assistant, model)}
@@ -375,7 +387,7 @@ export function EmberSettings({ me, assistant, onSetUp, onStopped, onChanged, on
         </div>
         <LevelDials name="assistant-most" levels={assistant.most} disabled={busy} onChange={(changes) => change(assistant, changes)} />
       </div>
-      {adding && <AddAssistantModel assistant={assistant} onAdded={onChanged} onClose={() => setAdding(false)} onFailed={onFailed} />}
+      {adding && <AddAssistantModel assistant={assistant} offered={offered} onAdded={onChanged} onClose={() => setAdding(false)} onFailed={onFailed} />}
     </section>
   );
 }
@@ -534,23 +546,28 @@ function Avatar({ src, uploaded, disabled, onChoose, onRemove }: { src: string; 
 
 /**
  * The models people can pick, in the order they were added, each a radio button that chooses it to
- * answer everyone else, with a Remove for each but that one, and Add a model under them, until there are
- * as many as there can be.
+ * answer everyone else, with a Remove for each but that one, and saying so of one Ember no longer
+ * offers (`noLongerOffered`), as the Worker lists them, `offered`, once it has, and Add a model under them,
+ * until there are as many as there can be, or people can pick every model Ember offers.
  */
 function Models({
   assistant,
+  offered,
   disabled,
   onChoose,
   onRemove,
   onAdd,
 }: {
   assistant: Assistant;
+  offered: OfferedModels | null;
   disabled: boolean;
   onChoose: (model: string) => void;
   onRemove: (model: string) => void;
   onAdd: () => void;
 }) {
   const full = assistant.models.length >= MAX_ASSISTANT_MODELS;
+  const noneToAdd = offered !== null && modelsToAddTo(assistant, offered.models).length === 0;
+  const why = full ? MODELS_FULL : noneToAdd ? EVERY_MODEL_ADDED : null;
   return (
     <div className="flex flex-col gap-3 border-t pt-4">
       <div>
@@ -575,7 +592,15 @@ function Models({
                 onChange={() => onChoose(id)}
                 className="size-4 flex-none accent-foreground"
               />
-              <span className="min-w-0 wrap-anywhere">{name}</span>
+              <span className="min-w-0 wrap-anywhere">
+                {name}
+                {offered && noLongerOffered(id, offered.models, offered.workersAi) && (
+                  <>
+                    {" "}
+                    <span className="text-muted-foreground">({NO_LONGER_OFFERED})</span>
+                  </>
+                )}
+              </span>
             </label>
             {assistant.model !== id && (
               <button type="button" aria-label={`Remove ${name}`} disabled={disabled} onClick={() => onRemove(id)} className={BUTTON}>
@@ -586,12 +611,12 @@ function Models({
         ))}
       </fieldset>
       <div className="flex flex-wrap items-center gap-x-[1ch] gap-y-2">
-        <button type="button" disabled={disabled || full} onClick={onAdd} aria-describedby={full ? "assistant-models-full" : undefined} className={BUTTON}>
+        <button type="button" disabled={disabled || why !== null} onClick={onAdd} aria-describedby={why ? "assistant-models-full" : undefined} className={BUTTON}>
           Add a model
         </button>
-        {full && (
+        {why && (
           <p id="assistant-models-full" className={NOTE}>
-            {MODELS_FULL}
+            {why}
           </p>
         )}
       </div>

@@ -8,6 +8,7 @@ import {
   connect,
   createRoom,
   cutOff,
+  direct,
   freshDeploy,
   freshRoom,
   openWorkspaceSocket,
@@ -24,7 +25,8 @@ import {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const unread = (roomId: RoomId): WorkspaceServerFrame => ({ type: "room.unread", roomId });
+/** The frame marking room `roomId` unread, as of when the message that marked it came, if that's given. */
+const unread = (roomId: RoomId, at: string = expect.any(String)): WorkspaceServerFrame => ({ type: "room.unread", roomId, at });
 const read = (roomId: RoomId): WorkspaceServerFrame => ({ type: "room.read", roomId });
 
 /** Waits until room `room` has nothing left in its log, which it forgets once the Workspace has applied it. */
@@ -54,12 +56,16 @@ const marked = async (room: RoomId) =>
 const unreadAt = async (room: RoomId, session: Session) =>
   ((await workspaceSql("SELECT unread_at FROM memberships WHERE room_id = ? AND user_id = ?", room, session.user.id))[0] as { unread_at: string | null }).unread_at;
 
-/** Whether room `room` shows as unread in the sidebar `GET /api/sidebar` gives `session`, with the response's ETag. */
+/**
+ * Whether room `room` shows as unread in the sidebar `GET /api/sidebar` gives `session`, and since when,
+ * with the response's ETag.
+ */
 async function sidebarOf(session: Session, room: RoomId, etag?: string) {
   const response = await api("/api/sidebar", { headers: { Cookie: session.cookie, ...(etag && { "If-None-Match": etag }) } });
   if (response.status === 304) return { status: 304, etag };
   const sidebar = (await response.json()) as Sidebar;
-  return { status: response.status, etag: response.headers.get("ETag")!, unread: sidebar.rooms.find(({ id }) => id === room)?.unread };
+  const listed = sidebar.rooms.find(({ id }) => id === room);
+  return { status: response.status, etag: response.headers.get("ETag")!, unread: listed?.unread, unreadSince: listed?.unreadSince };
 }
 
 const alarmOf = (room: RoomId) => runInDurableObject(roomStub(room), (_room, state: DurableObjectState) => state.storage.getAlarm());
@@ -77,13 +83,13 @@ describe("Unread rooms", () => {
     const grace = await connect(room, "Grace", { visible: true });
     const lin = await connect(room, "Lin", { visible: false });
     const hopper = await signIn("Hopper");
-    const tabs = await Promise.all([ada.session, grace.session, lin.session, hopper].map(openWorkspaceSocket));
+    const tabs = await Promise.all([ada.session, grace.session, lin.session, hopper].map((session) => openWorkspaceSocket(session)));
     await settle(ada, grace, lin);
 
     const message = await post(ada, "Anyone around?");
     const [adasTab, gracesTab, linsTab, hoppersTab] = tabs;
-    expect(await heard(hoppersTab!, room)).toEqual([unread(room)]);
-    expect(await heard(linsTab!, room)).toEqual([unread(room)]);
+    expect(await heard(hoppersTab!, room)).toEqual([unread(room, message.createdAt)]);
+    expect(await heard(linsTab!, room)).toEqual([unread(room, message.createdAt)]);
     expect(await heard(adasTab!, room)).toEqual([]);
     expect(await heard(gracesTab!, room)).toEqual([]);
     // Everyone is in an open room, its creator included.
@@ -99,15 +105,18 @@ describe("Unread rooms", () => {
 
     const first = await post(ada, "first");
     await post(ada, "second");
-    expect(await heard(laptop, room)).toEqual([unread(room)]);
-    expect(await heard(phone, room)).toEqual([unread(room)]);
+    expect(await heard(laptop, room)).toEqual([unread(room, first.createdAt)]);
+    expect(await heard(phone, room)).toEqual([unread(room, first.createdAt)]);
     expect(await unreadAt(room, hopper)).toBe(first.createdAt);
+    // His sidebar says since when, the first message's time, which the second doesn't move.
+    expect(await sidebarOf(hopper, room)).toMatchObject({ unread: true, unreadSince: first.createdAt });
 
     // Opening the room in a shown tab reads it, in his other tabs too.
     const reading = await connect(room, hopper, { visible: true });
     await settle(reading);
     expect(await heard(laptop, room)).toEqual([read(room)]);
     expect(await heard(phone, room)).toEqual([read(room)]);
+    expect(await sidebarOf(hopper, room)).toMatchObject({ unread: false, unreadSince: undefined });
 
     // Nothing marks it while he's viewing it, and the next message once he's gone does.
     await post(ada, "third");
@@ -298,6 +307,32 @@ describe("Unread rooms", () => {
     expect(await marked(room)).toEqual(["Host"]);
   });
 
+  it("marks a room for nobody who saw its message come in, though they left before the Workspace heard of it", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const room = await freshRoom("seen-then-gone");
+    const ada = await connect(room, "Ada", { visible: true });
+    const grace = await connect(room, "Grace", { visible: true });
+    const hopper = await signIn("Hopper");
+    const [gracesTab, hoppersTab] = await Promise.all([grace.session, hopper].map((session) => openWorkspaceSocket(session)));
+    await settle(ada, grace);
+    await delivered(room);
+
+    // Grace sees the message come in and leaves before the Workspace hears of it, as she can within the
+    // pause after a room's call, which here lasts until the room's alarm.
+    const reconnect = await cutOff(room);
+    await post(ada, "Did you catch that?");
+    await grace.next("message.created");
+    grace.close();
+    await ada.next("presence.left");
+    await vi.waitFor(async () => expect(await alarmOf(room)).not.toBeNull(), { timeout: 5_000 });
+
+    await reconnect();
+    expect(await runDurableObjectAlarm(roomStub(room))).toBe(true);
+    expect(await heard(gracesTab!, room)).toEqual([]);
+    expect(await heard(hoppersTab!, room)).toEqual([unread(room)]);
+    expect(await marked(room)).toEqual(["Hopper", "Host"]);
+  });
+
   it("calls a Workspace it couldn't reach again only when its alarm goes off, however busy the room is", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     const room = await freshRoom("backing-off");
@@ -382,5 +417,59 @@ describe("Hibernating rooms", () => {
     await post(ada, "after a nap");
     expect(await heard(hoppersTab, room)).toEqual([unread(room)]);
     expect(await heard(gracesTab, room)).toEqual([]);
+  });
+});
+
+describe("Unread DMs", () => {
+  /** The `room.unread` frames `socket` has heard once the Workspace has applied everything room `room` has logged. */
+  const marksHeard = async (socket: WorkspaceSocket, room: RoomId) => (await heard(socket, room)).filter((frame) => frame.type === "room.unread" || frame.type === "room.read");
+
+  it("counts each message in a DM for the people in it who aren't viewing it, telling them each time, until they read it", async () => {
+    const [ada, grace] = [await signIn("Ada"), await signIn("Grace")];
+    const { id: room } = await direct(ada, grace);
+    const adas = await connect(room, ada, { visible: true });
+    const gracesTab = await openWorkspaceSocket(grace);
+
+    const first = await post(adas, "one");
+    expect(await marksHeard(gracesTab, room)).toEqual([{ type: "room.unread", roomId: room, at: first.createdAt, count: 1 }]);
+    await post(adas, "two");
+    expect(await marksHeard(gracesTab, room)).toEqual([{ type: "room.unread", roomId: room, at: first.createdAt, count: 2 }]);
+    const listed = async () => (await (await api("/api/sidebar", { headers: { Cookie: grace.cookie } })).json() as Sidebar).rooms.find(({ id }) => id === room);
+    expect(await listed()).toMatchObject({ unread: true, unreadSince: first.createdAt, unreadCount: 2 });
+
+    // Reading it starts the count over.
+    const reading = await connect(room, grace, { visible: true });
+    await settle(reading);
+    expect(await marksHeard(gracesTab, room)).toEqual([read(room)]);
+    expect(await listed()).not.toHaveProperty("unreadCount");
+    reading.close();
+    await adas.next("presence.left");
+    const third = await post(adas, "three");
+    expect(await marksHeard(gracesTab, room)).toEqual([{ type: "room.unread", roomId: room, at: third.createdAt, count: 1 }]);
+  });
+
+  it("counts every message one call brings, and none applied before", async () => {
+    const [ada, grace] = [await signIn("Ada"), await signIn("Grace")];
+    const { id: room } = await direct(ada, grace);
+    const tab = await openWorkspaceSocket(grace);
+    const event = (seq: number): RoomEvent => ({ seq, kind: "message", userId: ada.user.id, at: `2026-10-14T12:00:0${seq}.000Z` });
+    await workspaceStub().applyRoomEvents(room, [event(1), event(2), event(3)], []);
+    await workspaceStub().applyRoomEvents(room, [event(2), event(3)], []);
+    expect(await workspaceSql("SELECT unread_at, unread_count FROM memberships WHERE room_id = ? AND user_id = ?", room, grace.user.id)).toEqual([
+      { unread_at: "2026-10-14T12:00:01.000Z", unread_count: 3 },
+    ]);
+    expect(await tab.next()).toEqual({ type: "room.unread", roomId: room, at: "2026-10-14T12:00:01.000Z", count: 3 });
+  });
+
+  it("doesn't count a room's messages, which mark it once", async () => {
+    const room = await freshRoom("uncounted");
+    const ada = await connect(room, "Ada", { visible: true });
+    const hopper = await signIn("Hopper");
+    const tab = await openWorkspaceSocket(hopper);
+    const first = await post(ada, "first");
+    await post(ada, "second");
+    expect(await heard(tab, room)).toEqual([unread(room, first.createdAt)]);
+    const { rooms } = (await (await api("/api/sidebar", { headers: { Cookie: hopper.cookie } })).json()) as Sidebar;
+    expect(rooms.find(({ id }) => id === room)).not.toHaveProperty("unreadCount");
   });
 });

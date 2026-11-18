@@ -1,5 +1,6 @@
-import { CloseCode, MAX_CHECKED_MESSAGES, MAX_MESSAGE_HTML_LENGTH, MAX_MESSAGE_LENGTH, MESSAGE_TOO_LONG, type Message, type ServerFrame, type User } from "@ember/protocol";
+import { CloseCode, MAX_CHECKED_MESSAGES, MAX_MESSAGE_HTML_LENGTH, MAX_MESSAGE_LENGTH, MESSAGE_TOO_LONG, type LinkPreview, type Message, type ServerFrame, type User } from "@ember/protocol";
 import { act, cleanup, renderHook } from "@testing-library/react";
+import type { AddPreview } from "@/components/workspace/composer";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { takeBack } from "@/lib/outbox";
@@ -795,24 +796,49 @@ const overformatted = `<p>${"<b></b>".repeat(Math.ceil(MAX_MESSAGE_HTML_LENGTH /
 describe("Send a message", () => {
   it(`says a message over ${MAX_MESSAGE_LENGTH} characters, or in more markup than a frame carries, is too long instead of sending it`, () => {
     const { result } = joinGeneral();
-    let sent: boolean | undefined;
+    let sent: AddPreview | null | undefined;
     act(() => {
       sent = result.current.postMessage(paragraphOf(MAX_MESSAGE_LENGTH + 1));
     });
-    expect(sent).toBe(false);
+    expect(sent).toBeNull();
     expect(socket().sentOfType("message.create")).toEqual([]);
     expect(result.current.state.messages).toEqual([]);
     expect(result.current.state.notice).toBe("Messages can be up to 10,000 characters.");
     act(() => {
       sent = result.current.postMessage(overformatted);
     });
-    expect(sent).toBe(false);
+    expect(sent).toBeNull();
 
     act(() => {
       sent = result.current.postMessage(paragraphOf(MAX_MESSAGE_LENGTH));
     });
-    expect(sent).toBe(true);
+    expect(sent).toBeTypeOf("function");
     expect(socket().sentOfType("message.create")).toHaveLength(1);
+  });
+});
+
+describe("Link previews after sending", () => {
+  const preview: LinkPreview = { title: "Basecamp", url: "https://basecamp.com/", image: null, description: "Calm & organized" };
+
+  it("sends the preview of a link that comes once the message has gone, naming the message, unless it's offline", () => {
+    const { result } = joinGeneral();
+    let addPreview!: AddPreview;
+    act(() => {
+      addPreview = result.current.postMessage("<p>https://basecamp.com</p>")!;
+    });
+    addPreview(preview);
+    const { clientMessageId } = socket().sentOfType("message.create")[0]!;
+    expect(socket().sentOfType("message.preview")).toEqual([{ type: "message.preview", clientMessageId, preview }]);
+
+    socket().drop();
+    addPreview(preview);
+    expect(socket().sentOfType("message.preview")).toHaveLength(1);
+  });
+
+  it("shows nothing when the room can't add one, as the page sent it of its own accord", () => {
+    const { result } = joinGeneral();
+    socket().receive({ type: "error", message: "Something went wrong", failed: "message.preview" });
+    expect(result.current.state.notice).toBeNull();
   });
 });
 
@@ -1209,6 +1235,60 @@ describe("React to a message", () => {
   });
 });
 
+describe("Click a card's button", () => {
+  const approve = { id: "approve", blockId: "deploy-42", value: '{"build":42}' };
+
+  /** Clicks Approve on m1, answering what the click comes to and the frame it sent, which names the button by its value too. */
+  function clickApprove(result: ReturnType<typeof joinGeneral>["result"]) {
+    let went: Promise<boolean> | undefined;
+    act(() => {
+      went = result.current.messageActions.click("m1", approve);
+    });
+    const [sent] = socket().sentOfType("card.click").slice(-1);
+    expect(sent).toEqual({ type: "card.click", clickId: expect.any(String), messageId: "m1", actionId: "approve", blockId: "deploy-42", value: approve.value });
+    return { went: went!, clickId: (sent as { clickId: string }).clickId };
+  }
+
+  it("sends the click to the room, and waits for the room to say the bot has answered", async () => {
+    const { result } = joinGeneral({ messages: [message("m1")] });
+    const { went, clickId } = clickApprove(result);
+    // Another click's answer isn't this one's.
+    act(() => socket().receive({ type: "card.clicked", clickId: "another" }));
+    let settled = false;
+    void went.then(() => (settled = true));
+    await act(async () => {});
+    expect(settled).toBe(false);
+    act(() => socket().receive({ type: "card.clicked", clickId }));
+    expect(await went).toBe(true);
+    expect(result.current.state.notice).toBeNull();
+  });
+
+  it("shows why a click came to nothing, as the room says", async () => {
+    const { result } = joinGeneral({ messages: [message("m1")] });
+    const { went, clickId } = clickApprove(result);
+    act(() => socket().receive({ type: "error", message: "Deploy Bot didn't answer in time", clickId, failed: "card.click" }));
+    expect(await went).toBe(false);
+    expect(result.current.state.notice).toBe("Deploy Bot didn't answer in time");
+  });
+
+  it("stops waiting once the room lets the page in again, which loses the click's answer", async () => {
+    const { result } = joinGeneral({ messages: [message("m1")] });
+    const { went } = clickApprove(result);
+    act(() => socket().receive({ type: "resumed", you: ada, messages: [], deletedIds: [], present: [ada], seq: 0 }));
+    expect(await went).toBe(false);
+  });
+
+  it("says a click made while the room is away didn't go", async () => {
+    const { result } = joinGeneral({ connect: false });
+    let went: Promise<boolean> | undefined;
+    act(() => {
+      went = result.current.messageActions.click("m1", approve);
+    });
+    expect(await went).toBe(false);
+    expect(result.current.state.notice).toBe("Not connected. Try again once you're reconnected.");
+  });
+});
+
 describe("Take back a reaction", () => {
   it("sends the removal to the room and drops the reaction when the room confirms", () => {
     const boost = { id: "b1", messageId: "m1", booster: ada, content: "🎉", createdAt: "" };
@@ -1382,13 +1462,22 @@ describe("Threads", () => {
     expect(result.current.room.state.messages.map((m) => m.id)).toEqual(["m1"]);
   });
 
+  it("sends the preview of a link that comes once a reply has gone, naming the reply", () => {
+    const { result } = openThread();
+    socket().receive({ type: "thread.opened", parentId: "m1", parent, messages: [], hasMore: false });
+    const preview: LinkPreview = { title: "Basecamp", url: "https://basecamp.com/", image: null, description: "" };
+    act(() => result.current.thread.postReply("<p>https://basecamp.com</p>", true)!(preview));
+    const { clientMessageId } = socket().sentOfType("message.create")[0]!;
+    expect(socket().sentOfType("message.preview")).toEqual([{ type: "message.preview", clientMessageId, preview }]);
+  });
+
   it("refuses a reply that's too long, saying so in the thread", () => {
     const { result } = openThread();
-    let sent = true;
+    let sent: AddPreview | null = () => {};
     act(() => {
       sent = result.current.thread.postReply(`<p>${"x".repeat(MAX_MESSAGE_LENGTH + 1)}</p>`, false);
     });
-    expect(sent).toBe(false);
+    expect(sent).toBeNull();
     expect(result.current.thread.state.replies.notice).toBe(MESSAGE_TOO_LONG);
     expect(socket().sentOfType("message.create")).toEqual([]);
   });

@@ -1,10 +1,10 @@
 import { MAX_ROOM_NAME_LENGTH, TRANSLATIONS, type User } from "@ember/protocol";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps, ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { AccountContext } from "@/hooks/use-account";
-import { AccessSwitch, CheckMark, RoomForm } from "./room-form";
+import { AccessSwitch, CheckMark, HUDDLE_ENDS, HUDDLES_ALLOWED, HUDDLES_NOT_ALLOWED, RoomForm } from "./room-form";
 
 const people = (count: number): User[] => Array.from({ length: count }, (_, i) => ({ id: `u${i}`, name: `Person ${i}` }));
 const grace = { id: "grace", name: "Grace Hopper" };
@@ -148,9 +148,59 @@ describe("Room settings page", () => {
   });
 });
 
+describe("Allow huddles in a room", () => {
+  const huddlesSwitch = () => screen.getByRole("switch", { name: "Allow huddles in this room" });
+
+  it("has no Huddles row unless it's given one", () => {
+    renderForm({ huddles: null });
+    expect(names()).toEqual(["Person 0", "Person 1", "Person 2"]);
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+    expect(screen.queryByText(HUDDLES_ALLOWED)).not.toBeInTheDocument();
+  });
+
+  it("has a Huddles row under the people, whose switch is on while the room allows them, described by what its members can do", async () => {
+    const onChange = vi.fn();
+    const { user } = renderForm({ huddles: { allowed: true, onChange } });
+    expect(names()).toEqual(["Person 0", "Person 1", "Person 2", "Huddles"]);
+    expect(huddlesSwitch()).toBeChecked();
+    expect(huddlesSwitch()).toHaveAccessibleDescription(HUDDLES_ALLOWED);
+    await user.click(huddlesSwitch());
+    expect(onChange).toHaveBeenCalledExactlyOnceWith(false);
+  });
+
+  it("says nobody can huddle there once the switch is off, which turns back on", async () => {
+    const onChange = vi.fn();
+    const { user } = renderForm({ huddles: { allowed: false, onChange } });
+    expect(huddlesSwitch()).not.toBeChecked();
+    expect(huddlesSwitch()).toHaveAccessibleDescription(HUDDLES_NOT_ALLOWED);
+    await user.click(huddlesSwitch());
+    expect(onChange).toHaveBeenCalledExactlyOnceWith(true);
+  });
+
+  it("says that saving ends the huddle going on in the room, once the switch is off and not before", () => {
+    renderForm({ huddles: { allowed: true, onChange: vi.fn(), live: true } });
+    expect(huddlesSwitch()).toHaveAccessibleDescription(HUDDLES_ALLOWED);
+    cleanup();
+    renderForm({ huddles: { allowed: false, onChange: vi.fn(), live: true } });
+    expect(huddlesSwitch()).toHaveAccessibleDescription(`${HUDDLES_NOT_ALLOWED} ${HUDDLE_ENDS}`);
+  });
+
+  it("only says that the room has no huddles, with no switch, when it's given none to change it with", () => {
+    renderForm({ canAdminister: false, mark: () => null, huddles: { allowed: false } });
+    expect(names()).toEqual(["Person 0", "Person 1", "Person 2", "Huddles"]);
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+    expect(screen.getByText(HUDDLES_NOT_ALLOWED)).toBeInTheDocument();
+  });
+
+  it("disables the Huddles switch while saving", () => {
+    renderForm({ saving: true, huddles: { allowed: true, onChange: vi.fn() } });
+    expect(huddlesSwitch()).toBeDisabled();
+  });
+});
+
 describe("Translation buttons", () => {
   it("has a translation button by the room's name once an administrator shows them", () => {
-    renderForm({}, ({ children }) => <AccountContext value={{ name: "Ember", tagline: "", hideTranslationButtons: false, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, ssoJoin: false, ssoSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false }}>{children}</AccountContext>);
+    renderForm({}, ({ children }) => <AccountContext value={{ name: "Ember", tagline: "", hideTranslationButtons: false, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, ssoJoin: false, ssoSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true }}>{children}</AccountContext>);
     expect(screen.getByText("Translate")).toBeInTheDocument();
     expect(screen.getByText(TRANSLATIONS.room_name[0][1])).toBeInTheDocument();
   });

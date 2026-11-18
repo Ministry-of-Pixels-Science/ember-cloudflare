@@ -94,7 +94,9 @@ describe("Send a message", () => {
 
   it("refuses a message it couldn't show, saying which", async () => {
     const ada = await connect(await freshRoom("unreadable"), "Ada");
-    for (const body of ["<b>".repeat(401) + "deep", "<action-text-attachment></action-text-attachment>"]) {
+    // A frame's worth that would parse into 95 MB: a title copied with the <b> each of 1,000 paragraphs reopens
+    const copied = `<p><b title="${"x".repeat(95_000)}">a${"<p>b".repeat(1_000)}`;
+    for (const body of ["<b>".repeat(401) + "deep", "<action-text-attachment></action-text-attachment>", copied]) {
       ada.send({ type: "message.create", clientMessageId: "c1", body });
       expect(await ada.next("error")).toEqual({ type: "error", message: "That message couldn't be saved.", clientMessageId: "c1", failed: "message.create" });
     }
@@ -182,6 +184,79 @@ describe("Link previews in messages", () => {
     const ada = await connect(await freshRoom("unreadable-preview"), "Ada");
     ada.send({ type: "message.create", clientMessageId: "c1", body: `<action-text-attachment content-type="${OPENGRAPH_EMBED_CONTENT_TYPE}" href="mailto:nobody" filename="Mail"></action-text-attachment>` });
     expect(await ada.next("error")).toEqual({ type: "error", message: "That message couldn't be saved.", clientMessageId: "c1", failed: "message.create" });
+  });
+});
+
+describe("Link previews after sending", () => {
+  const digg = { title: "SignuDoc · Digg", url: "https://digg.com/tech/oe71bdha", image: "https://digg.com/og.png", description: "An open-source signing app & more" };
+  const link = '<p><a href="https://digg.com/tech/oe71bdha">https://digg.com/tech/oe71bdha</a></p>';
+  /** The preview below a link, as the composer adds one in time. */
+  const card = (preview: typeof digg) =>
+    `<action-text-attachment content-type="${OPENGRAPH_EMBED_CONTENT_TYPE}" content="${attribute(previewContent({ href: preview.url, url: preview.image, filename: preview.title, description: preview.description }))}"></action-text-attachment>`;
+
+  it("adds the preview a tab had of its message's link once it had gone, for everyone, as the composer adds one, without marking it edited", async () => {
+    const room = await freshRoom("late-preview");
+    const ada = await connect(room, "Ada");
+    const grace = await connect(room, "Grace");
+    const sent = await post(ada, link);
+
+    ada.send({ type: "message.preview", clientMessageId: sent.clientMessageId, preview: digg });
+    const { message } = await grace.next("message.updated");
+    expect(message).toEqual({ ...sent, body: `${link}${card(digg)}`, updatedAt: message.updatedAt });
+    expect(message.updatedAt >= sent.updatedAt).toBe(true);
+    expect(message.editedAt).toBeNull();
+    expect((await ada.next("message.updated")).message).toEqual(message);
+    expect((await connect(room, "Linus")).welcome.messages).toEqual([message]);
+    // As one the composer added in time is kept.
+    expect((await post(ada, `${link}${card(digg)}`)).body).toBe(message.body);
+  });
+
+  it("adds it to a reply in a thread", async () => {
+    const room = await freshRoom("late-preview-reply");
+    const ada = await connect(room, "Ada");
+    const parent = await post(ada, "<p>News</p>");
+    ada.send({ type: "message.create", clientMessageId: "r1", body: link, parentId: parent.id });
+    let { message: reply } = await ada.next("message.created");
+    while (reply.clientMessageId !== "r1") ({ message: reply } = await ada.next("message.created"));
+
+    ada.send({ type: "message.preview", clientMessageId: "r1", preview: digg });
+    let { message } = await ada.next("message.updated");
+    while (message.id !== reply.id) ({ message } = await ada.next("message.updated"));
+    expect(message).toMatchObject({ parentId: parent.id, body: `${link}${card(digg)}`, editedAt: null });
+  });
+
+  it("adds nothing, without a word, to someone else's message, one edited or with a preview since, or one sent over a minute before", async () => {
+    const room = await freshRoom("late-preview-refused");
+    const ada = await connect(room, "Ada");
+    const grace = await connect(room, "Grace");
+    const graces = await post(grace, link);
+    const edited = await post(ada, link);
+    ada.send({ type: "message.update", messageId: edited.id, body: "<p>Never mind</p>" });
+    await Promise.all([ada.next("message.updated"), grace.next("message.updated")]);
+    const previewed = await post(ada, `${link}${card({ ...digg, title: "Earlier" })}`);
+    const old = await post(ada, link);
+    await roomSql(room, "UPDATE messages SET created_at = ? WHERE id = ?", new Date(Date.now() - 61_000).toISOString(), old.id);
+    const before = await roomSql(room, "SELECT id, body, edited_at FROM messages ORDER BY id");
+
+    for (const { clientMessageId } of [graces, edited, previewed, old]) ada.send({ type: "message.preview", clientMessageId, preview: digg });
+    ada.send({ type: "message.preview", clientMessageId: "unsent", preview: digg });
+    await settle(ada, grace);
+    expect(grace.pending("message.updated")).toEqual([]);
+    expect(ada.pending("message.updated")).toEqual([]);
+    expect(ada.pending("error")).toEqual([]);
+    expect(await roomSql(room, "SELECT id, body, edited_at FROM messages ORDER BY id")).toEqual(before);
+  });
+
+  it("adds nothing that makes the message longer than the room keeps", async () => {
+    const room = await freshRoom("late-preview-long");
+    const ada = await connect(room, "Ada");
+    // Markup a few hundred characters short of the most a message's can be, with fewer characters of text than a message can have.
+    const sent = await post(ada, `<p>${"<em>x</em>".repeat((MAX_MESSAGE_HTML_LENGTH - 400) / 10)}</p>`);
+    expect(sent.body.length).toBeGreaterThan(MAX_MESSAGE_HTML_LENGTH - 400);
+    ada.send({ type: "message.preview", clientMessageId: sent.clientMessageId, preview: digg });
+    await settle(ada);
+    expect(ada.pending("message.updated")).toEqual([]);
+    expect(ada.pending("error")).toEqual([]);
   });
 });
 

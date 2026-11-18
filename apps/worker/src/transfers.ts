@@ -17,16 +17,21 @@ import { workspace } from "./workspace";
 // does. Unlike Campfire's, a link works only while that session is still signed in as someone who may
 // show it: the person it's for, or an active administrator. So whatever ends a session, signing out, a
 // password reset, a removal or a ban, ends the links it showed, and losing administrator rights ends the
-// links an administrator showed of others.
+// links an administrator showed of others. A new password saved from a profile, and Disconnect Memberful,
+// end their person's other sessions but keep the one that asks, so they end the links it showed until
+// then instead. A link was shown 4 hours before it expires, by the Workspace's clock, which also says
+// when its session's links ended, so the two compare.
 
 /** `User::Transferable::TRANSFER_LINK_EXPIRY_DURATION`. */
 export const TRANSFER_LINK_EXPIRY_MS = 4 * 60 * 60 * 1000;
 
-/** What a sign-in link says: whom it signs in, and the session that showed it. */
+/** What a sign-in link says: whom it signs in, the session that showed it, and when. */
 export interface Transfer {
   userId: UserId;
   /** The id of the session whose page showed the link. */
   sessionId: string;
+  /** When it showed it, in milliseconds, by the Workspace's clock. */
+  shownAt: number;
 }
 
 const encoder = new TextEncoder();
@@ -38,12 +43,12 @@ async function signatureOf({ userId, sessionId }: Transfer, expiresAt: string, s
 }
 
 /**
- * `user.transfer_id`: the id of a new sign-in link for `transfer`, which works for 4 hours from `now`,
- * as often as it's opened, while its session lasts:
+ * `user.transfer_id`: the id of a new sign-in link for `transfer`, which works for 4 hours from when it
+ * was shown, as often as it's opened, while its session lasts:
  * `<their id>.<the session's id>.<when it expires, in base 36 milliseconds>.<signature>`.
  */
-export async function newTransferId(transfer: Transfer, secret: string, now: number): Promise<string> {
-  const expiresAt = (now + TRANSFER_LINK_EXPIRY_MS).toString(36);
+export async function newTransferId(transfer: Transfer, secret: string): Promise<string> {
+  const expiresAt = (transfer.shownAt + TRANSFER_LINK_EXPIRY_MS).toString(36);
   return `${transfer.userId}.${transfer.sessionId}.${expiresAt}.${await signatureOf(transfer, expiresAt, secret)}`;
 }
 
@@ -57,10 +62,11 @@ export async function transferOf(transferId: string, secret: string, now: number
   const [sessionId, expiresAt, signature] = parts.splice(-3);
   const userId = parts.join(".");
   if (!userId || !sessionId || !expiresAt || !signature) return null;
-  const transfer = { userId, sessionId };
+  const expiry = Number.parseInt(expiresAt, 36);
+  const transfer = { userId, sessionId, shownAt: expiry - TRANSFER_LINK_EXPIRY_MS };
   const [given, expected] = [encoder.encode(signature), encoder.encode(await signatureOf(transfer, expiresAt, secret))];
   if (given.length !== expected.length || !crypto.subtle.timingSafeEqual(given, expected)) return null;
-  return now < Number.parseInt(expiresAt, 36) ? transfer : null;
+  return now < expiry ? transfer : null;
 }
 
 /**
@@ -77,7 +83,7 @@ export async function transferPage(request: Request, env: Env): Promise<Response
  * the id names, with a session of its own that replaces any it had without ending it, and answers who
  * that is. An id that's expired, tampered with or made up, or one for someone who's no longer active,
  * answers 400 with nothing else, as there, and so does a guest's while guests can't sign in, one whose
- * session can no longer show it, or a body without an id.
+ * session can no longer show it or has ended the links it showed until then, or a body without an id.
  */
 export async function transferSession(request: Request, env: Env): Promise<Response> {
   // Any JSON value parses, null and numbers included, so don't assume an object.

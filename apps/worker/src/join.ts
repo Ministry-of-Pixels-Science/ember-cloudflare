@@ -26,6 +26,7 @@ import {
   type SignUp,
 } from "@ember/protocol";
 import { agentsName } from "@ember/protocol/agents";
+import { BLOCKED_WORDS_REFUSED } from "@ember/protocol/blocked-words";
 import { authenticate, clientOf, newSessionToken, sessionCookie, tokenDigest } from "./auth";
 import { userFormOf, userFormPhoto } from "./avatars";
 import { jsonBodyOf } from "./bodies";
@@ -35,7 +36,7 @@ import { emailLinkDigest, newEmailLink } from "./invitations";
 import { appPage, empty, formAnswer, home, signInFirst, signUpRefusal } from "./pages";
 import { passwordHasher } from "./passwords";
 import { passedTurnstile, turnstileKeysFor } from "./turnstile";
-import { signInNeededWith, workspace, type OnlyWay } from "./workspace";
+import { signInNeededWith, workspace, type NameRefusal, type OnlyWay } from "./workspace";
 import type { NewPerson } from "./workspace-store";
 
 // Joining with the workspace's join link, as Campfire's UsersController does (`new` and `create`),
@@ -149,7 +150,7 @@ export async function join(request: Request, env: Env, code: string): Promise<Re
   if (user === "not found") return formAnswer({ error: "Not found" }, 404);
   if (user === "memberful" || user === "sso" || user === "either") return formAnswer(elsewhereInstead(user), 403);
   if (user === "off") return formAnswer(signInInsteadOf("link_off"), 403);
-  if (user === "agent's name") return agentsNameRefused(form.name);
+  if (user === "agent's name" || user === "blocked words") return nameRefused(user, form.name);
   if (!user) return emailAddressTaken(form.emailAddress);
   return formAnswer({ user } satisfies { user: Me }, 201, sessionCookie(request, token));
 }
@@ -187,7 +188,7 @@ export async function signUp(request: Request, env: Env): Promise<Response> {
   const token = newSessionToken();
   const user = await workspace(env).signUp(person, await tokenDigest(token, env.SESSION_SECRET), client, limited);
   if (user === "closed" || user === "full") return signUpRefused(user, form.emailAddress);
-  if (user === "agent's name") return agentsNameRefused(form.name);
+  if (user === "agent's name" || user === "blocked words") return nameRefused(user, form.name);
   if (!user) return emailAddressTaken(form.emailAddress);
   return formAnswer({ user } satisfies { user: Me }, 201, sessionCookie(request, token));
 }
@@ -223,7 +224,7 @@ export async function joinWithEmailLink(request: Request, env: Env, kind: EmailL
   const token = newSessionToken();
   const user = await workspace(env).joinWithEmailLink(kind, linkDigest, person, await tokenDigest(token, env.SESSION_SECRET), clientOf(request));
   if (user === "gone") return linkGone(kind);
-  if (user === "agent's name") return agentsNameRefused(form.name);
+  if (user === "agent's name" || user === "blocked words") return nameRefused(user, form.name);
   if (!user) return emailAddressTaken(link.emailAddress);
   return formAnswer({ user } satisfies { user: Me }, 201, sessionCookie(request, token));
 }
@@ -278,8 +279,8 @@ async function personOf(env: Env, form: SignUp, photo: FormData | null): Promise
   return { name: form.name, emailAddress: form.emailAddress, passwordDigest, avatar };
 }
 
-/** What a form for joining answers for a name that's an AI agent's, which nobody else can take, on its field. */
-const agentsNameRefused = (name: string) => formAnswer({ error: agentsName(name), field: "name" }, 422);
+/** What a form for joining answers, on its field, for a name nobody can take: an AI agent's, or one with a word Blocked words keeps out. */
+const nameRefused = (refusal: NameRefusal, name: string) => formAnswer({ error: refusal === "agent's name" ? agentsName(name) : BLOCKED_WORDS_REFUSED, field: "name" }, 422);
 
 /** What a form for joining answers for an email address that has an account: sign in with it, filled in. */
 function emailAddressTaken(emailAddress: string): Response {

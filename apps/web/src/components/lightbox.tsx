@@ -49,7 +49,7 @@ export function Lightbox({ src, alt = "", downloadUrl = src ?? undefined, filena
         <Xmark className="size-[1.3em]" />
         <span className="sr-only">Close image viewer</span>
       </button>
-      <a href={downloadUrl} download={filename} className={cn(BUTTON, "self-end justify-self-end ios-pwa:hidden")}>
+      <a href={downloadUrl} download={filename ?? true} className={cn(BUTTON, "self-end justify-self-end ios-pwa:hidden")}>
         <Download className="size-[1.3em]" />
         <span className="sr-only">Download file</span>
       </a>

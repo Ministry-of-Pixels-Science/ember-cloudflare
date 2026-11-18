@@ -1,4 +1,4 @@
-import { workspacePageOf } from "@ember/protocol";
+import { signInReturnPathIn } from "@ember/protocol";
 import { cookieValues, hostCookie, hostCookieName } from "./auth";
 import { toBase64url, urlsafeDecode64 } from "./encoding";
 import { withCookies } from "./pages";
@@ -45,13 +45,13 @@ export function backTo(request: Request, returnPath: string, param: string, outc
 }
 
 /**
- * The page of the workspace at `origin` that `returnTo` names, its query and fragment included, or "/"
- * for anything else, so that signing in only ever opens a page here, or for one too long to keep, as
- * its address writes it, with every character that isn't ASCII escaped.
+ * The page of the workspace, or the welcome page, at `origin` that `returnTo` names, its query and
+ * fragment included (`signInReturnPathIn`), or "/" for anything else, so that signing in only ever opens
+ * a page here, or for one too long to keep, as its address writes it, with every character that isn't
+ * ASCII escaped.
  */
 export function returnPathOf(returnTo: string | null, origin: string): string {
-  const url = returnTo === null ? null : URL.parse(returnTo, origin);
-  const path = url?.origin === origin && workspacePageOf(url.pathname) ? `${url.pathname}${url.search}${url.hash}` : "/";
+  const path = signInReturnPathIn(returnTo, origin);
   return path.length <= MAX_RETURN_PATH_LENGTH ? path : "/";
 }
 

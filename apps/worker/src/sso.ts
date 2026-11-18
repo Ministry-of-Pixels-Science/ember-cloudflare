@@ -1,4 +1,4 @@
-import type { AccountSettings, UserId } from "@ember/protocol";
+import { welcomePath, type AccountSettings, type UserId } from "@ember/protocol";
 import {
   CLIENT_ID_REFUSED,
   CLIENT_SECRET_REFUSED,
@@ -200,6 +200,8 @@ async function signedInWithSso(request: Request, env: Env): Promise<Response> {
       ? await workspace(env).signInElsewhere("sso", provider.issuer, member, begunAt, digest, clientOf(request), keeping)
       : await workspace(env).connectElsewhere("sso", provider.issuer, member, begunAt, connecting, staying ? null : digest, clientOf(request), keeping);
   if (user === "connected") return backTo(request, kept.returnPath, SSO_CONNECTED);
+  // Someone new chooses how people here see them first, as with Memberful.
+  if (user === "joined") return redirect(new URL(welcomePath(kept.returnPath), request.url).href, sessionCookie(request, token));
   if (typeof user === "string") return back(user);
   return redirect(new URL(kept.returnPath, request.url).href, sessionCookie(request, token));
 }

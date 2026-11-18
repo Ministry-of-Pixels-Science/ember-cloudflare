@@ -1,6 +1,7 @@
 import {
   ASSISTANT_ID,
   NAME_RESERVED,
+  USERNAME_TAKEN,
   type Directory,
   type DirectoryUser,
   type Me,
@@ -24,7 +25,7 @@ import {
   type AgentSettings,
   type NewAgent,
 } from "@ember/protocol/agents";
-import { ASSISTANT_FORBIDDEN, ASSISTANT_OFF, type AssistantChanged } from "@ember/protocol/assistant";
+import { ASSISTANT_FORBIDDEN, ASSISTANT_OFF, MODEL_REFUSED, THINKING_LEVELS, type AssistantChanged } from "@ember/protocol/assistant";
 import { AGENT_TEMPLATE, EMBER_TEMPLATE, INSTRUCTIONS_PLACE_NEEDED } from "@ember/protocol/prompts";
 import type { BotAnswer, Bots } from "@ember/protocol/bots";
 import { mentionPromptItem } from "@ember/richtext";
@@ -34,7 +35,7 @@ import { agentAnsweredUnsearched } from "../src/assistant/agents";
 import type { Db, Statement } from "../src/db";
 import type { Workspace } from "../src/workspace";
 import notFoundPage from "../../web/public/404.html";
-import { api, apiWith, builtPages, cookieOf, createRoom, freshDeploy, openWorkspaceSocket, origin, recordedImage, shown, workspaceSql, workspaceStub, type Session, type WorkspaceSocket } from "./support";
+import { agentWithKeptModel, api, apiWith, builtPages, cookieOf, createRoom, freshDeploy, openWorkspaceSocket, origin, recordedImage, shown, workspaceSql, workspaceStub, type KeptModel, type Session, type WorkspaceSocket } from "./support";
 
 // The AI agents administrators make beside @ember on the AI assistant tab, each a bot without a key that
 // answers with its own instructions and model, and the instructions administrators add to @ember's own.
@@ -43,11 +44,24 @@ const ada = { name: "Ada Lovelace", emailAddress: "ada@example.com", password: "
 const grace = { name: "Grace Hopper", emailAddress: "grace@example.com", password: "compiler design" };
 
 const ACCOUNT_ID = "0123456789abcdef0123456789abcdef";
-const API_TOKEN = "an-api-token-with-workers-ai-read_0123456";
-const OTHER_API_TOKEN = "another-api-token-with-workers-ai-read_01";
-const CLOUDFLARE_API = `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/ai/v1`;
+const API_TOKEN = "an-api-token-with-ai-gateway-run_0123456";
+const OTHER_API_TOKEN = "another-api-token-with-ai-gateway-run_01";
 /** Anthropic's models, which take Messages and can search the web, OpenAI's, which takes Responses, and one of Workers AI's, which takes Chat Completions and can't. */
 const [SONNET, HAIKU, GPT, GLM] = ["anthropic/claude-sonnet-5.5", "anthropic/claude-haiku-5.5", "openai/gpt-6.1-sol", "@cf/zai-org/glm-4.7-flash"];
+/** GLM as an agent made before Ember stopped offering Workers AI's models keeps it, asked through Cloudflare's REST API. */
+const KEPT_GLM: KeptModel = { id: GLM, name: "GLM-4.7 Flash", format: "chat", thinkingLevels: [...THINKING_LEVELS] };
+/** DeepSeek's, kept from before too, which has no tools for the web in Chat Completions, nor Ember's, as Workers AI's do. */
+const KEPT_DEEPSEEK: KeptModel = { id: "deepseek/deepseek-v4-pro", name: "DeepSeek V4 Pro", format: "chat", thinkingLevels: [...THINKING_LEVELS] };
+/** xAI's Grok, which searches the web only in xAI's own Responses, through the default gateway's xAI endpoint there. */
+const GROK = "xai/grok-4.7";
+/** Where the account's default gateway passes requests on to each provider's own API, as Ember asks Claude and GPT, and Grok while it's to search. */
+const PROVIDER_ENDPOINTS = `https://gateway.ai.cloudflare.com/v1/${ACCOUNT_ID}/default`;
+const ANTHROPIC_ENDPOINT = `${PROVIDER_ENDPOINTS}/anthropic/v1/messages`;
+const OPENAI_ENDPOINT = `${PROVIDER_ENDPOINTS}/openai/responses`;
+/** Where Cloudflare's REST API takes requests in Chat Completions, as Ember asks Grok while it isn't to search. */
+const CHAT_COMPLETIONS = `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/ai/v1/chat/completions`;
+/** Cloudflare's Web Search API, which Ember searches with for a model given its own tool. */
+const WEB_SEARCH = `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/ai/websearch/`;
 const HELLO = "Hello, team!";
 
 /** An agent as New agent sends it: Recap, on Claude Haiku, in every open room. */
@@ -62,11 +76,12 @@ const RECAP: NewAgent = {
   rooms: null,
 };
 
-/** A request the fake AI Gateway was sent. */
+/** A request the fake AI Gateway was sent, with the API token as Cloudflare's API takes it, or as AI Gateway's endpoints for each provider do. */
 interface Asked {
   url: string;
   authorization: string | null;
-  body: { model?: string; system?: string; tools?: Array<{ type: string }> };
+  aigAuthorization: string | null;
+  body: { model?: string; system?: string; tools?: Array<{ type?: string; function?: { name: string } }>; reasoning?: { effort?: string }; messages?: Array<{ role: string }> };
 }
 
 /** A page the model finds on the web, as Anthropic's Messages gives it, and its answer citing it. */
@@ -77,8 +92,14 @@ const SEARCHED = [
   { type: "text", text: "AI Gateway is Cloudflare's proxy for AI models.", citations: [{ type: "web_search_result_location", ...DOCS, encrypted_index: "e", cited_text: "…" }] },
 ];
 
-/** Whether `asked` gives the model a tool for searching the web. */
-const searches = ({ body }: Asked) => (body.tools ?? []).some(({ type }) => type.startsWith("web_search"));
+/** Whether `asked` gives the model a tool for searching the web, its provider's or Ember's own. */
+const searches = ({ body }: Asked) => (body.tools ?? []).some(({ type, function: called }) => type?.startsWith("web_search") || called?.name === "web_search");
+
+/** Whether `asked` tells the model how much to think, as the test question does when it's asked again at each level of thinking. */
+const thinks = ({ body }: Asked) => "thinking" in body || "reasoning" in body || "reasoning_effort" in body;
+
+/** What was asked of the models but for the test questions asked again at each level of thinking. */
+const unthinking = () => asked.filter((sent) => !thinks(sent));
 
 /** A model saying hello in the format of the API at `url`. */
 function sayingHello(url: string): Response {
@@ -91,6 +112,19 @@ function sayingHello(url: string): Response {
 const answering = (asked: Asked): Response =>
   searches(asked) ? Response.json({ type: "message", role: "assistant", content: SEARCHED, stop_reason: "end_turn", usage: { input_tokens: 1_000, output_tokens: 100 } }) : sayingHello(asked.url);
 
+/**
+ * Grok, in Chat Completions through Cloudflare's REST API, calling Ember's own tool for searching the web
+ * whenever it's given it, then saying what Cloudflare's Web Search API found, as models answer everything
+ * else (`answering`).
+ */
+const grokAnswering = (asked: Asked): Response => {
+  if (asked.url === WEB_SEARCH) return Response.json({ success: true, result: { items: [{ ...DOCS, description: "About AI Gateway." }] } });
+  if (asked.url !== CHAT_COMPLETIONS || !asked.body.tools) return answering(asked);
+  if (asked.body.messages?.at(-1)?.role === "tool") return sayingHello(asked.url);
+  const call = { id: "call_0", type: "function", function: { name: "web_search", arguments: JSON.stringify({ query: "Cloudflare AI Gateway" }) } };
+  return Response.json({ choices: [{ message: { role: "assistant", content: null, tool_calls: [call] }, finish_reason: "tool_calls" }], usage: { completion_tokens: 20 } });
+};
+
 /** How the fake AI Gateway answers, which a test can change, and what it was asked. */
 let answer: (asked: Asked) => Response | Promise<Response>;
 let asked: Asked[];
@@ -101,7 +135,8 @@ beforeEach(async () => {
   asked = [];
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const request = new Request(input, init);
-    const sent = { url: request.url, authorization: request.headers.get("Authorization"), body: (await request.json()) as Asked["body"] };
+    const { headers } = request;
+    const sent = { url: request.url, authorization: headers.get("Authorization"), aigAuthorization: headers.get("cf-aig-authorization"), body: (await request.json()) as Asked["body"] };
     asked.push(sent);
     return answer(sent);
   });
@@ -342,29 +377,32 @@ describe("AI agents", () => {
         description: RECAP.description,
         model: HAIKU,
         modelName: "Claude Haiku 5.5",
+        access: "everyone",
         rooms: null,
         instructions: RECAP.instructions,
         promptTemplate: null,
-        format: "messages",
+        format: "anthropic",
         levels: { thinking: "off", length: "short" },
+        thinkingLevels: [...THINKING_LEVELS],
         webTools: [],
         avatar: false,
         changedBy: administrator.user,
         changedAt: expect.any(String) as string,
       } satisfies AgentSettings);
 
-      // Its model answered as it, through Ember AI's account and API token.
-      expect(asked).toHaveLength(1);
-      expect(asked[0]).toMatchObject({ url: `${CLOUDFLARE_API}/messages`, authorization: `Bearer ${API_TOKEN}`, body: { model: HAIKU } });
-      expect(asked[0]!.body.system).toContain("You are Recap, an AI agent");
+      // Its model answered as it, through Ember AI's account and API token, at the gateway's Anthropic endpoint, and then again at each level of thinking.
+      expect(asked).toHaveLength(5);
+      for (const sent of asked) expect(sent).toMatchObject({ url: ANTHROPIC_ENDPOINT, authorization: null, aigAuthorization: `Bearer ${API_TOKEN}`, body: { model: "claude-haiku-5-5" } });
+      expect(asked.map(thinks)).toEqual([false, true, true, true, true]);
+      expect(asked.map(({ body }) => body.system)).toEqual(Array(5).fill(expect.stringContaining("You are Recap, an AI agent")));
 
       expect(await roomsOf(recap.id)).toEqual(await openRooms());
       expect(await roomsOf(recap.id)).toContain(launch.id);
       expect(await workspaceSql("SELECT role, bot_token, email_address, password_digest FROM users WHERE id = ?", recap.id)).toEqual([
         { role: 2, bot_token: null, email_address: null, password_digest: null },
       ]);
-      const { id, name, bio, role, status, avatarUrl, agent, description, model, modelName, webTools, rooms } = recap;
-      expect(await listed(administrator)).toEqual([{ id, name, bio, role, status, avatarUrl, agent, description, model, modelName, webTools, rooms }]);
+      const { id, name, bio, role, status, avatarUrl, agent, description, model, modelName, webTools, access, rooms } = recap;
+      expect(await listed(administrator)).toEqual([{ id, name, bio, role, status, avatarUrl, agent, description, model, modelName, webTools, access, rooms }]);
       expect(await shownAgent(administrator, recap.id)).toEqual(recap);
       const asListed = { id, name, bio, role, status, avatarUrl, agent };
       expect(await inDirectory(administrator, recap.id)).toEqual(asListed);
@@ -377,8 +415,8 @@ describe("AI agents", () => {
       const leads = await createRoom("Leads", { closedTo: [administrator.user.id], as: administrator });
 
       // A closed room can't be picked, so it isn't joined.
-      const juniper = await made(administrator, { name: "Juniper", model: GLM, rooms: [support.id, leads.id] });
-      expect(juniper).toMatchObject({ rooms: [{ id: support.id, name: "Support" }], format: "chat", modelName: "GLM-4.7 Flash" });
+      const juniper = await made(administrator, { name: "Juniper", model: GPT, rooms: [support.id, leads.id] });
+      expect(juniper).toMatchObject({ rooms: [{ id: support.id, name: "Support" }], format: "openai", modelName: "GPT-6.1 Sol" });
       expect(await roomsOf(juniper.id)).toEqual([support.id]);
       const recap = await made(administrator);
 
@@ -396,19 +434,56 @@ describe("AI agents", () => {
     it("has its model search the web while Search the web is on, keeping the tools it took", async () => {
       const administrator = await setUp();
       const scout = await made(administrator, { name: "Scout", model: SONNET, webSearch: true });
-      expect(scout).toMatchObject({ format: "messages", webTools: ["search", "read"] });
-      expect(asked.map(searches)).toEqual([false, true]);
-      expect(asked[1]!.body.system).toContain("You are Scout, an AI agent");
+      expect(scout).toMatchObject({ format: "anthropic", webTools: ["search", "read"] });
+      expect(unthinking().map(searches)).toEqual([false, true]);
+      expect(unthinking()[1]!.body.system).toContain("You are Scout, an AI agent");
       // The AI assistant tab lists what it does on the web too.
       expect(await listed(administrator)).toEqual([expect.objectContaining({ name: "Scout", webTools: ["search", "read"] })]);
     });
 
-    it("refuses Search the web for a model that can't search, or that answered without searching, on its field", async () => {
+    it("has Grok search the web with Ember's own tool in Chat Completions, through Cloudflare's REST API, where it's asked", async () => {
       const administrator = await setUp();
-      expect(await refusalOf(await makeAgent(administrator, { ...RECAP, model: GLM, webSearch: true }))).toEqual([422, { error: agentCannotSearchWith("GLM-4.7 Flash"), field: "webSearch" }]);
-      // It was asked its test question, but not to search.
-      expect(asked.map(searches)).toEqual([false]);
+      asked.length = 0;
+      answer = grokAnswering;
+      const grok = await made(administrator, { name: "Grok", model: GROK, webSearch: true });
+      expect(grok).toMatchObject({ model: GROK, format: "chat", webTools: ["search"] });
+      // Its test question, then the one that searches, which Ember runs with Cloudflare's Web Search API, and nothing at AI Gateway's xAI endpoint.
+      expect(unthinking().map(({ url }) => url)).toEqual([CHAT_COMPLETIONS, CHAT_COMPLETIONS, WEB_SEARCH, CHAT_COMPLETIONS]);
+      expect(unthinking().map(searches)).toEqual([false, true, false, true]);
+      expect(asked.every(({ url, authorization }) => new URL(url).hostname === "api.cloudflare.com" && authorization === `Bearer ${API_TOKEN}`)).toBe(true);
+    });
 
+    it("has a Grok agent made before search where it is once Search the web goes on, and moves one kept in xAI's own Responses into Chat Completions", async () => {
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      const administrator = await setUp();
+      answer = grokAnswering;
+      const { id } = await made(administrator, { name: "Grok", model: GROK });
+      await agentWithKeptModel(id, { id: GROK, name: "Grok 4.7", format: "chat", thinkingLevels: ["low", "high"] });
+
+      asked.length = 0;
+      expect(await agentOf(await changeAgent(administrator, id, { webSearch: true }))).toMatchObject({ format: "chat", webTools: ["search"], thinkingLevels: ["low", "high"] });
+      expect(asked.map(({ url }) => url)).toEqual([CHAT_COMPLETIONS, WEB_SEARCH, CHAT_COMPLETIONS]);
+
+      // One searching in xAI's own Responses before is asked in Chat Completions from then on, at the levels it takes there.
+      await agentWithKeptModel(id, { id: GROK, name: "Grok 4.7", format: "xai", thinkingLevels: ["low", "medium", "high"] });
+      expect(await agentOf(await changeAgent(administrator, id, { webSearch: false }))).toMatchObject({ format: "xai", webTools: [] });
+      asked.length = 0;
+      expect(await agentOf(await changeAgent(administrator, id, { webSearch: true }))).toMatchObject({ format: "chat", webTools: ["search"], thinkingLevels: [...THINKING_LEVELS] });
+      expect(asked.every(({ url }) => url === CHAT_COMPLETIONS || url === WEB_SEARCH)).toBe(true);
+      expect(await workspaceSql("SELECT format, web_tools FROM agents WHERE user_id = ?", id)).toEqual([{ format: "chat", web_tools: '["search"]' }]);
+    });
+
+    it("refuses a model Ember doesn't offer, on its field, before AI Gateway is asked anything", async () => {
+      const administrator = await setUp();
+      for (const model of [GLM, "openai/gpt-5.5"]) {
+        expect(await refusalOf(await makeAgent(administrator, { ...RECAP, model, webSearch: true }))).toEqual([422, { error: MODEL_REFUSED, field: "model" }]);
+      }
+      expect(asked).toEqual([]);
+      expect(await workspaceSql("SELECT user_id FROM agents")).toEqual([]);
+    });
+
+    it("refuses Search the web for a model that answered without searching, on its field", async () => {
+      const administrator = await setUp();
       answer = ({ url }) => sayingHello(url);
       expect(await refusalOf(await makeAgent(administrator, { ...RECAP, webSearch: true }))).toEqual([422, { error: agentAnsweredUnsearched("Claude Haiku 5.5"), field: "webSearch" }]);
       expect(await workspaceSql("SELECT user_id FROM agents")).toEqual([]);
@@ -546,15 +621,20 @@ describe("AI agents", () => {
       expect(asked).toEqual([]);
     });
 
-    it("takes the name Cloudflare's catalog gives its model now, without asking the model again", async () => {
+    it("keeps a model Ember no longer offers, without asking it again, while it isn't changed to one Ember offers", async () => {
       const administrator = await setUp();
       const recap = await made(administrator);
+      await agentWithKeptModel(recap.id, KEPT_GLM);
       asked.length = 0;
-      expect(await agentOf(await changeAgent(administrator, recap.id, { model: HAIKU, modelName: "Claude Haiku" }))).toMatchObject({ model: HAIKU, modelName: "Claude Haiku" });
+
+      const changed = await agentOf(await changeAgent(administrator, recap.id, { ...RECAP, model: GLM, description: "Sums up the week" }));
+      expect(changed).toMatchObject({ model: GLM, modelName: "GLM-4.7 Flash", format: "chat", description: "Sums up the week" });
       expect(asked).toEqual([]);
-      // Nor is it lost while turning Search the web on has the model search.
-      expect(await agentOf(await changeAgent(administrator, recap.id, { model: HAIKU, modelName: "Haiku", webSearch: true }))).toMatchObject({ modelName: "Haiku", webTools: ["search", "read"] });
-      expect(asked.map(searches)).toEqual([true]);
+      expect(await refusalOf(await changeAgent(administrator, recap.id, { model: "openai/gpt-5.5" }))).toEqual([422, { error: MODEL_REFUSED, field: "model" }]);
+      expect(asked).toEqual([]);
+      expect(await agentOf(await changeAgent(administrator, recap.id, { model: HAIKU }))).toMatchObject({ model: HAIKU, modelName: "Claude Haiku 5.5", format: "anthropic" });
+      // Once it's changed, the model it kept can't be chosen again.
+      expect(await refusalOf(await changeAgent(administrator, recap.id, { model: GLM }))).toEqual([422, { error: MODEL_REFUSED, field: "model" }]);
     });
 
     it("refuses a name someone else has, and @ember's", async () => {
@@ -577,18 +657,45 @@ describe("AI agents", () => {
       const scout = await made(administrator, { name: "Scout", model: SONNET, webSearch: true });
       asked.length = 0;
 
-      expect(await agentOf(await changeAgent(administrator, scout.id, { model: GPT, webSearch: false }))).toMatchObject({ model: GPT, modelName: "GPT-6.1 Sol", format: "responses", webTools: [] });
-      expect(asked.map(({ url }) => url)).toEqual([`${CLOUDFLARE_API}/responses`]);
-      expect(asked[0]!.body).toMatchObject({ model: GPT });
+      expect(await agentOf(await changeAgent(administrator, scout.id, { model: GPT, webSearch: false }))).toMatchObject({ model: GPT, modelName: "GPT-6.1 Sol", format: "openai", webTools: [] });
+      expect(asked.map(({ url }) => url)).toEqual(Array(5).fill(OPENAI_ENDPOINT));
+      expect(asked[0]!.body).toMatchObject({ model: "gpt-6.1-sol" });
 
       asked.length = 0;
-      expect(await agentOf(await changeAgent(administrator, scout.id, { model: SONNET, modelName: "Claude Sonnet", webSearch: true }))).toMatchObject({
+      expect(await agentOf(await changeAgent(administrator, scout.id, { model: SONNET, webSearch: true }))).toMatchObject({
         model: SONNET,
-        modelName: "Claude Sonnet",
-        format: "messages",
+        modelName: "Claude Sonnet 5.5",
+        format: "anthropic",
         webTools: ["search", "read"],
       });
-      expect(asked.map(searches)).toEqual([false, true]);
+      expect(unthinking().map(searches)).toEqual([false, true]);
+    });
+
+    it("keeps the levels of thinking its model took its test question at, finding them again only for another model", async () => {
+      const administrator = await setUp();
+      // As a model that always thinks, and only a little or a lot: OpenAI's Responses asks for no thinking as none.
+      answer = (sent) => {
+        const effort = (sent.body as { reasoning?: { effort: string } }).reasoning?.effort;
+        if (effort !== "none" && effort !== "medium") return answering(sent);
+        return Response.json({ success: false, errors: [{ code: 7003, message: `Model execution failed (User Input Error): Unsupported value: '${effort}'` }], messages: [], result: null }, { status: 400 });
+      };
+      const recap = await made(administrator, { model: GPT });
+      expect(recap).toMatchObject({ model: GPT, format: "openai", thinkingLevels: ["low", "high"] });
+      expect(await workspaceSql("SELECT thinking_levels FROM agents WHERE user_id = ?", recap.id)).toEqual([{ thinking_levels: '["low","high"]' }]);
+
+      // Kept while its model is, without asking it again.
+      asked.length = 0;
+      expect(await agentOf(await changeAgent(administrator, recap.id, { description: "Sums up the week", thinking: "medium" }))).toMatchObject({ thinkingLevels: ["low", "high"], levels: { thinking: "medium" } });
+      expect(asked).toEqual([]);
+
+      // Another model takes its test question at each level again.
+      answer = answering;
+      expect(await agentOf(await changeAgent(administrator, recap.id, { model: SONNET }))).toMatchObject({ model: SONNET, thinkingLevels: [...THINKING_LEVELS] });
+      expect(asked.filter(thinks)).toHaveLength(4);
+
+      // An agent given its model before Ember asked at each level has none.
+      await workspaceSql("UPDATE agents SET thinking_levels = NULL");
+      expect(await shownAgent(administrator, recap.id)).toMatchObject({ model: SONNET, thinkingLevels: null });
     });
 
     it("turns Search the web on by having the model search, and off without asking it", async () => {
@@ -602,12 +709,11 @@ describe("AI agents", () => {
       expect(await agentOf(await changeAgent(administrator, recap.id, { webSearch: false }))).toMatchObject({ webTools: [] });
       expect(asked).toEqual([]);
 
-      // A model that can't search can't have it on, nor be given while it's on.
-      const juniper = await made(administrator, { name: "Juniper", model: GLM });
-      expect(await refusalOf(await changeAgent(administrator, juniper.id, { webSearch: true }))).toEqual([422, { error: agentCannotSearchWith("GLM-4.7 Flash"), field: "webSearch" }]);
-      await agentOf(await changeAgent(administrator, recap.id, { webSearch: true }));
-      expect(await refusalOf(await changeAgent(administrator, recap.id, { model: GLM }))).toEqual([422, { error: agentCannotSearchWith("GLM-4.7 Flash"), field: "webSearch" }]);
-      expect(await shownAgent(administrator, recap.id)).toMatchObject({ model: HAIKU, webTools: ["search", "read"] });
+      // A model kept from before that can't search can't have it on.
+      const juniper = await made(administrator, { name: "Juniper" });
+      await agentWithKeptModel(juniper.id, KEPT_DEEPSEEK);
+      expect(await refusalOf(await changeAgent(administrator, juniper.id, { webSearch: true }))).toEqual([422, { error: agentCannotSearchWith("DeepSeek V4 Pro"), field: "webSearch" }]);
+      expect(await shownAgent(administrator, juniper.id)).toMatchObject({ model: KEPT_DEEPSEEK.id, webTools: [] });
     });
 
     it("moves it between every open room and the ones picked, keeping the closed rooms it was added to", async () => {
@@ -681,7 +787,7 @@ describe("AI agents", () => {
       const administrator = await setUp();
       const [support, launch] = [await createRoom("Support", { as: administrator }), await createRoom("Launch", { as: administrator })];
       const recap = await made(administrator);
-      const juniper = await made(administrator, { name: "Juniper", model: GLM, rooms: [support.id, launch.id] });
+      const juniper = await made(administrator, { name: "Juniper", model: GPT, rooms: [support.id, launch.id] });
       const leads = await createRoom("Leads", { closedTo: [administrator.user.id, recap.id], as: administrator });
       const tab = await openWorkspaceSocket(administrator);
       const everyone = [ASSISTANT_ID, juniper.id, recap.id].sort();
@@ -733,6 +839,24 @@ describe("AI agents", () => {
       }
       expect(await inDirectory(administrator, member.user.id)).toMatchObject({ name: "Grace Hopper" });
       expect(await inDirectory(administrator, bot.id)).toMatchObject({ name: "Build Bot" });
+    });
+
+    it("are nobody's username, nor can an agent be called by someone's, as typing @ finds both", async () => {
+      const administrator = await setUp();
+      const recap = await made(administrator);
+      const member = await joinAsGrace();
+      const renamed = await api("/api/users/me/profile", { method: "PATCH", headers: as(member), body: JSON.stringify({ username: "RECAP" }) });
+      expect(await refusalOf(renamed)).toEqual([422, { error: USERNAME_TAKEN }]);
+
+      const named = await api("/api/users/me/profile", { method: "PATCH", headers: as(member), body: JSON.stringify({ username: "scout" }) });
+      expect(named.status, await named.clone().text()).toBe(200);
+      expect(await refusalOf(await makeAgent(administrator, { ...RECAP, name: "Scout" }))).toEqual([422, { error: NAME_TAKEN, field: "name" }]);
+      expect(await refusalOf(await changeAgent(administrator, recap.id, { name: "SCOUT" }))).toEqual([422, { error: NAME_TAKEN, field: "name" }]);
+
+      // Someone removed keeps their username, as lifting a ban lets back even them.
+      expect((await api(`/api/account/users/${member.user.id}`, { method: "DELETE", headers: as(administrator) })).status).toBe(200);
+      expect(await refusalOf(await makeAgent(administrator, { ...RECAP, name: "Scout" }))).toEqual([422, { error: NAME_TAKEN, field: "name" }]);
+      expect(await refusalOf(await changeAgent(administrator, recap.id, { name: "SCOUT" }))).toEqual([422, { error: NAME_TAKEN, field: "name" }]);
     });
   });
 

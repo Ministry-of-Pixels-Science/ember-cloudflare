@@ -1,4 +1,7 @@
+import type { Env } from "../env";
 import type { Identified } from "./blobs";
+import type { ImageSize } from "./images";
+import { previewFromImages } from "./previews";
 import { identifiedOf, keptAs, UPLOAD_PART_SIZE } from "./uploads";
 
 // Storing a file in R2 as it arrives, where nothing says first how large it is, as a bot's form and a
@@ -14,10 +17,14 @@ export interface ArrivingFile {
   read: () => Promise<Uint8Array | null>;
 }
 
-/** A file R2 has all of: how many bytes it is, and what its first bytes said it is. */
+/**
+ * A file R2 has all of: how many bytes it is, what its first bytes said it is, and the size of the
+ * preview Cloudflare Images made of it, if it made one.
+ */
 export interface StreamedFile {
   byteSize: number;
   identified: Identified;
+  preview?: ImageSize;
 }
 
 /**
@@ -61,6 +68,16 @@ export async function storeArriving(files: R2Bucket, key: string, file: Arriving
     await upload?.abort().catch(() => {});
     throw error;
   }
+}
+
+/**
+ * `stored`, the file named `filename` that R2 keeps for upload `key`, with the preview Cloudflare Images
+ * makes of it, if its message would show it only by one, since nothing sends a preview of a file that
+ * arrives this way (previews.ts).
+ */
+export async function withPreview(env: Env, files: R2Bucket, key: string, filename: string, stored: StreamedFile): Promise<StreamedFile> {
+  const preview = await previewFromImages(env, files, key, { filename, byteSize: stored.byteSize, ...stored.identified });
+  return preview ? { ...stored, preview } : stored;
 }
 
 /** Gathers chunks of bytes into parts of `size` bytes, as an upload in parts takes them, all but its last. */

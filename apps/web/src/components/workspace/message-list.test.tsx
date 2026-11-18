@@ -87,7 +87,7 @@ const scrollTo = (log: HTMLElement, top: number) => {
 };
 
 const ada: Me = { id: "u1", name: "Ada", administrator: false };
-const actions = { boost: vi.fn(), unboost: vi.fn(), edit: vi.fn(), remove: vi.fn() };
+const actions = { boost: vi.fn(), unboost: vi.fn(), edit: vi.fn(), remove: vi.fn(), click: vi.fn() };
 const editors = { open: vi.fn(), close: vi.fn(), returnFocus: vi.fn(), attach: vi.fn(), reply: vi.fn() };
 
 /** Messages from Ada named m`from` to m`to`. */
@@ -338,7 +338,7 @@ describe("Welcome and invite card", () => {
 
 describe("Sign in with Memberful", () => {
   it("shows no welcome card while Memberful is members only, since its join link is off", () => {
-    const account = { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: true, memberfulSignIn: true, ssoJoin: false, ssoSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false };
+    const account = { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: true, memberfulSignIn: true, ssoJoin: false, ssoSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true };
     render(<AccountContext value={account}>{list({ messages: [], paged: false }, vi.fn(), { roomId: "general", joinCode: "aB3d-Ef5h-iJ7k" })}</AccountContext>);
     expect(screen.queryByRole("heading", { name: "Welcome to Ember" })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Welcome to #general" })).toBeInTheDocument();
@@ -347,12 +347,46 @@ describe("Sign in with Memberful", () => {
 
 describe("Ways to join", () => {
   it("shows no welcome card while the join link is off, but shows it again once it's on", () => {
-    const account = { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: false, openSignUp: true, memberfulJoin: false, memberfulSignIn: false, ssoJoin: false, ssoSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false };
+    const account = { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: false, openSignUp: true, memberfulJoin: false, memberfulSignIn: false, ssoJoin: false, ssoSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true };
     const welcome = (joinLink: boolean) => <AccountContext value={{ ...account, joinLink }}>{list({ messages: [], paged: false }, vi.fn(), { roomId: "general", joinCode: "aB3d-Ef5h-iJ7k" })}</AccountContext>;
     const { rerender } = render(welcome(false));
     expect(screen.queryByRole("heading", { name: "Welcome to Ember" })).not.toBeInTheDocument();
     rerender(welcome(true));
     expect(screen.getByRole("heading", { name: "Welcome to Ember" })).toBeInTheDocument();
+  });
+});
+
+describe("Welcome someone who joins", () => {
+  const grace = { id: "u2", name: "Grace" };
+  const joined = { user: grace, at: "2026-10-12T09:30:00" };
+  /** Ada's DM with Grace, started as Grace joined, with `messages`, as far back as the room has said it goes. */
+  const withGrace = (messages: Message[], state: Partial<RoomState> = {}) => list({ messages, paged: false, ...state }, vi.fn(), null, { direct: true, roomName: "Grace", joined });
+  const days = () => screen.getAllByRole("heading", { level: 2 }).flatMap((heading) => (heading.querySelector("time") ? [heading.textContent] : []));
+
+  it("opens a DM started as someone joined with their having joined the workspace, under the day they did", () => {
+    render(withGrace([]));
+    expect(screen.getByText("This is the very beginning of your direct messages.")).toBeInTheDocument();
+    const line = screen.getByText("joined Ember");
+    expect(line).toHaveClass("text-message-muted");
+    const said = line.closest("article")!;
+    expect(within(said).getByRole("heading", { level: 3 })).toHaveTextContent("Grace");
+    expect(said.querySelector("h3 time")).toHaveAttribute("datetime", joined.at);
+    expect(days()).toEqual(["October 12, 2026"]);
+  });
+
+  it("dates the day once when the first message came on it, and the next day the first came on", () => {
+    const { rerender } = render(withGrace([message("m1", "2026-10-12T10:00:00")]));
+    expect(days()).toEqual(["October 12, 2026"]);
+    expect(screen.getByText("joined Ember").closest("[data-row]")!.nextElementSibling).toHaveAttribute("data-message-id", "m1");
+    rerender(withGrace([message("m1", "2026-10-13T10:00:00")]));
+    expect(days()).toEqual(["October 12, 2026", "October 13, 2026"]);
+  });
+
+  it("waits for the room to say its timeline reaches back that far", () => {
+    const { rerender } = render(withGrace([], { status: "connecting", paged: null }));
+    expect(screen.queryByText("joined Ember")).not.toBeInTheDocument();
+    rerender(withGrace(messages(1, 3), { hasMore: true }));
+    expect(screen.queryByText("joined Ember")).not.toBeInTheDocument();
   });
 });
 
@@ -362,6 +396,50 @@ describe("Day separators", () => {
     const days = screen.getAllByRole("heading", { level: 2 });
     expect(days.map((day) => day.textContent)).toEqual(["October 10, 2026", "October 11, 2026"]);
     expect(days[1]!.querySelector("time")).toHaveAttribute("title", "10/11/26, 9:00 AM");
+  });
+});
+
+describe("New line", () => {
+  const grace = { id: "u2", name: "Grace" };
+  /** A message from Grace, named by its id. */
+  const from = (id: string, createdAt: string): Message => ({ ...message(id, createdAt), creator: grace });
+  const timeline = [message("Earlier", "2026-10-12T09:00:00.000Z"), from("Before", "2026-10-12T09:30:00.000Z"), message("Mine", "2026-10-12T10:00:00.000Z"), from("First new", "2026-10-12T10:05:00.000Z"), from("Second new", "2026-10-12T10:06:00.000Z")];
+  const newLine = () => screen.queryByRole("separator", { name: "New messages" });
+  /** The id of the message the New line is over. */
+  const newLineOver = () => newLine()?.closest("[data-message-id]")?.getAttribute("data-message-id");
+
+  it("draws New over the first message someone else wrote since the room was marked unread", () => {
+    render(list({ messages: timeline }, vi.fn(), null, { newSince: "2026-10-12T10:00:00.000Z" }));
+    expect(screen.getAllByRole("separator", { name: "New messages" })).toHaveLength(1);
+    expect(newLineOver()).toBe("First new");
+    expect(newLine()).toHaveTextContent("New");
+  });
+
+  it("draws none in a room that wasn't marked unread, or for only the reader's own messages since", () => {
+    const { rerender } = render(list({ messages: timeline }));
+    expect(newLine()).not.toBeInTheDocument();
+    rerender(list({ messages: timeline.slice(0, 3) }, vi.fn(), null, { newSince: "2026-10-12T10:00:00.000Z" }));
+    expect(newLine()).not.toBeInTheDocument();
+  });
+
+  it("keeps the line where it was as more messages come", () => {
+    const { rerender } = render(list({ messages: timeline }, vi.fn(), null, { newSince: "2026-10-12T10:00:00.000Z" }));
+    rerender(list({ messages: [...timeline, from("Third new", "2026-10-12T10:07:00.000Z")] }, vi.fn(), null, { newSince: "2026-10-12T10:00:00.000Z" }));
+    expect(newLineOver()).toBe("First new");
+  });
+
+  it("draws none over the first message loaded when older new ones may not be loaded yet", () => {
+    const { rerender } = render(list({ messages: timeline.slice(3), hasMore: true }, vi.fn(), null, { newSince: "2026-10-12T10:00:00.000Z" }));
+    expect(newLine()).not.toBeInTheDocument();
+    rerender(list({ messages: timeline.slice(3), hasMore: false }, vi.fn(), null, { newSince: "2026-10-12T10:00:00.000Z" }));
+    expect(newLineOver()).toBe("First new");
+  });
+
+  it("draws none when the first message loaded is the reader's own, sent since, and older ones may not be loaded yet", () => {
+    const { rerender } = render(list({ messages: timeline.slice(2), hasMore: true }, vi.fn(), null, { newSince: "2026-10-12T09:45:00.000Z" }));
+    expect(newLine()).not.toBeInTheDocument();
+    rerender(list({ messages: timeline.slice(2), hasMore: false }, vi.fn(), null, { newSince: "2026-10-12T09:45:00.000Z" }));
+    expect(newLineOver()).toBe("First new");
   });
 });
 
@@ -626,6 +704,22 @@ describe("Stay at the newest message", () => {
     expect(log.scrollTop).toBe(780);
     rerender(list({ messages: messages(1, 9), arrivals: 1 }));
     expect(log.scrollTop).toBe(880);
+    expect(jump()).not.toBeInTheDocument();
+  });
+
+  it("stays at the newest message as it grows, though the browser scrolls the timeline on its own before that's reported", () => {
+    const { rerender } = render(list({ messages: messages(1, 8) }));
+    const log = screen.getByRole("log");
+    const { heights, resize } = layOut(log);
+    expect(log.scrollTop).toBe(400);
+    // m8 grows 300px, as a message does when its file's text loads, and before that's reported, the browser scrolls
+    // the timeline 50px, as Chrome's scroll anchoring can, which leaves its end 250px below the view.
+    heights.m8 = 400;
+    scrollTo(log, 450);
+    resize();
+    expect(log.scrollTop).toBe(700);
+    rerender(list({ messages: messages(1, 9), arrivals: 1 }));
+    expect(log.scrollTop).toBe(800);
     expect(jump()).not.toBeInTheDocument();
   });
 

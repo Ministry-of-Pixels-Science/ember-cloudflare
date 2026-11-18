@@ -11,7 +11,7 @@ import { api, apiWith, avatarVersionOf, cookieOf, freshDeploy, openWorkspaceSock
 
 const files = (env as unknown as Env).FILES!;
 
-const SETUP = { accountId: "0123456789abcdef0123456789abcdef", apiToken: "an-api-token-with-workers-ai-read_0123456", model: "@cf/zai-org/glm-4.7-flash" };
+const SETUP = { accountId: "0123456789abcdef0123456789abcdef", apiToken: "an-api-token-with-ai-gateway-run_0123456", model: "anthropic/claude-haiku-5.5" };
 const PATH = "/api/account/assistant/avatar";
 
 /** Ember's flame, as the built app's files have it, which these tests stand in for. */
@@ -41,7 +41,7 @@ async function joinAsGrace(): Promise<Session> {
 /** Turns Ember AI on as `administrator`, its model saying hello to the test question. */
 async function turnOn(administrator: Session): Promise<void> {
   const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
-    Response.json({ object: "chat.completion", choices: [{ index: 0, message: { role: "assistant", content: "Hello, team!" }, finish_reason: "stop" }] }),
+    Response.json({ type: "message", role: "assistant", content: [{ type: "text", text: "Hello, team!" }], stop_reason: "end_turn" }),
   );
   const response = await api("/api/account/assistant", { method: "PUT", headers: as(administrator), body: JSON.stringify(SETUP) });
   expect(response.status, await response.clone().text()).toBe(200);

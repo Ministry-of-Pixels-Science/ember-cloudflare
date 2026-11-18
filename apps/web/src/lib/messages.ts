@@ -34,20 +34,38 @@ export const dateLabel = (date: Date) => dateFormat.format(date);
 /** What a time or a separator's date shows on hover: "10/12/26, 3:04 PM". */
 export const dateTimeLabel = (date: Date) => dateTimeFormat.format(date);
 
+/** The day `date` falls on, as of `now`: today, yesterday, or its date, "Oct 12", or "Oct 12, 2025" in another year. */
+function dayAsOf(date: Date, now: Date): { near: "today" | "yesterday" } | { on: string } {
+  const day = dayFormat.format(date);
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (day === dayFormat.format(now)) return { near: "today" };
+  if (day === dayFormat.format(yesterday)) return { near: "yesterday" };
+  return { on: (yearFormat.format(date) === yearFormat.format(now) ? monthDayFormat : shortDateFormat).format(date) };
+}
+
 /**
  * When a thread's newest reply came, as the thread's summary says it, as of `now`: "today at 3:04 PM",
  * "yesterday at 3:04 PM", "on Oct 12", or "on Oct 12, 2025" in another year. A narrow summary, as on a
  * phone, says it `short`: today's time, or "yesterday".
  */
 export function lastReplyLabel(date: Date, now = new Date()): { long: string; short: string } {
-  const day = dayFormat.format(date);
-  const yesterday = new Date(now);
-  yesterday.setDate(now.getDate() - 1);
-  if (day === dayFormat.format(now)) return { long: `today at ${timeLabel(date)}`, short: timeLabel(date) };
-  if (day === dayFormat.format(yesterday)) return { long: `yesterday at ${timeLabel(date)}`, short: "yesterday" };
-  const on = `on ${(yearFormat.format(date) === yearFormat.format(now) ? monthDayFormat : shortDateFormat).format(date)}`;
-  return { long: on, short: on };
+  const day = dayAsOf(date, now);
+  if ("on" in day) return { long: `on ${day.on}`, short: `on ${day.on}` };
+  return { long: `${day.near} at ${timeLabel(date)}`, short: day.near === "today" ? timeLabel(date) : "yesterday" };
 }
+
+/**
+ * When a huddle started, as the Huddles page says it, as of `now`: "Today at 3:04 PM", "Yesterday at
+ * 3:04 PM", "Oct 12", or "Oct 12, 2025" in another year.
+ */
+export function huddleStartedLabel(date: Date, now = new Date()): string {
+  const day = dayAsOf(date, now);
+  return "on" in day ? day.on : `${day.near === "today" ? "Today" : "Yesterday"} at ${timeLabel(date)}`;
+}
+
+/** Whether two ISO times fall on the same day in the reader's time zone, as a timeline's separators tell days apart. */
+export const sameDay = (a: string, b: string) => dayFormat.format(new Date(a)) === dayFormat.format(new Date(b));
 
 /** The day each message was written, as `dayFormat` writes it, kept with the message, since a timeline asks again on every render. */
 const days = new WeakMap<Message, string>();
@@ -62,7 +80,8 @@ function dayOf(message: Message): string {
  * is from another day. It's threaded, without its author's avatar and name, when the one above it is the
  * same person's from no more than five minutes before or after, even across midnight, when it has a separator
  * and still no header. A message deleted while its thread has replies shows neither its author nor its time,
- * so nothing threads under it, and it threads under nothing.
+ * so nothing threads under it, and it threads under nothing. The same goes for a huddle's message, which
+ * shows the headphones and what it says of its huddle where its author would be.
  */
 export function timeline(messages: Message[]): TimelineItem[] {
   return messages.map((message, index) => {
@@ -73,10 +92,16 @@ export function timeline(messages: Message[]): TimelineItem[] {
       message,
       firstOfDay: dayOf(previous) !== dayOf(message),
       threaded:
-        !message.deleted && !previous.deleted && previous.creator.id === message.creator.id && Math.abs(created.getTime() - before.getTime()) <= THREAD_WINDOW_MS,
+        !message.deleted && !previous.deleted && !message.huddle && !previous.huddle && previous.creator.id === message.creator.id && Math.abs(created.getTime() - before.getTime()) <= THREAD_WINDOW_MS,
     };
   });
 }
+
+/**
+ * The newest of `messages` that the person `userId` signs in wrote, which Up Arrow edits. A huddle's
+ * message is in the name of whoever started the huddle, who didn't write it.
+ */
+export const newestWrittenBy = <T extends Message>(messages: T[], userId: UserId): T | undefined => messages.findLast((message) => message.creator.id === userId && !message.huddle);
 
 /**
  * What Quote writes in the composer (reply_controller.js): what the message shows but its link previews,

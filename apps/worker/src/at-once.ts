@@ -29,6 +29,11 @@ export class JobQueue {
     private readonly capacity: number,
   ) {}
 
+  /** Whether a job that came now would be turned away, as too many are waiting already. */
+  get full(): boolean {
+    return this.running >= this.limit && this.waiting.length >= this.capacity;
+  }
+
   /** Runs `job` in its turn, answering whether it ran: false, at once, when too many are waiting already. */
   async run(job: () => Promise<void>): Promise<boolean> {
     if (this.running < this.limit) this.running++;

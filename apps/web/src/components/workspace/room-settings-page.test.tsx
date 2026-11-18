@@ -1,11 +1,15 @@
 import type { Room, RoomSettings } from "@ember/protocol";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Sheet } from "@/components/ui/sheet";
+import { AccountContext, useAccount } from "@/hooks/use-account";
 import { leave, navigate, useRoute } from "@/hooks/use-route";
 import { ApiError } from "@/lib/api";
 import type { RoomAnswer } from "@/lib/room-list";
+import { HuddlesContext, type Huddles } from "./huddle-button";
+import { HUDDLE_ENDS, HUDDLES_ALLOWED, HUDDLES_NOT_ALLOWED } from "./room-form";
 import { CONFIRM_DELETE, CONFIRM_LEAVE, RoomSettingsPage } from "./room-settings-page";
 
 const ada = { id: "u1", name: "Ada Lovelace" };
@@ -14,14 +18,17 @@ const linus = { id: "u3", name: "Linus Torvalds" };
 const design: Room = { id: "design", name: "Design", kind: "open", icon: null };
 const leads: Room = { id: "leads", name: "Leads", kind: "closed", icon: "lock" };
 
+/** Design's settings, as an administrator has them, or as someone who can't change the room does. */
 const openSettings = (canAdminister = true): RoomSettings => ({
   room: design,
   canAdminister,
+  canChangeHuddles: canAdminister,
   people: [ada, grace, linus].map((person) => ({ ...person, member: true })),
 });
 const closedSettings: RoomSettings = {
   room: leads,
   canAdminister: true,
+  canChangeHuddles: true,
   people: [
     { ...ada, member: true },
     { ...grace, member: false },
@@ -57,7 +64,7 @@ function SettingsRoute(callbacks: Callbacks) {
   ) : null;
 }
 
-function showPage(room: Room, path = `/rooms/${room.kind}s/${room.id}/edit`) {
+function showPage(room: Room, path = `/rooms/${room.kind}s/${room.id}/edit`, wrapper?: (props: { children: ReactNode }) => ReactNode) {
   const [onSaved, onLeft, onMissing, onFailed] = [vi.fn(), vi.fn(), vi.fn(), vi.fn()];
   // The answers the page lists: rooms saved, and those it took Ada out of or deleted.
   const askForRoom = () => (answer: RoomAnswer) => (answer.type === "saved" ? onSaved(answer.room) : onLeft(answer.roomId));
@@ -66,6 +73,7 @@ function showPage(room: Room, path = `/rooms/${room.kind}s/${room.id}/edit`) {
     <Sheet>
       <SettingsRoute askForRoom={askForRoom} onMissing={onMissing} onFailed={onFailed} />
     </Sheet>,
+    { wrapper },
   );
   return { onSaved, onLeft, onMissing, onFailed, unmount, user: userEvent.setup() };
 }
@@ -335,7 +343,7 @@ describe("Who can change a room", () => {
   });
 
   it("shows them a private room's members, then everyone else, with no Everyone row or switches", async () => {
-    serve({ ...closedSettings, canAdminister: false });
+    serve({ ...closedSettings, canAdminister: false, canChangeHuddles: false });
     showPage(leads);
     expect(await screen.findByRole("heading", { level: 2, name: "Leads" })).toBeInTheDocument();
     expect(names()).toEqual(["Ada Lovelace", "Linus Torvalds", "Grace Hopper"]);
@@ -377,6 +385,149 @@ describe("Who can change a room", () => {
     await act(async () => answers[1]!(Response.json({ error: "Sign in to continue" }, { status: 401 })));
     expect(second.onFailed).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ status: 401 }));
     expect(second.onMissing).not.toHaveBeenCalled();
+  });
+});
+
+describe("Allow huddles in a room", () => {
+  /** Gives what's inside it a workspace where huddles are on, with the huddles going on in it. */
+  const huddlesOn = (live: Huddles["live"] = {}) =>
+    function HuddlesOn({ children }: { children: ReactNode }) {
+      return (
+        <AccountContext value={{ ...useAccount(), huddles: true }}>
+          <HuddlesContext value={{ live, preview: vi.fn() }}>{children}</HuddlesContext>
+        </AccountContext>
+      );
+    };
+  /** The page where huddles are on. */
+  const showWithHuddles = (room: Room, live?: Huddles["live"]) => showPage(room, undefined, huddlesOn(live));
+  const withoutHuddles = (settings: RoomSettings): RoomSettings => ({ ...settings, room: { ...settings.room, huddles: false } });
+  /** The settings of whoever made the room and isn't an administrator: theirs to change, but for its huddles. */
+  const asCreator = (settings: RoomSettings): RoomSettings => ({ ...settings, canChangeHuddles: false });
+  const huddlesSwitch = () => screen.findByRole("switch", { name: "Allow huddles in this room" });
+  const huddle = { startedAt: "2026-11-17T09:00:00.000Z", userIds: [grace.id] };
+
+  it("has no Huddles row until huddles are on, and saves a room without a word of them", async () => {
+    serve(withoutHuddles(openSettings()), { saved: { ...design, name: "Design team", huddles: false } });
+    const { onSaved, user } = showPage(design);
+    await user.type(await roomName(), " team");
+    expect(names()).toEqual(["Everyone", "Ada Lovelace", "Grace Hopper", "Linus Torvalds"]);
+    expect(screen.queryByRole("switch", { name: "Allow huddles in this room" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+    expect(sent()).toEqual({ name: "Design team", icon: "", kind: "open" });
+  });
+
+  it("has the Huddles switch under the people once they are, on for a room that allows them and off for one that doesn't", async () => {
+    serve(openSettings());
+    const allowed = showWithHuddles(design);
+    expect(await huddlesSwitch()).toBeChecked();
+    expect(await huddlesSwitch()).toHaveAccessibleDescription(HUDDLES_ALLOWED);
+    expect(names()).toEqual(["Everyone", "Ada Lovelace", "Grace Hopper", "Linus Torvalds", "Huddles"]);
+    allowed.unmount();
+
+    vi.restoreAllMocks();
+    serve(withoutHuddles(closedSettings));
+    showWithHuddles(leads);
+    expect(await huddlesSwitch()).not.toBeChecked();
+    expect(await huddlesSwitch()).toHaveAccessibleDescription(HUDDLES_NOT_ALLOWED);
+  });
+
+  it("turns huddles off in a room, and on again, with Save", async () => {
+    const saved: Room = { ...design, huddles: false };
+    serve(openSettings(), { saved });
+    const off = showWithHuddles(design);
+    await off.user.click(await huddlesSwitch());
+    expect(await huddlesSwitch()).not.toBeChecked();
+    await off.user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(off.onSaved).toHaveBeenCalledWith(saved));
+    expect(sent()).toEqual({ name: "Design", icon: "", huddles: false, kind: "open" });
+    expect(location.pathname).toBe("/rooms/design");
+    off.unmount();
+
+    vi.restoreAllMocks();
+    serve(withoutHuddles(closedSettings), { saved: leads });
+    const on = showWithHuddles(leads);
+    await on.user.click(await huddlesSwitch());
+    await on.user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(on.onSaved).toHaveBeenCalledWith(leads));
+    expect(sent()).toEqual({ name: "Leads", icon: "lock", huddles: true, kind: "closed", memberIds: [ada.id, linus.id] });
+  });
+
+  it("saves the switch as it stands with any other change", async () => {
+    serve(withoutHuddles(openSettings()), { saved: { ...design, name: "Design team", huddles: false } });
+    const { onSaved, user } = showWithHuddles(design);
+    await user.type(await roomName(), " team{Enter}");
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+    expect(sent()).toEqual({ name: "Design team", icon: "", huddles: false, kind: "open" });
+  });
+
+  it("says that saving ends the huddle going on in the room, once its switch is off", async () => {
+    serve(openSettings());
+    const here = showWithHuddles(design, { design: huddle });
+    expect(await huddlesSwitch()).toHaveAccessibleDescription(HUDDLES_ALLOWED);
+    await here.user.click(await huddlesSwitch());
+    expect(await huddlesSwitch()).toHaveAccessibleDescription(`${HUDDLES_NOT_ALLOWED} ${HUDDLE_ENDS}`);
+    here.unmount();
+
+    // A huddle in another room isn't this one's to end.
+    const elsewhere = showWithHuddles(design, { leads: huddle });
+    await elsewhere.user.click(await huddlesSwitch());
+    expect(await huddlesSwitch()).toHaveAccessibleDescription(HUDDLES_NOT_ALLOWED);
+  });
+
+  it("counts the switch as a change to ask about before leaving, and not once it's flipped back", async () => {
+    serve(openSettings());
+    const { user } = showWithHuddles(design);
+    await user.click(await huddlesSwitch());
+    act(() => navigate("/rooms/general"));
+    expect(await screen.findByRole("dialog", { name: "Unsaved Changes" })).toBeInTheDocument();
+    expect(location.pathname).toBe("/rooms/opens/design/edit");
+
+    await user.click(screen.getByRole("button", { name: "Keep editing" }));
+    await waitFor(() => expect(asking()).not.toBeInTheDocument());
+    await user.click(await huddlesSwitch());
+    act(() => navigate("/rooms/general"));
+    expect(location.pathname).toBe("/rooms/general");
+    expect(asking()).not.toBeInTheDocument();
+  });
+
+  it("has no Huddles switch for the room's creator, who isn't an administrator, and saves their changes without a word of huddles", async () => {
+    serve(asCreator(openSettings()), { saved: { ...design, name: "Design team" } });
+    const { onSaved, user } = showWithHuddles(design);
+    await user.type(await roomName(), " team");
+    expect(names()).toEqual(["Everyone", "Ada Lovelace", "Grace Hopper", "Linus Torvalds"]);
+    expect(screen.queryByRole("switch", { name: "Allow huddles in this room" })).not.toBeInTheDocument();
+    expect(screen.queryByText(HUDDLES_ALLOWED)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+    expect(sent()).toEqual({ name: "Design team", icon: "", kind: "open" });
+  });
+
+  it("tells the room's creator that it has no huddles, as it tells everyone else, and leaves that as it is when they save", async () => {
+    serve(asCreator(withoutHuddles(openSettings())), { saved: { ...design, name: "Design team", huddles: false } });
+    const { onSaved, user } = showWithHuddles(design, { design: huddle });
+    expect(await screen.findByText(HUDDLES_NOT_ALLOWED)).toBeInTheDocument();
+    expect(names()).toEqual(["Everyone", "Ada Lovelace", "Grace Hopper", "Linus Torvalds", "Huddles"]);
+    expect(screen.queryByRole("switch", { name: "Allow huddles in this room" })).not.toBeInTheDocument();
+    await user.type(await roomName(), " team{Enter}");
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+    expect(sent()).toEqual({ name: "Design team", icon: "", kind: "open" });
+  });
+
+  it("only tells people who can't change the room that it has no huddles, and nothing of a room that has them", async () => {
+    serve(withoutHuddles(openSettings(false)));
+    const none = showWithHuddles(design);
+    expect(await screen.findByText(HUDDLES_NOT_ALLOWED)).toBeInTheDocument();
+    expect(names()).toEqual(["Everyone", "Ada Lovelace", "Grace Hopper", "Linus Torvalds", "Huddles"]);
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+    none.unmount();
+
+    vi.restoreAllMocks();
+    serve(openSettings(false));
+    showWithHuddles(design);
+    expect(await screen.findByRole("heading", { level: 2, name: "Design" })).toBeInTheDocument();
+    expect(names()).toEqual(["Everyone", "Ada Lovelace", "Grace Hopper", "Linus Torvalds"]);
+    expect(screen.queryByText(HUDDLES_ALLOWED)).not.toBeInTheDocument();
   });
 });
 
@@ -466,7 +617,7 @@ describe("Delete a room", () => {
 describe("Leave a private room", () => {
   const leaveButton = () => screen.findByRole("button", { name: "Leave Leads" });
   const confirmed = (answer: boolean) => vi.spyOn(window, "confirm").mockReturnValue(answer);
-  const asMember: RoomSettings = { ...closedSettings, canAdminister: false };
+  const asMember: RoomSettings = { ...closedSettings, canAdminister: false, canChangeHuddles: false };
 
   it("offers Leave to someone in a private room they can't change, in its own panel", async () => {
     serve(asMember);

@@ -2,12 +2,15 @@ import { useContext, useEffect, useLayoutEffect, useRef, useState } from "react"
 import type { DirectoryUser, Me, Person, PersonAnswer, User, UserId } from "@ember/protocol";
 import type { AgentProfile } from "@ember/protocol/agents";
 import { isWorkersAiModel } from "@ember/protocol/assistant";
-import { ChatLines, EditPencil, Prohibition } from "@/components/icons/iconoir";
+import { ChatLines, EditPencil, Prohibition, TriangleFlag, UserXmark } from "@/components/icons/iconoir";
 import { PageLink } from "@/components/page-link";
+import { BlockingContext } from "@/hooks/use-blocking";
 import { PeopleContext, useNameOf } from "@/hooks/use-directory";
 import { useMounted } from "@/hooks/use-mounted";
+import { ReportingContext } from "@/hooks/use-reporting";
 import { leave, PROFILE_PATH, useBackPath } from "@/hooks/use-route";
 import { useTitle } from "@/hooks/use-title";
+import { asListed, canAsk } from "@/lib/agents";
 import { banPerson, fetchPerson, isSignedOut, unbanPerson } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { AgentBadge, isAgent } from "./agent-badge";
@@ -16,6 +19,9 @@ import { isMissing } from "./room-settings-page";
 import { Panel, SettingsPage } from "./settings-page";
 import { SignInLink } from "./sign-in-link";
 import { UserAvatar } from "./user-avatar";
+
+/** What the page of an AI agent kept for administrators, called `name`, says to anyone else, in place of the button that starts a DM with it. */
+export const adminsOnlyAsk = (name: string) => `Only administrators can ask ${name}.`;
 
 /** What Ban and Remove ban ask first. */
 export const CONFIRM_BAN = "Are you sure you want to ban this user? This will log them out, delete their messages, and block their IP addresses.";
@@ -50,8 +56,11 @@ const DIRECT_BUTTON =
  * button that starts a DM with them, or opens the one you have. Removed people show their name and that
  * they're no longer on this account, and bots their avatar, with the agent badge under an AI agent's
  * and, for an agent an administrator made, what `AboutAgent` says of it, then the DM button while
- * they're active. Administrators get a new sign-in link for anyone active who isn't a bot, themselves
- * included, and Ban for anyone else active or Remove ban for anyone banned. The people directory keeps
+ * they're active, or, for an agent only administrators can ask, to anyone else, that they can't.
+ * Administrators get a new sign-in link for anyone active who isn't a bot, themselves included, and Ban
+ * for anyone else active or Remove ban for anyone banned. Everyone gets Block for anyone else active,
+ * bots too, and Unblock for anyone they've blocked, whose page offers no DM, and Report for anyone else
+ * active, for their name, picture or bio. The people directory keeps
  * what it lists of them current. Members suspended for their Memberful membership's lapsing show as
  * removed people do, but to administrators, who see them as banned people, with why they can't sign in,
  * and Ban.
@@ -65,9 +74,13 @@ export function PersonPage({ userId, me, onStartDirect, onPersonChanged, reloadP
   useLayoutEffect(() => {
     listedNow.current = listed;
   }, [listed]);
-  const person = fetched && { ...fetched.person, ...listed };
+  const person = fetched && (listed ? asListed(fetched.person, listed) : fetched.person);
   const [starting, setStarting] = useState(false);
   const [banning, setBanning] = useState(false);
+  const blocking = useContext(BlockingContext);
+  const blocked = blocking.blocked.has(userId);
+  const [changingBlock, setChangingBlock] = useState(false);
+  const openReport = useContext(ReportingContext);
   // How many times a ban or its lifting has loaded the page again.
   const [reloads, setReloads] = useState(0);
   const back = useBackPath();
@@ -89,7 +102,7 @@ export function PersonPage({ userId, me, onStartDirect, onPersonChanged, reloadP
     return () => void (stopped = true);
   }, [userId, me.administrator, reloads, onMissing, onFailed]);
 
-  // As the sidebar's suggestions do, once the page's guard lets it, which a second click doesn't start again.
+  // Once the page's guard lets it, which a second click doesn't start again.
   const startDirect = () => {
     if (!person || starting) return;
     leave(async () => {
@@ -126,7 +139,18 @@ export function PersonPage({ userId, me, onStartDirect, onPersonChanged, reloadP
       .finally(() => mounted.current && setBanning(false));
   };
 
+  // Block and Unblock wait for the server, which a second click doesn't ask again.
+  const changeBlock = () => {
+    if (!person || changingBlock) return;
+    setChangingBlock(true);
+    void blocking.setBlocked(person, !blocked).finally(() => mounted.current && setChangingBlock(false));
+  };
+
   const mine = userId === me.id;
+  const blockButton = person && !mine && (person.status === "active" || blocked) && (
+    <BlockButton person={person} blocked={blocked} busy={changingBlock} onClick={changeBlock} />
+  );
+  const reportButton = person && !mine && person.status === "active" && <ReportButton person={person} onClick={() => openReport({ kind: "person", person })} />;
   // Gone as soon as you stop being an administrator, before the page has loaded them again.
   const transferId = me.administrator ? fetched?.transferId : undefined;
   const editProfile = mine && (
@@ -145,25 +169,37 @@ export function PersonPage({ userId, me, onStartDirect, onPersonChanged, reloadP
             {isAgent(person) && <AgentBadge className="mx-auto" />}
             {fetched?.agent && <AboutAgent name={person.name} agent={fetched.agent} meId={me.id} />}
             {person.role === "bot" ? (
-              person.status === "active" ? (
-                // At the page's text size.
-                <button type="button" aria-disabled={starting || undefined} onClick={startDirect} className={cn(DIRECT_BUTTON, "bg-background")}>
-                  <ChatLines className="size-[1.3em]" />
-                  <span className="sr-only">Ping {person.name}</span>
-                </button>
-              ) : (
-                <NoLongerHere name={person.name} />
-              )
+              <>
+                {person.status !== "active" ? (
+                  <NoLongerHere name={person.name} />
+                ) : !canAsk(person, me) ? (
+                  <div className="text-[0.8em] text-muted-foreground">{adminsOnlyAsk(person.name)}</div>
+                ) : (
+                  !blocked && (
+                    // At the page's text size.
+                    <button type="button" aria-disabled={starting || undefined} onClick={startDirect} className={cn(DIRECT_BUTTON, "bg-background")}>
+                      <ChatLines className="size-[1.3em]" />
+                      <span className="sr-only">Ping {person.name}</span>
+                    </button>
+                  )
+                )}
+                {blockButton}
+                {reportButton}
+              </>
             ) : person.status === "deactivated" || (person.status === "suspended" && !me.administrator) ? (
-              <div>
-                <h1 className="text-[23px] font-bold">{person.name}</h1>
-                <NoLongerHere name={person.name} />
-              </div>
+              <>
+                <div>
+                  <h1 className="text-[23px] font-bold">{person.name}</h1>
+                  <NoLongerHere name={person.name} />
+                </div>
+                {blockButton}
+              </>
             ) : (
               <>
                 {/* Campfire's `.gap` with a third of its block space between rows. */}
                 <div className="flex flex-col gap-x-[1ch] gap-y-[calc(1rem/3)]">
                   <h1 className="text-[23px] leading-[1.2] font-bold">{person.name}</h1>
+                  {person.username && <div className="text-muted-foreground">@{person.username}</div>}
                   {/* Campfire's link, left out for someone with no address. */}
                   {person.emailAddress !== undefined && (
                     <div>
@@ -178,18 +214,20 @@ export function PersonPage({ userId, me, onStartDirect, onPersonChanged, reloadP
                 </div>
                 {person.status === "active" && (
                   <>
-                    <div className="mx-[1ch] mt-4 px-[2ch] max-md:px-3">
-                      {/* Named for what it does, since its icon is hidden. */}
-                      <button
-                        type="button"
-                        aria-disabled={starting || undefined}
-                        onClick={startDirect}
-                        className={cn(DIRECT_BUTTON, "border-transparent bg-primary text-[17px] text-primary-foreground hover:not-active:brightness-70")}
-                      >
-                        <ChatLines className="size-[1.3em]" />
-                        <span className="sr-only">Ping {person.name}</span>
-                      </button>
-                    </div>
+                    {!blocked && (
+                      <div className="mx-[1ch] mt-4 px-[2ch] max-md:px-3">
+                        {/* Named for what it does, since its icon is hidden. */}
+                        <button
+                          type="button"
+                          aria-disabled={starting || undefined}
+                          onClick={startDirect}
+                          className={cn(DIRECT_BUTTON, "border-transparent bg-primary text-[17px] text-primary-foreground hover:not-active:brightness-70")}
+                        >
+                          <ChatLines className="size-[1.3em]" />
+                          <span className="sr-only">Ping {person.name}</span>
+                        </button>
+                      </div>
+                    )}
                     {transferId && (
                       <>
                         {/* Campfire's borderless `hr`, spacing the sign-in link from the button. */}
@@ -202,6 +240,8 @@ export function PersonPage({ userId, me, onStartDirect, onPersonChanged, reloadP
                 {person.status === "suspended" && (
                   <div className="mt-4">{person.name}’s Memberful membership has lapsed, so they can’t sign in until it’s renewed.</div>
                 )}
+                {blockButton && <div className="mt-4">{blockButton}</div>}
+                {reportButton && <div className="mt-4">{reportButton}</div>}
                 {me.administrator && !mine && (
                   <div className="mt-4">
                     <BanButton person={person} busy={banning} onClick={toggleBan} />
@@ -231,6 +271,26 @@ function BanButton({ person, busy, onClick }: { person: Person; busy: boolean; o
     >
       <Prohibition className="size-[1.3em]" />
       <span>{banned ? "Remove ban" : `Ban ${person.name}`}</span>
+    </button>
+  );
+}
+
+/** Block, or Unblock for someone you've blocked, the full width of the panel, as Ban is. */
+function BlockButton({ person, blocked, busy, onClick }: { person: Person; blocked: boolean; busy: boolean; onClick: () => void }) {
+  return (
+    <button type="button" aria-disabled={busy || undefined} onClick={onClick} className={cn(DIRECT_BUTTON, "bg-background")}>
+      <UserXmark className="size-[1.3em]" />
+      <span>{`${blocked ? "Unblock" : "Block"} ${person.name}`}</span>
+    </button>
+  );
+}
+
+/** Report, the full width of the panel, as Block is. */
+function ReportButton({ person, onClick }: { person: Person; onClick: () => void }) {
+  return (
+    <button type="button" onClick={onClick} className={cn(DIRECT_BUTTON, "bg-background")}>
+      <TriangleFlag className="size-[1.3em]" />
+      <span>{`Report ${person.name}`}</span>
     </button>
   );
 }

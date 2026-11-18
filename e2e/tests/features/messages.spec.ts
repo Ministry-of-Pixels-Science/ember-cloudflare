@@ -1,6 +1,6 @@
 import type { ServerFrame } from "@ember/protocol";
 import type { Locator, Page } from "@playwright/test";
-import { administratorOn, editorField, ROOM_SOCKET } from "../../fixtures";
+import { administratorOn, allowClipboard, editorField, ROOM_SOCKET } from "../../fixtures";
 import { expect, test, type Member } from "./fixtures";
 
 const phone = { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true };
@@ -54,6 +54,22 @@ test.describe("Send a message", () => {
 
     const grace = await members.signIn("Grace");
     await expect(grace.message("For whoever's next")).toBeVisible();
+  });
+});
+
+test.describe("Keyboard shortcuts", () => {
+  test("lists them on Cmd+/ or Ctrl+/ from the composer, and gives the composer back on Escape", async ({ members }) => {
+    const ada = await members.signIn("Ada");
+    await ada.composer().click();
+    await ada.page.keyboard.press("ControlOrMeta+/");
+    const dialog = ada.page.getByRole("dialog", { name: "Keyboard shortcuts" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole("region", { name: "Write a message" })).toContainText("Add a link");
+
+    await ada.page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(ada.composer()).toBeFocused();
+    await expect(ada.composer()).toHaveText("");
   });
 });
 
@@ -220,7 +236,9 @@ test.describe("Emoji-only messages", () => {
     await grace.say("Haha! 😄🤘");
     const ada = await members.signIn("Ada");
     const content = (text: RegExp) => ada.page.locator(".message-content").filter({ hasText: text });
-    await expect(content(/^😄🤘$/)).toHaveCSS("font-size", "33.6px");
+    // 2.24 times 15px, which WebKit gives as the nearest float, 33.599998px.
+    const fontSize = (text: RegExp) => content(text).evaluate((element) => parseFloat(getComputedStyle(element).fontSize));
+    await expect.poll(() => fontSize(/^😄🤘$/)).toBeCloseTo(33.6, 4);
     await expect(content(/^Haha! 😄🤘$/)).toHaveCSS("font-size", "15px");
   });
 });
@@ -378,6 +396,8 @@ test.describe("Message action bar", () => {
     const options = message.getByRole("button", { name: "Message options" });
 
     await ada.composer().focus();
+    // Back past the formatting row, which is one stop.
+    await ada.page.keyboard.press("Shift+Tab");
     await ada.page.keyboard.press("Shift+Tab");
     await expect(options).toBeFocused();
     // Focus shows Message options, not the bar.
@@ -570,6 +590,23 @@ test.describe("Message action bar", () => {
     expect(more.x + more.width + 5).toBe(Math.min(trigger.x + trigger.width, 320 - 8));
   });
 
+  test("keeps the bar's rows clear of the avatars on a narrow phone, each ending at its right edge", async ({ members, participant }) => {
+    await (await participant("Grace")).say("Ten actions on a narrow phone");
+    const ada = await members.signIn("Ada", { administrator: true, context: { ...phone, viewport: { width: 320, height: 620 } } });
+    const message = ada.message("Ten actions on a narrow phone");
+    await message.getByRole("button", { name: "Message options" }).tap();
+    // An administrator has six buttons after the reactions on someone else's message, of which five fit
+    // right of the avatars' column, so Edit starts a third row, under Report.
+    const more = await box(bar(message).getByRole("button", { name: "More reactions" }));
+    const thread = await box(bar(message).getByRole("link", { name: "Reply in thread" }));
+    const report = await box(bar(message).getByRole("button", { name: "Report message" }));
+    const edit = await box(bar(message).getByRole("button", { name: "Edit" }));
+    expect(thread).toMatchObject({ x: more.x - 4 * 44, y: more.y + 44 });
+    expect(report).toMatchObject({ x: more.x, y: thread.y });
+    expect(edit).toMatchObject({ x: more.x, y: thread.y + 44 });
+    expect((await box(bar(message))).x).toBeGreaterThanOrEqual((await box(message.getByText("Grace", { exact: true }))).x);
+  });
+
   test("opens the bar below Message options on touch screens where there's room", async ({ members, participant }) => {
     await (await participant("Grace")).say("Room below me");
     const ada = await members.signIn("Ada", { context: phone });
@@ -670,11 +707,12 @@ test.describe("More actions on a message", () => {
   });
 
   test("copies a message's text, leaving the actions open", async ({ members, participant }) => {
-    await (await participant("Grace")).say("Copy my words");
+    const grace = await participant("Grace");
+    await grace.say("Copy my words");
     const ada = await members.signIn("Ada");
-    await ada.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await allowClipboard(ada.page.context());
     const panel = await openMoreActions(ada, "Copy my words");
-    await expect(panel.getByRole("button")).toHaveText(["Quote", "Copy text", "Copy link"]);
+    await expect(panel.getByRole("button")).toHaveText(["Quote", "Copy text", "Copy link", `Block ${grace.session.user.name}`, "Report message"]);
     await panel.getByRole("button", { name: "Copy text" }).click();
     await expect.poll(() => ada.page.evaluate(() => navigator.clipboard.readText())).toBe("Copy my words");
     await expect(panel).toBeVisible();
@@ -754,7 +792,7 @@ test("copies a code block from its corner, keeping its line breaks", async ({ me
   const code = 'const greeting = "Hello";\nconsole.log(greeting);';
   await (await participant("Grace")).post(`<p>Run this snippet</p><pre data-language="javascript">${code}</pre>`);
   const ada = await members.signIn("Ada");
-  await ada.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await allowClipboard(ada.page.context());
   const block = ada.message("Run this snippet").locator(".code-block");
   const copy = block.getByRole("button", { name: "Copy code" });
   await ada.page.getByRole("heading", { level: 1 }).hover();
@@ -783,7 +821,7 @@ test.describe("Copy a link to a message", () => {
   test("copies the message's address from More actions, keeping it open and turning Copy link green", async ({ members, participant, rooms, baseURL }) => {
     await (await participant("Grace")).say("Link to me");
     const ada = await members.signIn("Ada");
-    await ada.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await allowClipboard(ada.page.context());
     // With a mouse, it's in More actions rather than on the bar.
     await expect((await ada.actions("Link to me")).getByRole("button", { name: "Copy link" })).toHaveCount(0);
     const panel = await openMoreActions(ada, "Link to me");
@@ -801,7 +839,7 @@ test.describe("Link to a message", () => {
   test("opens a message's room at its permalink", async ({ members, participant, rooms }) => {
     await (await participant("Grace")).say("Find me later");
     const ada = await members.signIn("Ada");
-    await ada.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await allowClipboard(ada.page.context());
     await (await openMoreActions(ada, "Find me later")).getByRole("button", { name: "Copy link" }).click();
     const path = new URL(await ada.page.evaluate(() => navigator.clipboard.readText())).pathname;
 
@@ -814,7 +852,7 @@ test.describe("Link to a message", () => {
   test("goes from a message's own address to its permalink", async ({ members, participant, rooms }) => {
     await (await participant("Grace")).say("Find me again");
     const ada = await members.signIn("Ada");
-    await ada.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await allowClipboard(ada.page.context());
     await (await openMoreActions(ada, "Find me again")).getByRole("button", { name: "Copy link" }).click();
     const permalink = new URL(await ada.page.evaluate(() => navigator.clipboard.readText())).pathname;
 
@@ -874,13 +912,31 @@ test.describe("Edit a message", () => {
     await expect(ada.page.getByRole("article")).not.toContainText("(edited)");
   });
 
-  test("shows the formatting toolbar above the text on a wide screen with a mouse", async ({ members }) => {
+  test("shows the formatting row above the text on a wide screen with a mouse, which formats the edit as its keys do", async ({ members }) => {
     const ada = await members.signIn("Ada");
     await ada.send("Format me");
     await (await ada.actions("Format me")).getByRole("button", { name: "Edit" }).click();
-    const bold = ada.message("Format me").getByRole("toolbar").getByRole("button", { name: "Bold" });
+    const bold = ada.message("Format me").getByRole("toolbar", { name: "Formatting" }).getByRole("button", { name: "Bold" });
     await expect(bold).toBeVisible();
     expect((await box(bold)).y).toBeLessThan((await box(ada.editor())).y);
+
+    await ada.editor().press("ControlOrMeta+a");
+    await bold.click();
+    await expect(ada.editor()).toBeFocused();
+    await ada.editor().press("ControlOrMeta+Shift+X");
+    // Escape closes Link's dialog, leaving the edit open.
+    await ada.editor().press("ControlOrMeta+k");
+    await expect(ada.page.getByRole("dialog", { name: "Edit link" }).or(ada.page.getByRole("dialog", { name: "Add link" }))).toBeVisible();
+    // The click shut the tooltip that named Bold as the pointer reached it, which takes Escape until it has faded,
+    // hidden under the dialog as it is.
+    await expect(ada.page.getByRole("tooltip", { includeHidden: true })).toHaveCount(0);
+    await ada.page.keyboard.press("Escape");
+    await expect(ada.page.getByRole("dialog")).toBeHidden();
+    await expect(ada.editor()).toBeFocused();
+
+    await ada.editor().press("ControlOrMeta+Enter");
+    await expect(ada.message("Format me").locator(".message-content strong")).toHaveText("Format me");
+    await expect(ada.message("Format me").locator(".message-content s")).toHaveText("Format me");
   });
 
   test("scrolls the editor to the middle of the timeline as it opens, from the newest messages too", async ({ members, participant }) => {
@@ -911,14 +967,22 @@ test.describe("Edit a message", () => {
     await expect.poll(() => ada.outOfView(ada.message("My newest").locator(".message-edit"))).toBe(0);
   });
 
-  test("saves from Save changes with the Link field open, as Lexxy checks that itself", async ({ members }) => {
+  test("links what's selected from Link's dialog, whose Enter saves the link and leaves the edit open", async ({ members }) => {
     const ada = await members.signIn("Ada");
     await ada.send("Draft");
     await (await ada.actions("Draft")).getByRole("button", { name: "Edit" }).click();
     await ada.editor().fill("Final");
+    await ada.editor().press("ControlOrMeta+a");
     await ada.editor().press("ControlOrMeta+k");
+    const dialog = ada.page.getByRole("dialog", { name: "Add link" });
+    await dialog.getByLabel("Link").fill("example.com");
+    await dialog.getByLabel("Link").press("Enter");
+    await expect(dialog).toBeHidden();
+    await expect(ada.editor()).toBeFocused();
+    await expect(ada.editor().getByRole("link", { name: "Final" })).toHaveAttribute("href", "https://example.com");
     await ada.page.getByRole("button", { name: "Save changes" }).click();
     await expect(ada.message("Final")).toContainText("(edited)");
+    await expect(ada.message("Final").getByRole("link", { name: "Final" })).toHaveAttribute("href", "https://example.com");
   });
 
   test("discards an edit with Escape or Close editor and discard changes", async ({ members }) => {

@@ -179,11 +179,20 @@ export const MEMBERFUL_OR_SSO_SIGN_IN_NEEDED =
   "Members sign in with Memberful or single sign-on. Only administrators and invited people can sign in with a password.";
 /** Why connecting from your profile is refused without your password, while you have one. */
 export const SSO_PASSWORD_NEEDED = "Enter your password to connect single sign-on.";
-/** Why disconnecting is refused without your password, without one, without an email address, or while you aren't connected. */
+/**
+ * Why disconnecting is refused without your password, without one, which you'd have nothing to sign in
+ * with without, and which single sign-on signing you in gives you none of, without an email address, or
+ * while you aren't connected.
+ */
 export const SSO_DISCONNECT_PASSWORD_NEEDED = "Enter your password to disconnect single sign-on.";
-export const SSO_DISCONNECT_WITHOUT_PASSWORD = "Set a password before you disconnect, so you can still sign in.";
+export const SSO_DISCONNECT_WITHOUT_PASSWORD = "You sign in with single sign-on alone, so it can't be disconnected.";
 export const SSO_DISCONNECT_WITHOUT_EMAIL = "Add an email address before you disconnect, so you can still sign in.";
 export const SSO_NOT_CONNECTED = "Single sign-on isn't connected.";
+/**
+ * Why a first password is refused to someone single sign-on signs in, while it does: it's their way in,
+ * and a password that whoever holds their session could set would be another, as with Memberful.
+ */
+export const PASSWORD_WITH_SSO = "You sign in with single sign-on, so there's no password to set.";
 
 /** Why single sign-on can't be turned on yet, nor SSO only. */
 export const SSO_SETUP_NEEDED = "Set up single sign-on first.";

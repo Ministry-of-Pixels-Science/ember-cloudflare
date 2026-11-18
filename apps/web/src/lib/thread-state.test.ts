@@ -97,6 +97,16 @@ describe("Open a thread", () => {
     expect(frame(state, { type: "typing", user: ada, typing: true })).toBe(state);
     expect(frame(state, { type: "typing", user: ada, typing: true, threadId: "m9" })).toBe(state);
   });
+
+  it("has its message once the room writes it, as a huddle's thread can be open before its message is there, and as the room tells of it again", () => {
+    const without = opened(initialThreadState({ parentId: "m1" }), [], { of: null });
+    const written = frame(without, { type: "message.created", message: parent, seq: 1 });
+    expect(written.parent).toEqual(parent);
+    expect(written.replies).toBe(without.replies);
+
+    const told = message({ updatedAt: "2026-10-12T10:05:00.000Z" });
+    expect(frame(written, { type: "message.created", message: told, seq: 2 }).parent).toEqual(told);
+  });
 });
 
 describe("Follow a thread as it changes", () => {

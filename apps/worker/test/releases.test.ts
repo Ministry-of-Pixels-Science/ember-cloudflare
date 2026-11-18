@@ -1,6 +1,6 @@
 import { EMBER_REPOSITORY, type NewWorkspace, type ReleaseCheck } from "@ember/protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AFRESH_AFTER_MS, ANSWER_KEPT_MS, forgetNewestRelease, isNewer, LIST_TAGS, NO_ANSWER_KEPT_MS } from "../src/releases";
+import { AFRESH_AFTER_MS, ANSWER_KEPT_MS, forgetNewestRelease, LIST_TAGS, NO_ANSWER_KEPT_MS } from "../src/releases";
 import { isBeta, releaseNameOf, VERSION } from "../src/version";
 import type { Env } from "../src/env";
 import { api, apiWith, cookieOf, freshDeploy, shown, signIn, type Session } from "./support";
@@ -104,7 +104,14 @@ describe("Checking for a newer release", () => {
     const response = await checkRelease(administrator);
     expect(response.status).toBe(200);
     expect(response.headers.get("Cache-Control")).toBe("no-store");
-    expect(await response.json()).toEqual({ release: releaseNameOf(VERSION), beta: isBeta(VERSION), newest: { release: releaseNameOf(NEXT), notes: pageOf(NEXT), newer: true }, newestBeta: null, copy: null });
+    expect(await response.json()).toEqual({
+      release: releaseNameOf(VERSION),
+      beta: isBeta(VERSION),
+      newest: { release: releaseNameOf(NEXT), version: NEXT, notes: pageOf(NEXT), newer: true },
+      checkedAt: expect.any(String),
+      newestBeta: null,
+      copy: null,
+    });
     expect(asked).toEqual([{ url: LATEST, redirect: "manual", userAgent: `Ember/${VERSION} (+${EMBER_REPOSITORY})` }]);
   });
 
@@ -116,7 +123,14 @@ describe("Checking for a newer release", () => {
     ] as const) {
       forgetNewestRelease();
       latestIs(version);
-      expect(await releaseCheckFor(administrator)).toEqual({ release: releaseNameOf(VERSION), beta: isBeta(VERSION), newest: { release: name, notes: pageOf(version), newer: false }, newestBeta: null, copy: null });
+      expect(await releaseCheckFor(administrator)).toEqual({
+        release: releaseNameOf(VERSION),
+        beta: isBeta(VERSION),
+        newest: { release: name, version, notes: pageOf(version), newer: false },
+        checkedAt: expect.any(String),
+        newestBeta: null,
+        copy: null,
+      });
     }
   });
 
@@ -132,21 +146,6 @@ describe("Checking for a newer release", () => {
     }
   });
 
-  it("puts a beta after the release before it and before its own, as copies take it", () => {
-    for (const [later, earlier] of [
-      ["0.5.0-beta.1", "0.4.2"],
-      ["0.5.0-beta.2", "0.5.0-beta.1"],
-      ["0.5.0-beta.10", "0.5.0-beta.9"],
-      ["0.5.0", "0.5.0-beta.10"],
-      ["0.5.1", "0.5.0"],
-      ["0.6.0-beta.1", "0.5.9"],
-    ]) {
-      expect(isNewer(later!, earlier!), `${later} after ${earlier}`).toBe(true);
-      expect(isNewer(earlier!, later!), `${earlier} after ${later}`).toBe(false);
-      expect(isNewer(later!, later!), `${later} after itself`).toBe(false);
-    }
-  });
-
   it("names a beta for its release, as 0.5 beta 1, and a release without its trailing .0", () => {
     expect(["0.5.0-beta.1", "0.5.1-beta.12", "1.0.0", "0.10.0", "0.4.2", "0.5.10"].map(releaseNameOf)).toEqual(["0.5 beta 1", "0.5.1 beta 12", "1.0", "0.10", "0.4.2", "0.5.10"]);
     expect(["0.5.0-beta.1", "0.5.0", "0.5.0-rc.1"].map(isBeta)).toEqual([true, false, false]);
@@ -158,7 +157,7 @@ describe("Checking for a newer release", () => {
     const logged = vi.spyOn(console, "warn").mockImplementation(() => {});
     const beta = `${Number(VERSION.split(".")[0]) + 1}.0.0-beta.1`;
     latestIs(beta);
-    expect(await releaseCheckFor(administrator)).toEqual({ release: releaseNameOf(VERSION), beta: false, newest: null, newestBeta: null, copy: null });
+    expect(await releaseCheckFor(administrator)).toEqual({ release: releaseNameOf(VERSION), beta: false, newest: null, checkedAt: null, newestBeta: null, copy: null });
     expect(logged.mock.calls).toEqual([[`GitHub didn't name Ember's newest release: GitHub's latest release is a beta, ${pageOf(beta)}`]]);
   });
 
@@ -166,7 +165,7 @@ describe("Checking for a newer release", () => {
     const administrator = await setUp();
     const moved = "https://github.com/someone-else/ember";
     const asked = fakeGitHub((url) => (url === LATEST ? redirectTo(`${moved}/releases/latest`, 301) : redirectTo(`${moved}/releases/tag/v${NEXT}`)));
-    expect((await releaseCheckFor(administrator)).newest).toEqual({ release: releaseNameOf(NEXT), notes: `${moved}/releases/tag/v${NEXT}`, newer: true });
+    expect((await releaseCheckFor(administrator)).newest).toEqual({ release: releaseNameOf(NEXT), version: NEXT, notes: `${moved}/releases/tag/v${NEXT}`, newer: true });
     expect(asked.map(({ url }) => url)).toEqual([LATEST, `${moved}/releases/latest`]);
   });
 
@@ -187,7 +186,7 @@ describe("Checking for a newer release", () => {
     fakeGitHub(() => failure());
     for (failure of failures) {
       forgetNewestRelease();
-      expect(await releaseCheckFor(administrator)).toEqual({ release: releaseNameOf(VERSION), beta: isBeta(VERSION), newest: null, newestBeta: null, copy: null });
+      expect(await releaseCheckFor(administrator)).toEqual({ release: releaseNameOf(VERSION), beta: isBeta(VERSION), newest: null, checkedAt: null, newestBeta: null, copy: null });
     }
     expect(logged.mock.calls).toEqual([
       ["GitHub didn't name Ember's newest release: GitHub answered 200"],
@@ -216,7 +215,7 @@ describe("Checking for a newer release", () => {
     expect(asked).toHaveLength(1);
 
     vi.setSystemTime(start + NO_ANSWER_KEPT_MS);
-    const named = { release: releaseNameOf(NEXT), notes: pageOf(NEXT), newer: true };
+    const named = { release: releaseNameOf(NEXT), version: NEXT, notes: pageOf(NEXT), newer: true };
     expect((await releaseCheckFor(administrator)).newest).toEqual(named);
     expect(asked).toHaveLength(2);
     answer = () => redirectTo(pageOf(VERSION));
@@ -225,7 +224,7 @@ describe("Checking for a newer release", () => {
     expect(asked).toHaveLength(2);
 
     vi.setSystemTime(start + NO_ANSWER_KEPT_MS + ANSWER_KEPT_MS);
-    expect((await releaseCheckFor(administrator)).newest).toEqual({ release: releaseNameOf(VERSION), notes: pageOf(VERSION), newer: false });
+    expect((await releaseCheckFor(administrator)).newest).toEqual({ release: releaseNameOf(VERSION), version: VERSION, notes: pageOf(VERSION), newer: false });
     expect(asked).toHaveLength(3);
     // Ember's tags, for its newest beta, each time with the release.
     expect(askedForTags).toHaveLength(3);
@@ -241,7 +240,7 @@ describe("Checking for a newer release", () => {
       while (!answerFirst) await new Promise((resolve) => setTimeout(resolve, 5));
       return new Response("Unavailable", { status: 503 });
     });
-    const named = { release: releaseNameOf(NEXT), notes: pageOf(NEXT), newer: true };
+    const named = { release: releaseNameOf(NEXT), version: NEXT, notes: pageOf(NEXT), newer: true };
     const newestIn = async (response: Response) => ((await response.json()) as ReleaseCheck).newest;
     const checks = [checkRelease(administrator), checkRelease(administrator)];
     expect(await newestIn((await Promise.race(checks)).clone())).toEqual(named);
@@ -275,7 +274,7 @@ describe("Checking afresh, as opening Admin does", () => {
     const asked = fakeGitHub(() => redirectTo(pageOf(latest)));
     const start = Date.now();
     vi.useFakeTimers({ toFake: ["Date"], now: start });
-    const newest = { release: releaseNameOf(VERSION), notes: pageOf(VERSION), newer: false };
+    const newest = { release: releaseNameOf(VERSION), version: VERSION, notes: pageOf(VERSION), newer: false };
     expect((await releaseCheckFor(administrator)).newest).toEqual(newest);
     // GitHub publishes a newer release, which an ordinary check doesn't hear of for six hours.
     latest = NEXT;
@@ -285,8 +284,15 @@ describe("Checking afresh, as opening Admin does", () => {
     expect(asked).toHaveLength(1);
 
     vi.setSystemTime(start + AFRESH_AFTER_MS);
-    const next = { release: releaseNameOf(NEXT), notes: pageOf(NEXT), newer: true };
-    expect(await releaseCheckFor(administrator, checkReleaseAfresh)).toEqual({ release: releaseNameOf(VERSION), beta: isBeta(VERSION), newest: next, newestBeta: null, copy: null });
+    const next = { release: releaseNameOf(NEXT), version: NEXT, notes: pageOf(NEXT), newer: true };
+    expect(await releaseCheckFor(administrator, checkReleaseAfresh)).toEqual({
+      release: releaseNameOf(VERSION),
+      beta: isBeta(VERSION),
+      newest: next,
+      checkedAt: new Date(start + AFRESH_AFTER_MS).toISOString(),
+      newestBeta: null,
+      copy: null,
+    });
     expect(asked.map(({ url }) => url)).toEqual([LATEST, LATEST]);
     // Ordinary checks say so too, for six hours from then, and another made afresh within the minute asks nothing.
     expect((await releaseCheckFor(administrator)).newest).toEqual(next);
@@ -303,7 +309,7 @@ describe("Checking afresh, as opening Admin does", () => {
   it("asks GitHub for a check made afresh where it hasn't asked yet, as a new isolate hasn't", async () => {
     const administrator = await setUp();
     const asked = latestIs(NEXT);
-    expect((await releaseCheckFor(administrator, checkReleaseAfresh)).newest).toEqual({ release: releaseNameOf(NEXT), notes: pageOf(NEXT), newer: true });
+    expect((await releaseCheckFor(administrator, checkReleaseAfresh)).newest).toEqual({ release: releaseNameOf(NEXT), version: NEXT, notes: pageOf(NEXT), newer: true });
     expect(asked).toHaveLength(1);
   });
 
@@ -314,7 +320,7 @@ describe("Checking afresh, as opening Admin does", () => {
     const asked = fakeGitHub(() => answer());
     const start = Date.now();
     vi.useFakeTimers({ toFake: ["Date"], now: start });
-    const next = { release: releaseNameOf(NEXT), notes: pageOf(NEXT), newer: true };
+    const next = { release: releaseNameOf(NEXT), version: NEXT, notes: pageOf(NEXT), newer: true };
     expect((await releaseCheckFor(administrator)).newest).toEqual(next);
 
     answer = () => new Response("Unavailable", { status: 503 });
@@ -329,6 +335,47 @@ describe("Checking afresh, as opening Admin does", () => {
     expect((await releaseCheckFor(administrator, checkReleaseAfresh)).newest).toEqual(next);
     expect(asked).toHaveLength(3);
   });
+
+  it("says when GitHub named the release, which General says it last checked, renewed by asking again but not by hearing none", async () => {
+    const administrator = await setUp();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    let answer = () => redirectTo(pageOf(NEXT));
+    fakeGitHub(() => answer());
+    const start = Date.now();
+    vi.useFakeTimers({ toFake: ["Date"], now: start });
+    const at = (time: number) => new Date(time).toISOString();
+    expect((await releaseCheckFor(administrator)).checkedAt).toBe(at(start));
+    // Kept with the release, as ordinary checks say it, and one made afresh within the minute.
+    vi.setSystemTime(start + AFRESH_AFTER_MS - 1);
+    expect((await releaseCheckFor(administrator)).checkedAt).toBe(at(start));
+    expect((await releaseCheckFor(administrator, checkReleaseAfresh)).checkedAt).toBe(at(start));
+    vi.setSystemTime(start + AFRESH_AFTER_MS);
+    expect((await releaseCheckFor(administrator, checkReleaseAfresh)).checkedAt).toBe(at(start + AFRESH_AFTER_MS));
+
+    // A check that hears no release says when GitHub named the one kept, and once none is, nothing of when.
+    answer = () => new Response("Unavailable", { status: 503 });
+    vi.setSystemTime(start + 2 * AFRESH_AFTER_MS);
+    const next = { release: releaseNameOf(NEXT), version: NEXT, notes: pageOf(NEXT), newer: true };
+    expect(await releaseCheckFor(administrator, checkReleaseAfresh)).toMatchObject({ newest: next, checkedAt: at(start + AFRESH_AFTER_MS) });
+    vi.setSystemTime(start + AFRESH_AFTER_MS + ANSWER_KEPT_MS);
+    expect(await releaseCheckFor(administrator)).toMatchObject({ newest: null, checkedAt: null });
+  });
+
+  it("says GitHub named the release when it did, though it lists the tags seconds after", async () => {
+    const administrator = await setUp();
+    const start = Date.now();
+    vi.useFakeTimers({ toFake: ["Date"], now: start });
+    fakeGitHub(
+      () => redirectTo(pageOf(NEXT)),
+      async () => {
+        // Long after the release is named, which takes no time here.
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        vi.setSystemTime(start + 3_000);
+        return tagsOf();
+      },
+    );
+    expect((await releaseCheckFor(administrator)).checkedAt).toBe(new Date(start).toISOString());
+  });
 });
 
 describe("Ember's newest beta", () => {
@@ -337,7 +384,7 @@ describe("Ember's newest beta", () => {
   const NEXTS_BETA = `${major + 1}.0.0-beta.3`;
   const betaAfter = (beta: number) => `${major + 2}.0.0-beta.${beta}`;
   /** What the check says of `version`, as General names it, with its notes. */
-  const namedAs = (version: string, newer: boolean) => ({ release: releaseNameOf(version), notes: pageOf(version), newer });
+  const namedAs = (version: string, newer: boolean) => ({ release: releaseNameOf(version), version, notes: pageOf(version), newer });
 
   it("names the newest beta among the tags git lists while it's ahead of the newest release, asking as git ls-remote does", async () => {
     const administrator = await setUp();

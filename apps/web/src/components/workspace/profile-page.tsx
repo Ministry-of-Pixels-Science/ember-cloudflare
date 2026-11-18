@@ -8,6 +8,7 @@ import {
   MAX_USER_NAME_LENGTH,
   MEMBERFUL_DISCONNECTED_NOTICE,
   MIN_PASSWORD_LENGTH,
+  type AccountDeletion,
   type Me,
   type MemberfulStatus,
   type Profile,
@@ -16,11 +17,13 @@ import {
   type SidebarRoom,
 } from "@ember/protocol";
 import { SSO_DISCONNECTED_NOTICE, type SsoStatus } from "@ember/protocol/sso";
+import type { HuddleSounds } from "@ember/protocol/huddles";
 import { AUTH_FORM } from "@/components/auth-page";
 import { FIELD_INPUT, Field, SubmitButton } from "@/components/field";
 import { useFlash } from "@/components/flash";
 import { LogOut } from "@/components/icons/iconoir";
 import { Input } from "@/components/ui/input";
+import { UsernameField } from "@/components/username-field";
 import { PeopleContext } from "@/hooks/use-directory";
 import { useMounted } from "@/hooks/use-mounted";
 import { usePush } from "@/hooks/use-push";
@@ -32,7 +35,10 @@ import { pushEndpoint } from "@/lib/push";
 import type { RoomAnswer } from "@/lib/room-list";
 import { cn } from "@/lib/utils";
 import { AnswerLevels } from "./answer-levels";
+import { BlockedPeople } from "./blocked-people";
 import { ConversationNotifications } from "./conversation-notifications";
+import { DeleteAccount } from "./delete-account";
+import { HuddleSoundSwitches } from "./huddle-sound-switches";
 import { MemberfulConnection } from "./memberful-connection";
 import { InstallInstructions } from "./notification-help";
 import { HEADER_TEXT_BUTTON } from "./page-header";
@@ -41,6 +47,8 @@ import { PageHeading, Panel, SettingsPage } from "./settings-page";
 import { SignInLink } from "./sign-in-link";
 import { SingleSignOnConnection } from "./sso-connection";
 import { avatarUrlOf, avatarVersionOf } from "./user-avatar";
+import { YourApps } from "./your-apps";
+import { YourOutsideAi } from "./your-outside-ai";
 
 interface Props {
   me: Me;
@@ -48,13 +56,19 @@ interface Props {
   rooms: SidebarRoom[] | null;
   /** Called as a bell saves your level in a room, with what gives the room the level the server answers. */
   askForRoom: () => (answer: RoomAnswer) => void;
+  /** Which of a huddle's sounds you hear, as the sidebar's list has them, or null while huddles are off, and until the list has loaded. */
+  huddleSounds: HuddleSounds | null;
+  /** Called as a switch saves one of a huddle's sounds, with what keeps the sounds the server answers. */
+  askForHuddleSounds: () => (sounds: HuddleSounds) => void;
   /** Signs out, settling with whether it did. */
   onSignOut: () => Promise<boolean>;
+  /** Deletes your account and goes to sign in, settling once it's deleted, or failing with why not. */
+  onDeleteAccount: (deletion: AccountDeletion) => Promise<void>;
   /** Says why loading or saving failed, as the workspace's alerts do. */
   onFailed: (error: unknown) => void;
 }
 
-const FIELDS = ["name", "emailAddress", "bio"] as const;
+const FIELDS = ["name", "username", "emailAddress", "bio"] as const;
 
 /** What the profile says once it has saved a new avatar. */
 export const AVATAR_CHANGED = "It may take up to 30 minutes to change everywhere.";
@@ -66,7 +80,7 @@ type Picture = Pick<Profile, "avatarUrl" | "avatar">;
 type Fields = Record<(typeof FIELDS)[number], string>;
 
 /** A profile in the form. */
-const fieldsOf = ({ name, emailAddress, bio }: Profile): Fields => ({ name, emailAddress: emailAddress ?? "", bio: bio ?? "" });
+const fieldsOf = ({ name, username, emailAddress, bio }: Profile): Fields => ({ name, username: username ?? "", emailAddress: emailAddress ?? "", bio: bio ?? "" });
 
 /**
  * The fields `typed` differently from `saved`, the profile as the page last loaded or saved it, and
@@ -109,18 +123,20 @@ function disconnectsWithNewPassword(memberful: MemberfulStatus | null, sso: SsoS
 /**
  * Your profile: how to install Ember, for the browsers that get steps, then your avatar, which a photo
  * picked saves at once, showing it meanwhile, with the notice "It may take up to 30 minutes to change
- * everywhere.", and Remove avatar takes away, then your name, email address, a new password, your
- * current password while you have one, which changing your email address or password takes, and your
+ * everywhere.", and Remove avatar takes away, then your name, username, email address, a new password,
+ * unless Memberful or single sign-on signs you in without one, your current password while you have
+ * one, which changing your email address or password takes, and your
  * bio, which Save changes saves with the notice "✓", keeping the page, then, while members sign in with
  * Memberful, connecting your Memberful account, or the one you've connected, which Disconnect Memberful
  * unlinks with the notice "Your Memberful account is disconnected.", then, likewise, while members sign
- * in with single sign-on, connecting your account at the provider, then, while Ember AI is on, how much @ember thinks and
- * how long it answers you, then your notification level in each of your rooms and DMs, then a sign-in
- * link for you, a new one each time the page loads or saves, and Log out in the top bar. Go Back
- * returns to the page it was opened from. Your avatar, name and bio reach everyone's open pages at
- * once, through the workspace socket, as they reach the rail.
+ * in with single sign-on, connecting your account at the provider, then, while Ember AI is on, how much
+ * @ember thinks and how long it answers you, then, while huddles are on, which of a huddle's sounds you
+ * hear, then your notification level in each of your rooms and DMs, then a sign-in
+ * link for you, a new one each time the page loads or saves, then Delete my account, and Log out in
+ * the top bar. Go Back returns to the page it was opened from. Your avatar, name, username and bio
+ * reach everyone's open pages at once, through the workspace socket, as they reach the rail.
  */
-export function ProfilePage({ me, rooms, askForRoom, onSignOut, onFailed }: Props) {
+export function ProfilePage({ me, rooms, askForRoom, huddleSounds, askForHuddleSounds, onSignOut, onDeleteAccount, onFailed }: Props) {
   const [fields, setFields] = useState<Fields | null>(null);
   /** The profile as the page last loaded or saved it. */
   const saved = useRef<Fields | null>(null);
@@ -131,6 +147,12 @@ export function ProfilePage({ me, rooms, askForRoom, onSignOut, onFailed }: Prop
   const [transferId, setTransferId] = useState<string | null>(null);
   /** Whether you have a password, which the form then asks for to change your email address or password. */
   const [hasPassword, setHasPassword] = useState(false);
+  /**
+   * Your name as the profile last loaded or saved it, which Delete my account asks someone without a
+   * password to type, as the server has it: a name saved while the workspace socket is down reaches
+   * `me` only once it's back. A photo's answer, which can arrive after a save, has the name from before.
+   */
+  const [savedName, setSavedName] = useState(me.name);
   /**
    * Whether you have an email address saved, which signing in with your password takes, so disconnecting
    * Memberful needs it: from loading and saving the profile alone, which change it, so a photo's answer
@@ -145,6 +167,9 @@ export function ProfilePage({ me, rooms, askForRoom, onSignOut, onFailed }: Prop
   const [membershipNeeded, setMembershipNeeded] = useState(true);
   /** Which model @ember answers you with, how much it thinks and how long its answers are, or null while Ember AI is off. */
   const [assistant, setAssistant] = useState<Profile["assistant"]>(null);
+  /** The connected apps you can sign in to yourself, each with your sign-in to it, if you've made one. */
+  const [apps, setApps] = useState<Profile["apps"]>([]);
+  const [outsideAi, setOutsideAi] = useState<Profile["outsideAi"]>(null);
   const [saving, setSaving] = useState(false);
   const passwordInput = useRef<HTMLInputElement>(null);
   const currentPasswordInput = useRef<HTMLInputElement>(null);
@@ -166,11 +191,15 @@ export function ProfilePage({ me, rooms, askForRoom, onSignOut, onFailed }: Prop
         if (stopped) return;
         saved.current = fieldsOf(answer.profile);
         setFields(saved.current);
+        setSavedName(answer.profile.name);
         setHasEmailAddress(answer.profile.emailAddress !== null);
         showAnswer(answer);
         // Only from here and the Ember AI section's own saves, as a save of the profile or a photo can
         // answer after a change there, with your model and levels from before it.
         setAssistant(answer.profile.assistant);
+        // The same goes for the Apps section, which signing out there changes.
+        setApps(answer.profile.apps);
+        setOutsideAi(answer.profile.outsideAi);
       },
       (error: unknown) => {
         // A page left before its profile loads only reports a session that's ended, which goes to sign in.
@@ -260,6 +289,7 @@ export function ProfilePage({ me, rooms, askForRoom, onSignOut, onFailed }: Prop
         setSaving(false);
         const now = fieldsOf(answer.profile);
         saved.current = now;
+        setSavedName(answer.profile.name);
         setFields((fields) => fields && settled(fields, sent, now));
         setHasEmailAddress(answer.profile.emailAddress !== null);
         // The passwords leave their fields, unless others were typed meanwhile.
@@ -279,6 +309,8 @@ export function ProfilePage({ me, rooms, askForRoom, onSignOut, onFailed }: Prop
   // Another tab's change reaches the people directory, whose address is the later one then.
   const listed = avatarUrlOf(people, me);
   const avatarUrl = picture && avatarVersionOf(picture.avatarUrl) >= avatarVersionOf(listed) ? picture.avatarUrl : listed;
+  // Someone Memberful or single sign-on signs in who has no password is given none, as the Worker refuses one: it's their way in.
+  const signsInElsewhereAlone = !hasPassword && Boolean(memberful?.connected || sso?.connected);
 
   const logOut = (
     <button type="button" onClick={() => leave(onSignOut)} className={HEADER_TEXT_BUTTON}>
@@ -318,6 +350,7 @@ export function ProfilePage({ me, rooms, askForRoom, onSignOut, onFailed }: Prop
               className={FIELD_INPUT}
             />
           </Field>
+          <UsernameField value={fields?.username ?? ""} onChange={(username) => setFields((fields) => fields && { ...fields, username })} disabled={!fields} />
           <Field id="user_email_address" label="Email address" translation="email_address">
             <Input
               id="user_email_address"
@@ -331,27 +364,29 @@ export function ProfilePage({ me, rooms, askForRoom, onSignOut, onFailed }: Prop
               className={FIELD_INPUT}
             />
           </Field>
-          <Field id="user_password" label="New password" translation="update_password">
-            {/* Uncontrolled, so what's typed never reaches its `value` attribute, where custom CSS could read it. */}
-            <Input
-              ref={passwordInput}
-              id="user_password"
-              type="password"
-              autoComplete="new-password"
-              placeholder="Change password"
-              minLength={MIN_PASSWORD_LENGTH}
-              maxLength={MAX_PASSWORD_LENGTH}
-              aria-describedby="profile-password-help"
-              disabled={!fields}
-              className={FIELD_INPUT}
-            />
-            <p id="profile-password-help" className="text-[0.8em] text-muted-foreground">
-              {/* Someone who signed in with Memberful, single sign-on or just a name has no password. */}
-              {fields && !hasPassword ? "Leave blank to keep signing in without a password." : "Leave blank to keep your current password."}
-              {/* As the one it replaces connected it, while it's saved with an email address to sign in by. */}
-              {fields && hasPassword && fields.emailAddress.trim() !== "" && disconnectsWithNewPassword(memberful, sso)}
-            </p>
-          </Field>
+          {!signsInElsewhereAlone && (
+            <Field id="user_password" label="New password" translation="update_password">
+              {/* Uncontrolled, so what's typed never reaches its `value` attribute, where custom CSS could read it. */}
+              <Input
+                ref={passwordInput}
+                id="user_password"
+                type="password"
+                autoComplete="new-password"
+                placeholder="Change password"
+                minLength={MIN_PASSWORD_LENGTH}
+                maxLength={MAX_PASSWORD_LENGTH}
+                aria-describedby="profile-password-help"
+                disabled={!fields}
+                className={FIELD_INPUT}
+              />
+              <p id="profile-password-help" className="text-[0.8em] text-muted-foreground">
+                {/* Someone who signed in with just a name has no password, nor has someone who joined with Memberful or single sign-on once it no longer signs them in. */}
+                {fields && !hasPassword ? "Leave blank to keep signing in without a password." : "Leave blank to keep your current password."}
+                {/* As the one it replaces connected it, while it's saved with an email address to sign in by. */}
+                {fields && hasPassword && fields.emailAddress.trim() !== "" && disconnectsWithNewPassword(memberful, sso)}
+              </p>
+            </Field>
+          )}
           {hasPassword && (
             <Field id="user_current_password" label="Current password" translation="password">
               {/* Uncontrolled too, and asked for as sign-in asks for it. */}
@@ -410,8 +445,13 @@ export function ProfilePage({ me, rooms, askForRoom, onSignOut, onFailed }: Prop
           />
         )}
         {assistant && <AnswerLevels assistant={assistant} onChanged={setAssistant} onFailed={onFailed} />}
+        {apps.length > 0 && <YourApps apps={apps} onChanged={setApps} onFailed={onFailed} />}
+        {outsideAi && <YourOutsideAi connections={outsideAi} onChanged={setOutsideAi} onFailed={onFailed} />}
+        {huddleSounds && <HuddleSoundSwitches sounds={huddleSounds} askForSounds={askForHuddleSounds} onFailed={onFailed} />}
         {rooms && <ConversationNotifications me={me} rooms={rooms} askForRoom={askForRoom} onFailed={onFailed} />}
+        <BlockedPeople />
         {transferId && <SignInLink transferId={transferId} mine />}
+        {fields && <DeleteAccount name={savedName} hasPassword={hasPassword} onDelete={onDeleteAccount} onFailed={onFailed} />}
       </Panel>
     </SettingsPage>
   );

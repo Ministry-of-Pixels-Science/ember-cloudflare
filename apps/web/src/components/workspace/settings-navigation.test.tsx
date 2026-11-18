@@ -37,6 +37,23 @@ describe("Community settings page", () => {
     expect(current()).toHaveClass("aria-[current=page]:bg-hover", "aria-[current=page]:font-semibold");
   });
 
+  it("counts administrators' open reports on Membership, which holds their list, as screen readers hear too", () => {
+    const { rerender } = render(<SettingsNavigation section="community-settings" administrator openReports={2} />);
+    const membership = screen.getByRole("link", { name: "Membership" });
+    expect(membership).toHaveAccessibleDescription("2 open reports");
+    expect(membership.lastElementChild).toHaveTextContent("2");
+    expect(membership.lastElementChild).toHaveAttribute("aria-hidden", "true");
+    rerender(<SettingsNavigation section="community-settings" administrator openReports={1} />);
+    expect(membership).toHaveAccessibleDescription("1 open report");
+    for (const link of links().filter((link) => link !== membership)) expect(link).not.toHaveAccessibleDescription();
+
+    rerender(<SettingsNavigation section="community-settings" administrator openReports={0} />);
+    expect(membership).not.toHaveAccessibleDescription();
+    expect(membership).toHaveTextContent(/^Membership$/);
+    rerender(<SettingsNavigation section="community-settings" administrator={false} openReports={2} />);
+    expect(screen.getByRole("link", { name: "Membership" })).toHaveTextContent(/^Membership$/);
+  });
+
   it("follows a link to another section in place, the page staying as it is", async () => {
     render(<SettingsNavigation section="community-settings" administrator={false} />);
     history.replaceState(null, "", "/account/edit");
@@ -70,6 +87,7 @@ describe("Community settings page", () => {
       ["/account/edit#membership-settings", "membership-settings"],
       ["/account/edit#domain-settings", "domain-settings"],
       ["/account/edit#assistant-settings", "assistant-settings"],
+      ["/account/edit#huddles-settings", "huddles-settings"],
       ["/account/edit#nowhere", "community-settings"],
       ["/rooms/opens/new", "channel-settings"],
       ["/rooms/closeds/new", "channel-settings"],
@@ -81,6 +99,9 @@ describe("Community settings page", () => {
       ["/account/agents/new", "assistant-settings"],
       ["/account/agents/a1/edit", "assistant-settings"],
       ["/account/agents/ember/edit", "assistant-settings"],
+      ["/account/apps/new", "assistant-settings"],
+      ["/account/apps/p1/edit", "assistant-settings"],
+      ["/account/apps/signed-in", "assistant-settings"],
       ["/account/custom_styles/edit", "custom-styles"],
       ["/rooms/general", null],
       ["/rooms/directs/d1/edit", null],
@@ -106,7 +127,7 @@ describe("Chat bots page", () => {
     const { rerender } = render(<SettingsNavigation section="chat-bots" administrator />);
     expect(screen.getByRole("link", { name: "Chat bots" })).toHaveAttribute("href", "/account/bots");
     expect(current()).toHaveTextContent("Chat bots");
-    expect(links().map((link) => link.textContent)).toEqual(["General", "Rooms and permissions", "Membership", "Domain settings", "Chat bots", "AI assistant", "Custom styles"]);
+    expect(links().map((link) => link.textContent)).toEqual(["General", "Rooms and permissions", "Membership", "Domain settings", "Chat bots", "AI assistant", "Huddles", "Custom styles"]);
     rerender(<SettingsNavigation section="community-settings" administrator={false} />);
     expect(screen.queryByRole("link", { name: "Chat bots" })).not.toBeInTheDocument();
   });
@@ -122,6 +143,21 @@ describe("Ember AI", () => {
     expect(current()).toBe(assistant);
     rerender(<SettingsNavigation section="community-settings" administrator={false} />);
     expect(screen.queryByRole("link", { name: "AI assistant" })).not.toBeInTheDocument();
+  });
+});
+
+describe("Set up huddles", () => {
+  it("links administrators to Huddles, after AI assistant, under the huddle's headset, and members not at all", () => {
+    const { rerender } = render(<SettingsNavigation section="huddles-settings" administrator />);
+    const huddles = screen.getByRole("link", { name: "Huddles" });
+    expect(huddles).toHaveAttribute("href", "/account/edit#huddles-settings");
+    expect(huddles.querySelector("svg")).toHaveClass("iconoir-headset");
+    expect(huddles.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
+    expect(links()[links().indexOf(screen.getByRole("link", { name: "AI assistant" })) + 1]).toBe(huddles);
+    expect(current()).toBe(huddles);
+    expect(workspaceSectionOf("#huddles-settings")).toBe("huddles-settings");
+    rerender(<SettingsNavigation section="community-settings" administrator={false} />);
+    expect(screen.queryByRole("link", { name: "Huddles" })).not.toBeInTheDocument();
   });
 });
 

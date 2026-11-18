@@ -2,7 +2,8 @@
 
 `pnpm perf` puts the chat backend and the web app under load on your machine and writes a report:
 WebSocket latency, throughput and fan-out for each storage backend, how big one room can get, how
-fast history pages, and how the web app loads and renders a busy room.
+fast history pages, what someone joining a huddle costs its room, and how the web app loads and
+renders a busy room.
 
 ```sh
 pnpm perf --quick                  # a smoke run, about 3 minutes
@@ -33,7 +34,9 @@ count as worse, a metric has to move by more than `--threshold` percent (10 by d
 than its floor (1 ms for most latencies, 4 ms for fan-out tails, one frame for paint timings, 200 ms
 for Lighthouse's Total Blocking Time), and by more than it moved between runs of the same commit,
 which `src/compare.ts` records per metric: 10 to 25% for most, 40% for tail latencies, history reads
-and joins into a saturated room. Lost or missing messages and errors count from the first one.
+and joins into a saturated room, and 60% for a huddle and someone who joins it hearing each other.
+Lost or missing messages and errors count from the first one, as does one request more or fewer to
+the SFU for someone to join a huddle, which every run of the same code counts alike.
 
 On a pull request, adding the `perf` label runs the quick suite in CI on every push. The report
 shows in the run's summary and both files are attached to the run. Running the Performance workflow
@@ -60,6 +63,7 @@ and talk to rooms over real WebSockets, sending the same frames as the web app.
 | `unread` | One member posting in rooms of 100, 500 and 1,000 people away from them, each with only the workspace socket open: one message, then 100 more at 10 a second | How long the Workspace takes to mark a room unread for everyone away and tell them, and what each message after costs once they're marked |
 | `history` | A 2,000-message room: 30 fresh joins, then paging back to the start three times | The read path, where DO SQLite and D1 differ most |
 | `search` | 250 messages written in each of 20 rooms at once, then someone in all of them searching: until they find the last, then for each of 30 new messages in quiet rooms until they find it, then for a word in a quarter of the messages, one in a message in each room, and one in none, 50 times each | How far behind a burst leaves the search index, how soon a new message can be found, and what a search costs |
+| `huddle` | One huddle grown a person at a time to 10, 25 and 50, the most it takes, each joining with their voice once the last is heard by everyone; at each size, 100 reactions at 10 a second from the people in turn | What someone joining costs a huddle's room: how long until they're welcomed, hear everyone and are heard by everyone, and how many requests the room makes of the SFU for it; and what a reaction costs |
 
 Alongside each measurement it records the CPU used by the `wrangler` and `workerd` processes. A
 room's Durable Object runs on one thread, so "busiest process" near 100% means the room itself is
@@ -69,6 +73,14 @@ few milliseconds, the latencies include time the client spent queued rather than
 The `tabs` scenario's reconnect closes the sockets from the client and waits for their goodbyes to
 finish, since a deploy drops sockets without any. The Workspace keeps the sessions it has looked up in
 memory, which a deploy would clear, so its checks after the reconnect read less than they would.
+
+The `huddle` scenario's SFU is a stand-in on this machine (`src/sfu.ts`), which its `wrangler dev`
+is told of as `REALTIME_SFU_URL`. It answers what the room asks at once, with session descriptions as
+long as a browser's, and carries no sound. What people say in a huddle goes between their browsers
+and Cloudflare's SFU, never through Ember, so the scenario times the room's own work and counts its
+requests, to which a real SFU adds however long it takes to answer each. `--url` leaves the scenario
+out: it sets a new server up to turn huddles on, with a stand-in that only the `wrangler dev` it
+starts is told of.
 
 Receivers check that messages arrive in id order. Ids are assigned in arrival order, so "out of
 order" means writes finished in a different order than they started.
@@ -96,8 +108,8 @@ order" means writes finished in a different order than they started.
   replicates each write before confirming it, and D1 is a network round trip to its primary.
 - Local D1 is simulated inside the same `workerd` process. Local D1 numbers are therefore a floor:
   in production every D1 read and write also pays that round trip, which can cross regions.
-- `pnpm perf backend --url https://<worker> --storage do-sqlite` runs the backend scenarios against
-  a deployed Worker to get real network numbers; `--storage` names its backend, or `/api/health`
+- `pnpm perf backend --url https://<worker> --storage do-sqlite` runs the backend scenarios, but for
+  `huddle`, against a deployed Worker to get real network numbers; `--storage` names its backend, or `/api/health`
   tells it when `EMBER_RECOVERY_TOKEN` in the environment is the Worker's. It creates users and
   messages there and generates real load, so use a staging deployment, never production. CPU and
   memory aren't available remotely.
@@ -110,6 +122,8 @@ order" means writes finished in a different order than they started.
 | `src/server.ts` | Starts `wrangler dev` per storage backend and samples its CPU and memory |
 | `src/room-client.ts` | A minimal room participant over one WebSocket |
 | `src/tab-client.ts` | A tab as the web app opens one: a room's socket, the workspace socket, the sidebar and the people directory |
+| `src/huddle-client.ts` | A tab in a huddle: its socket, its voice, and the rounds it asks to hear the others in |
+| `src/sfu.ts` | A stand-in for Cloudflare's Realtime SFU, which the `huddle` scenario's room asks |
 | `src/load.ts` | Shared helpers: joining, rate control, seeding, measurement windows |
 | `src/scenarios/` | The backend scenarios |
 | `src/web/` | Bundle sizes, Lighthouse, and the in-browser render timing |

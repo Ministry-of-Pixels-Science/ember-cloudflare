@@ -14,6 +14,7 @@ const grace: SsoAccount = { name: "Grace Hopper", emailAddress: "grace@example.c
 const DISCONNECTED: ProfileAnswer = {
   profile: {
     name: "Grace Hopper",
+    username: null,
     emailAddress: "grace@example.com",
     bio: null,
     avatarUrl: "/users/t0k3n/avatar?v=1",
@@ -23,6 +24,8 @@ const DISCONNECTED: ProfileAnswer = {
     memberful: null,
     sso: { name: "Acme", ssoOnly: true, connected: null },
     assistant: null,
+    apps: [],
+    outsideAi: null,
   },
   transferId: "u2.mgk3x2b0.saved",
 };

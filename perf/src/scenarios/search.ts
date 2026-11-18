@@ -33,20 +33,23 @@ export interface SearchResult extends SearchOptions {
 const POLL_MS = 10;
 const FIND_TIMEOUT_MS = 60_000;
 
-/** Searches as `session`'s person, and answers what it found and how long it took. */
-async function search(server: Server, session: Session, q: string): Promise<{ messages: Message[]; ms: number }> {
+/**
+ * Searches as `session`'s person, and answers what it found in `rooms` and how long it took. A server
+ * that was running already has other rooms, which its person is in too, with messages that match.
+ */
+async function search(server: Server, session: Session, rooms: Set<string>, q: string): Promise<{ messages: Message[]; ms: number }> {
   const started = performance.now();
   const response = await fetch(new URL(`/api/searches?q=${encodeURIComponent(q)}`, server.url), { headers: { Cookie: session.cookie } });
   if (!response.ok) throw new Error(`Searching for "${q}" failed (${response.status}): ${await response.text()}`);
   const { matches } = (await response.json()) as SearchResults;
-  return { messages: matches.map(({ message }) => message), ms: performance.now() - started };
+  return { messages: matches.map(({ message }) => message).filter(({ roomId }) => rooms.has(roomId)), ms: performance.now() - started };
 }
 
 /** Searches every `POLL_MS` until `found` holds, and answers when it did. */
-async function searchUntil(server: Server, session: Session, q: string, found: (messages: Message[]) => boolean): Promise<number> {
+async function searchUntil(server: Server, session: Session, rooms: Set<string>, q: string, found: (messages: Message[]) => boolean): Promise<number> {
   const deadline = performance.now() + FIND_TIMEOUT_MS;
   for (;;) {
-    const { messages } = await search(server, session, q);
+    const { messages } = await search(server, session, rooms, q);
     if (found(messages)) return performance.now();
     if (performance.now() > deadline) throw new Error(`Searching for "${q}" found ${messages.length} messages after ${FIND_TIMEOUT_MS}ms`);
     await sleep(POLL_MS);
@@ -54,10 +57,10 @@ async function searchUntil(server: Server, session: Session, q: string, found: (
 }
 
 /** Runs a search `times` times, one after another, checking each finds `expected` messages. */
-async function time(server: Server, session: Session, q: string, times: number, expected: number): Promise<Summary | null> {
+async function time(server: Server, session: Session, rooms: Set<string>, q: string, times: number, expected: number): Promise<Summary | null> {
   const samples: number[] = [];
   for (let i = 0; i < times; i++) {
-    const { messages, ms } = await search(server, session, q);
+    const { messages, ms } = await search(server, session, rooms, q);
     // A search that comes back short would pass for a faster one.
     if (messages.length !== expected) throw new Error(`Searching for "${q}" found ${messages.length} messages, not ${expected}`);
     samples.push(ms);
@@ -92,7 +95,8 @@ export async function searchAt(server: Server, options: SearchOptions): Promise<
   await Promise.all(writers.map((writer) => seedRoom([writer], options.messages, 10)));
   const seeded = performance.now();
   const last = String(options.messages - 1);
-  const caughtUp = await searchUntil(server, searcher, last, (messages) => messages.length === options.rooms);
+  const own = new Set(rooms);
+  const caughtUp = await searchUntil(server, searcher, own, last, (messages) => messages.length === options.rooms);
 
   const newMessage: number[] = [];
   for (let i = 0; i < options.newMessages; i++) {
@@ -100,12 +104,12 @@ export async function searchAt(server: Server, options: SearchOptions): Promise<
     await sleep(300);
     const word = `fresh${i}`;
     const acknowledged = await post(writers[i % writers.length]!, `search-${i}`, `<p>Has anyone seen ${word}?</p>`);
-    newMessage.push((await searchUntil(server, searcher, word, (messages) => messages.length === 1)) - acknowledged);
+    newMessage.push((await searchUntil(server, searcher, own, word, (messages) => messages.length === 1)) - acknowledged);
   }
 
-  const common = await time(server, searcher, "deploy", options.searches, Math.min(100, options.rooms * Math.ceil(options.messages / 4)));
-  const rare = await time(server, searcher, "7", options.searches, options.rooms);
-  const none = await time(server, searcher, "zebra", options.searches, 0);
+  const common = await time(server, searcher, own, "deploy", options.searches, Math.min(100, options.rooms * Math.ceil(options.messages / 4)));
+  const rare = await time(server, searcher, own, "7", options.searches, options.rooms);
+  const none = await time(server, searcher, own, "zebra", options.searches, 0);
   closeAll(writers);
 
   return { ...options, catchUpMs: Math.round(caughtUp - seeded), newMessage: summarize(newMessage), common, rare, none };

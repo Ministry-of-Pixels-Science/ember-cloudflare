@@ -6,7 +6,7 @@ import { slackMessage } from "../src/bots/slack";
 import { keptCards } from "../src/cards";
 import type { Env } from "../src/env";
 import slackPayloads from "./fixtures/slack_payloads.json";
-import { api, apiWith, connect, cookieOf, createRoom, freshDeploy, objectSql, roomSql, roomStub, sharedD1, shown, workspaceSql, type Session } from "./support";
+import { api, apiWith, connect, cookieOf, createRoom, freshDeploy, objectSql, roomSql, roomStub, searchSql, sharedD1, shown, workspaceSql, type Session } from "./support";
 
 // What a Slack incoming webhook is sent, posted to a room at /rooms/<room id>/<bot key>/slack (bots/slack.ts),
 // so tools that post to Slack can post to Ember, answered as Slack's webhooks answer.
@@ -463,6 +463,19 @@ describe("Bot cards", () => {
     await vi.waitFor(async () => expect(await roomSql(general, "SELECT seq FROM unindexed_messages WHERE room_id = ?", general)).toEqual([]));
     const found = (await (await api("/api/searches?q=aardvark", { headers: { Cookie: administrator.cookie } })).json()) as SearchResults;
     expect(found.matches.map(({ message: { id, cards } }) => ({ id, cards }))).toEqual([{ id: message.id, cards: message.cards }]);
+  });
+
+  it("tells the search index whether cards have a link in time proportional to their size", { timeout: 60_000 }, async () => {
+    const { bot, general } = await withBot();
+    // Nearly all that a message's cards can hold, in alt text, which a card keeps as it's written: `<a ` over and over, none of them a tag.
+    const images = Array.from({ length: 32 }, (_, index) => ({ type: "image", image_url: `https://example.com/${index}.png`, alt_text: "<a ".repeat(1000) }));
+    const started = performance.now();
+    for (let sent = 0; sent < 5; sent++) expect(await answerTo(bot.key, general, { blocks: [{ type: "context", elements: images }] })).toEqual(OK);
+    await vi.waitFor(async () => expect(await roomSql(general, "SELECT seq FROM unindexed_messages WHERE room_id = ?", general)).toEqual([]), { timeout: 50_000 });
+    // Under a second here; reading on from each `<a ` to the end of the cards took seconds a message.
+    expect(performance.now() - started).toBeLessThan(5_000);
+    // The links they have are their images' addresses.
+    expect(await searchSql("SELECT has_link FROM search_messages WHERE room_id = ?", general)).toEqual(Array.from({ length: 5 }, () => ({ has_link: 1 })));
   });
 
   it("leaves out links, images and icons that aren't web addresses on a named host, keeping the rest of the card, and email links in its text", async () => {

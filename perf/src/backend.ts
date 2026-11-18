@@ -2,15 +2,20 @@ import type { Profile } from "./profiles.ts";
 import { connections, type ConnectionsResult } from "./scenarios/connections.ts";
 import { fanoutAt, type FanoutResult } from "./scenarios/fanout.ts";
 import { history, type HistoryResult } from "./scenarios/history.ts";
+import { huddle, type HuddleResult } from "./scenarios/huddle.ts";
 import { latency, type LatencyResult } from "./scenarios/latency.ts";
 import { searchAt, type SearchResult } from "./scenarios/search.ts";
 import { tabs, type TabsResult } from "./scenarios/tabs.ts";
 import { throughput, type ThroughputResult } from "./scenarios/throughput.ts";
 import { unreadAt, type UnreadResult } from "./scenarios/unread.ts";
 import { existingServer, startServer, type Server, type Storage } from "./server.ts";
+import { standInSfu, type StandInSfu } from "./sfu.ts";
 
-export const SCENARIOS = ["latency", "throughput", "fanout", "connections", "tabs", "unread", "history", "search"] as const;
+export const SCENARIOS = ["latency", "throughput", "fanout", "connections", "tabs", "unread", "history", "search", "huddle"] as const;
 export type Scenario = (typeof SCENARIOS)[number];
+
+/** The scenarios that run only against the `wrangler dev` this starts: a huddle's SFU is a stand-in that server is told of as it starts. */
+export const LOCAL_SCENARIOS: readonly Scenario[] = ["huddle"];
 
 export interface BackendResults {
   latency?: LatencyResult;
@@ -21,6 +26,7 @@ export interface BackendResults {
   unread?: UnreadResult[];
   history?: HistoryResult;
   search?: SearchResult;
+  huddle?: HuddleResult;
 }
 
 interface Target {
@@ -39,6 +45,22 @@ async function withServer<T>({ storage, url }: Target, fn: (server: Server) => P
     return await fn(server);
   } finally {
     await server.stop();
+  }
+}
+
+/** A server of its own for the huddle scenario, whose huddles run through a stand-in for the Realtime SFU that starts and stops with it. */
+async function withSfu<T>({ storage, url }: Target, fn: (server: Server, sfu: StandInSfu) => Promise<T>): Promise<T> {
+  if (url) throw new Error("The huddle scenario runs only against the wrangler dev it starts, which it gives a stand-in for the Realtime SFU.");
+  const sfu = await standInSfu();
+  try {
+    const server = await startServer(storage, undefined, { REALTIME_SFU_URL: sfu.url });
+    try {
+      return await fn(server, sfu);
+    } finally {
+      await server.stop();
+    }
+  } finally {
+    await sfu.close();
   }
 }
 
@@ -78,6 +100,9 @@ export async function runBackend(target: Target, profile: Profile, scenarios: re
         break;
       case "search":
         results.search = await withServer(target, (server) => searchAt(server, profile.search));
+        break;
+      case "huddle":
+        results.huddle = await withSfu(target, (server, sfu) => huddle(server, sfu, profile.huddle));
         break;
     }
   }

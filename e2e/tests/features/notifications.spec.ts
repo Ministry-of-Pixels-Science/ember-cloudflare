@@ -1,5 +1,5 @@
 import { MAX_PUSH_SUBSCRIPTIONS, type PushSubscriptions } from "@ember/protocol";
-import type { Page } from "@playwright/test";
+import { devices, type Page } from "@playwright/test";
 import { administratorOn, allowNotifications, logOut, PUSH_KEYS, uniqueEndpoint, VAPID_PUBLIC_KEY } from "../../fixtures";
 import { expect, startDirect, test, unique } from "./fixtures";
 
@@ -143,7 +143,8 @@ test.describe("Turn on notifications", () => {
     const dialog = setup(grace.page);
     await expect(dialog.getByRole("heading", { level: 1 })).toHaveText("Notifications aren’t configured");
     await expect(dialog.getByRole("status")).toHaveText("Ask your workspace administrator to configure Web Push on this server.");
-    await expect(dialog.locator("details")).not.toBeVisible();
+    // None of the help shows: it's in the page, hidden, as two sections in Safari.
+    await expect(dialog.locator("details").filter({ visible: true })).toHaveCount(0);
     await expect(dialog.getByRole("button", { name: "Close" })).toBeFocused();
     await dialog.getByRole("button", { name: "Close" }).click();
     await expect(dialog).toBeHidden();
@@ -172,7 +173,11 @@ test.describe("Turn on notifications", () => {
   });
 
   test("gives the help for this browser when they aren't available, its one section open", async ({ members }) => {
-    const grace = await members.signIn(unique("Grace"), { beforeOpen: async (page) => void (await page.addInitScript(() => Reflect.deleteProperty(window, "PushManager"))) });
+    // The help is picked by what the browser says it is, Desktop Chrome here in either engine.
+    const grace = await members.signIn(unique("Grace"), {
+      context: { userAgent: devices["Desktop Chrome"].userAgent },
+      beforeOpen: async (page) => void (await page.addInitScript(() => Reflect.deleteProperty(window, "PushManager"))),
+    });
     await enableButton(grace.page).click();
     const dialog = setup(grace.page);
     await expect(dialog.getByRole("heading", { level: 1 })).toHaveText("Notifications aren’t available here");
@@ -282,7 +287,7 @@ test.describe("Save push subscriptions", () => {
 });
 
 test.describe("Push subscriptions page", () => {
-  test("lists the browser that turned them on at /users/me/push_subscriptions, where a test push fails while the server has no Web Push keys, and deletes it", async ({ members }) => {
+  test("lists the browser that turned them on at /users/me/push_subscriptions, where a test push fails while the server has no Web Push keys, and deletes it", async ({ members, browserName }) => {
     const endpoint = uniqueEndpoint();
     const grace = await members.signIn(unique("Grace"), { beforeOpen: (page) => allowNotifications(page.context(), { endpoint, on: false }) });
     const saved = grace.page.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname === "/api/push-subscriptions");
@@ -295,8 +300,8 @@ test.describe("Push subscriptions page", () => {
     await expect(grace.page.getByRole("heading", { level: 1 })).toHaveText("Push Notification Subscriptions");
     const rows = grace.page.getByRole("list", { name: "Push Notification Subscriptions" }).getByRole("listitem");
     await expect(rows).toHaveCount(1);
-    // Desktop Chrome, as the user_agent gem names it.
-    await expect(rows.locator("strong")).toHaveText(/^Chrome [\d.]+ on Windows$/);
+    // Desktop Chrome or Desktop Safari, as the user_agent gem names them.
+    await expect(rows.locator("strong")).toHaveText(browserName === "webkit" ? /^Safari [\d.]+ on Macintosh$/ : /^Chrome [\d.]+ on Windows$/);
     await expect(rows).toContainText(endpoint);
 
     await rows.getByRole("button", { name: "Send test notification" }).click();

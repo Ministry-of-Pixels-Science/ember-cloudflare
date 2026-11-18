@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { HuddlesSettings } from "@ember/protocol";
 import { APP_ID_REFUSED, APP_ID_UNKNOWN, APP_SECRET_REFUSED, APP_SECRET_UNKNOWN, HUDDLES_FORBIDDEN, HUDDLES_UNCHECKED } from "@ember/protocol/huddles";
 import { ApiError } from "@/lib/api";
-import { HuddlesSetup } from "./huddles-setup";
+import { HUDDLES_ON, HuddlesSetup, SETUP_EXPLAINED } from "./huddles-setup";
 
 /** A Realtime SFU app's keys, as an administrator copies them from Cloudflare's dashboard. */
 const APP = { appId: "2a95132c15732412d22c1476fa83f27a", appSecret: "66bcf64aa8907b9f9d90ac17746a77ce394c393b92b3916633dc02846e608ad4" };
@@ -12,7 +12,7 @@ const APP = { appId: "2a95132c15732412d22c1476fa83f27a", appSecret: "66bcf64aa89
 const ACCOUNT_ID = "0123456789abcdef0123456789abcdef";
 
 /** Answers giving Ember the app's keys as the server would, or as `saved` says. */
-function serve(saved: () => Response | Promise<Response> = () => Response.json({ huddles: { appId: APP.appId } })) {
+function serve(saved: () => Response | Promise<Response> = () => Response.json({ huddles: { appId: APP.appId, relayKeyId: null } })) {
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     if (`${init?.method} ${String(input)}` === "PUT /api/account/huddles") return saved();
     throw new Error(`Unexpected request for ${init?.method} ${String(input)}`);
@@ -43,6 +43,9 @@ const dialog = (name: string) => screen.findByRole("dialog", { name });
 const button = (name: string) => screen.getByRole("button", { name });
 const appIdField = () => screen.getByRole("textbox", { name: "App ID" });
 const appSecretField = () => screen.getByRole("textbox", { name: "App Secret" });
+const dashboardButton = () => screen.getByRole("link", { name: "Open Cloudflare's dashboard" });
+/** What the line under the secret says of it while there's nothing else to say. */
+const SECRET_KEPT = "Ember keeps it encrypted.";
 
 /** Types the app's keys, as given, and saves them. */
 async function giveKeys(user: ReturnType<typeof userEvent.setup>, app: { appId: string; appSecret: string } = APP) {
@@ -56,22 +59,23 @@ async function giveKeys(user: ReturnType<typeof userEvent.setup>, app: { appId: 
 afterEach(() => vi.restoreAllMocks());
 
 describe("Set up huddles", () => {
-  it("starts with the app to make, linking to Serverless SFU in the Cloudflare dashboard", async () => {
+  it("starts with its two steps: the app to make, with the button that opens Cloudflare's dashboard at Serverless SFU, then the app's keys", async () => {
     const fetch = serve();
     const { user, onClose } = showSetup();
     const setup = await dialog("Set up huddles");
     expect(within(setup).getByRole("heading", { name: "Set up huddles" })).toHaveFocus();
-    expect(setup).toHaveAccessibleDescription(
-      "Huddles run through Cloudflare's Realtime SFU, which carries what each person in a huddle says to the others. It has a free monthly allowance, and what it sends past that is billed to your Cloudflare account. Ember keeps the app's secret encrypted.",
-    );
-    const [app, keys] = within(screen.getByRole("list", { name: "Steps to make a Realtime SFU app" })).getAllByRole("listitem");
-    expect(app).toHaveTextContent("In the Cloudflare dashboard, open Realtime and choose Serverless SFU, then create an app.");
-    const dashboard = within(app!).getByRole("link", { name: "Open Serverless SFU in the Cloudflare dashboard" });
+    expect(setup).toHaveAccessibleDescription(SETUP_EXPLAINED);
+    const [app, keys] = within(screen.getByRole("list", { name: "Steps to set up huddles" })).getAllByRole("listitem");
+    expect(within(app!).getByRole("heading", { level: 3, name: "Create an SFU app in Cloudflare" })).toBeVisible();
+    expect(app).toHaveTextContent("Open Realtime, choose Serverless SFU, and create an app. Any name will do.");
     // Without the account Ember is deployed to, the dashboard asks which.
-    expect(dashboard).toHaveAttribute("href", "https://dash.cloudflare.com/?to=/:account/realtime/sfu");
-    expect(dashboard).toHaveAttribute("target", "_blank");
-    expect(keys).toHaveTextContent("Copy the app's App ID and App Secret here.");
+    expect(within(app!).getByRole("link")).toBe(dashboardButton());
+    expect(dashboardButton()).toHaveAttribute("href", "https://dash.cloudflare.com/?to=/:account/realtime/sfu");
+    expect(dashboardButton()).toHaveAttribute("target", "_blank");
+    expect(within(keys!).getByRole("heading", { level: 3, name: "Copy the app's keys here" })).toBeVisible();
+    expect(within(keys!).getAllByRole("textbox")).toEqual([appIdField(), appSecretField()]);
     expect(appIdField()).toHaveValue("");
+    expect(appSecretField()).toHaveAccessibleDescription(SECRET_KEPT);
     expect(screen.queryByText(/has an app's keys already/)).not.toBeInTheDocument();
     expect(button("Save")).toBeDisabled();
     await user.type(appIdField(), APP.appId);
@@ -88,7 +92,21 @@ describe("Set up huddles", () => {
     serve();
     showSetup({ deployedAccountId: ACCOUNT_ID });
     await dialog("Set up huddles");
-    expect(screen.getByRole("link", { name: "Open Serverless SFU in the Cloudflare dashboard" })).toHaveAttribute("href", `https://dash.cloudflare.com/${ACCOUNT_ID}/realtime/sfu`);
+    expect(dashboardButton()).toHaveAttribute("href", `https://dash.cloudflare.com/${ACCOUNT_ID}/realtime/sfu`);
+  });
+
+  it("hides the secret as it's typed, in a field that's no password's, and keeps it out of the field's value attribute, where custom CSS could read it", async () => {
+    serve();
+    const { user } = showSetup();
+    await dialog("Set up huddles");
+    await user.type(appSecretField(), APP.appSecret);
+    expect(appSecretField()).toHaveValue(APP.appSecret);
+    expect(appSecretField()).toHaveClass("[-webkit-text-security:disc]");
+    // No password manager offers to keep it, or to fill in a password it kept.
+    expect(appSecretField()).toHaveProperty("type", "text");
+    expect(appSecretField()).toHaveAttribute("autocomplete", "off");
+    expect(appSecretField()).not.toHaveAttribute("value");
+    expect(appIdField()).not.toHaveClass("[-webkit-text-security:disc]");
   });
 
   it("refuses keys that can't be an app's on their fields, asking the server nothing, until they're typed again", async () => {
@@ -111,13 +129,14 @@ describe("Set up huddles", () => {
   });
 
   it("saves the app's keys, without the spaces around them, once Cloudflare has started a session with them", async () => {
-    const answer = held(() => Response.json({ huddles: { appId: APP.appId } }));
+    const answer = held(() => Response.json({ huddles: { appId: APP.appId, relayKeyId: null } }));
     serve(answer.answered);
     const { user, onSaved, onClose } = showSetup();
     await giveKeys(user, { appId: ` ${APP.appId} `, appSecret: `${APP.appSecret} ` });
 
-    // Nothing closes it, or changes the keys, while Cloudflare is asked.
+    // Nothing closes it, or changes the keys, while Cloudflare is asked, which the line under the secret says.
     expect(screen.getByRole("status")).toHaveTextContent("Asking Cloudflare to start a session with the app's keys…");
+    expect(screen.queryByText(SECRET_KEPT)).not.toBeInTheDocument();
     expect(screen.getByRole("dialog", { name: "Set up huddles" })).toHaveAttribute("aria-busy", "true");
     expect(button("Checking…")).toBeDisabled();
     expect(button("Cancel")).toBeDisabled();
@@ -129,10 +148,11 @@ describe("Set up huddles", () => {
     expect(onSaved).not.toHaveBeenCalled();
 
     await answer.answer();
-    const done = await dialog("Huddles are set up");
-    expect(within(done).getByRole("heading", { name: "Huddles are set up" })).toHaveFocus();
-    expect(done).toHaveAccessibleDescription("Cloudflare started a session with the app's keys, so huddles can run through it. Ember keeps the keys until huddles are turned off.");
-    expect(onSaved).toHaveBeenCalledExactlyOnceWith({ appId: APP.appId });
+    const done = await dialog("Huddles are on");
+    expect(within(done).getByRole("heading", { name: "Huddles are on" })).toHaveFocus();
+    expect(done).toHaveAccessibleDescription(HUDDLES_ON);
+    expect(HUDDLES_ON).toContain("Anyone can start one with the headphones at the top of a room.");
+    expect(onSaved).toHaveBeenCalledExactlyOnceWith({ appId: APP.appId, relayKeyId: null });
     expect(asked()).toEqual([["PUT /api/account/huddles", APP]]);
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
     await user.click(button("Done"));
@@ -153,21 +173,25 @@ describe("Set up huddles", () => {
     // What was typed is still there to correct.
     expect(appIdField()).toHaveValue(APP.appId);
     expect(appSecretField()).toHaveValue(APP.appSecret);
-    expect(screen.getByRole("status")).toBeEmptyDOMElement();
+    expect(screen.getByRole("status")).toHaveTextContent(SECRET_KEPT);
 
+    // Why the secret wasn't taken is said in that line's place, so the steps stay as tall.
     await user.click(button("Save"));
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(APP_SECRET_UNKNOWN));
     expect(appSecretField()).toHaveAccessibleDescription(APP_SECRET_UNKNOWN);
+    expect(appSecretField()).toHaveAttribute("aria-invalid", "true");
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
     expect(appIdField()).toHaveAttribute("aria-invalid", "false");
     await user.type(appSecretField(), "{Backspace}");
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(appSecretField()).toHaveAccessibleDescription(SECRET_KEPT);
     expect(screen.getByRole("dialog", { name: "Set up huddles" })).toBeInTheDocument();
     expect(onSaved).not.toHaveBeenCalled();
     expect(onFailed).not.toHaveBeenCalled();
   });
 
-  it("says under the keys that Cloudflare couldn't be asked, which saving again asks", async () => {
-    const answers = [() => Response.json({ error: HUDDLES_UNCHECKED }, { status: 502 }), () => Response.json({ huddles: { appId: APP.appId } })];
+  it("says under the secret that Cloudflare couldn't be asked, which saving again asks", async () => {
+    const answers = [() => Response.json({ error: HUDDLES_UNCHECKED }, { status: 502 }), () => Response.json({ huddles: { appId: APP.appId, relayKeyId: null } })];
     serve(() => answers.shift()!());
     const { user, onSaved, onFailed } = showSetup();
     await giveKeys(user);
@@ -176,8 +200,8 @@ describe("Set up huddles", () => {
     expect(onFailed).not.toHaveBeenCalled();
 
     await user.click(button("Save"));
-    await dialog("Huddles are set up");
-    expect(onSaved).toHaveBeenCalledExactlyOnceWith({ appId: APP.appId });
+    await dialog("Huddles are on");
+    expect(onSaved).toHaveBeenCalledExactlyOnceWith({ appId: APP.appId, relayKeyId: null });
     expect(asked()).toEqual([
       ["PUT /api/account/huddles", APP],
       ["PUT /api/account/huddles", APP],
@@ -190,7 +214,7 @@ describe("Set up huddles", () => {
     await giveKeys(user);
     await waitFor(() => expect(onFailed).toHaveBeenCalledWith(new ApiError(403, HUDDLES_FORBIDDEN)));
     expect(screen.getByRole("dialog", { name: "Set up huddles" })).toBeInTheDocument();
-    expect(screen.getByRole("status")).toBeEmptyDOMElement();
+    expect(screen.getByRole("status")).toHaveTextContent(SECRET_KEPT);
     expect(button("Save")).toBeEnabled();
     expect(appSecretField()).toHaveValue(APP.appSecret);
     expect(onSaved).not.toHaveBeenCalled();
@@ -200,17 +224,19 @@ describe("Set up huddles", () => {
   it("starts from the app's ID when changing keys, and asks for its secret again", async () => {
     serve();
     const another = { appId: "f".repeat(32), appSecret: "0".repeat(64) };
-    const { user, onSaved } = showSetup({ huddles: { appId: APP.appId } });
+    const { user, onSaved } = showSetup({ huddles: { appId: APP.appId, relayKeyId: null } });
     await dialog("Set up huddles");
     expect(appIdField()).toHaveValue(APP.appId);
     expect(appSecretField()).toHaveValue("");
-    expect(screen.getByText("Ember has an app's keys already. Give another app's to run huddles through it instead.")).toBeVisible();
+    // Said under the secret, in the place of what Ember does with it.
+    expect(appSecretField()).toHaveAccessibleDescription("Ember has an app's keys already. Give another app's to run huddles through it instead.");
+    expect(screen.queryByText(SECRET_KEPT)).not.toBeInTheDocument();
     expect(button("Save")).toBeDisabled();
 
-    vi.mocked(fetch).mockImplementation(async () => Response.json({ huddles: { appId: another.appId } }));
+    vi.mocked(fetch).mockImplementation(async () => Response.json({ huddles: { appId: another.appId, relayKeyId: null } }));
     await giveKeys(user, another);
-    await dialog("Huddles are set up");
-    expect(onSaved).toHaveBeenCalledExactlyOnceWith({ appId: another.appId });
+    await dialog("Huddles are on");
+    expect(onSaved).toHaveBeenCalledExactlyOnceWith({ appId: another.appId, relayKeyId: null });
     expect(asked()).toEqual([["PUT /api/account/huddles", another]]);
   });
 });

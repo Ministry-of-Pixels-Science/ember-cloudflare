@@ -1,7 +1,19 @@
-import type { Sidebar, WorkspaceServerFrame } from "@ember/protocol";
-import type { APIRequestContext, Page, WebSocketRoute } from "@playwright/test";
-import { administratorSession, connectWorkspace, cookieHeader, createRoom, invitation, keepOtherRoomsOut, listing, makeAdministrator, rowsWithStars, signInAs, WORKSPACE_SOCKET } from "../../fixtures";
+import type { Room, Sidebar, WorkspaceServerFrame } from "@ember/protocol";
+import type { APIRequestContext, BrowserContext, Page, WebSocketRoute } from "@playwright/test";
+import { administratorSession, allowClipboard, answerChanged, connectWorkspace, cookieHeader, createRoom, downloadName, invitation, keepOtherRoomsOut, listing, makeAdministrator, rowsWithStars, signInAs, WORKSPACE_SOCKET } from "../../fixtures";
 import { expect, test, unique, type Member } from "./fixtures";
+
+/**
+ * Makes every page in `context` list just the rooms `shows` picks, and any DMs, as the list loads and as
+ * the workspace socket brings rooms saved since, since every other test's open rooms take everyone in
+ * too. It routes the context, as `members` does, which stops routing it before closing it, so the test
+ * can end while a list is still loading.
+ */
+async function showRoomsPicked(context: BrowserContext, shows: (room: Room) => boolean): Promise<void> {
+  const picked = (room: Room) => room.kind === "direct" || shows(room);
+  await context.route("**/api/sidebar", (route) => answerChanged<Sidebar>(route, (list) => ({ ...list, rooms: list.rooms.filter(picked) })));
+  await context.routeWebSocket(WORKSPACE_SOCKET, (ws) => void connectWorkspace(ws, (frame) => frame.type !== "room.saved" || picked(frame.room)));
+}
 
 test.describe("Conversations sidebar", () => {
   test("lists the rooms the server says you're in", async ({ members, rooms }) => {
@@ -47,6 +59,27 @@ test.describe("Live sidebar updates", () => {
     const deleted = await request.delete(`/api/rooms/${plans.id}`, { headers: { Cookie: cookieHeader(ada.session) } });
     expect(deleted.status(), await deleted.text()).toBe(204);
     await expect(row(roadmap)).toHaveCount(0);
+  });
+
+  test("lists a room as it's made below every other room in everyone's sidebar, whatever its name, through a reload", async ({ members, request, rooms }) => {
+    // This test's rooms, and the ones it makes, whose names end with its tag.
+    const tag = crypto.randomUUID().slice(0, 8);
+    const ours = (room: Room) => room.id === rooms.general.id || room.id === rooms.random.id || (room.kind !== "direct" && room.name.endsWith(tag));
+    const showOurs = (page: Page) => showRoomsPicked(page.context(), ours);
+    const ada = await members.signIn("Ada", { serverRooms: true, beforeOpen: showOurs });
+    const grace = await members.signIn("Grace", { serverRooms: true, beforeOpen: showOurs });
+    const rows = (member: Member) => member.page.getByRole("region", { name: "Rooms" }).getByRole("link");
+    for (const member of [ada, grace]) await expect(rows(member)).toHaveText(["#general", "#random"]);
+
+    // Names that come first by name.
+    const annex = await createRoom(request, ada.session, `Annex ${tag}`);
+    for (const member of [ada, grace]) await expect(rows(member)).toHaveText(["#general", "#random", `#${annex.name}`]);
+    const aardvark = await createRoom(request, grace.session, `Aardvark ${tag}`);
+    const listed = ["#general", "#random", `#${annex.name}`, `#${aardvark.name}`];
+    for (const member of [ada, grace]) await expect(rows(member)).toHaveText(listed);
+
+    await grace.page.reload();
+    await expect(rows(grace)).toHaveText(listed);
   });
 
   test("loads the sidebar again when the tab's workspace connection comes back, for what it missed", async ({ members, request, rooms, session }) => {
@@ -293,7 +326,7 @@ test.describe("Go back to the last room", () => {
 
   test("shows someone in no rooms a picture of an empty room, with their name for screen readers", async ({ page, session }) => {
     await signInAs(page, session);
-    await page.route("**/api/sidebar", (route) => route.fulfill({ json: { rooms: [], favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, suggestions: [], huddles: {} } satisfies Sidebar }));
+    await page.route("**/api/sidebar", (route) => route.fulfill({ json: { rooms: [], favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: {}, blocks: { userIds: [], version: 0 } } satisfies Sidebar }));
     await keepOtherRoomsOut(page, []);
     await page.goto("/");
     await expect(page).toHaveTitle("No rooms yet");
@@ -305,7 +338,7 @@ test.describe("Go back to the last room", () => {
 });
 
 test.describe("Room addresses", () => {
-  test("opens your newest room at /rooms", async ({ members, rooms }) => {
+  test("opens the room you were put in latest at /rooms", async ({ members, rooms }) => {
     const ada = await members.signIn("Ada", { path: "/rooms" });
     await expect(ada.page).toHaveURL(new RegExp(`/rooms/${rooms.random.id}$`));
     await expect(ada.page.getByRole("heading", { level: 1 })).toHaveText("random");
@@ -397,8 +430,8 @@ test.describe("Welcome card for administrators, until they dismiss it", () => {
 test.describe("Join link", () => {
   test("copies the join link", async ({ baseURL, members, request, session }) => {
     const { roomId, joinCode } = await invitation(request, session);
-    const context = { permissions: ["clipboard-read", "clipboard-write"] };
-    const ada = await members.signIn("Ada", { path: `/rooms/${roomId}`, serverRooms: true, administrator: true, context });
+    const ada = await members.signIn("Ada", { path: `/rooms/${roomId}`, serverRooms: true, administrator: true });
+    await allowClipboard(ada.page.context());
     const copy = ada.page.getByRole("button", { name: "Copy join link" });
     await copy.click();
     await expect(copy).toHaveClass(/animate-success/);
@@ -470,7 +503,7 @@ test.describe("QR codes for links", () => {
     // It saves the code and stays open.
     const download = ada.page.waitForEvent("download");
     await viewer.getByRole("link", { name: "Download file" }).click();
-    expect((await download).suggestedFilename()).toBe("QR code.svg");
+    expect(downloadName(await download)).toBe("QR code.svg");
     await expect(viewer).toBeVisible();
     expect(new URL(ada.page.url()).pathname).toBe(`/rooms/${roomId}`);
 

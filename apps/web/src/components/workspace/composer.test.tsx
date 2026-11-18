@@ -1,19 +1,33 @@
 import { MAX_FILE_SIZE, type LinkPreview, type User } from "@ember/protocol";
 import { OPENGRAPH_EMBED_CONTENT_TYPE, previewContent } from "@ember/richtext/dom";
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PeopleContext } from "@/hooks/use-directory";
 import { createRef } from "react";
-import { Composer, RoomDeleted, type ComposerHandle } from "./composer";
+import { Composer, RoomDeleted, type AddPreview, type ComposerHandle } from "./composer";
 import { editorLoaded } from "./editor";
 
 // The editor here is test-setup.ts's stand-in for Lexxy, a text box whose lines are one paragraph,
 // and every test starts before its code has loaded.
 vi.mock("./editor", async (importOriginal) => ({ ...(await importOriginal<typeof import("./editor")>()), editorLoaded: vi.fn(() => false) }));
 
-async function showComposer({ typing = [] as User[], disabled = false, roomId = "r1", threadId = undefined as string | undefined, direct = false, autoFocus = true } = {}) {
-  const onSend = vi.fn((_body: string, _alsoSend: boolean) => true);
+// The emoji picker, without Emojibase's data, which isn't served here: one emoji to pick.
+vi.mock("./emoji-panel", () => ({
+  default: ({ onPick }: { onPick: (emoji: string) => void }) => (
+    <button type="button" onClick={() => onPick("🎉")}>
+      🎉
+    </button>
+  ),
+}));
+
+/** What `onSend` answers for a message that went, where nothing's to come after it. */
+const went: AddPreview = () => {};
+
+async function showComposer({ typing = [] as User[], disabled = false, roomId = "r1", threadId = undefined as string | undefined, direct = false, autoFocus = true, mentionsAbove = false } = {}) {
+  // Hears a link's preview that comes once the message has gone.
+  const addPreview = vi.fn((_preview: LinkPreview) => {});
+  const onSend = vi.fn((_body: string, _alsoSend: boolean): AddPreview | null => addPreview);
   const onSendFiles = vi.fn((_files: File[], _alsoSend: boolean) => {});
   const onTyping = vi.fn();
   const composer = createRef<ComposerHandle>();
@@ -31,11 +45,12 @@ async function showComposer({ typing = [] as User[], disabled = false, roomId = 
       onSendFiles={onSendFiles}
       onTyping={onTyping}
       autoFocus={autoFocus}
+      mentionsAbove={mentionsAbove}
     />,
   );
   // The editor loads as the first composer shows.
-  const input = await screen.findByRole("textbox", { name: threadId === undefined ? "Write a message" : "Write a reply" });
-  return { onSend, onSendFiles, onTyping, composer, view, user: userEvent.setup(), input };
+  const input = await within(view.container).findByRole("textbox", { name: threadId === undefined ? "Write a message" : "Write a reply" });
+  return { onSend, addPreview, onSendFiles, onTyping, composer, view, user: userEvent.setup(), input };
 }
 
 function touchScreen() {
@@ -43,8 +58,11 @@ function touchScreen() {
 }
 
 const sendButton = () => screen.getByRole("button", { name: "Send Message" });
-const formattingOptions = () => screen.getByRole("button", { name: "Rich text" });
-const attachFiles = () => screen.getByLabelText("Attach a file");
+const showFormatting = () => screen.getByRole("button", { name: "Show formatting" });
+const formattingRow = () => screen.queryByRole("toolbar", { name: "Formatting" });
+const tool = (name: string) => within(formattingRow()!).getByRole("button", { name });
+/** The file picker that Upload from your computer and Cmd or Ctrl+O open. */
+const fileField = () => document.querySelector<HTMLInputElement>('input[type="file"]')!;
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -52,12 +70,14 @@ afterEach(() => {
 });
 
 describe("Composer", () => {
-  it("has the text box on top, with Attach files, Formatting options and Send below", async () => {
-    const { input } = await showComposer();
+  it("has the formatting row over the text box, and Slack's buttons below it in Slack's order", async () => {
+    const { input, view } = await showComposer();
+    expect(formattingRow()).toBeInTheDocument();
     expect(input).toHaveAttribute("placeholder", "Message #general");
-    expect(attachFiles().closest("label")).toHaveAttribute("title", "Attach files");
-    expect(formattingOptions()).toHaveAttribute("title", "Formatting options");
-    expect(sendButton()).toHaveAttribute("title", "Send message");
+    const below = [...view.container.querySelectorAll("form button")].filter((button) => !button.closest("[role=toolbar]"));
+    expect(below.map((button) => button.getAttribute("aria-label") ?? button.textContent)).toEqual(["Attach", "Show formatting", "Emoji", "Mention someone", "Send Message"]);
+    expect(fileField()).toHaveAttribute("multiple");
+    expect(fileField()).not.toBeVisible();
   });
 
   it("focuses the text box as the room opens", async () => {
@@ -71,7 +91,19 @@ describe("Composer", () => {
     expect(input).not.toHaveFocus();
   });
 
-  const room = { roomId: "r1", roomName: "general", userId: "u1", typing: [], disabled: false, onSend: () => true, onSendFiles: () => {}, onTyping: () => {} };
+  it("lists the people @ finds above the text on touch screens, whose keyboard is under it", async () => {
+    touchScreen();
+    expect((await showComposer()).input).toHaveAttribute("data-mentions-above");
+  });
+
+  it("lists them above the text with a mouse only where it's asked to, as where something under the composer would cut the list off", async () => {
+    const { input, view } = await showComposer();
+    expect(input).not.toHaveAttribute("data-mentions-above");
+    view.unmount();
+    expect((await showComposer({ mentionsAbove: true })).input).toHaveAttribute("data-mentions-above");
+  });
+
+  const room = { roomId: "r1", roomName: "general", userId: "u1", typing: [], disabled: false, onSend: () => went, onSendFiles: () => {}, onTyping: () => {} };
 
   it("holds the editor back while the room's first messages are on their way, which loading it would delay", async () => {
     // React has the editor's code from an earlier composer, so it would show at once if it weren't held back.
@@ -115,23 +147,216 @@ describe("Composer", () => {
 
 describe("Group DMs and DM names", () => {
   it("asks for a message to the others in a DM by name, without the #", async () => {
-    render(<Composer roomId="d1" roomName="Grace and Linus" direct userId="u1" typing={[]} disabled={false} onSend={() => true} onSendFiles={() => {}} onTyping={() => {}} />);
+    render(<Composer roomId="d1" roomName="Grace and Linus" direct userId="u1" typing={[]} disabled={false} onSend={() => went} onSendFiles={() => {}} onTyping={() => {}} />);
     expect(await screen.findByRole("textbox", { name: "Write a message" })).toHaveAttribute("placeholder", "Message Grace and Linus");
   });
 });
 
-describe("Formatting toolbar", () => {
-  it("shows the toolbar while Formatting options is pressed, keeping focus in the text", async () => {
+describe("Formatting row", () => {
+  it("hides the row while Show formatting is let go, keeping focus in the text, as this browser remembers", async () => {
     const { input, user, view } = await showComposer();
     const form = view.container.querySelector("form")!;
-    await user.click(formattingOptions());
-    expect(formattingOptions()).toHaveAttribute("aria-pressed", "true");
-    expect(form).toHaveAttribute("data-toolbar");
+    expect(showFormatting()).toHaveAttribute("aria-pressed", "true");
+    expect(form).toHaveAttribute("data-formatting");
+
+    await user.click(showFormatting());
+    expect(showFormatting()).toHaveAttribute("aria-pressed", "false");
+    expect(formattingRow()).not.toBeInTheDocument();
+    expect(form).not.toHaveAttribute("data-formatting");
     expect(input).toHaveFocus();
 
-    await user.click(formattingOptions());
-    expect(formattingOptions()).toHaveAttribute("aria-pressed", "false");
-    expect(form).not.toHaveAttribute("data-toolbar");
+    view.unmount();
+    await showComposer();
+    expect(formattingRow()).not.toBeInTheDocument();
+    await user.click(showFormatting());
+    expect(formattingRow()).toBeInTheDocument();
+  });
+
+  it("starts hidden on touch screens, whose keyboard leaves the composer little room", async () => {
+    touchScreen();
+    await showComposer();
+    expect(formattingRow()).not.toBeInTheDocument();
+    expect(showFormatting()).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("has Slack's buttons in Slack's order, each named with its keys", async () => {
+    await showComposer();
+    expect(within(formattingRow()!).getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual([
+      "Bold",
+      "Italic",
+      "Underline",
+      "Strikethrough",
+      "Paragraph",
+      "Link",
+      "Ordered list",
+      "Bulleted list",
+      "Blockquote",
+      "Code",
+      "Code block",
+      "Divider",
+    ]);
+    expect(tool("Strikethrough")).toHaveAttribute("aria-keyshortcuts", "Control+Shift+X");
+    expect(tool("Link")).toHaveAttribute("aria-keyshortcuts", "Control+Shift+U");
+    expect(tool("Divider")).not.toHaveAttribute("aria-keyshortcuts");
+  });
+
+  it("lights a button while its formatting is on where the cursor is, keeping focus in the text", async () => {
+    const { input, user } = await showComposer();
+    await user.click(tool("Bold"));
+    await user.click(tool("Bulleted list"));
+    expect(tool("Bold")).toHaveAttribute("aria-pressed", "true");
+    expect(tool("Bulleted list")).toHaveAttribute("aria-pressed", "true");
+    expect(tool("Ordered list")).toHaveAttribute("aria-pressed", "false");
+    expect(input).toHaveFocus();
+
+    await user.click(tool("Ordered list"));
+    expect(tool("Bulleted list")).toHaveAttribute("aria-pressed", "false");
+    expect(tool("Ordered list")).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("formats from Slack's keys, with the row hidden too, leaving Cmd or Ctrl+B, I and U to the editor", async () => {
+    const { input, user } = await showComposer();
+    await user.type(input, "struck");
+    await user.keyboard("{Control>}{Shift>}X{/Shift}{/Control}");
+    expect(tool("Strikethrough")).toHaveAttribute("aria-pressed", "true");
+
+    await user.click(showFormatting());
+    await user.keyboard("{Control>}{Shift>}({/Shift}{/Control}");
+    await user.click(showFormatting());
+    expect(tool("Blockquote")).toHaveAttribute("aria-pressed", "true");
+
+    await user.keyboard("{Control>}b{/Control}");
+    expect(tool("Bold")).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("styles the line from the Paragraph menu, its style ticked, and puts focus back in the text", async () => {
+    const { input, user } = await showComposer();
+    await user.click(tool("Paragraph"));
+    expect(screen.getByRole("menuitemradio", { name: "Paragraph" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["Paragraph", "Big headingH1", "Medium headingH2", "Small headingH3"]);
+
+    await user.click(screen.getByRole("menuitemradio", { name: /Medium heading/ }));
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    await waitFor(() => expect(input).toHaveFocus());
+
+    await user.click(tool("Paragraph"));
+    expect(screen.getByRole("menuitemradio", { name: /Medium heading/ })).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("greys out what a code block has no use for, and its keys", async () => {
+    const { input, user } = await showComposer();
+    await user.click(tool("Code block"));
+    expect(tool("Code block")).toHaveAttribute("aria-pressed", "true");
+    for (const name of ["Bold", "Italic", "Underline", "Strikethrough", "Link", "Code", "Divider"]) expect(tool(name), name).toBeDisabled();
+    for (const name of ["Paragraph", "Ordered list", "Bulleted list", "Blockquote", "Code block"]) expect(tool(name), name).toBeEnabled();
+
+    input.focus();
+    await user.keyboard("{Control>}{Shift>}X{/Shift}{/Control}");
+    await user.click(tool("Code block"));
+    expect(tool("Strikethrough")).toBeEnabled();
+    expect(tool("Strikethrough")).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("is one stop in the tab order, whose arrow keys move along it, and Escape goes back to the text", async () => {
+    const { input, user } = await showComposer();
+    await user.tab({ shift: true });
+    expect(tool("Bold")).toHaveFocus();
+    await user.keyboard("{ArrowRight}");
+    expect(tool("Italic")).toHaveFocus();
+    await user.keyboard("{End}");
+    expect(tool("Divider")).toHaveFocus();
+    await user.keyboard("{ArrowRight}");
+    expect(tool("Bold")).toHaveFocus();
+    await user.keyboard("{ArrowLeft}{ArrowLeft}");
+    expect(tool("Code block")).toHaveFocus();
+
+    await user.keyboard("{Escape}");
+    expect(input).toHaveFocus();
+    await user.tab({ shift: true });
+    expect(tool("Code block")).toHaveFocus();
+  });
+
+  it("formats from the keyboard, leaving focus on the button for the next", async () => {
+    const { user } = await showComposer();
+    await user.tab({ shift: true });
+    await user.keyboard("{Enter}");
+    expect(tool("Bold")).toHaveAttribute("aria-pressed", "true");
+    expect(tool("Bold")).toHaveFocus();
+    await user.keyboard("{ArrowRight} ");
+    expect(tool("Italic")).toHaveAttribute("aria-pressed", "true");
+    expect(tool("Italic")).toHaveFocus();
+  });
+});
+
+describe("Link", () => {
+  /** The composer, `text` written in it, and `selected` selected, or else the cursor after the text. */
+  async function written(text: string, selected = "") {
+    const shown = await showComposer();
+    await shown.user.type(shown.input, text);
+    if (selected) {
+      const start = text.indexOf(selected);
+      (shown.input as HTMLTextAreaElement).setSelectionRange(start, start + selected.length);
+    }
+    return shown;
+  }
+
+  it("links what's selected through Link's dialog, taking an address without a scheme as a web address", async () => {
+    const { input, user } = await written("Read the docs", "the docs");
+    await user.click(tool("Link"));
+    const dialog = screen.getByRole("dialog", { name: "Add link" });
+    expect(within(dialog).getByLabelText("Text")).toHaveValue("the docs");
+    expect(within(dialog).getByLabelText("Link")).toHaveFocus();
+    expect(within(dialog).queryByRole("button", { name: "Remove link" })).not.toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Save" })).toBeDisabled();
+
+    await user.type(within(dialog).getByLabelText("Link"), "example.com/docs{Enter}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await waitFor(() => expect(input).toHaveAttribute("data-linked", "https://example.com/docs"));
+    expect(input).toHaveFocus();
+    expect(input).toHaveValue("Read the docs");
+    expect(tool("Link")).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("opens from Cmd or Ctrl+Shift+U and Cmd or Ctrl+K, with the row hidden too, starting at the text with nothing selected", async () => {
+    const { input, user } = await written("See ");
+    await user.click(showFormatting());
+    await user.keyboard("{Control>}{Shift>}U{/Shift}{/Control}");
+    const dialog = screen.getByRole("dialog", { name: "Add link" });
+    expect(within(dialog).getByLabelText("Text")).toHaveFocus();
+
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await waitFor(() => expect(input).toHaveFocus());
+    await user.keyboard("{Control>}k{/Control}");
+    expect(screen.getByRole("dialog", { name: "Add link" })).toBeInTheDocument();
+  });
+
+  it("writes the address as the text when the text's left blank, and leaves the text as it was on Cancel", async () => {
+    const { input, user } = await written("See ");
+    await user.click(tool("Link"));
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await waitFor(() => expect(input).toHaveFocus());
+    expect(input).toHaveValue("See ");
+
+    await user.click(tool("Link"));
+    await user.type(within(screen.getByRole("dialog")).getByLabelText("Link"), "https://example.com{Enter}");
+    await waitFor(() => expect(input).toHaveValue("See https://example.com"));
+  });
+
+  it("edits the link the cursor is in, or takes it off, keeping its text", async () => {
+    const { input, user } = await written("Read the docs", "the docs");
+    await user.click(tool("Link"));
+    await user.type(within(screen.getByRole("dialog")).getByLabelText("Link"), "example.com{Enter}");
+    await waitFor(() => expect(input).toHaveAttribute("data-linked"));
+
+    await user.click(tool("Link"));
+    const dialog = screen.getByRole("dialog", { name: "Edit link" });
+    expect(within(dialog).getByLabelText("Link")).toHaveValue("https://example.com");
+    await user.click(within(dialog).getByRole("button", { name: "Remove link" }));
+    await waitFor(() => expect(input).not.toHaveAttribute("data-linked"));
+    expect(input).toHaveValue("Read the docs");
+    expect(tool("Link")).toHaveAttribute("aria-pressed", "false");
   });
 });
 
@@ -154,15 +379,11 @@ describe("Send from the keyboard", () => {
     expect(onSend).toHaveBeenCalledWith("<p>line one<br>line two</p>", false);
   });
 
-  it("starts a new line on Enter while the toolbar shows, sends on Ctrl+Enter, and then hides the toolbar", async () => {
+  it("sends on Enter with the formatting row showing, as Slack's does, and keeps the row", async () => {
     const { onSend, input, user } = await showComposer();
-    await user.click(formattingOptions());
-    await user.type(input, "one{Enter}two");
-    expect(onSend).not.toHaveBeenCalled();
-
-    await user.keyboard("{Control>}{Enter}{/Control}");
-    expect(onSend).toHaveBeenCalledExactlyOnceWith("<p>one<br>two</p>", false);
-    expect(formattingOptions()).toHaveAttribute("aria-pressed", "false");
+    await user.type(input, "one{Enter}");
+    expect(onSend).toHaveBeenCalledExactlyOnceWith("<p>one</p>", false);
+    expect(formattingRow()).toBeInTheDocument();
   });
 
   it("sends only from the Send button on touch screens", async () => {
@@ -187,7 +408,7 @@ describe("Send from the keyboard", () => {
 
   it("keeps what's written when the room won't take it, as when it's too long", async () => {
     const { onSend, input, user } = await showComposer();
-    onSend.mockReturnValue(false);
+    onSend.mockReturnValue(null);
     await user.type(input, "Too much{Enter}");
     expect(onSend).toHaveBeenCalledExactlyOnceWith("<p>Too much</p>", false);
     expect(input).toHaveValue("Too much");
@@ -234,20 +455,18 @@ describe("Attach files", () => {
 
   it("waits to send the files picked with Attach files, in order of their names, however often they're picked", async () => {
     const { user } = await showComposer();
-    expect(attachFiles()).toHaveAttribute("type", "file");
-    expect(attachFiles()).toHaveAttribute("multiple");
-    await user.upload(attachFiles(), [fileOf("b.txt"), fileOf("A.pdf"), fileOf("a.txt")]);
+    await user.upload(fileField(), [fileOf("b.txt"), fileOf("A.pdf"), fileOf("a.txt")]);
     expect(chips()).toEqual(["Remove A.pdf", "Remove a.txt", "Remove b.txt"]);
 
-    await user.upload(attachFiles(), fileOf("a.txt"));
+    await user.upload(fileField(), fileOf("a.txt"));
     expect(chips()).toEqual(["Remove A.pdf", "Remove a.txt", "Remove a.txt", "Remove b.txt"]);
-    expect(attachFiles()).toHaveValue("");
+    expect(fileField()).toHaveValue("");
   });
 
   it("shows a picture's thumbnail, and a file icon for anything else, over its name up to its last dot and its extension", async () => {
     const { made } = thumbnails();
     const { user } = await showComposer();
-    await user.upload(attachFiles(), [fileOf("moon.jpg", { type: "image/jpeg" }), fileOf("archive.tar.gz", { type: "application/gzip" }), fileOf("README")]);
+    await user.upload(fileField(), [fileOf("moon.jpg", { type: "image/jpeg" }), fileOf("archive.tar.gz", { type: "application/gzip" }), fileOf("README")]);
 
     const moon = screen.getByRole("button", { name: "Remove moon.jpg" });
     expect(made).toEqual(["blob:moon.jpg"]);
@@ -265,7 +484,7 @@ describe("Attach files", () => {
   it("takes a file back out when its chip is pressed, letting go of its thumbnail", async () => {
     const { revoked } = thumbnails();
     const { user, onSendFiles } = await showComposer();
-    await user.upload(attachFiles(), [fileOf("moon.jpg", { type: "image/jpeg" }), fileOf("notes.txt")]);
+    await user.upload(fileField(), [fileOf("moon.jpg", { type: "image/jpeg" }), fileOf("notes.txt")]);
     await user.click(screen.getByRole("button", { name: "Remove moon.jpg" }));
     expect(chips()).toEqual(["Remove notes.txt"]);
     expect(revoked).toEqual(["blob:moon.jpg"]);
@@ -277,7 +496,7 @@ describe("Attach files", () => {
   it("sends the files, each as a message of its own, before what's written, and empties the list", async () => {
     const { onSend, onSendFiles, input, user } = await showComposer();
     const [b, a] = [fileOf("b.txt"), fileOf("a.txt")];
-    await user.upload(attachFiles(), [b, a]);
+    await user.upload(fileField(), [b, a]);
     await user.type(input, "Here they are{Enter}");
     expect(onSendFiles).toHaveBeenCalledExactlyOnceWith([a, b], false);
     expect(onSend).toHaveBeenCalledExactlyOnceWith("<p>Here they are</p>", false);
@@ -290,8 +509,8 @@ describe("Attach files", () => {
     (await showComposer()).view.unmount();
     const onSendFiles = vi.fn();
     const user = userEvent.setup();
-    render(<Composer roomId="r1" roomName="general" userId="u1" typing={[]} disabled={false} deferEditor onSend={() => true} onSendFiles={onSendFiles} onTyping={() => {}} />);
-    await user.upload(attachFiles(), fileOf("a.txt"));
+    render(<Composer roomId="r1" roomName="general" userId="u1" typing={[]} disabled={false} deferEditor onSend={() => went} onSendFiles={onSendFiles} onTyping={() => {}} />);
+    await user.upload(fileField(), fileOf("a.txt"));
     await user.click(sendButton());
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
     expect(onSendFiles).toHaveBeenCalledExactlyOnceWith([expect.objectContaining({ name: "a.txt" })], false);
@@ -300,7 +519,7 @@ describe("Attach files", () => {
 
   it("sends files with nothing written", async () => {
     const { onSend, onSendFiles, user } = await showComposer();
-    await user.upload(attachFiles(), fileOf("a.txt"));
+    await user.upload(fileField(), fileOf("a.txt"));
     await user.click(sendButton());
     expect(onSendFiles).toHaveBeenCalledOnce();
     expect(onSend).not.toHaveBeenCalled();
@@ -312,7 +531,7 @@ describe("Attach files", () => {
 
   it("holds on to the files while the room is disconnected, when files can't be picked", async () => {
     const { onSendFiles, composer, input, user } = await showComposer({ disabled: true });
-    expect(attachFiles()).toBeDisabled();
+    expect(fileField()).toBeDisabled();
     act(() => composer.current!.addFiles([fileOf("a.txt")]));
     await user.type(input, "{Enter}");
     expect(onSendFiles).not.toHaveBeenCalled();
@@ -342,6 +561,105 @@ describe("Attach files", () => {
   });
 });
 
+describe("The buttons under the text", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  // Hidden from screen readers, as everything but the menu is, while the menu's open.
+  const attach = () => screen.getByRole("button", { name: "Attach", hidden: true });
+
+  it("greys Send out until something's written or a file's picked, as Slack's is", async () => {
+    const { input, user } = await showComposer();
+    expect(sendButton()).toHaveAttribute("data-empty");
+    await user.type(input, "Hi");
+    expect(sendButton()).not.toHaveAttribute("data-empty");
+
+    await user.type(input, "{Enter}");
+    expect(sendButton()).toHaveAttribute("data-empty");
+    await user.upload(fileField(), fileOf("a.txt"));
+    expect(sendButton()).not.toHaveAttribute("data-empty");
+  });
+
+  it("offers Text snippet and Upload from your computer from +, an × while they show, which opens the file picker", async () => {
+    const { input, user } = await showComposer();
+    const picking = vi.spyOn(fileField(), "click").mockImplementation(() => {});
+    expect(attach().querySelector("svg")).toHaveClass("iconoir-plus");
+    await user.click(attach());
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Text snippetCtrl+Shift+Enter", "Upload from your computerCtrl+O"]);
+    expect(screen.getByRole("menuitem", { name: /Upload/ })).toHaveAttribute("aria-keyshortcuts", "Control+O");
+    expect(attach().querySelector("svg")).toHaveClass("iconoir-xmark");
+
+    await user.click(screen.getByRole("menuitem", { name: /Upload from your computer/ }));
+    expect(picking).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(attach().querySelector("svg")).toHaveClass("iconoir-plus");
+    await waitFor(() => expect(input).toHaveFocus());
+  });
+
+  it("opens the file picker on Cmd or Ctrl+O, and Text snippet on Cmd or Ctrl+Shift+Enter, which doesn't send", async () => {
+    const { input, onSend, user } = await showComposer();
+    const picking = vi.spyOn(fileField(), "click").mockImplementation(() => {});
+    await user.type(input, "Hello");
+    await user.keyboard("{Control>}o{/Control}");
+    expect(picking).toHaveBeenCalledOnce();
+
+    await user.keyboard("{Control>}{Shift>}{Enter}{/Shift}{/Control}");
+    expect(onSend).not.toHaveBeenCalled();
+    expect(await screen.findByRole("dialog", { name: "Create a text snippet" })).toBeInTheDocument();
+  });
+
+  it("adds a text snippet as a text file named after its title, to send with the next message", async () => {
+    const { input, onSendFiles, user } = await showComposer();
+    await user.click(attach());
+    await user.click(screen.getByRole("menuitem", { name: /Text snippet/ }));
+    const dialog = await screen.findByRole("dialog", { name: "Create a text snippet" });
+    const create = within(dialog).getByRole("button", { name: "Create snippet" });
+    await waitFor(() => expect(within(dialog).getByLabelText("Content")).toHaveFocus());
+    expect(create).toBeDisabled();
+
+    await user.type(within(dialog).getByLabelText("Content"), "echo hi");
+    await user.type(within(dialog).getByLabelText("Title (optional)"), "deploy.sh");
+    await user.click(create);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(chips()).toEqual(["Remove deploy.sh"]);
+    await waitFor(() => expect(input).toHaveFocus());
+
+    await user.click(sendButton());
+    const [snippet] = onSendFiles.mock.calls[0]![0];
+    expect(snippet!.type).toBe("text/plain");
+    expect(await snippet!.text()).toBe("echo hi");
+  });
+
+  it("names an untitled snippet Untitled.txt, and creates it on Cmd or Ctrl+Enter", async () => {
+    const { user } = await showComposer();
+    await user.keyboard("{Control>}{Shift>}{Enter}{/Shift}{/Control}");
+    const dialog = await screen.findByRole("dialog", { name: "Create a text snippet" });
+    await user.type(within(dialog).getByLabelText("Content"), "First line{Enter}Second line{Control>}{Enter}{/Control}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(chips()).toEqual(["Remove Untitled.txt"]);
+  });
+
+  it("writes the emoji picked where the cursor is, and puts focus back in the text", async () => {
+    const { input, user } = await showComposer();
+    await user.type(input, "Party ");
+    await user.click(screen.getByRole("button", { name: "Emoji" }));
+    await user.click(await screen.findByRole("button", { name: "🎉" }));
+    expect(input).toHaveValue("Party 🎉");
+    expect(screen.queryByRole("dialog", { name: "Emoji" })).not.toBeInTheDocument();
+    await waitFor(() => expect(input).toHaveFocus());
+  });
+
+  it("types @ for the people to mention, after a space where the cursor follows a word, keeping focus in the text", async () => {
+    const { input, user } = await showComposer();
+    await user.click(screen.getByRole("button", { name: "Mention someone" }));
+    expect(input).toHaveValue("@");
+    expect(input).toHaveFocus();
+
+    await user.type(input, "{Backspace}Thanks");
+    await user.click(screen.getByRole("button", { name: "Mention someone" }));
+    expect(input).toHaveValue("Thanks @");
+  });
+});
+
 describe("Pasting into the composer", () => {
   afterEach(() => vi.restoreAllMocks());
 
@@ -362,7 +680,7 @@ describe("250 MB file limit", () => {
 
   it("leaves out files over 250 MB, saying so under the others until more are picked, dropped or pasted", async () => {
     const { input, user, view, onSendFiles } = await showComposer();
-    await user.upload(attachFiles(), [
+    await user.upload(fileField(), [
       fileOf("huge.mov", { size: MAX_FILE_SIZE + 1 }),
       fileOf("fits.mov", { size: MAX_FILE_SIZE }),
       fileOf("vast.iso", { size: MAX_FILE_SIZE + 1 }),
@@ -378,13 +696,13 @@ describe("250 MB file limit", () => {
     expect(screen.getByRole("alert")).toBe(alert);
 
     // Picking more says only what's wrong with them.
-    await user.upload(attachFiles(), fileOf("enormous.zip", { size: MAX_FILE_SIZE + 1 }));
+    await user.upload(fileField(), fileOf("enormous.zip", { size: MAX_FILE_SIZE + 1 }));
     expect(screen.getByRole("alert")).toHaveTextContent(tooLarge("enormous.zip"), { normalizeWhitespace: false });
     fireEvent.drop(view.container.querySelector("form")!, { dataTransfer: { files: [fileOf("small.txt")] } });
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 
     // Pasting anything clears it, even text.
-    await user.upload(attachFiles(), fileOf("enormous.zip", { size: MAX_FILE_SIZE + 1 }));
+    await user.upload(fileField(), fileOf("enormous.zip", { size: MAX_FILE_SIZE + 1 }));
     fireEvent.paste(input, { clipboardData: clipboard() });
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
@@ -458,7 +776,7 @@ describe("Reply in a thread", () => {
 
   it("sends files to the room too while Also send is ticked", async () => {
     const { onSendFiles, user } = await showComposer({ threadId: "m1" });
-    await user.upload(attachFiles(), new File(["hi"], "notes.txt", { type: "text/plain" }));
+    await user.upload(fileField(), new File(["hi"], "notes.txt", { type: "text/plain" }));
     await user.click(alsoSend());
     await user.click(sendButton());
     expect(onSendFiles).toHaveBeenCalledExactlyOnceWith([expect.objectContaining({ name: "notes.txt" })], true);
@@ -480,12 +798,176 @@ describe("Reply in a thread", () => {
   });
 });
 
+describe("A thread's draft, beside its room and in the room's huddle over it", () => {
+  const draft = () => localStorage.getItem("composer-draft-u1-r1/threads/m1");
+
+  /** The thread's composer beside its room, with its text box as it is now: another, once the editor has opened again. */
+  async function showBeside() {
+    const shown = await showComposer({ threadId: "m1" });
+    const own = within(shown.view.container);
+    return { ...shown, box: () => own.getByRole("textbox", { name: "Write a reply" }), send: () => own.getByRole("button", { name: "Send Message" }) };
+  }
+
+  /** The same thread's composer in its room's huddle, which opens over the one beside the room and leaves focus where it is. */
+  const showInHuddle = () => showComposer({ threadId: "m1", autoFocus: false });
+
+  it("opens the huddle's with what was begun beside the room, which shows what the huddle's left of it once that's gone, leaving focus where it is", async () => {
+    const beside = await showBeside();
+    await beside.user.upload(fileField(), new File(["hi"], "notes.txt", { type: "text/plain" }));
+    await beside.user.click(screen.getByRole("checkbox", { name: "Also send to #general" }));
+    await beside.user.type(beside.input, "Shipping on");
+    const huddle = await showInHuddle();
+    expect(huddle.input).toHaveValue("Shipping on");
+
+    // Only the one in front can be written in, so the other has it once it's in front again.
+    await huddle.user.type(huddle.input, " Friday");
+    expect(beside.box()).toBe(beside.input);
+    expect(beside.box()).toHaveValue("Shipping on");
+    beside.onTyping.mockClear();
+    huddle.view.unmount();
+    expect(beside.box()).toHaveValue("Shipping on Friday");
+    expect(beside.box()).not.toHaveFocus();
+    expect(draft()).toBe("<p>Shipping on Friday</p>");
+    // It wasn't typed here, so the room hears of no typing, and what waits to go with the reply still does.
+    expect(beside.onTyping).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Remove notes.txt" })).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Also send to #general" })).toBeChecked();
+
+    // A huddle's that leaves it as it found it leaves the editor as it is.
+    const reopened = beside.box();
+    (await showInHuddle()).view.unmount();
+    expect(beside.box()).toBe(reopened);
+    await beside.user.type(beside.box(), "{Enter}");
+    expect(beside.onSend).toHaveBeenCalledExactlyOnceWith("<p>Shipping on Friday</p>", true);
+  });
+
+  it("has nothing left written beside the room once the reply's been sent from the huddle, so it can't be sent twice", async () => {
+    const beside = await showBeside();
+    await beside.user.type(beside.input, "Shipping on Friday");
+    const huddle = await showInHuddle();
+    await huddle.user.type(huddle.input, "{Enter}");
+    expect(huddle.onSend).toHaveBeenCalledExactlyOnceWith("<p>Shipping on Friday</p>", false);
+    huddle.view.unmount();
+
+    expect(beside.box()).toHaveValue("");
+    expect(beside.send()).toHaveAttribute("data-empty");
+    await beside.user.type(beside.box(), "{Enter}");
+    expect(beside.onSend).not.toHaveBeenCalled();
+  });
+
+  it("takes up what was begun in the huddle as a draft it opens with: Send lights, and emptying it tells the room its writer has stopped", async () => {
+    const beside = await showBeside();
+    const huddle = await showInHuddle();
+    await huddle.user.type(huddle.input, "Hello");
+    huddle.view.unmount();
+
+    expect(beside.box()).toHaveValue("Hello");
+    expect(beside.send()).not.toHaveAttribute("data-empty");
+    expect(beside.onTyping).not.toHaveBeenCalled();
+    await beside.user.clear(beside.box());
+    expect(beside.onTyping).toHaveBeenCalledExactlyOnceWith(false);
+    expect(draft()).toBeNull();
+  });
+
+  it("leaves what's written, and focus, as they are where the huddle's left the draft as it found it", async () => {
+    const beside = await showBeside();
+    await beside.user.type(beside.input, "Hello");
+    (await showInHuddle()).view.unmount();
+    expect(beside.box()).toBe(beside.input);
+    expect(beside.input).toHaveValue("Hello");
+    expect(beside.input).toHaveFocus();
+  });
+
+  it("leaves the huddle's as it is when the one under it goes, which was written in before it, whether the huddle's has been written in or not", async () => {
+    const huddlesBox = () => within(huddle.view.container).getByRole("textbox", { name: "Write a reply" });
+    const beside = await showBeside();
+    await beside.user.type(beside.input, "Hello");
+    const huddle = await showInHuddle();
+    beside.view.unmount();
+    expect(huddlesBox()).toBe(huddle.input);
+    expect(huddle.input).toHaveValue("Hello");
+
+    const besideAgain = await showBeside();
+    await huddle.user.type(huddle.input, " there");
+    besideAgain.view.unmount();
+    expect(huddlesBox()).toBe(huddle.input);
+    expect(huddle.input).toHaveValue("Hello there");
+    expect(huddle.input).toHaveFocus();
+  });
+
+  it("leaves each with what's written in it where this browser keeps no drafts, so neither has the other's to show", async () => {
+    const refuse = () => {
+      throw new DOMException("The operation is insecure.", "SecurityError");
+    };
+    vi.stubGlobal("localStorage", { getItem: refuse, setItem: refuse, removeItem: refuse });
+    const beside = await showBeside();
+    await beside.user.type(beside.input, "Hello");
+    const huddle = await showInHuddle();
+    expect(huddle.input).toHaveValue("");
+    await huddle.user.type(huddle.input, "Hi{Enter}");
+    huddle.view.unmount();
+    expect(beside.box()).toBe(beside.input);
+    expect(beside.input).toHaveValue("Hello");
+  });
+});
+
+describe("A message the room won't take for what it says", () => {
+  const WHY = "This community doesn't allow one of these words.";
+
+  it("comes back to be changed, keeping it as the draft, with why above the card, until something's sent", async () => {
+    const { composer, input, user, onSend } = await showComposer();
+    await user.type(input, "Oh fudge");
+    await user.keyboard("{Enter}");
+    expect(input).toHaveValue("");
+
+    let taken = false;
+    act(() => void (taken = composer.current!.giveBack("<p>Oh fudge</p>", WHY, false)));
+    expect(taken).toBe(true);
+    expect(input).toHaveValue("Oh fudge");
+    expect(input).toHaveFocus();
+    expect(screen.getByRole("alert")).toHaveTextContent(WHY);
+    expect(localStorage.getItem("composer-draft-u1-r1")).toBe("<p>Oh fudge</p>");
+
+    await user.clear(input);
+    await user.type(input, "Oh fiddlesticks");
+    expect(screen.getByRole("alert")).toHaveTextContent(WHY);
+    await user.keyboard("{Enter}");
+    expect(onSend).toHaveBeenLastCalledWith("<p>Oh fiddlesticks</p>", false);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("stays out of the composer once something else is written there", async () => {
+    const { composer, input, user } = await showComposer();
+    await user.type(input, "Never mind");
+
+    let taken = true;
+    act(() => void (taken = composer.current!.giveBack("<p>Oh fudge</p>", WHY, false)));
+    expect(taken).toBe(false);
+    expect(input).toHaveValue("Never mind");
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("comes back to a thread's composer with Also send to the room ticked again, as it went", async () => {
+    const { composer, input } = await showComposer({ threadId: "m1" });
+    act(() => void composer.current!.giveBack("<p>Oh fudge</p>", WHY, true));
+    expect(input).toHaveValue("Oh fudge");
+    expect(screen.getByRole("checkbox", { name: "Also send to #general" })).toBeChecked();
+  });
+
+  it("says why only in the room it came back in", async () => {
+    const { composer, view } = await showComposer();
+    act(() => void composer.current!.giveBack("<p>Oh fudge</p>", WHY, false));
+    view.rerender(<Composer ref={composer} roomId="r2" roomName="random" userId="u1" typing={[]} disabled={false} onSend={() => went} onSendFiles={() => {}} onTyping={() => {}} />);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
 describe("Reply with a quote", () => {
   it("writes a reply in place of what's written, with the cursor at its end, keeping it as the draft", async () => {
     const composer = createRef<ComposerHandle>();
     const onTyping = vi.fn();
     render(
-      <Composer ref={composer} roomId="r1" roomName="general" userId="u1" typing={[]} disabled={false} onSend={() => true} onSendFiles={() => {}} onTyping={onTyping} />,
+      <Composer ref={composer} roomId="r1" roomName="general" userId="u1" typing={[]} disabled={false} onSend={() => went} onSendFiles={() => {}} onTyping={onTyping} />,
     );
     const input = await screen.findByRole("textbox", { name: "Write a message" });
     await userEvent.setup().type(input, "Unsent");
@@ -515,7 +997,7 @@ describe("Reply with a quote", () => {
         typing={[]}
         disabled={false}
         deferEditor={deferEditor}
-        onSend={() => true}
+        onSend={() => went}
         onSendFiles={() => {}}
         onTyping={onTyping}
       />
@@ -596,6 +1078,115 @@ describe("Link previews while writing", () => {
     view.unmount();
     expect(fetch.mock.calls[2]![1].signal!.aborted).toBe(true);
   });
+
+  it("forgets it too once the editor it was pasted in opens again, with what another composer left of its draft", async () => {
+    const fetch = previews(() => new Promise<Response>(() => {}));
+    const { user } = await showComposer({ threadId: "m1" });
+    await user.paste("https://example.com/slow");
+    const over = await showComposer({ threadId: "m1", autoFocus: false });
+    await over.user.type(over.input, " is slow");
+    expect(fetch.mock.calls[0]![1].signal!.aborted).toBe(false);
+    over.view.unmount();
+    expect(fetch.mock.calls[0]![1].signal!.aborted).toBe(true);
+  });
+
+  describe("once the message has gone", () => {
+    /** Answers each ask for a link's preview with `preview` once `answer` is called. */
+    function slowPreviews(preview: LinkPreview) {
+      let answer!: () => void;
+      const answered = new Promise<void>((resolve) => (answer = resolve));
+      const fetch = previews(async () => {
+        await answered;
+        return Response.json(preview);
+      });
+      return { fetch, answer: () => act(async () => answer()) };
+    }
+
+    it("adds a pasted link's preview that comes after the message went to the message, rather than below the link", async () => {
+      const { fetch, answer } = slowPreviews(basecamp);
+      const { onSend, addPreview, user, view } = await showComposer();
+      await user.paste("https://basecamp.com");
+      await user.keyboard("{Enter}");
+      expect(onSend).toHaveBeenCalledExactlyOnceWith("<p>https://basecamp.com</p>", false);
+      view.unmount();
+      expect(addPreview).not.toHaveBeenCalled();
+
+      await answer();
+      expect(addPreview).toHaveBeenCalledExactlyOnceWith(basecamp);
+      expect(fetch).toHaveBeenCalledOnce();
+      expect(fetch.mock.calls[0]![1].signal!.aborted).toBe(false);
+      expect(shownPreviews(view)).toHaveLength(0);
+    });
+
+    it("asks for the preview of the first link to a web page typed in the message as it goes, as Slack does", async () => {
+      const fetch = previews(() => Response.json(basecamp));
+      const { addPreview, input, user } = await showComposer({ threadId: "m1" });
+      await user.type(input, "Mail ada@example.com, or see www.basecamp.com and https://example.com{Enter}");
+      await vi.waitFor(() => expect(addPreview).toHaveBeenCalledExactlyOnceWith(basecamp));
+      expect(fetch).toHaveBeenCalledExactlyOnceWith("/api/unfurl", expect.objectContaining({ body: JSON.stringify({ url: "http://www.basecamp.com" }) }));
+    });
+
+    it("adds none to a message that took a preview as it was written, even one taken out of it", async () => {
+      const fetch = previews(() => Response.json(basecamp));
+      const { onSend, addPreview, input, user, view } = await showComposer();
+      await user.paste("https://basecamp.com");
+      await screen.findByRole("link", { name: "Basecamp" });
+      await user.keyboard("{Enter}");
+      expect(onSend.mock.calls[0]![0]).toContain(OPENGRAPH_EMBED_CONTENT_TYPE);
+
+      await user.paste("https://basecamp.com");
+      await screen.findByRole("link", { name: "Basecamp" });
+      await user.click(screen.getByRole("button", { name: "Remove" }));
+      expect(shownPreviews(view)).toHaveLength(0);
+      await user.type(input, " is calm{Enter}");
+      expect(onSend).toHaveBeenLastCalledWith("<p>https://basecamp.com is calm</p>", false);
+
+      await act(async () => {});
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(addPreview).not.toHaveBeenCalled();
+    });
+
+    it("asks for a pasted link changed before the message went as it went, rather than add the pasted one's preview", async () => {
+      let answerPasted!: () => void;
+      const pastedAnswered = new Promise<void>((resolve) => (answerPasted = resolve));
+      const fetch = previews(async (url) => {
+        if (url.endsWith("/story")) await pastedAnswered;
+        return Response.json({ ...basecamp, title: url });
+      });
+      const { addPreview, input, user } = await showComposer();
+      await user.paste("https://example.com/story");
+      await user.type(input, "/other{Enter}");
+      await vi.waitFor(() => expect(addPreview).toHaveBeenCalledExactlyOnceWith({ ...basecamp, title: "https://example.com/story/other" }));
+      expect(fetch.mock.calls[0]![1].signal!.aborted).toBe(true);
+
+      await act(async () => answerPasted());
+      expect(addPreview).toHaveBeenCalledOnce();
+    });
+
+    it("asks once for a pasted link's page that has none, then for a link typed after it, and forgets a preview whose link has gone", async () => {
+      const answers: Record<string, Response> = { "https://example.com/none": new Response(null, { status: 204 }), "https://example.com/some": Response.json(basecamp) };
+      const fetch = previews((url) => answers[url]!);
+      const { addPreview, input, user } = await showComposer();
+      await user.paste("https://example.com/none");
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+      await user.type(input, " has none{Enter}");
+      await act(async () => {});
+      expect(fetch).toHaveBeenCalledOnce();
+
+      await user.paste("https://example.com/none");
+      await user.type(input, " has none, but https://example.com/some does{Enter}");
+      await vi.waitFor(() => expect(addPreview).toHaveBeenCalledExactlyOnceWith(basecamp));
+      expect(fetch.mock.calls.map(([, init]) => JSON.parse(init.body as string).url)).toEqual(["https://example.com/none", "https://example.com/none", "https://example.com/some"]);
+
+      addPreview.mockClear();
+      const { answer } = slowPreviews(basecamp);
+      await user.paste("https://basecamp.com");
+      await user.clear(input);
+      await user.type(input, "Never mind{Enter}");
+      await answer();
+      expect(addPreview).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe("Typing indicator", () => {
@@ -644,7 +1235,7 @@ describe("Typing indicator", () => {
           userId="u1"
           typing={[typist("Linus", 1), typist("Grace", 2)]}
           disabled={false}
-          onSend={vi.fn(() => true)}
+          onSend={vi.fn(() => went)}
           onSendFiles={vi.fn()}
           onTyping={vi.fn()}
         />

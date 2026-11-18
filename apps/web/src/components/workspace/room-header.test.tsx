@@ -36,6 +36,7 @@ function renderHeader(props: Partial<ComponentProps<typeof RoomHeader>> = {}, on
           <RoomHeader
             room={general}
             name="general"
+            meId="linus"
             present={[]}
             status="open"
             offline={false}
@@ -71,6 +72,7 @@ describe("Who's here", () => {
           <RoomHeader
             room={general}
             name="general"
+            meId="linus"
             present={people(2)}
             status="open"
             offline={false}
@@ -145,6 +147,7 @@ describe("Group DMs and DM names", () => {
           <RoomHeader
             room={{ ...adaDirect, members: [{ id: "ada", name: "Ada" }, { id: recap.id, name: recap.name }] }}
             name="Recap"
+            meId="ada"
             present={[]}
             status="open"
             offline={false}
@@ -302,26 +305,29 @@ describe("Huddles", () => {
   function HuddlesOn({ children }: { children: ReactNode }) {
     return <AccountContext value={{ ...useAccount(), huddles: true }}>{children}</AccountContext>;
   }
-  /** The header of `room` where huddles are on. */
-  const renderWithHuddles = (room: Room, name: string) =>
+  /** The header of `room`, as Linus reads it, where huddles are on and the people directory lists `listed`. */
+  const renderWithHuddles = (room: Room, name: string, listed: DirectoryUser[] = []) =>
     render(
-      <PushContext value={PUSH_ON}>
-        <Sheet>
-          <RoomHeader
-            room={room}
-            name={name}
-            present={[]}
-            status="open"
-            offline={false}
-            favorite={false}
-            onStarred={vi.fn()}
-            involvement="mentions"
-            askForRoom={() => vi.fn()}
-            onSessionChanged={vi.fn()}
-            onFailed={vi.fn()}
-          />
-        </Sheet>
-      </PushContext>,
+      <PeopleContext value={new Map(listed.map((person) => [person.id, person]))}>
+        <PushContext value={PUSH_ON}>
+          <Sheet>
+            <RoomHeader
+              room={room}
+              name={name}
+              meId="linus"
+              present={[]}
+              status="open"
+              offline={false}
+              favorite={false}
+              onStarred={vi.fn()}
+              involvement="mentions"
+              askForRoom={() => vi.fn()}
+              onSessionChanged={vi.fn()}
+              onFailed={vi.fn()}
+            />
+          </Sheet>
+        </PushContext>
+      </PeopleContext>,
       { wrapper: HuddlesOn },
     );
   const following = (a: Element, b: Element) => a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING;
@@ -340,9 +346,40 @@ describe("Huddles", () => {
     expect(search).toHaveClass("max-[429px]:hidden");
   });
 
-  it("has none in a DM, which keeps Search", () => {
+  it("has none in a room whose settings don't allow huddles, which keeps Search", () => {
+    renderWithHuddles({ ...general, huddles: false }, "general");
+    expect(screen.queryByRole("button", { name: "Start huddle" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Huddle options" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Search messages" })).not.toHaveClass("max-[429px]:hidden");
+  });
+
+  it("has it in a DM with someone to huddle with, where Search gives way to it too", () => {
     renderWithHuddles(adaDirect, "Ada");
+    const search = screen.getByRole("link", { name: "Search messages" });
+    expect(following(screen.getByRole("button", { name: "Start huddle" }), search)).toBeTruthy();
+    expect(search).toHaveClass("max-[429px]:hidden");
+  });
+
+  it("has none in a DM with nobody to huddle with, their own, one with bots alone or one with someone who can no longer sign in, which keeps Search", () => {
+    const linus = { id: "linus", name: "Linus" };
+    const own = renderWithHuddles({ ...adaDirect, members: [linus] }, "Linus");
     expect(screen.queryByRole("button", { name: "Start huddle" })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Search messages" })).not.toHaveClass("max-[429px]:hidden");
+    own.unmount();
+
+    const deploys: DirectoryUser = { id: "u8", name: "Deploys", bio: null, role: "bot", status: "active", avatarUrl: "/users/u8/avatar" };
+    const withBots: Room = { ...adaDirect, members: [linus, { id: deploys.id, name: deploys.name }, ember] };
+    const bots = renderWithHuddles(withBots, "Deploys and Ember", [deploys]);
+    expect(screen.queryByRole("button", { name: "Start huddle" })).not.toBeInTheDocument();
+    bots.unmount();
+
+    // Ada has been deactivated since the DM with her started.
+    renderWithHuddles(adaDirect, "Ada", [{ id: "ada", name: "Ada", bio: null, role: "member", status: "deactivated", avatarUrl: "/users/ada/avatar" }]);
+    expect(screen.queryByRole("button", { name: "Start huddle" })).not.toBeInTheDocument();
+  });
+
+  it("has it in a DM with a bot and someone else", () => {
+    renderWithHuddles({ ...adaDirect, members: [...adaDirect.members, ember] }, "Ada and Ember");
+    expect(screen.getByRole("button", { name: "Start huddle" })).toBeInTheDocument();
   });
 });

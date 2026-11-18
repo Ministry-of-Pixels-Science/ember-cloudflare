@@ -72,6 +72,11 @@ const NAMED_MEMBER = /^(\w+)\.(\w+)\.(\w+)$/;
 const VERSION_FILE = "apps/worker/package.json";
 /** What GitHub answers a workflow that may not open pull requests, as a new repository's may not. */
 const PULL_REQUESTS_NOT_PERMITTED = /not permitted to create or approve pull requests/i;
+/**
+ * Who gh says opened what a workflow opens with the token GitHub gives it, as this one's issues are: it
+ * opens one only on the answer above, which GitHub gives that token alone. No person's login has a slash.
+ */
+const WORKFLOWS_AUTHOR = "app/github-actions";
 /** The first git whose merge-tree takes --merge-base. */
 const GIT_NEEDED = [2, 40, 0];
 
@@ -485,10 +490,32 @@ function listed<T>(args: string[]): T[] {
   return result.status === 0 ? (JSON.parse(result.stdout) as T[]) : [];
 }
 
+/** A pull request as gh lists it, with whether its branch is in another repository than the copy's, as a fork's is. */
+interface ListedPull {
+  headRefName: string;
+  isCrossRepository?: boolean;
+}
+
+/** An issue as gh lists it, with who opened it. */
+interface ListedIssue {
+  title: string;
+  author?: { login?: string };
+}
+
+/**
+ * Whether a pull request's branch is in the copy's own repository, where only those who may push to it
+ * can make or change one. Anyone can open one from a fork, with a branch there named as an update's.
+ */
+const isFromCopy = (pull: ListedPull) => pull.isCrossRepository === false;
+
+/** Whether an issue is one this workflow opened. Anyone who may open one can give it an update's title. */
+const isWorkflows = (issue: ListedIssue) => issue.author?.login === WORKFLOWS_AUTHOR;
+
 /**
  * Closes the pull requests and issues for updates the copy needs no more: those for older releases
  * than `newest`, which `where` offers, or once the copy has `newest`, those up to it. One for a newer
- * beta, which the copy asked for, stays open until a release passes it.
+ * beta, which the copy asked for, stays open until a release passes it, and so does anyone else's
+ * that looks like an update's, which isn't this workflow's to close.
  */
 function closeStale(newest: Release, where?: string): void {
   const reason = where ? `Ember ${newest.tag} is out, so ${where} brings this copy up to it instead.` : `This copy has Ember's newest ${kindOf(newest)} now.`;
@@ -497,14 +524,14 @@ function closeStale(newest: Release, where?: string): void {
     const order = version ? compareVersions(version, newest.version) : -1;
     return where ? order < 0 : order <= 0;
   };
-  for (const pull of listed<{ number: number; headRefName: string }>(["pr", "list", "--state", "open", "--limit", "100", "--json", "number,headRefName"])) {
-    if (pull.headRefName.startsWith("update-ember/") && isStale(pull.headRefName)) {
+  for (const pull of listed<ListedPull & { number: number }>(["pr", "list", "--state", "open", "--limit", "100", "--json", "number,headRefName,isCrossRepository"])) {
+    if (pull.headRefName.startsWith("update-ember/") && isFromCopy(pull) && isStale(pull.headRefName)) {
       run("gh", ["pr", "close", String(pull.number), "--delete-branch", "--comment", reason]);
     }
   }
-  const issues = listed<{ number: number; title: string }>(["issue", "list", "--state", "open", "--limit", "100", "--json", "number,title"]);
+  const issues = listed<ListedIssue & { number: number }>(["issue", "list", "--state", "open", "--limit", "100", "--json", "number,title,author"]);
   for (const issue of issues) {
-    if (UPDATE_TITLE.test(issue.title) && isStale(issue.title)) run("gh", ["issue", "close", String(issue.number), "--comment", reason]);
+    if (UPDATE_TITLE.test(issue.title) && isWorkflows(issue) && isStale(issue.title)) run("gh", ["issue", "close", String(issue.number), "--comment", reason]);
   }
 }
 
@@ -554,12 +581,19 @@ function conflictsOn(branch: string, release: Release): Conflict[] {
   return [...marked.filter((file) => !noted.some((conflict) => conflict.file === file)).map((file) => ({ file })), ...noted];
 }
 
-/** The pull request or issue that offered `release` before, an open one rather than one closed. */
+/**
+ * The pull request or issue that offered `release` before, an open one rather than one closed: a pull
+ * request for the update's branch in the copy's own repository, or an issue this workflow opened, and
+ * no one else's that is named as one.
+ */
 function offerOf(release: Release): { url: string; state: string } | undefined {
   const branch = branchOf(release);
-  const pulls = listed<{ url: string; state: string; headRefName: string }>(["pr", "list", "--head", branch, "--state", "all", "--json", "url,state,headRefName"]);
-  const issues = listed<{ url: string; state: string; title: string }>(["issue", "list", "--state", "all", "--limit", "100", "--json", "url,state,title"]);
-  const offers = [...pulls.filter((pull) => pull.headRefName === branch), ...issues.filter((issue) => issue.title === titleOf(release))];
+  const pulls = listed<ListedPull & { url: string; state: string }>(["pr", "list", "--head", branch, "--state", "all", "--json", "url,state,headRefName,isCrossRepository"]);
+  const issues = listed<ListedIssue & { url: string; state: string }>(["issue", "list", "--state", "all", "--limit", "100", "--json", "url,state,title,author"]);
+  const offers = [
+    ...pulls.filter((pull) => pull.headRefName === branch && isFromCopy(pull)),
+    ...issues.filter((issue) => issue.title === titleOf(release) && isWorkflows(issue)),
+  ];
   return offers.find((offer) => offer.state === "OPEN") ?? offers[0];
 }
 

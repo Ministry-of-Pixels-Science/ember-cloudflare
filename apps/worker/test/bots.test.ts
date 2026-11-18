@@ -13,10 +13,9 @@ import type {
   RoomChanges,
   RoomId,
   RoomSettings,
-  Sidebar,
   UserId,
 } from "@ember/protocol";
-import { WEBHOOK_URL_REFUSED } from "@ember/protocol/bots";
+import { BOT_ROOMS_REFUSED, botMessagesPath, WEBHOOK_URL_REFUSED } from "@ember/protocol/bots";
 import { beforeEach, describe, expect, it } from "vitest";
 import notFoundPage from "../../web/public/404.html";
 import { DEFAULT_BOT_AVATAR } from "../src/default-bot-avatar";
@@ -60,7 +59,7 @@ async function botOf(response: Response, status = 200): Promise<BotSettings> {
 }
 
 /** Adds a bot as `administrator`, answering it as its edit page shows it. */
-const added = async (administrator: Session, body: { name: string; webhookUrl?: string }) => botOf(await addBot(administrator, body), 201);
+const added = async (administrator: Session, body: { name: string; webhookUrl?: string; rooms?: RoomId[] | null }) => botOf(await addBot(administrator, body), 201);
 
 /** The active bots, as the bots page lists them to `administrator`. */
 async function listed(administrator: Session): Promise<Bots["bots"]> {
@@ -101,7 +100,11 @@ async function directWith(administrator: Session, bot: BotSettings): Promise<Dir
 }
 
 /** A bot as the bots page lists it, in `rooms`. */
-const listedAs = ({ webhookUrl: _, ...bot }: BotSettings, rooms: BotRoom[]) => ({ ...bot, rooms });
+const listedAs = ({ webhookUrl: _, pickedRooms: __, ...bot }: BotSettings, rooms: BotRoom[]) => ({ ...bot, rooms });
+
+/** Posts `text` to room `roomId` as the bot whose key is `key`, as curl does. */
+const postAs = (key: string, roomId: RoomId, text: string) =>
+  api(botMessagesPath(roomId, key), { method: "POST", body: text, headers: { "Content-Type": "application/x-www-form-urlencoded" } });
 
 const tokenOf = (bot: BotSettings) => bot.key.slice(bot.id.length + 1);
 
@@ -149,6 +152,7 @@ describe("Add and edit a bot", () => {
       key: expect.any(String),
       rooms: [general, random],
       webhookUrl: "https://ci.example.com/hooks/ember",
+      pickedRooms: null,
     });
     expect(bot.key).toMatch(new RegExp(`^${bot.id}-[A-Za-z0-9]{12}$`));
     expect(await stored(bot.id)).toMatchObject({ name: "Build Bot", role: 2, status: 0, bot_token: tokenOf(bot) });
@@ -159,6 +163,70 @@ describe("Add and edit a bot", () => {
     // Open rooms made later take it in, as they do everyone active.
     const later = await createRoom("Later", { as: administrator });
     expect((await showBot(administrator, bot.id).then(botOf)).rooms).toEqual([general, { id: later.id, name: "Later" }, random]);
+  });
+
+  it("keeps a bot to the open rooms picked, which open rooms made or opened later leave it out of, and its key with it", async () => {
+    const administrator = await setUp();
+    const [general] = await firstRooms();
+    const support = await createRoom("Support", { as: administrator });
+    const leads = await createRoom("Leads", { closedTo: [administrator.user.id], as: administrator });
+
+    // A private room can't be picked, so it isn't joined.
+    const bot = await added(administrator, { name: "Build Bot", rooms: [support.id, leads.id] });
+    const picked = [{ id: support.id, name: "Support" }];
+    expect(bot).toMatchObject({ rooms: picked, pickedRooms: picked });
+    expect(await roomIdsOf(bot.id)).toEqual([support.id]);
+    expect((await postAs(bot.key, support.id, "Deployed")).status).toBe(201);
+    expect((await postAs(bot.key, general!.id, "Deployed")).status).toBe(404);
+
+    const later = await createRoom("Later", { as: administrator });
+    expect((await changeRoom(administrator, leads.id, { kind: "open" })).status).toBe(200);
+    expect(await roomIdsOf(bot.id)).toEqual([support.id]);
+    expect((await postAs(bot.key, later.id, "Deployed")).status).toBe(404);
+    // One in every open room joins them, as before.
+    const everywhere = await added(administrator, { name: "Deploy Bot", rooms: null });
+    expect(everywhere.pickedRooms).toBeNull();
+    expect((await listed(administrator)).map(({ name, rooms }) => [name, rooms.map(({ name }) => name)])).toEqual([
+      ["Build Bot", ["Support"]],
+      ["Deploy Bot", ["general", "Later", "Leads", "random", "Support"]],
+    ]);
+  });
+
+  it("moves a bot between every open room and the ones picked, keeping the private rooms it was put in", async () => {
+    const administrator = await setUp();
+    const [general, random] = await firstRooms();
+    const support = await createRoom("Support", { as: administrator });
+    const bot = await added(administrator, { name: "Build Bot" });
+    const leads = await createRoom("Leads", { closedTo: [administrator.user.id, bot.id], as: administrator });
+    const inLeads = { id: leads.id, name: "Leads" };
+
+    const kept = await botOf(await changeBot(administrator, bot.id, { rooms: [support.id] }));
+    expect(kept).toMatchObject({ rooms: [inLeads, { id: support.id, name: "Support" }], pickedRooms: [{ id: support.id, name: "Support" }] });
+    expect((await postAs(bot.key, general!.id, "Deployed")).status).toBe(404);
+    const later = await createRoom("Later", { as: administrator });
+    expect(await roomIdsOf(bot.id)).not.toContain(later.id);
+
+    // None at all keeps it to its private rooms and DMs.
+    expect(await botOf(await changeBot(administrator, bot.id, { rooms: [] }))).toMatchObject({ rooms: [inLeads], pickedRooms: [] });
+
+    const everywhere = await botOf(await changeBot(administrator, bot.id, { rooms: null }));
+    expect(everywhere).toMatchObject({ pickedRooms: null, rooms: [general, { id: later.id, name: "Later" }, inLeads, random, { id: support.id, name: "Support" }] });
+    const latest = await createRoom("Latest", { as: administrator });
+    expect(await roomIdsOf(bot.id)).toContain(latest.id);
+  });
+
+  it("refuses rooms that aren't a list of rooms' IDs, each once, saving nothing", async () => {
+    const administrator = await setUp();
+    const [general] = await firstRooms();
+    for (const rooms of [general!.id, [general!.id, general!.id], ["Launch!"]]) {
+      const refused = await addBot(administrator, { name: "Build Bot", rooms });
+      expect([refused.status, await refused.json()]).toEqual([422, { error: BOT_ROOMS_REFUSED }]);
+    }
+    expect(await listed(administrator)).toEqual([]);
+    const bot = await added(administrator, { name: "Build Bot" });
+    const refused = await changeBot(administrator, bot.id, { name: "Deploy Bot", rooms: "everywhere" });
+    expect([refused.status, await refused.json()]).toEqual([422, { error: BOT_ROOMS_REFUSED }]);
+    expect(await showBot(administrator, bot.id).then(botOf)).toEqual(bot);
   });
 
   it("gives every bot a token of its own", async () => {
@@ -457,7 +525,7 @@ describe("Where bots show up", () => {
     expect(await answered<NewRoomForm>(administrator, "/api/rooms/new")).toEqual({ people: [administrator.user, member.user] });
   });
 
-  it("offers an active bot to mention in the rooms it's in until it's deleted, but never suggests a DM with it", async () => {
+  it("offers an active bot to mention in the rooms it's in until it's deleted", async () => {
     const administrator = await setUp();
     const member = await joinAsGrace();
     const secrets = await createRoom("Secrets", { closedTo: [administrator.user.id, member.user.id], as: administrator });
@@ -466,7 +534,6 @@ describe("Where bots show up", () => {
 
     expect(await mentionable(member, general!.id, "bot")).toEqual(["Build Bot"]);
     expect(await mentionable(member, secrets.id, "bot")).toEqual([]);
-    expect((await answered<Sidebar>(member, "/api/sidebar")).suggestions).toEqual([administrator.user]);
 
     expect((await deleteBot(administrator, bot.id)).status).toBe(204);
     expect(await mentionable(member, general!.id, "bot")).toEqual([]);
