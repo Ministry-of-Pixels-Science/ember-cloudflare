@@ -11,8 +11,12 @@ import {
   fetchRoomSettings,
   fetchSidebar,
   forgetStoredSession,
+  handleReport,
   joinWorkspace,
+  listReports,
   removeAvatar,
+  reportMessage,
+  reportPerson,
   roomSocketUrl,
   setFavorite,
   setFavoriteOrder,
@@ -215,6 +219,29 @@ describe("Block someone", () => {
     expect(fetch).toHaveBeenLastCalledWith("/api/users/u%202/block", expect.objectContaining({ method: "POST" }));
     await changeBlock("u 2", false);
     expect(fetch).toHaveBeenLastCalledWith("/api/users/u%202/block", expect.objectContaining({ method: "DELETE" }));
+  });
+});
+
+describe("Report a message or someone", () => {
+  it("reports a message in its room, or someone, saying why", async () => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(null, { status: 204 }));
+    await reportMessage("r1", "m 1", { reason: "spam", note: "Again" });
+    expect(fetch).toHaveBeenLastCalledWith("/api/rooms/r1/messages/m%201/report", expect.objectContaining({ method: "POST", body: JSON.stringify({ reason: "spam", note: "Again" }) }));
+    await reportPerson("u 2", { reason: "other", note: "" });
+    expect(fetch).toHaveBeenLastCalledWith("/api/users/u%202/report", expect.objectContaining({ method: "POST", body: JSON.stringify({ reason: "other", note: "" }) }));
+  });
+
+  it("lists the reports for an administrator, and handles one, answering the reports that closed", async () => {
+    const report = { id: "rep 1", reporterId: "u2", reason: "spam", note: "", reportedAt: "2026-11-18T00:00:00.000Z", subject: { kind: "person", person: { id: "u3", name: "Grace", bio: null } }, handled: null };
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(Response.json({ open: [report], handled: [] }));
+    expect(await listReports()).toEqual({ open: [report], handled: [] });
+    expect(fetch).toHaveBeenLastCalledWith("/api/reports", expect.anything());
+    const handled = { ...report, handled: { by: "u1", at: "2026-11-18T00:01:00.000Z", outcome: "dismissed" } };
+    fetch.mockResolvedValueOnce(Response.json({ reports: [handled] }));
+    expect(await handleReport("rep 1", "dismissed")).toEqual([handled]);
+    expect(fetch).toHaveBeenLastCalledWith("/api/reports/rep%201", expect.objectContaining({ method: "POST", body: JSON.stringify({ outcome: "dismissed" }) }));
+    fetch.mockResolvedValueOnce(Response.json({ error: "Another administrator has handled that report" }, { status: 409 }));
+    await expect(handleReport("rep 1", "deleted")).rejects.toMatchObject({ status: 409, message: "Another administrator has handled that report" });
   });
 });
 

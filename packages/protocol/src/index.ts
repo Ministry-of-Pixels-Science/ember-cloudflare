@@ -353,6 +353,11 @@ export interface Sidebar {
   huddles: Record<RoomId, LiveHuddle>;
   /** Whom they've blocked, which `blocks.changed` frames keep current. */
   blocks: Blocks;
+  /**
+   * For an administrator, how many open reports they see, which never include the reports of them, as
+   * `reports.changed` frames keep it. Nobody else is given it.
+   */
+  openReports?: number;
 }
 
 /**
@@ -1831,6 +1836,11 @@ export type WorkspaceServerFrame =
   | { type: "favorites.changed"; favorites: Favorites }
   /** They've blocked or unblocked someone, in this tab or another: whom they've blocked now. */
   | { type: "blocks.changed"; blocks: Blocks }
+  /**
+   * Someone has made a report, or an administrator has handled one: how many open reports whoever it's
+   * sent to sees now, which never include the reports of them. Sent to the administrators.
+   */
+  | { type: "reports.changed"; open: number }
   /** They've given a room of theirs another notification level, in this tab or another. */
   | { type: "room.involvement"; roomId: RoomId; involvement: Involvement }
   /** They've dismissed the welcome card, in this tab or another, so their sidebar has no invitation from now on. */

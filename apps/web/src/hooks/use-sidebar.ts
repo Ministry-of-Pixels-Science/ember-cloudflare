@@ -72,7 +72,7 @@ const isSame = (you: Me, me: Me) => you.id === me.id && you.name === me.name && 
  * it wasn't connected reached it. Meanwhile the socket brings rooms as they're made, changed and
  * deleted, and as this person is put in them and taken out, marks rooms unread and read, moves DMs as
  * messages come in them, and brings the stars saved in any of their tabs, whom they've blocked in any of
- * them, and the welcome card dismissed in any of them. It loads again when the tab is shown after more than a minute hidden too, as
+ * them, the welcome card dismissed in any of them, and for an administrator, how many reports are open. It loads again when the tab is shown after more than a minute hidden too, as
  * `refresh-room:visible` reloads it (Campfire's users/sidebar_helper.rb), which Campfire does on a
  * room's page and this does on every page, and, its rooms only, a while after the socket says the shared
  * order has changed. Once it says this person has been given another role, it loads again with the
@@ -249,6 +249,8 @@ export function useSidebar(
           return change({ type: "starred", favorites: frame.favorites });
         case "blocks.changed":
           return change({ type: "blocked", blocks: frame.blocks });
+        case "reports.changed":
+          return change({ type: "reports", open: frame.open });
         case "invitation.dismissed":
           return change({ type: "invitation dismissed" });
         case "rooms.reordered":

@@ -162,9 +162,10 @@ export type RoomAnswer = Extract<RoomChange, { type: "saved" | "gone" | "involve
 
 /**
  * A change to the list: to someone's rooms, or to the welcome card: the join link's new code, made here,
- * or the card dismissed, here or in another of their tabs.
+ * or the card dismissed, here or in another of their tabs, or for an administrator, how many open reports
+ * they see, as the workspace socket says once a report is made or handled.
  */
-export type SidebarChange = RoomChange | { type: "join code"; joinCode: string } | { type: "invitation dismissed" };
+export type SidebarChange = RoomChange | { type: "join code"; joinCode: string } | { type: "invitation dismissed" } | { type: "reports"; open: number };
 
 /**
  * Someone's rooms: the server's list, once it arrives, with the changes made since it was asked for,
@@ -219,6 +220,9 @@ function changed(list: Sidebar, change: SidebarChange): Sidebar {
     // As stars do, blocks come from a block's answer, the socket and the list itself, so the newest stands.
     case "blocked":
       return change.blocks.version > list.blocks.version ? { ...list, blocks: change.blocks } : list;
+    // The socket's counts come in order, and the last of them is the newest, even replayed over a list that's newer than some.
+    case "reports":
+      return { ...list, openReports: change.open };
   }
 }
 

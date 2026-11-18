@@ -116,6 +116,7 @@ import {
   type YourAppSignedOut,
 } from "@ember/protocol/apps";
 import type { MemberfulKeysChange, MemberfulSaved } from "@ember/protocol/memberful";
+import type { HandledReports, NewReport, ReportOutcome, Reports, ReportSubject } from "@ember/protocol/reports";
 import type { Gateway } from "./assistant/gateway";
 import { modelsFileUrlOf, type KeptModelsFile, type KeptWorkersAiModels } from "./assistant/offered";
 import { providerMovesOf } from "./assistant/model-tests";
@@ -144,7 +145,9 @@ import {
   type MemberfulSetup,
 } from "./memberful-api";
 import { Presence } from "./presence";
+import { sendPushes } from "./push/delivery";
 import { webPush } from "./push/keys";
+import { reportPayload } from "./push/payload";
 import { FixedWindowLimit } from "./rate-limit";
 import { urlOf } from "./request-url";
 import { OPEN_ROOMS_ONLY, sessionTag } from "./revocations";
@@ -152,6 +155,7 @@ import type { RoomEvent } from "./room-log";
 import { appConnector } from "./apps/connector";
 import { ACCESS_TTL_SECONDS, CODE_TTL_MS, provesChallenge, REFRESH_TTL_MS } from "./outside/oauth";
 import { OutsideStore, type NewOutsideConnection, type OutsideClient, type OutsideTokens, type StoredOutsideConnection } from "./outside/store";
+import { reportedMessage, ReportStore, subjectOf, type OpenReports, type ReportToKeep } from "./reports/store";
 import type { Key } from "./apps/mcp";
 import { isDue, type SignIn } from "./apps/oauth";
 import { scopesWith } from "./apps/scopes";
@@ -1002,6 +1006,7 @@ export class Workspace extends DurableObject<Env> {
   private readonly db: Db;
   private readonly store: WorkspaceStore;
   private readonly outside: OutsideStore;
+  private readonly reports: ReportStore;
   private readonly sessions = new SessionCache<StoredSession>(CACHED_SESSIONS);
   /**
    * The account once it exists. Renaming it and regenerating its join code keep this current, and
@@ -1062,6 +1067,7 @@ export class Workspace extends DurableObject<Env> {
     this.presence = new Presence(ctx);
     this.store = new WorkspaceStore(this.db);
     this.outside = new OutsideStore(this.db);
+    this.reports = new ReportStore(this.db);
     // The outbox can hold revocations with no alarm set for them: the Workspace can stop after saving a
     // change but before setting the alarm, and an alarm that keeps failing is given up. So it looks
     // whenever it starts, before answering anything. A failure is only logged; the next change that
@@ -3218,10 +3224,10 @@ export class Workspace extends DurableObject<Env> {
   async sidebar(credentials: Credentials): Promise<Sidebar | null> {
     const user = await this.authenticate(credentials);
     if (!user) return null;
-    const [{ rooms, favorites, sharedOrder, huddles, blocks, invitationRoomId }, account] = await Promise.all([this.store.roomsFor(user.id), this.joinableAccount()]);
+    const [{ rooms, favorites, sharedOrder, huddles, blocks, invitationRoomId, openReports }, account] = await Promise.all([this.store.roomsFor(user.id), this.joinableAccount()]);
     const invited = invitationRoomId !== null && rooms.some((room) => room.id === invitationRoomId);
     const invitation = account && invited ? { roomId: invitationRoomId, joinCode: account.joinCode } : null;
-    return { rooms, favorites, sharedOrder, invitation, huddles, blocks };
+    return { rooms, favorites, sharedOrder, invitation, huddles, blocks, ...(openReports !== null && { openReports }) };
   }
 
   /**
@@ -3331,6 +3337,121 @@ export class Workspace extends DurableObject<Env> {
     const user = await this.authenticate(credentials);
     if (!user) return null;
     return this.blocksChanged(user.id, await this.store.unblock(user.id, userId));
+  }
+
+  /**
+   * Reports message `messageId` in room `roomId` as the person `credentials` signs in, for `report`'s
+   * reason, as Report message in its More actions does: "not found" unless they're in the room and it has
+   * the message, undeleted, "yours" for one of their own, or null without a valid session. The report keeps
+   * the message as it is now, with the room's kind, and its name unless it's a DM, and nothing else of the
+   * room. Every active administrator but whoever wrote it hears of it (`keepReport`). Reporting a message
+   * again while their report of it is open changes nothing.
+   */
+  async reportMessage(credentials: Credentials, roomId: RoomId, messageId: string, report: NewReport): Promise<"reported" | "not found" | "yours" | null> {
+    const user = await this.authenticate(credentials);
+    if (!user) return null;
+    const room = await this.reports.roomOf(roomId, user.id);
+    const [message] = room ? await this.env.CHAT_ROOM.getByName(roomId).messagesWithIds(roomId, [messageId]) : [];
+    if (!room || !message || message.deleted) return "not found";
+    if (message.creator.id === user.id) return "yours";
+    const subject: ReportSubject = { kind: "message", roomId, room: { kind: room.kind, name: room.kind === "direct" ? null : room.name }, message: reportedMessage(message) };
+    await this.keepReport(user, { ...report, id: sortableId(), reporterId: user.id, subjectId: message.creator.id, subject, createdAt: new Date().toISOString() }, message.creator.name);
+    return "reported";
+  }
+
+  /**
+   * Reports whoever has id `userId` as the person `credentials` signs in, for `report`'s reason, as Report
+   * on their page does, for their name, picture or bio: "not found" unless somebody they're told of has
+   * it, "yourself" for their own, or null without a valid session. The report keeps their name and bio
+   * as they are now, and every active administrator but them hears of it (`keepReport`). Reporting someone
+   * again while a report of theirs of them is open changes nothing.
+   */
+  async reportPerson(credentials: Credentials, userId: UserId, report: NewReport): Promise<"reported" | "not found" | "yourself" | null> {
+    const user = await this.authenticate(credentials);
+    if (!user) return null;
+    if (userId === user.id) return "yourself";
+    const [person] = (await this.isListedTo(userId, user.id)) ? await this.store.directoryEntries([userId]) : [];
+    if (!person) return "not found";
+    const subject: ReportSubject = { kind: "person", person: { id: person.id, name: person.name, bio: person.bio } };
+    await this.keepReport(user, { ...report, id: sortableId(), reporterId: user.id, subjectId: person.id, subject, createdAt: new Date().toISOString() }, person.name);
+    return "reported";
+  }
+
+  /**
+   * Keeps `report`, made by `reporter` of someone named `subjectName`, unless they have an open report of
+   * the same message or person. Then every tab of every active administrator but whoever it's of hears
+   * how many reports are open, and their pushes say who reported whom, but to whoever made it, and those
+   * who've blocked them. Nobody else hears of it.
+   */
+  private async keepReport(reporter: User, report: ReportToKeep, subjectName: string): Promise<void> {
+    const kept = await this.reports.keep(report);
+    if (!kept) return;
+    this.tellOpenReports(kept.open.filter(({ userId }) => userId !== report.subjectId));
+    if (kept.deliveries.length === 0) return;
+    const payload = reportPayload(reporter.name, subjectName, report.subject, report.reason);
+    this.ctx.waitUntil(this.pushReport([{ payload, deliveries: kept.deliveries }]));
+  }
+
+  /** Sends a report's pushes, as each is still allowed when its turn comes, and forgets the subscriptions they find gone. */
+  private async pushReport(pushes: Parameters<typeof sendPushes>[1]): Promise<void> {
+    try {
+      const gone = await sendPushes(this.env, pushes, (id) => this.store.pushable(id));
+      if (gone.length > 0) await this.forgetPushSubscriptions(gone);
+    } catch (error) {
+      console.error("Could not push a report", error);
+    }
+  }
+
+  /** Tells every tab of each administrator `open` lists how many open reports they see. */
+  private tellOpenReports(open: OpenReports[]): void {
+    for (const { userId, open: count } of open) this.tell([userId], { type: "reports.changed", open: count });
+  }
+
+  /**
+   * The reports the administrator `credentials` signs in sees, as Membership's Reports list shows them:
+   * the newest open ones and the ones handled last, leaving out the reports of them, "forbidden" for
+   * anyone else, or null without a valid session.
+   */
+  async listReports(credentials: Credentials): Promise<Reports | "forbidden" | null> {
+    const user = await this.authenticate(credentials);
+    if (!user) return null;
+    if (!(await this.store.isAdministrator(user.id))) return "forbidden";
+    return this.reports.list(user.id);
+  }
+
+  /**
+   * Handles report `reportId` as the administrator `credentials` signs in, as `outcome` says: deletes
+   * its message, removes or bans whoever wrote it, or whom it reports, as Remove and Ban do and answering
+   * as they would when they can't, or dismisses it. Then the report is closed as theirs, with every other
+   * open report of the message deleted, or of whoever was removed or banned, and every administrator's
+   * tabs hear how many are open. Answers the reports it closed, "handled" once another administrator has,
+   * "not found" unless there's such a report that isn't of them, "invalid" for deleting a person,
+   * "unremovable" for removing or banning someone Remove or Ban can't, as one already removed, or an AI
+   * agent, "forbidden" for anyone but an administrator, or null without a valid session.
+   */
+  async handleReport(
+    credentials: Credentials,
+    reportId: string,
+    outcome: ReportOutcome,
+  ): Promise<HandledReports | BanProblem | "your address" | "handled" | "invalid" | "unremovable" | "forbidden" | "not found" | "yourself" | null> {
+    const user = await this.authenticate(credentials);
+    if (!user) return null;
+    if (!(await this.store.isAdministrator(user.id))) return "forbidden";
+    const report = await this.reports.reportFor(reportId, user.id);
+    if (!report) return "not found";
+    if (report.handled) return "handled";
+    const { subject } = report;
+    if (outcome === "deleted") {
+      if (subject.kind !== "message") return "invalid";
+      await this.env.CHAT_ROOM.getByName(subject.roomId).deleteReportedMessage(subject.roomId, subject.message.id);
+    } else if (outcome !== "dismissed") {
+      const done = outcome === "removed" ? await this.removePerson(credentials, subjectOf(report)) : await this.banPerson(credentials, subjectOf(report));
+      if (done === "not found") return "unremovable";
+      if (typeof done === "string" || done === null) return done;
+    }
+    const { closed, open } = await this.reports.close(report, user.id, outcome, new Date().toISOString());
+    this.tellOpenReports(open);
+    return closed.length > 0 ? { reports: closed } : "handled";
   }
 
   /** Tells every tab of `userId`'s what `change` leaves: their level in the DM it hid or showed again, then whom they've blocked. */

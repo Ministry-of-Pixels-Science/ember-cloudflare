@@ -121,6 +121,7 @@ import type {
 } from "@ember/protocol/apps";
 import type { MemberfulKeysChange, MemberfulSaved } from "@ember/protocol/memberful";
 import type { OutsideAiSettings, OutsideAnswer, OutsideAnswered, OutsideAsk, OutsideAsked, OutsideScope, YourOutsideAi } from "@ember/protocol/outside";
+import type { HandledReports, NewReport, Report, ReportHandling, ReportOutcome, Reports } from "@ember/protocol/reports";
 import type { LogoVariants } from "@/lib/previews";
 
 // The session lives in an HttpOnly cookie, which the browser sends with every request and socket,
@@ -940,6 +941,33 @@ export async function unbanPerson(userId: UserId): Promise<DirectoryUser> {
  */
 export async function changeBlock(userId: UserId, blocked: boolean): Promise<ChangedBlocks> {
   return request<ChangedBlocks>(`/api/users/${encodeURIComponent(userId)}/block`, { method: blocked ? "POST" : "DELETE" });
+}
+
+/**
+ * Reports message `messageId` in room `roomId` to the workspace's administrators, as Report message does.
+ * Fails with a 404 ApiError unless you're in the room and it has the message, and a 422 for your own.
+ */
+export async function reportMessage(roomId: RoomId, messageId: string, report: NewReport): Promise<void> {
+  await request(`/api/rooms/${encodeURIComponent(roomId)}/messages/${encodeURIComponent(messageId)}/report`, { method: "POST", body: JSON.stringify(report) });
+}
+
+/** Reports someone to the workspace's administrators, for their name, picture or bio, as Report on their page does. */
+export async function reportPerson(userId: UserId, report: NewReport): Promise<void> {
+  await request(`/api/users/${encodeURIComponent(userId)}/report`, { method: "POST", body: JSON.stringify(report) });
+}
+
+/** The reports an administrator sees: the open ones, newest first, and the ones handled last. */
+export function listReports(): Promise<Reports> {
+  return request<Reports>("/api/reports");
+}
+
+/**
+ * Handles report `reportId` as `outcome` says, answering the reports that closed. Fails with a 409
+ * ApiError once another administrator has handled it, and a 422 saying why when it can't be done.
+ */
+export async function handleReport(reportId: string, outcome: ReportOutcome): Promise<Report[]> {
+  const handling: ReportHandling = { outcome };
+  return (await request<HandledReports>(`/api/reports/${encodeURIComponent(reportId)}`, { method: "POST", body: JSON.stringify(handling) })).reports;
 }
 
 /** A copy of someone's sidebar, and the ETag the server sent it with. */

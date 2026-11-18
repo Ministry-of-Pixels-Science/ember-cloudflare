@@ -289,6 +289,15 @@ describe("Block someone", () => {
   });
 });
 
+describe("Reports", () => {
+  it("takes an administrator's count of open reports from the socket, the last count standing even over a list that came after it", () => {
+    const loaded = roomListReducer(NO_ROOM_LIST, { type: "loaded", list: { ...sidebar(four), openReports: 1 } });
+    expect(roomListReducer(loaded, { type: "reports", open: 2 }).list!.openReports).toBe(2);
+    const asked = roomListReducer(roomListReducer(loaded, { type: "asked" }), { type: "reports", open: 0 });
+    expect(roomListReducer(asked, { type: "loaded", list: { ...sidebar(four), openReports: 1 } }).list!.openReports).toBe(0);
+  });
+});
+
 describe("Reorder starred rooms", () => {
   it("drops the star of a room that's gone, as the server's stars do, so an order saved next is one it knows", () => {
     const loaded = roomListReducer(NO_ROOM_LIST, { type: "loaded", list: sidebar(four, { rooms: ["r1", "r3"], version: 2 }) });

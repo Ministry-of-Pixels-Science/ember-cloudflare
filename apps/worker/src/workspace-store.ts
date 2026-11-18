@@ -89,7 +89,7 @@ const SUSPENDED = 3;
 /** The role for everyone who neither runs the workspace nor is a bot. */
 const MEMBER = 0;
 /** The role for the people who run the workspace. */
-const ADMINISTRATOR = 1;
+export const ADMINISTRATOR = 1;
 /** The role for bots. */
 const BOT = 2;
 /** The roles and statuses, each at the number it stores. */
@@ -573,6 +573,8 @@ export interface SidebarRooms {
   blocks: Blocks;
   /** The workspace's first room, if they're given the welcome card. */
   invitationRoomId: RoomId | null;
+  /** How many open reports an active administrator sees, which leave out the reports of them, or else null. */
+  openReports: number | null;
 }
 
 interface BlockedRow {
@@ -1997,7 +1999,7 @@ const PUSHABLE = `SELECT 1 FROM push_subscriptions JOIN users ON users.id = push
   WHERE push_subscriptions.id = ?1 AND users.status = ${ACTIVE}`;
 
 /** A subscription a push goes to, and the count it sets the badge to. */
-interface DeliveryRow {
+export interface DeliveryRow {
   id: number;
   endpoint: string;
   p256dh_key: string;
@@ -2025,7 +2027,7 @@ const TEST_PUSH = `SELECT id, endpoint, p256dh_key, auth_key,
     (SELECT count(*) FROM memberships AS marked WHERE marked.user_id = push_subscriptions.user_id AND marked.unread_at IS NOT NULL) AS badge
   FROM push_subscriptions WHERE id = ?1 AND user_id = ?2`;
 
-const deliveryOf = (row: DeliveryRow): PushDelivery => ({
+export const deliveryOf = (row: DeliveryRow): PushDelivery => ({
   subscriptionId: row.id,
   endpoint: row.endpoint,
   p256dhKey: row.p256dh_key,
@@ -2303,6 +2305,10 @@ const SHOW_UNBLOCKED_DIRECT = `UPDATE memberships SET involvement = (SELECT dire
 
 /** Counts a change to ?'s blocks. */
 const COUNT_BLOCKS_CHANGE = `UPDATE users SET blocks_version = blocks_version + 1 WHERE id = ? RETURNING blocks_version AS version`;
+
+/** How many open reports someone, ?, sees, which leave out the reports of them, if they're an active administrator (reports/store.ts). */
+export const OPEN_REPORTS_OF_ADMINISTRATOR = `SELECT (SELECT count(*) FROM reports WHERE handled_at IS NULL AND subject_id <> users.id) AS open
+  FROM users WHERE id = ? AND role = ${ADMINISTRATOR} AND status = ${ACTIVE}`;
 
 /** Whom ? has blocked, in the order they blocked them. */
 export const BLOCKED_BY_USER = `SELECT blocked_id FROM blocks WHERE user_id = ? ORDER BY created_at, blocked_id`;
@@ -4083,18 +4089,28 @@ export class WorkspaceStore {
 
   /**
    * The rooms someone is in, with their unread marks and the people in their DMs, the ones they've
-   * starred, the huddles going on in their rooms, whom they've blocked, and the workspace's first room,
-   * if there is one yet and they're given the welcome card: an active administrator who hasn't dismissed it.
+   * starred, the huddles going on in their rooms, whom they've blocked, the workspace's first room, if
+   * there is one yet and they're given the welcome card: an active administrator who hasn't dismissed it,
+   * and how many open reports they see, if they're an active administrator.
    */
   async roomsFor(userId: UserId): Promise<SidebarRooms> {
-    const [rows, [original], starred, [user], members, blocked] = (await this.db.batch([
+    const [rows, [original], starred, [user], members, blocked, [reports]] = (await this.db.batch([
       statement(ROOMS_FOR_USER, userId),
       statement(ORIGINAL_ROOM),
       statement(FAVORITES_FOR_USER, userId),
       statement(SIDEBAR_USER, userId),
       statement(DIRECT_MEMBERS_FOR_USER, userId),
       statement(BLOCKED_BY_USER, userId),
-    ])) as [SidebarRow[], Array<{ id: RoomId }>, Array<{ room_id: RoomId }>, Array<{ version: number; blocks_version: number; invited: number }>, DirectMemberRow[], BlockedRow[]];
+      statement(OPEN_REPORTS_OF_ADMINISTRATOR, userId),
+    ])) as [
+      SidebarRow[],
+      Array<{ id: RoomId }>,
+      Array<{ room_id: RoomId }>,
+      Array<{ version: number; blocks_version: number; invited: number }>,
+      DirectMemberRow[],
+      BlockedRow[],
+      Array<{ open: number }>,
+    ];
     const membersByRoom = Map.groupBy(members, (member) => member.room_id);
     return {
       rooms: rows.map((row) => sidebarRoom(row, membersByRoom.get(row.id))),
@@ -4103,6 +4119,7 @@ export class WorkspaceStore {
       huddles: liveHuddlesIn(rows),
       blocks: { userIds: blocked.map((row) => row.blocked_id), version: user?.blocks_version ?? 0 },
       invitationRoomId: user?.invited === 1 ? (original?.id ?? null) : null,
+      openReports: reports?.open ?? null,
     };
   }
 

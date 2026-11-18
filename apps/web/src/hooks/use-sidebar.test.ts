@@ -722,6 +722,18 @@ describe("Block someone", () => {
   });
 });
 
+describe("Reports", () => {
+  it("counts an administrator's open reports as the workspace socket says, made or handled in any tab", async () => {
+    const { result } = await showSidebar();
+    socket().connect();
+    await settle();
+    socket().receive({ type: "reports.changed", open: 3 });
+    expect(result.current.list?.openReports).toBe(3);
+    socket().receive({ type: "reports.changed", open: 0 });
+    expect(result.current.list?.openReports).toBe(0);
+  });
+});
+
 describe("Welcome card for administrators, until they dismiss it", () => {
   const invited: Sidebar = { ...unstarred([general]), invitation: { roomId: general.id, joinCode: "aB3d-Ef5h-iJ7k" } };
 

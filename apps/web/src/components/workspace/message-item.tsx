@@ -5,6 +5,7 @@ import { NavArrowRight } from "@/components/icons/iconoir";
 import { PageLink } from "@/components/page-link";
 import { useAccount } from "@/hooks/use-account";
 import { BlockingContext } from "@/hooks/use-blocking";
+import { ReportingContext } from "@/hooks/use-reporting";
 import { PeopleContext } from "@/hooks/use-directory";
 import { messagePath, permalinkOf, threadPath } from "@/hooks/use-route";
 import { cardsQuote, dateTimeLabel, lastReplyLabel, timeLabel } from "@/lib/messages";
@@ -286,6 +287,7 @@ export const MessageItem = memo(function MessageItem({ message, me, threaded: fo
   const mine = message.creator.id === me.id;
   // Someone you've blocked's messages collapse until you show them, but for a huddle's, which is the room's.
   const blocking = useContext(BlockingContext);
+  const openReport = useContext(ReportingContext);
   const blocked = !mine && blocking.blocked.has(message.creator.id);
   const [shownAnyway, setShownAnyway] = useState(false);
   // Blocking them again collapses it again.
@@ -486,6 +488,8 @@ export const MessageItem = memo(function MessageItem({ message, me, threaded: fo
                   },
                 }
           }
+          // The composer takes focus once Report closes.
+          onReport={mine || message.huddle ? undefined : () => openReport({ kind: "message", message }, editors.returnFocus)}
         />
       )}
     </article>

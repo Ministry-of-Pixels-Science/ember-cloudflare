@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Sheet } from "@/components/ui/sheet";
 import { BlockingContext } from "@/hooks/use-blocking";
 import { PeopleContext, type People } from "@/hooks/use-directory";
+import { ReportingContext } from "@/hooks/use-reporting";
 import { guardLeaving, navigate } from "@/hooks/use-route";
 import { adminsOnlyAsk, CONFIRM_BAN, CONFIRM_UNBAN, PersonPage } from "./person-page";
 
@@ -39,21 +40,24 @@ function showPage(person: Person | string, { me = ada, people = new Map(), start
   const onPersonChanged = vi.fn<(person: DirectoryUser) => void>();
   const reloadPeople = vi.fn(async () => {});
   const setBlocked = vi.fn<(person: User, blocked: boolean) => Promise<boolean>>(changedBlock);
+  const openReport = vi.fn();
   let shown = { me, people, blocking: { blocked: new Set(blocked), setBlocked } };
   const view = () => (
     <PeopleContext value={shown.people}>
       <BlockingContext value={shown.blocking}>
-        <Sheet>
-          <PersonPage
-            userId={userId}
-            me={shown.me}
-            onStartDirect={onStartDirect}
-            onPersonChanged={onPersonChanged}
-            reloadPeople={reloadPeople}
-            onMissing={onMissing}
-            onFailed={onFailed}
-          />
-        </Sheet>
+        <ReportingContext value={openReport}>
+          <Sheet>
+            <PersonPage
+              userId={userId}
+              me={shown.me}
+              onStartDirect={onStartDirect}
+              onPersonChanged={onPersonChanged}
+              reloadPeople={reloadPeople}
+              onMissing={onMissing}
+              onFailed={onFailed}
+            />
+          </Sheet>
+        </ReportingContext>
       </BlockingContext>
     </PeopleContext>
   );
@@ -69,6 +73,7 @@ function showPage(person: Person | string, { me = ada, people = new Map(), start
     onMissing,
     onFailed,
     setBlocked,
+    openReport,
     list: (people: People) => show({ people }),
     become: (me: Me) => show({ me }),
     block: (blockedNow: string[]) => show({ blocking: { blocked: new Set(blockedNow), setBlocked } }),
@@ -690,6 +695,43 @@ describe("Block and unblock people", () => {
     await avatar();
     expect(unblockButton("Bender")).toBeVisible();
     expect(directButton("Bender")).toBeNull();
+  });
+});
+
+describe("Report people", () => {
+  const reportButton = (name = grace.name) => screen.queryByRole("button", { name: `Report ${name}` });
+
+  it("offers Report for anyone else active, bots too, with a flag, below Block, and none on your own page or for removed people", async () => {
+    serve(found(grace));
+    showPage(grace);
+    await heading();
+    const button = reportButton()!;
+    expect(button).toHaveClass("bg-background");
+    expect(button.querySelector("svg")).toHaveClass("iconoir-triangle-flag");
+    expect(screen.getByRole("button", { name: `Block ${grace.name}` }).compareDocumentPosition(button)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    cleanup();
+
+    serve(found(bender));
+    showPage(bender);
+    await avatar();
+    expect(reportButton("Bender")).toBeVisible();
+    cleanup();
+
+    for (const person of [{ ...grace, id: ada.id, name: ada.name }, { ...grace, status: "deactivated" }, { ...grace, status: "banned" }, { ...grace, status: "suspended" }] as const) {
+      serve(found(person));
+      showPage(person);
+      await avatar();
+      expect(screen.queryByRole("button", { name: /^Report/ }), JSON.stringify(person)).toBeNull();
+      cleanup();
+    }
+  });
+
+  it("opens Report for them, someone you've blocked too", async () => {
+    serve(found(grace));
+    const { openReport, user } = showPage(grace, { blocked: [grace.id] });
+    await heading();
+    await user.click(reportButton()!);
+    expect(openReport).toHaveBeenCalledExactlyOnceWith({ kind: "person", person: expect.objectContaining({ id: grace.id, name: grace.name }) });
   });
 });
 
