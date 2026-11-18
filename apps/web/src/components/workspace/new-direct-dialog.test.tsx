@@ -214,6 +214,16 @@ describe("New direct message dialog", () => {
     expect(status()).toHaveTextContent("No people found. Try another name.");
   });
 
+  it("finds people by the start of their usernames too, which it shows after their names", async () => {
+    const amazing = { ...grace, username: "amazing.grace" };
+    const { user } = showDialog({ people: [ada, amazing, linus, alan] });
+    await user.type(search(), "@Amaz");
+    expect(listed()).toEqual(["Grace Hopper @amazing.grace"]);
+    await user.clear(search());
+    await user.type(search(), "zing");
+    expect(listed()).toEqual([]);
+  });
+
   it("picks people by pointer, as chips that take them back out, which leave the list", async () => {
     const { user } = showDialog();
     await user.click(option("Grace Hopper"));

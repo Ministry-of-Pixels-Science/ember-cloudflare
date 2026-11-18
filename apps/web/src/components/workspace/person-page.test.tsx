@@ -108,6 +108,21 @@ describe("Someone's profile page", () => {
     expect(mailLink()).toBeNull();
   });
 
+  it("shows someone's @username under their name, if they have one, as the people directory lists them now", async () => {
+    const amazing = { ...grace, username: "amazing.grace" };
+    serve(found(amazing));
+    const { list } = showPage(amazing, { people: new Map([[grace.id, amazing]]) });
+    expect(await heading()).toHaveTextContent("Grace Hopper");
+    expect(screen.getByText("@amazing.grace")).toBeVisible();
+
+    list(new Map([[grace.id, { ...amazing, username: "grace" }]]));
+    expect(await screen.findByText("@grace")).toBeVisible();
+    // The directory leaves out a username they've taken away.
+    list(new Map([[grace.id, grace]]));
+    expect(await heading()).toHaveTextContent("Grace Hopper");
+    expect(screen.queryByText(/^@/)).toBeNull();
+  });
+
   it("goes back home when the app didn't open it, and asks for ids escaped", async () => {
     history.replaceState(null, "", "/users/caf%C3%A9");
     serve(found({ ...grace, id: "café" }));

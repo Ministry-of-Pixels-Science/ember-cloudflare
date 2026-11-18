@@ -296,6 +296,8 @@ export interface StoredSession {
 
 /** Someone as the people directory lists them, with when they last changed, which their avatar's address follows. */
 export interface DirectoryEntry extends User {
+  /** The username they picked, or null while they have none. */
+  username: string | null;
   bio: string | null;
   role: Role;
   status: UserStatus;
@@ -345,6 +347,8 @@ export interface AssistantPicks {
 export interface NewLinkedPerson {
   id: UserId;
   name: string;
+  /** The username they start with, or null for none. */
+  username: string | null;
   /** Their Memberful account's email address, or null for one Ember can't keep. */
   emailAddress: string | null;
 }
@@ -542,7 +546,7 @@ export interface AvatarChange {
 }
 
 /** What `WorkspaceStore.changeProfile` saves: someone's profile, and the digest of a new password, or null to keep theirs. */
-export interface ProfileChange extends Pick<Profile, "name" | "emailAddress" | "bio"> {
+export interface ProfileChange extends Pick<Profile, "name" | "username" | "emailAddress" | "bio"> {
   passwordDigest: string | null;
 }
 
@@ -1036,6 +1040,7 @@ const SESSION = `SELECT sessions.id AS session_id, sessions.last_active_at, user
 interface DirectoryRow {
   id: UserId;
   name: string;
+  username: string | null;
   bio: string | null;
   role: number;
   status: number;
@@ -1096,6 +1101,7 @@ const keptForOf = (access: AgentAccess): KeptFor | null => (access === "everyone
 const directoryEntry = (row: DirectoryRow): DirectoryEntry => ({
   id: row.id,
   name: row.name,
+  username: row.username,
   bio: row.bio,
   role: ROLES[row.role] ?? "member",
   status: STATUSES[row.status] ?? "active",
@@ -2382,7 +2388,7 @@ export const ACTIVE_PEOPLE = `SELECT id, name FROM users WHERE status = ${ACTIVE
  * are, deleted agents too, whose answers stay, and whom an agent not everyone can ask is kept for
  * (migrations/0063_agent_access.sql).
  */
-const DIRECTORY_COLUMNS = `users.id, users.name, users.bio, users.role, users.status, users.updated_at,
+const DIRECTORY_COLUMNS = `users.id, users.name, users.username, users.bio, users.role, users.status, users.updated_at,
   (users.role = ${BOT} AND users.bot_token IS NULL) AS agent, users.agent_access`;
 
 /** Everyone ?1 is told of, for the people directory: removed and banned people too, whose messages stay (`listedTo`). */
@@ -2652,9 +2658,10 @@ const DEACTIVATE = `UPDATE users SET status = ${DEACTIVATED}, email_address = re
 /**
  * Deletes someone's account, ?3's, recording when, ?2: their row stays, deactivated, as a removed
  * person's does, so the rooms and DMs they were in still name somebody, but called ?1, with no email
- * address, password, bio, avatar or picks of theirs, and no longer an administrator.
+ * address, password, username, bio, avatar or picks of theirs, and no longer an administrator. Their
+ * username is free for anyone then, as their email address is.
  */
-const DELETE_ACCOUNT = `UPDATE users SET name = ?1, status = ${DEACTIVATED}, role = ${MEMBER}, email_address = NULL, password_digest = NULL, bio = NULL,
+const DELETE_ACCOUNT = `UPDATE users SET name = ?1, status = ${DEACTIVATED}, role = ${MEMBER}, email_address = NULL, password_digest = NULL, username = NULL, bio = NULL,
   avatar_key = NULL, avatar_variant = NULL, assistant_thinking = NULL, assistant_answer_length = NULL, assistant_model = NULL,
   invitation_dismissed_at = NULL, deleted_at = ?2, updated_at = ?2 WHERE id = ?3`;
 
@@ -2720,7 +2727,7 @@ const QUEUE_PICTURE_DELETION = `INSERT INTO pending_picture_deletions (object_ke
 const KEEP_PICTURE = `DELETE FROM pending_picture_deletions WHERE object_key = ?`;
 
 /** Saves someone's profile and records when, keeping their password unless given a new one's digest. */
-const CHANGE_PROFILE = `UPDATE users SET name = ?, email_address = ?, bio = ?, password_digest = coalesce(?, password_digest), updated_at = ?
+const CHANGE_PROFILE = `UPDATE users SET name = ?, username = ?, email_address = ?, bio = ?, password_digest = coalesce(?, password_digest), updated_at = ?
   WHERE id = ?`;
 
 /** The same, with whether each is in a room, for its settings. */
@@ -2750,16 +2757,19 @@ const DIRECTORY_WITH_IDS = `SELECT ${DIRECTORY_COLUMNS} FROM users WHERE id IN (
 export const MENTIONABLE_PAGE = 20;
 
 /**
- * Active people whose names contain ?1, by name, whom ?2 can ask (`askedBy`). It's `LIKE`, so only ASCII
- * letters ignore case, `%` and `_` match anything, and "" matches everyone.
+ * Active people whose names contain ?1, or whose usernames start with it, by name, whom ?2 can ask
+ * (`askedBy`). It's `LIKE`, so only ASCII letters ignore case, `%` and `_` match anything, and "" matches
+ * everyone.
  */
 const MENTIONABLE_PEOPLE = `SELECT ${DIRECTORY_COLUMNS} FROM users
-  WHERE status = ${ACTIVE} AND name LIKE '%' || ?1 || '%' AND ${askedBy("?2")} ORDER BY lower(name), id LIMIT ${MENTIONABLE_PAGE}`;
+  WHERE status = ${ACTIVE} AND (name LIKE '%' || ?1 || '%' OR username LIKE ?1 || '%') AND ${askedBy("?2")}
+  ORDER BY lower(name), id LIMIT ${MENTIONABLE_PAGE}`;
 
 /** The same of room ?2's members (`Current.user.rooms.find(room_id).users`), for ?3. */
 const MENTIONABLE_MEMBERS = `SELECT ${DIRECTORY_COLUMNS}
   FROM memberships JOIN users ON users.id = memberships.user_id
-  WHERE memberships.room_id = ?2 AND users.status = ${ACTIVE} AND users.name LIKE '%' || ?1 || '%' AND ${askedBy("?3")}
+  WHERE memberships.room_id = ?2 AND users.status = ${ACTIVE} AND (users.name LIKE '%' || ?1 || '%' OR users.username LIKE ?1 || '%')
+    AND ${askedBy("?3")}
   ORDER BY lower(users.name), users.id LIMIT ${MENTIONABLE_PAGE}`;
 
 /** Whether someone in a room can change it: administrators and the room's creator can. */
@@ -3272,7 +3282,15 @@ export class WorkspaceStore {
     now: string,
   ): Promise<DirectRoom[]> {
     const results = await this.db.batch([
-      statement(`INSERT INTO users (id, name, email_address, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`, person.id, person.name, person.emailAddress, now, now),
+      statement(
+        `INSERT INTO users (id, name, username, email_address, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+        person.id,
+        person.name,
+        person.username,
+        person.emailAddress,
+        now,
+        now,
+      ),
       statement(
         `INSERT INTO identities (issuer, subject, user_id, checked_at, created_at, updated_at, name, email_address) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         account.issuer,
@@ -4556,11 +4574,30 @@ export class WorkspaceStore {
   /**
    * The names of everyone but `userId` who's active, or can be again with the name they have: people,
    * bots and agents active, and people banned, whom lifting the ban lets back, or suspended for their
-   * membership's lapsing, whom renewing it does.
+   * membership's lapsing, whom renewing it does. And everyone else's usernames, whatever their status, as
+   * a username stays its person's, and lifting a ban lets back even someone removed.
    */
   async namesInUse(userId: UserId | null): Promise<string[]> {
-    const rows = await this.db.all<{ name: string }>(`SELECT name FROM users WHERE status IN (${ACTIVE}, ${BANNED}, ${SUSPENDED}) AND id IS NOT ?`, userId);
+    const rows = await this.db.all<{ name: string }>(
+      `SELECT name FROM users WHERE status IN (${ACTIVE}, ${BANNED}, ${SUSPENDED}) AND id IS NOT ?1
+        UNION ALL SELECT username FROM users WHERE username IS NOT NULL AND id IS NOT ?1`,
+      userId,
+    );
     return rows.map((row) => row.name);
+  }
+
+  /** Whether anyone but `userId`, whatever their status, has `username`. */
+  async hasUsername(username: string, userId: UserId): Promise<boolean> {
+    return (await this.db.all(`SELECT 1 FROM users WHERE username = ? AND id <> ?`, username, userId)).length > 0;
+  }
+
+  /**
+   * The usernames that start with `start`, whatever their owners' status: a range of the index on them,
+   * since `{` sorts after every character a username can have.
+   */
+  async usernamesStartingWith(start: string): Promise<string[]> {
+    const rows = await this.db.all<{ username: string }>(`SELECT username FROM users WHERE username >= ?1 AND username < ?1 || '{'`, start);
+    return rows.map((row) => row.username);
   }
 
   /**
@@ -4909,8 +4946,8 @@ export class WorkspaceStore {
    * they had one and keep an email address to sign in with (`UNLINK_ON_NEW_PASSWORD`). Answers whether it
    * queued any.
    */
-  async changeProfile(userId: UserId, { name, emailAddress, bio, passwordDigest }: ProfileChange, now: string, ended: EndedByPassword | null): Promise<boolean> {
-    const change = statement(CHANGE_PROFILE, name, emailAddress, bio, passwordDigest, now, userId);
+  async changeProfile(userId: UserId, { name, username, emailAddress, bio, passwordDigest }: ProfileChange, now: string, ended: EndedByPassword | null): Promise<boolean> {
+    const change = statement(CHANGE_PROFILE, name, username, emailAddress, bio, passwordDigest, now, userId);
     if (!ended) {
       await this.db.batch([change]);
       return false;

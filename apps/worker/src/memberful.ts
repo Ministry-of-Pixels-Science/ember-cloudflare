@@ -1,7 +1,8 @@
 import {
   MEMBERFUL_CONNECTED,
   MEMBERFUL_PROBLEM_PARAM,
-  workspacePageOf,
+  signInReturnPathIn,
+  welcomePath,
   type AccountSettings,
   type MemberfulConnection,
   type MemberfulSignInProblem,
@@ -95,13 +96,13 @@ function authorizationOf({ site, clientId }: MemberfulKeys, state: string): stri
 }
 
 /**
- * The page of the workspace at `origin` that `returnTo` names, its query and fragment included, or "/"
- * for anything else, so that signing in only ever opens a page here, or for one too long to keep, as
- * its address writes it, with every character that isn't ASCII escaped.
+ * The page of the workspace, or the welcome page, at `origin` that `returnTo` names, its query and
+ * fragment included (`signInReturnPathIn`), or "/" for anything else, so that signing in only ever opens
+ * a page here, or for one too long to keep, as its address writes it, with every character that isn't
+ * ASCII escaped.
  */
 function returnPathOf(returnTo: string | null, origin: string): string {
-  const url = returnTo === null ? null : URL.parse(returnTo, origin);
-  const path = url?.origin === origin && workspacePageOf(url.pathname) ? `${url.pathname}${url.search}${url.hash}` : "/";
+  const path = signInReturnPathIn(returnTo, origin);
   return path.length <= MAX_RETURN_PATH_LENGTH ? path : "/";
 }
 
@@ -184,9 +185,9 @@ export async function memberfulConnectionFor(
 /**
  * `GET /auth/memberful/callback`, where Memberful sends the browser back: signs it in as whoever signed
  * in there (`Workspace.signInWithMemberful`), or connects their account there to the one here that the
- * state started connecting (`Workspace.connectMemberful`), and opens the page it was started from, or
- * else goes back to sign in, or to that page when the browser is signed in, which says why not. Each
- * state is good for one try, whatever comes of it.
+ * state started connecting (`Workspace.connectMemberful`), and opens the page it was started from, by
+ * way of the welcome page for someone new, or else goes back to sign in, or to that page when the
+ * browser is signed in, which says why not. Each state is good for one try, whatever comes of it.
  */
 export async function finishMemberfulSignIn(request: Request, env: Env): Promise<Response> {
   if (request.method !== "GET") return notFound(request);
@@ -222,6 +223,8 @@ async function signedInWithMemberful(request: Request, env: Env): Promise<Respon
       ? await workspace(env).signInWithMemberful(keys.site, member, begunAt, digest, clientOf(request))
       : await workspace(env).connectMemberful(keys.site, member, begunAt, connecting, staying ? null : digest, clientOf(request));
   if (user === "connected") return backTo(request, kept.returnPath, MEMBERFUL_CONNECTED);
+  // Someone new chooses how people here see them first.
+  if (user === "joined") return redirect(new URL(welcomePath(kept.returnPath), request.url).href, sessionCookie(request, token));
   if (typeof user === "string") return back(user);
   return redirect(new URL(kept.returnPath, request.url).href, sessionCookie(request, token));
 }

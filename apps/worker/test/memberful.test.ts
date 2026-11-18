@@ -638,12 +638,12 @@ describe("Sign in with Memberful", () => {
   });
 
   describe("coming back from Memberful", () => {
-    it("signs in someone new with an active membership as a member in every open room, linked to their Memberful account", async () => {
+    it("signs in someone new with an active membership as a member in every open room, linked to their Memberful account, by way of the welcome page", async () => {
       await setUpWithMemberful();
       const site = fakeMemberful();
       const response = await signInWithMemberful({ returnTo: "/rooms/abc?tab=pins#latest" });
       expect(response.status).toBe(302);
-      expect(locationOf(response)).toBe(`${origin}/rooms/abc?tab=pins#latest`);
+      expect(locationOf(response)).toBe(`${origin}/welcome?return_to=%2Frooms%2Fabc%3Ftab%3Dpins%23latest`);
       expect(response.headers.get("Cache-Control")).toBe("no-store");
       expect(response.headers.getSetCookie()).toEqual([
         expect.stringMatching(/^__Host-session_token=[\w-]{43}; Path=\/; Max-Age=34560000; HttpOnly; SameSite=Lax; Secure$/),
@@ -652,10 +652,10 @@ describe("Sign in with Memberful", () => {
 
       const user = await signedInAs(response);
       expect(user).toEqual({ id: expect.any(String), name: "Katherine Johnson", administrator: false });
-      const [stored] = (await workspaceSql("SELECT name, email_address, password_digest, role, status, guest FROM users WHERE id = ?", user.id)) as Array<
+      const [stored] = (await workspaceSql("SELECT name, username, email_address, password_digest, role, status, guest FROM users WHERE id = ?", user.id)) as Array<
         Record<string, unknown>
       >;
-      expect(stored).toEqual({ name: "Katherine Johnson", email_address: "katherine@example.com", password_digest: null, role: 0, status: 0, guest: 0 });
+      expect(stored).toEqual({ name: "Katherine Johnson", username: "katherinejohnson", email_address: "katherine@example.com", password_digest: null, role: 0, status: 0, guest: 0 });
       expect(await identities()).toEqual([{ issuer: SITE, subject: "4242", user_id: user.id }]);
       expect(await workspaceSql("SELECT ip_address, user_agent FROM sessions WHERE user_id = ?", user.id)).toEqual([
         { ip_address: IP, user_agent: "Katherine's laptop" },
@@ -696,12 +696,14 @@ describe("Sign in with Memberful", () => {
       expect(await workspace.next()).toEqual({ type: "room.saved", room });
     });
 
-    it("signs the same person in again by their Memberful account, whatever its name and email address are now", async () => {
+    it("signs the same person in again by their Memberful account, whatever its name and email address are now, straight to the page they signed in from", async () => {
       await setUpWithMemberful();
       const site = fakeMemberful();
       const first = await signedInAs(await signInWithMemberful());
       site.member = { ...katherine, fullName: "Katherine G. Johnson", email: "kgj@example.com" };
-      expect(await signedInAs(await signInWithMemberful())).toEqual(first);
+      const again = await signInWithMemberful({ returnTo: "/rooms/abc" });
+      expect(locationOf(again)).toBe(`${origin}/rooms/abc`);
+      expect(await signedInAs(again)).toEqual(first);
       expect(await count("users")).toBe(2);
       expect(await count("identities")).toBe(1);
       expect(await workspaceSql("SELECT count(*) AS n FROM sessions WHERE user_id = ?", first.id)).toEqual([{ n: 2 }]);
@@ -774,6 +776,28 @@ describe("Sign in with Memberful", () => {
       expect((await signedInAs(await signInWithMemberful())).name).toBe("Member");
     });
 
+    it("gives someone new a username from their name, or with the first number that makes it nobody's, nor @ember's or an agent's name", async () => {
+      const administrator = await setUpWithMemberful();
+      const site = fakeMemberful();
+      const usernameOf = async (response: Response) =>
+        ((await workspaceSql("SELECT username FROM users WHERE id = ?", (await signedInAs(response)).id)) as Array<{ username: string | null }>)[0]!.username;
+      expect(await usernameOf(await signInWithMemberful())).toBe("katherinejohnson");
+      site.member = { ...katherine, id: "4243", email: "kj2@example.com" };
+      expect(await usernameOf(await signInWithMemberful())).toBe("katherinejohnson2");
+      // One someone picked, in another's place, is passed over too, as one past the next free number is.
+      await workspaceSql("UPDATE users SET username = 'katherinejohnson4' WHERE id = ?", administrator.user.id);
+      site.member = { ...katherine, id: "4244", email: "kj3@example.com" };
+      expect(await usernameOf(await signInWithMemberful())).toBe("katherinejohnson3");
+      site.member = { ...katherine, id: "4245", email: "kj4@example.com" };
+      expect(await usernameOf(await signInWithMemberful())).toBe("katherinejohnson5");
+      site.member = { ...katherine, id: "4246", fullName: "Ember!", email: "ember.fan@example.com" };
+      expect(await usernameOf(await signInWithMemberful())).toBe("ember2");
+      site.member = { ...katherine, id: "4247", fullName: "Émilie du Châtelet", email: "emilie@example.com" };
+      expect(await usernameOf(await signInWithMemberful())).toBe("emilieduchatelet");
+      site.member = { ...katherine, id: "4248", fullName: "李白", email: "li@example.com" };
+      expect(await usernameOf(await signInWithMemberful())).toBe("member");
+    });
+
     it("passes over an AI agent's name too, even while Ember AI is off", async () => {
       const administrator = await setUpWithMemberful();
       // As making an agent called `name` leaves it once Ember AI is turned off.
@@ -794,8 +818,12 @@ describe("Sign in with Memberful", () => {
       site.member = { ...katherine, id: "4243", email: null };
       expect((await signedInAs(await signInWithMemberful())).name).toBe("Member");
       await agentCalled("1agent", "MEMBER");
+      // Nor is anyone's username an agent's name.
+      await agentCalled("2agent", "member2");
       site.member = { ...katherine, id: "4244", email: null };
-      expect((await signedInAs(await signInWithMemberful())).name).toBe("Member 2");
+      const unnamed = await signedInAs(await signInWithMemberful());
+      expect(unnamed.name).toBe("Member 2");
+      expect(await workspaceSql("SELECT username FROM users WHERE id = ?", unnamed.id)).toEqual([{ username: "member22" }]);
     });
 
     it("signs nobody in with a state this browser didn't start with, or without a code, and asks Memberful nothing", async () => {
@@ -862,17 +890,29 @@ describe("Sign in with Memberful", () => {
     it("goes home, rather than to another site or a page that isn't the workspace's, after signing in", async () => {
       await setUpWithMemberful();
       fakeMemberful();
+      // Someone new goes by way of the welcome page, which has nowhere else to go on to either.
+      expect(locationOf(await signInWithMemberful({ returnTo: "https://example.com/rooms/abc" }))).toBe(`${origin}/welcome`);
       // The last is short, but too long to keep once its address escapes it.
       for (const returnTo of [
         "https://example.com/rooms/abc",
         "//example.com/rooms/abc",
         "/api/me",
+        "/welcome/",
         `/rooms/${"a".repeat(1024)}`,
         `/rooms/abc?q=${"é".repeat(200)}`,
       ]) {
         expect(locationOf(await signInWithMemberful({ returnTo })), returnTo).toBe(`${origin}/`);
       }
       expect(locationOf(await signInWithMemberful())).toBe(`${origin}/`);
+    });
+
+    it("comes back to the welcome page for a member whose session ended there, which checks where it goes on to itself", async () => {
+      await setUpWithMemberful();
+      fakeMemberful();
+      expect(locationOf(await signInWithMemberful())).toBe(`${origin}/welcome`);
+      for (const returnTo of ["/welcome?return_to=%2Frooms%2Fabc", "/welcome"]) {
+        expect(locationOf(await signInWithMemberful({ returnTo })), returnTo).toBe(`${origin}${returnTo}`);
+      }
     });
 
     it("signs nobody new in once an administrator has turned it off, nor anyone once the deployment has lost the keys", async () => {
