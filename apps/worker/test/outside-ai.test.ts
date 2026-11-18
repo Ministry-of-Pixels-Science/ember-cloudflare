@@ -866,6 +866,17 @@ describe("What a connected AI app sends", () => {
     ada.close();
   });
 
+  it("sends a message as long as one can be, with more Markdown than Slack takes in its blocks", async () => {
+    const { administrator, token, general } = await sending();
+    const ada = await connect(general, administrator);
+
+    const sent = await found<Sent>(token, "send_message", { room_id: general, text: "w".repeat(MAX_MESSAGE_LENGTH) });
+    const { message: heard } = await ada.next("message.created");
+    expect(heard.id).toBe(sent.message.id);
+    expect(heard.plainText).toHaveLength(MAX_MESSAGE_LENGTH);
+    ada.close();
+  });
+
   it("sends what it sends to no bot, though it's to a direct message with one, where what its person writes goes to it", async () => {
     const { administrator, member, token } = await sending({ privateToo: true });
     const added = await api("/api/account/bots", { method: "POST", headers: { Cookie: administrator.cookie }, body: JSON.stringify({ name: "Build Bot", webhookUrl: "https://bots.example.com/build" }) });

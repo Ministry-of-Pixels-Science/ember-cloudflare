@@ -1,7 +1,7 @@
 import { fromJsonSchema, type McpServer } from "@modelcontextprotocol/server";
-import { hasWords, HISTORY_PAGE_SIZE, MAX_SEARCH_LENGTH, MESSAGE_TOO_LONG, sanitizeSearch, searchTerms, type Message, type Room, type SidebarRoom, type UserId } from "@ember/protocol";
+import { hasWords, HISTORY_PAGE_SIZE, MAX_MESSAGE_HTML_LENGTH, MAX_SEARCH_LENGTH, MESSAGE_TOO_LONG, sanitizeSearch, searchTerms, type Message, type Room, type SidebarRoom, type UserId } from "@ember/protocol";
 import type { OutsideScope } from "@ember/protocol/outside";
-import { markdownHtml, MAX_MARKDOWN_LENGTH } from "../bots/markdown";
+import { markdownHtml } from "../bots/markdown";
 import type { Env } from "../env";
 import { searchIndex } from "../search-index";
 import { matchesOf } from "../searches";
@@ -151,7 +151,8 @@ async function searchMessages(env: Env, access: OutsideAccess, { words, room_id:
  */
 async function sendMessage(env: Env, access: OutsideAccess, { room_id: roomId, text, thread_id: threadId }: Record<string, unknown>): Promise<unknown> {
   if (typeof text !== "string" || text.trim() === "") throw new Refused("Give the message to send, as `text`.");
-  if (text.length > MAX_MARKDOWN_LENGTH) throw new Refused(MESSAGE_TOO_LONG);
+  // Up to as much Markdown as a message can have of markup, as the bot API takes a bot's text, leaving the room to say whether its text is too long.
+  if (text.length > MAX_MESSAGE_HTML_LENGTH) throw new Refused(MESSAGE_TOO_LONG);
   if (threadId !== undefined && typeof threadId !== "string") throw new Refused("Give `thread_id` as the id of the message the thread is under.");
   const room = await roomOf(env, access, roomId);
   const sender = await workspace(env).outsideSender(access, room.id);
