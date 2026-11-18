@@ -163,6 +163,6 @@ them apart by their tags and know no other kind.
 ## Performance
 
 `pnpm perf` load-tests the Worker under `wrangler dev` on both storage backends (latency,
-throughput, fan-out, room size, history paging, search) and measures how the web app loads and renders a
-busy room. `perf/README.md` explains the scenarios and how to compare two runs; the numbers the
+throughput, fan-out, room size, history paging, search, huddles) and measures how the web app loads
+and renders a busy room. `perf/README.md` explains the scenarios and how to compare two runs; the numbers the
 suite started with are in `perf/baseline/report.md`.
