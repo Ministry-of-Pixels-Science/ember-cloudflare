@@ -405,7 +405,10 @@ Objects, D1 or speed call for something else.
   latest activity, and reaches no push or webhook. The room's object keeps the message's id in its
   own storage (`huddleMessage`) from before it writes the row, so a write whose answer it never had
   isn't made twice, and with it when the huddle started, everyone who has been in it, since the
-  huddle's sockets only say who's in it now, and when it was found over. The id is the huddle's to
+  huddle's sockets only say who's in it now, when it was found over, and whether it has gone on
+  since. Whoever joins, and that a huddle goes on which the row says is over, are kept before the
+  row is written again, so a row that can't be written while its huddle goes on names everyone who
+  was in it, and says when it ended, once it can. The id is the huddle's to
   give as it starts, and its sockets carry it, so that each tab that joins is told which message's
   thread is the huddle's, to show beside the people in it. The alarm that says who's in the huddle
   again brings the message in step with it too, which makes up for a write that failed, and for an

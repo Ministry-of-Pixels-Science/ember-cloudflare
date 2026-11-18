@@ -384,6 +384,92 @@ describe("A huddle's message in its room", () => {
     expect((await watching.next("message.updated")).message).toEqual({ ...message, updatedAt: expect.any(String) as string, huddle: { startedAt } });
   });
 
+  it("names everyone who was in a huddle whose message could only be written once it was over, whoever came and went meanwhile", async () => {
+    const { ada } = await huddlesOn();
+    const [grace, linus] = [await signIn("Grace"), await signIn("Linus")];
+    const room = await freshRoom("standup");
+    const watching = await connect(room, linus);
+    countFailures();
+    // The room can't write the message for as long as the huddle goes on.
+    const create = MessageStore.prototype.createHuddle;
+    vi.spyOn(MessageStore.prototype, "createHuddle").mockImplementation(async function (this: MessageStore, ...given) {
+      if (given[3].endedAt === undefined) throw unreachable();
+      return create.apply(this, given);
+    });
+
+    const adas = await joinHuddle(room, ada);
+    const { startedAt } = await adas.next("huddle.welcome");
+    await left(await welcomed(room, grace));
+    await heardNoMore(watching);
+    await left(adas);
+    const { message } = await watching.next("message.created");
+    expect(message).toEqual({ ...written(room, ada), huddle: { startedAt, endedAt: message.createdAt, people: [ada.user, grace.user] } });
+  });
+
+  it("says when a huddle ended, and who was in it, though it went on after its message said that it was over, and the message couldn't say that it did", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() });
+    const { ada } = await huddlesOn();
+    const [grace, linus] = [await signIn("Grace"), await signIn("Linus")];
+    const room = await freshRoom("standup");
+    const watching = await connect(room, linus);
+    const failures = countFailures();
+    const { socket: adas, startedAt, message } = await started(room, ada, watching);
+    await left(adas);
+    const { message: over } = await watching.next("message.updated");
+    expect(over.huddle).toEqual({ startedAt, endedAt: over.updatedAt, people: [ada.user] });
+    // The message can't say that the huddle goes on, for as long as it does.
+    const update = MessageStore.prototype.updateHuddle;
+    vi.spyOn(MessageStore.prototype, "updateHuddle").mockImplementation(async function (this: MessageStore, ...given) {
+      if (given[1].endedAt === undefined) throw unreachable();
+      return update.apply(this, given);
+    });
+
+    vi.setSystemTime(Date.now() + 5_000);
+    const back = await joinHuddle(room, ada);
+    expect((await back.next("huddle.welcome")).startedAt).toBe(startedAt);
+    await left(await welcomed(room, grace));
+    await heardNoMore(watching);
+    expect(failures()).toBe(3);
+    vi.setSystemTime(Date.now() + 5_000);
+    await left(back);
+    const { message: ended } = await watching.next("message.updated");
+    expect(ended).toEqual({ ...message, updatedAt: expect.any(String) as string, huddle: { startedAt, endedAt: ended.updatedAt, people: [ada.user, grace.user] } });
+    expect(Date.parse(ended.updatedAt) - Date.parse(over.updatedAt)).toBeGreaterThanOrEqual(10_000);
+    // Nothing is left for the check to make up for, and the huddle is one to go on with for half a minute from then.
+    await ring(room);
+    await heardNoMore(watching);
+    expect([failures(), await alarmOf(room)]).toEqual([3, null]);
+  });
+
+  it("goes on as the huddle it was for whoever joins before its message could say that it ended a second time", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() });
+    const { ada } = await huddlesOn();
+    const [grace, linus] = [await signIn("Grace"), await signIn("Linus")];
+    const room = await freshRoom("standup");
+    const watching = await connect(room, linus);
+    countFailures();
+    const { socket: adas, startedAt, message } = await started(room, ada, watching);
+    await left(adas);
+    await watching.next("message.updated");
+    // From here on the message can say nothing more of its huddle: not that it goes on, nor that it's over again.
+    const unwritable = vi.spyOn(MessageStore.prototype, "updateHuddle").mockRejectedValue(unreachable());
+    vi.setSystemTime(Date.now() + 5_000);
+    const back = await joinHuddle(room, ada);
+    expect((await back.next("huddle.welcome")).startedAt).toBe(startedAt);
+    await left(back);
+    await heardNoMore(watching);
+
+    // Grace wasn't in it, and joins long after its message said that it was over: the room has yet to find it over since.
+    vi.setSystemTime(Date.now() + HUDDLE_RESUMED_MS + 1);
+    const graces = await joinHuddle(room, grace);
+    expect(await graces.next("huddle.welcome")).toMatchObject({ startedAt, messageId: message.id });
+    unwritable.mockRestore();
+    await ring(room);
+    expect((await watching.next("message.updated")).message).toEqual({ ...message, updatedAt: expect.any(String) as string, huddle: { startedAt } });
+    await left(graces);
+    expect((await watching.next("message.updated")).message).toMatchObject({ id: message.id, huddle: { startedAt, people: [ada.user, grace.user] } });
+  });
+
   it("says that the huddle is over, though the room never heard of it, when its write failed, was saved all the same, and nobody is left by the next check", async () => {
     const { ada } = await huddlesOn();
     const linus = await signIn("Linus");
