@@ -73,7 +73,7 @@ test.describe("DMs in the sidebar", () => {
       involvement: "everything",
     };
     await page.route("**/api/sidebar", (route) =>
-      route.fulfill({ json: { rooms: [{ ...room, kind: "open", icon: null, unread: false, involvement: "mentions" }, direct], favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: {} } satisfies Sidebar }),
+      route.fulfill({ json: { rooms: [{ ...room, kind: "open", icon: null, unread: false, involvement: "mentions" }, direct], favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: {}, blocks: { userIds: [], version: 0 } } satisfies Sidebar }),
     );
     await openRoom(page, room);
     if (hasDrawerLayout(page)) await page.getByRole("button", { name: "Open conversations" }).tap();

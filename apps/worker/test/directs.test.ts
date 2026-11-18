@@ -247,7 +247,7 @@ describe("DMs in the sidebar", () => {
     const [grace, linus] = [await signIn("Grace"), await signIn("Linus")];
     const sidebar = await sidebarOf(ada);
     expect(sidebar.rooms.filter((room) => room.kind === "direct")).toEqual([]);
-    expect(Object.keys(sidebar).sort()).toEqual(["favorites", "huddles", "invitation", "rooms", "sharedOrder"]);
+    expect(Object.keys(sidebar).sort()).toEqual(["blocks", "favorites", "huddles", "invitation", "rooms", "sharedOrder"]);
     const room = await direct(grace, ada);
     expect(await directsOf(ada)).toEqual([listedRoom({ ...room, members: everyone(ada.user, grace.user) })]);
     expect(await directsOf(linus)).toEqual([]);

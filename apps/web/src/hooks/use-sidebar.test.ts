@@ -11,7 +11,7 @@ const design = { id: "r1", name: "Design", kind: "open", icon: null, unread: fal
 const NOON = "2026-10-15T12:00:00.000Z";
 const general = { id: "r2", name: "general", kind: "open", icon: null, unread: false, involvement: "mentions" } satisfies SidebarRoom;
 /** Ada's sidebar with `rooms`, none of them starred. */
-const unstarred = (rooms: SidebarRoom[]): Sidebar => ({ rooms, favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: {} });
+const unstarred = (rooms: SidebarRoom[]): Sidebar => ({ rooms, favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: {}, blocks: { userIds: [], version: 0 } });
 const ember: Account = { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true };
 /** Someone as the directory lists them. */
 const listed = (me: Me, role: DirectoryUser["role"]): DirectoryUser => ({ id: me.id, name: me.name, bio: null, role, status: "active", avatarUrl: `/users/${me.id}/avatar` });
@@ -707,6 +707,18 @@ describe("Star rooms", () => {
     await release();
     await settle();
     expect(result.current.list?.favorites).toEqual({ rooms: [design.id], version: 1 });
+  });
+});
+
+describe("Block someone", () => {
+  it("takes the blocks made in any of Ada's tabs from the workspace socket, keeping the newest", async () => {
+    const { result } = await showSidebar();
+    socket().connect();
+    await settle();
+    socket().receive({ type: "blocks.changed", blocks: { userIds: ["u2"], version: 2 } });
+    expect(result.current.list?.blocks).toEqual({ userIds: ["u2"], version: 2 });
+    socket().receive({ type: "blocks.changed", blocks: { userIds: [], version: 1 } });
+    expect(result.current.list?.blocks).toEqual({ userIds: ["u2"], version: 2 });
   });
 });
 

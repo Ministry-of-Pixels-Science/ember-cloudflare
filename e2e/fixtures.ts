@@ -239,7 +239,7 @@ export async function isolateRoom(page: Page, room: TestRoom, { joinCode, huddle
   const invitation = joinCode === undefined ? null : { roomId: room.id, joinCode };
   const huddles = huddle ? { [room.id]: huddle } : {};
   await page.route("**/api/sidebar", (route) =>
-    route.fulfill({ json: { rooms: [{ ...room, kind: "open", icon: null, unread: false, involvement: "mentions" }], favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation, huddles } satisfies Sidebar }),
+    route.fulfill({ json: { rooms: [{ ...room, kind: "open", icon: null, unread: false, involvement: "mentions" }], favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation, huddles, blocks: { userIds: [], version: 0 } } satisfies Sidebar }),
   );
   await keepOtherRoomsOut(page, [room.id]);
 }

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useReducer, useRef, useState, type MouseEvent, type ReactNode } from "react";
-import { ASSISTANT_ID, searchOfQuery, startingInvolvement, type Account, type AccountDeletion, type DirectRoom, type Favorites, type Me, type Room, type RoomId, type SidebarRoom, type User, type UserId } from "@ember/protocol";
+import { ASSISTANT_ID, searchOfQuery, startingInvolvement, type Account, type AccountDeletion, type Blocks, type DirectRoom, type Favorites, type Me, type Room, type RoomId, type SidebarRoom, type User, type UserId } from "@ember/protocol";
 import { CAMERAS_OFF, SCREENS_OFF } from "@ember/protocol/huddles";
 import { useFlash } from "@/components/flash";
 import { Xmark } from "@/components/icons/iconoir";
@@ -8,13 +8,14 @@ import { Button } from "@/components/ui/button";
 import { Sheet, SheetClose, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
 import { useAccount, useCamerasAllowed, useScreensAllowed } from "@/hooks/use-account";
 import { useAppBadge } from "@/hooks/use-app-badge";
+import { BlockingContext, type Blocking } from "@/hooks/use-blocking";
 import { ActivePeople, DirectoryLoaded, PeopleContext, useDirectory } from "@/hooks/use-directory";
 import { useHuddle } from "@/hooks/use-huddle";
 import { useMounted } from "@/hooks/use-mounted";
 import { useReleaseCheck } from "@/hooks/use-release-check";
 import { useSidebar } from "@/hooks/use-sidebar";
 import { agentsToAsk } from "@/lib/agents";
-import { answerHuddleInvitation, ApiError, dismissInvitation, isSignedOut, startDirect } from "@/lib/api";
+import { answerHuddleInvitation, ApiError, changeBlock, dismissInvitation, isSignedOut, startDirect } from "@/lib/api";
 import { invitationsReducer, NO_INVITATIONS } from "@/lib/huddle-invitations";
 import { hasHuddles } from "@/lib/huddle-people";
 import { hearHuddle, leaveHuddle, muteHuddle, OPEN_HUDDLE, openHuddle, shareHuddleScreen, showHuddleCamera } from "@/lib/huddle-store";
@@ -134,6 +135,7 @@ interface Redirect {
 const NO_ROOMS: SidebarRoom[] = [];
 const NO_FAVORITES: Favorites = { rooms: [], version: 0 };
 const NO_ORDER: RoomId[] = [];
+const NO_BLOCKS: Blocks = { userIds: [], version: 0 };
 
 /** What the page shows while its rooms, or the page itself, load. */
 const LOADING = (
@@ -500,6 +502,27 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onDe
     }
   }, [failed]);
   const starredRooms = useCallback((favorites: Favorites) => changeRooms({ type: "starred", favorites }), []);
+  // Blocking someone, or unblocking them, collapses their messages here or shows them again once the
+  // server answers, and hides your DM with them alone or shows it again. The set changes only with
+  // whom you've blocked, so that a sidebar loaded again draws no message again.
+  const setBlocked = useCallback(
+    async (person: User, blocked: boolean) => {
+      const answered = askForRoom();
+      try {
+        const changed = await changeBlock(person.id, blocked);
+        changeRooms({ type: "blocked", blocks: changed.blocks });
+        if (changed.direct) answered({ type: "involved", ...changed.direct });
+        return true;
+      } catch (error) {
+        failed(error);
+        return false;
+      }
+    },
+    [askForRoom, failed],
+  );
+  // Whom you've blocked, by a key that stays the same while they do, so a list loaded again renders no message again.
+  const blockedKey = JSON.stringify((list?.blocks ?? NO_BLOCKS).userIds);
+  const blocking = useMemo<Blocking>(() => ({ blocked: new Set(JSON.parse(blockedKey) as UserId[]), setBlocked }), [blockedKey, setBlocked]);
   // A save's answer can come after a newer order has loaded, so the rooms load again once it's taken.
   const reorderedRooms = useCallback(
     (sharedOrder: RoomId[]) => {
@@ -1025,7 +1048,9 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onDe
         <ActivePeople value={active}>
           <SettingsLayout value={settings}>
             <OpenSearchContext value={openSearch}>
-              <HuddlesContext value={huddles}>{layout}</HuddlesContext>
+              <HuddlesContext value={huddles}>
+                <BlockingContext value={blocking}>{layout}</BlockingContext>
+              </HuddlesContext>
             </OpenSearchContext>
           </SettingsLayout>
         </ActivePeople>
