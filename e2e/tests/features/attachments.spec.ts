@@ -379,7 +379,7 @@ test.describe("Download and share files", () => {
     await expect(bar.getByRole("button", { name: "Quote" })).toHaveCount(0);
     // Quoting a file would quote nothing, so More actions has no Quote either.
     await grace.message("Q3 report.txt").getByRole("button", { name: "Message options" }).click();
-    await expect(grace.message("Q3 report.txt").getByRole("group", { name: "More actions" }).getByRole("button")).toHaveText(["Copy link"]);
+    await expect(grace.message("Q3 report.txt").getByRole("group", { name: "More actions" }).getByRole("button")).toHaveText(["Copy link", `Block ${ada.name}`]);
     // Chromium on Linux can't share.
     await expect(bar.getByRole("button", { name: "Share" })).toHaveCount(0);
     await expect(grace.message("Q3 report.txt").getByRole("button", { name: "Share Q3 report.txt" })).toHaveCount(0);

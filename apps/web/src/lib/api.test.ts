@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ApiError,
   changeAvatar,
+  changeBlock,
   changeRoom,
   createRoom,
   fetchMe,
@@ -156,7 +157,14 @@ describe("One live connection per tab outside the open room", () => {
 });
 
 describe("Live sidebar updates", () => {
-  const sidebar: Sidebar = { rooms: [{ id: "r1", name: "Design", kind: "open", icon: null, unread: false, involvement: "mentions" }], favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: {} };
+  const sidebar: Sidebar = {
+    rooms: [{ id: "r1", name: "Design", kind: "open", icon: null, unread: false, involvement: "mentions" }],
+    favorites: { rooms: [], version: 0 },
+    sharedOrder: [],
+    invitation: null,
+    huddles: {},
+    blocks: { userIds: [], version: 0 },
+  };
 
   it("keeps the sidebar's ETag, and names it to keep the copy while it's current", async () => {
     const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(Response.json(sidebar, { headers: { ETag: 'W/"abc"' } }));
@@ -196,6 +204,17 @@ describe("Reorder starred rooms", () => {
     const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ favorites }));
     expect(await setFavoriteOrder(["r2", "r1"])).toEqual(favorites);
     expect(fetch).toHaveBeenLastCalledWith("/api/sidebar/order", expect.objectContaining({ method: "PUT", body: JSON.stringify({ roomIds: ["r2", "r1"] }) }));
+  });
+});
+
+describe("Block someone", () => {
+  it("blocks someone, or unblocks them, answering whom you've blocked and your DM with them", async () => {
+    const changed = { blocks: { userIds: ["u 2"], version: 4 }, direct: { roomId: "d1", involvement: "invisible" as const } };
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json(changed));
+    expect(await changeBlock("u 2", true)).toEqual(changed);
+    expect(fetch).toHaveBeenLastCalledWith("/api/users/u%202/block", expect.objectContaining({ method: "POST" }));
+    await changeBlock("u 2", false);
+    expect(fetch).toHaveBeenLastCalledWith("/api/users/u%202/block", expect.objectContaining({ method: "DELETE" }));
   });
 });
 

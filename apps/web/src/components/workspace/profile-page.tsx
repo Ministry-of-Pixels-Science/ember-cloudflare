@@ -32,6 +32,7 @@ import { pushEndpoint } from "@/lib/push";
 import type { RoomAnswer } from "@/lib/room-list";
 import { cn } from "@/lib/utils";
 import { AnswerLevels } from "./answer-levels";
+import { BlockedPeople } from "./blocked-people";
 import { ConversationNotifications } from "./conversation-notifications";
 import { DeleteAccount } from "./delete-account";
 import { MemberfulConnection } from "./memberful-connection";
@@ -403,6 +404,7 @@ export function ProfilePage({ me, rooms, askForRoom, onSignOut, onDeleteAccount,
         {apps.length > 0 && <YourApps apps={apps} onChanged={setApps} onFailed={onFailed} />}
         {outsideAi && <YourOutsideAi connections={outsideAi} onChanged={setOutsideAi} onFailed={onFailed} />}
         {rooms && <ConversationNotifications me={me} rooms={rooms} askForRoom={askForRoom} onFailed={onFailed} />}
+        <BlockedPeople />
         {transferId && <SignInLink transferId={transferId} mine />}
         {fields && <DeleteAccount name={savedName} hasPassword={hasPassword} onDelete={onDeleteAccount} onFailed={onFailed} />}
       </Panel>

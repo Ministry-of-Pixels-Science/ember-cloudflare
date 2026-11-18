@@ -688,11 +688,12 @@ test.describe("More actions on a message", () => {
   });
 
   test("copies a message's text, leaving the actions open", async ({ members, participant }) => {
-    await (await participant("Grace")).say("Copy my words");
+    const grace = await participant("Grace");
+    await grace.say("Copy my words");
     const ada = await members.signIn("Ada");
     await ada.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
     const panel = await openMoreActions(ada, "Copy my words");
-    await expect(panel.getByRole("button")).toHaveText(["Quote", "Copy text", "Copy link"]);
+    await expect(panel.getByRole("button")).toHaveText(["Quote", "Copy text", "Copy link", `Block ${grace.session.user.name}`]);
     await panel.getByRole("button", { name: "Copy text" }).click();
     await expect.poll(() => ada.page.evaluate(() => navigator.clipboard.readText())).toBe("Copy my words");
     await expect(panel).toBeVisible();
