@@ -115,7 +115,7 @@ import {
   type YourApp,
   type YourAppSignedOut,
 } from "@ember/protocol/apps";
-import { hearsAllHuddleSounds, type HuddleSoundChanges, type HuddleSounds } from "@ember/protocol/huddles";
+import { hearsAllHuddleSounds, type HuddleSoundChanges, type HuddleSounds, type PastHuddle } from "@ember/protocol/huddles";
 import type { MemberfulKeysChange, MemberfulSaved } from "@ember/protocol/memberful";
 import type { Gateway } from "./assistant/gateway";
 import { modelsFileUrlOf, type KeptModelsFile, type KeptWorkersAiModels } from "./assistant/offered";
@@ -149,7 +149,7 @@ import { webPush } from "./push/keys";
 import { FixedWindowLimit } from "./rate-limit";
 import { urlOf } from "./request-url";
 import { OPEN_ROOMS_ONLY, sessionTag } from "./revocations";
-import type { RoomEvent } from "./room-log";
+import type { HuddleChange, RoomEvent } from "./room-log";
 import { appConnector } from "./apps/connector";
 import { ACCESS_TTL_SECONDS, CODE_TTL_MS, provesChallenge, REFRESH_TTL_MS } from "./outside/oauth";
 import { OutsideStore, type NewOutsideConnection, type OutsideClient, type OutsideTokens, type StoredOutsideConnection } from "./outside/store";
@@ -1890,6 +1890,27 @@ export class Workspace extends DurableObject<Env> {
     const { memberIds, outdatedBy } = await this.store.reportHuddle(roomId, at, huddle);
     if (memberIds) this.tell(memberIds, { type: "room.huddle", roomId, huddle });
     return outdatedBy;
+  }
+
+  /**
+   * Takes room `roomId`'s word for what its huddles' messages say now, each as the room read it, for the
+   * list of the huddles that are over: one that's over is listed, with how many replies its thread has,
+   * unless nobody else joined it and its thread has none, and one that goes on after all, or whose
+   * message is deleted, goes from the list. Everyone in the room hears that the list changed, when it
+   * did, to load it again: the room says the same again after a call whose answer it never had.
+   */
+  async applyHuddleChanges(roomId: RoomId, changes: HuddleChange[]): Promise<void> {
+    const memberIds = await this.store.applyHuddleChanges(roomId, changes);
+    if (memberIds) this.tell(memberIds, { type: "huddles.changed" });
+  }
+
+  /**
+   * The huddles that are over in the rooms of the person `credentials` signs in, the latest to have
+   * started first, as many as the Huddles page lists, or null without a valid session.
+   */
+  async pastHuddles(credentials: Credentials): Promise<PastHuddle[] | null> {
+    const user = await this.authenticate(credentials);
+    return user && this.store.pastHuddles(user.id);
   }
 
   /**

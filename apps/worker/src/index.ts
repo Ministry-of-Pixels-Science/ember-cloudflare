@@ -86,7 +86,7 @@ import {
   type WorkspaceSettings,
 } from "@ember/protocol";
 import { agentsName } from "@ember/protocol/agents";
-import { parseHuddleSoundChanges, type HuddleSoundsChanged } from "@ember/protocol/huddles";
+import { parseHuddleSoundChanges, type HuddleSoundsChanged, type PastHuddles } from "@ember/protocol/huddles";
 import { OUTSIDE_AUTHORIZE_PATH } from "@ember/protocol/outside";
 import { mentionPromptItem } from "@ember/richtext";
 import { isAccountLogoPath, showAccountLogo, storeLogo } from "./account-logo";
@@ -907,6 +907,16 @@ async function changeHuddleSounds(request: Request, env: Env): Promise<Response>
 }
 
 /**
+ * `GET /api/huddles`: the huddles that are over in the rooms the signed-in person is in, the latest to
+ * have started first, which the Huddles page lists.
+ */
+async function pastHuddles(request: Request, env: Env): Promise<Response> {
+  const credentials = await credentialsOf(request, env);
+  const huddles = credentials && (await workspace(env).pastHuddles(credentials));
+  return huddles ? json({ huddles } satisfies PastHuddles) : problem(401, "Not signed in");
+}
+
+/**
  * Everyone in the workspace, deactivated and banned people too, with their avatars' addresses, for
  * the app to show people by, but the AI agents only administrators' direct messages reach, which only
  * an administrator is listed. No cache keeps it, as none keeps the sidebar, so the app keeps its own copy.
@@ -1278,6 +1288,7 @@ function apiAction(request: Request, env: Env, pathname: string): (() => Respons
   if (pathname === "/api/users/me" && request.method === "DELETE") return () => deleteAccount(request, env);
   if (pathname === "/api/users/me/assistant" && request.method === "PATCH") return () => changeYourAssistant(request, env);
   if (pathname === "/api/users/me/huddle-sounds" && request.method === "PATCH") return () => changeHuddleSounds(request, env);
+  if (pathname === "/api/huddles" && request.method === "GET") return () => pastHuddles(request, env);
   const ownAppSignIn = pathname.match(/^\/api\/users\/me\/apps\/([^/]+)\/sign-in$/);
   if (ownAppSignIn && request.method === "POST") return () => beginOwnAppSignIn(request, env, ownAppSignIn[1]!);
   if (ownAppSignIn && request.method === "DELETE") return () => signOutOfApp(request, env, ownAppSignIn[1]!);

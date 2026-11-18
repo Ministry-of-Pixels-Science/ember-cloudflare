@@ -64,12 +64,12 @@ import {
 } from "@ember/protocol/assistant";
 import type { AgentAccess, AgentProfile, AgentRoom } from "@ember/protocol/agents";
 import type { AppId } from "@ember/protocol/apps";
-import { ALL_HUDDLE_SOUNDS, type HuddleSoundChanges, type HuddleSounds, type LiveHuddle } from "@ember/protocol/huddles";
+import { ALL_HUDDLE_SOUNDS, PAST_HUDDLES_LISTED, type HuddleSoundChanges, type HuddleSounds, type LiveHuddle, type PastHuddle } from "@ember/protocol/huddles";
 import { statement, type Db, type Statement } from "./db";
 import type { StoredPicture } from "./files/pictures";
 import { INVITATION_TTL_SECONDS, invitationPayload, messagePayload, type PushPayload } from "./push/payload";
 import { ADDRESS_TAG_PREFIX, EVERYONE, OPEN_ROOMS_ONLY, SESSION_TAG_PREFIX, type Revocation } from "./revocations";
-import type { RoomEvent } from "./room-log";
+import type { HuddleChange, RoomEvent } from "./room-log";
 
 // The account, its people, their sessions and their rooms, kept by the Workspace in its own SQLite
 // storage or in D1 (see db.ts).
@@ -1705,6 +1705,48 @@ const KEEP_REPORT_TIME = `UPDATE rooms SET huddle_reported_at = ?2 WHERE id = ?1
 
 /** When the report kept of a room's huddle was made. */
 const HUDDLE_REPORTED_AT = `SELECT huddle_reported_at FROM rooms WHERE id = ?`;
+
+/**
+ * Whether the list of the huddles that are over has a huddle, by what its room says of its message: one
+ * that's over, which someone else joined or whose thread has a reply. Slack's lists none that nobody
+ * else joined, of which it keeps no message.
+ */
+const isListed = ({ over, replies }: HuddleChange): boolean => over !== null && (over.userIds.length > 1 || replies > 0);
+
+/**
+ * Lists the huddles of room ?1 that a JSON array ?2 has, each `{ messageId, startedAt, endedAt, userIds,
+ * replies }`, while the room is there, and has what's listed of each say what it says. Answers those it
+ * listed or changed: none of one listed just so already, nor of a message listed for another room.
+ */
+const LIST_HUDDLES = `INSERT INTO past_huddles (message_id, room_id, started_at, ended_at, user_ids, replies)
+  SELECT json_extract(value, '$.messageId'), ?1, json_extract(value, '$.startedAt'), json_extract(value, '$.endedAt'), json_extract(value, '$.userIds'), json_extract(value, '$.replies')
+    FROM json_each(?2) WHERE EXISTS (SELECT 1 FROM rooms WHERE id = ?1)
+  ON CONFLICT (message_id) DO UPDATE SET started_at = excluded.started_at, ended_at = excluded.ended_at, user_ids = excluded.user_ids, replies = excluded.replies
+    WHERE past_huddles.room_id = excluded.room_id
+      AND (past_huddles.started_at <> excluded.started_at OR past_huddles.ended_at <> excluded.ended_at OR past_huddles.user_ids <> excluded.user_ids OR past_huddles.replies <> excluded.replies)
+  RETURNING message_id`;
+
+/** Takes the huddles of room ?1 whose messages a JSON array ?2 names off the list, and answers those that were on it. */
+const UNLIST_HUDDLES = `DELETE FROM past_huddles WHERE room_id = ?1 AND message_id IN (SELECT value FROM json_each(?2)) RETURNING message_id`;
+
+/**
+ * The huddles that are over in the rooms user ?1 is in, the latest to have started first, up to ?2 of
+ * them. Only each room's latest ?2 are read, from the index's end, so a room's older huddles cost
+ * nothing, however many it has had.
+ */
+const PAST_HUDDLES_FOR_USER = `SELECT past_huddles.room_id AS roomId, past_huddles.message_id AS messageId, past_huddles.started_at AS startedAt, past_huddles.ended_at AS endedAt,
+    past_huddles.user_ids AS userIds, past_huddles.replies
+  FROM memberships CROSS JOIN past_huddles
+  WHERE memberships.user_id = ?1 AND past_huddles.room_id = memberships.room_id
+    AND past_huddles.message_id >= coalesce((
+      SELECT oldest.message_id FROM past_huddles AS oldest WHERE oldest.room_id = memberships.room_id ORDER BY oldest.message_id DESC LIMIT 1 OFFSET ?2 - 1
+    ), '')
+  ORDER BY past_huddles.message_id DESC LIMIT ?2`;
+
+/** A huddle that's over as its row lists it, with everyone who was in it as a JSON array of their ids. */
+interface PastHuddleRow extends Omit<PastHuddle, "userIds"> {
+  userIds: string;
+}
 
 /**
  * Whether whoever has the membership `memberships` reads has blocked `blocked`, a parameter, so that
@@ -4213,6 +4255,29 @@ export class WorkspaceStore {
   async roomAllowsHuddles(roomId: RoomId): Promise<boolean> {
     const [row] = await this.db.all<HuddlesAllowedRow>(HUDDLES_ALLOWED, roomId);
     return !row || allowsHuddles(row);
+  }
+
+  /**
+   * Brings the list of the huddles that are over in step with what room `roomId` says of its huddles'
+   * messages, in one transaction: each one the list has (`isListed`) is listed as it is now, and any
+   * other goes from it. Answers who's in the room, to hear of it, when that changed what's listed, and
+   * null when it didn't, as when the room says again what it said. A room that's gone lists nothing.
+   */
+  async applyHuddleChanges(roomId: RoomId, changes: HuddleChange[]): Promise<UserId[] | null> {
+    const listed = changes.filter(isListed).map(({ messageId, over, replies }) => ({ messageId, ...over, replies }));
+    const unlisted = changes.filter((change) => !isListed(change)).map(({ messageId }) => messageId);
+    const [added, removed, members] = (await this.db.batch([
+      statement(LIST_HUDDLES, roomId, JSON.stringify(listed)),
+      statement(UNLIST_HUDDLES, roomId, JSON.stringify(unlisted)),
+      statement(ROOM_MEMBERS, roomId),
+    ])) as [unknown[], unknown[], UserIdRow[]];
+    return added.length + removed.length > 0 ? userIdsOf(members) : null;
+  }
+
+  /** The huddles that are over in the rooms someone is in, the latest to have started first, as many as the Huddles page lists. */
+  async pastHuddles(userId: UserId): Promise<PastHuddle[]> {
+    const rows = await this.db.all<PastHuddleRow>(PAST_HUDDLES_FOR_USER, userId, PAST_HUDDLES_LISTED);
+    return rows.map((row) => ({ ...row, userIds: JSON.parse(row.userIds) as UserId[] }));
   }
 
   /**

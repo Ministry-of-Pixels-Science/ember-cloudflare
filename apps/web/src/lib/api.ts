@@ -62,6 +62,8 @@ import {
   type NewBot,
   type NewWorkspace,
   type OpenSignUp,
+  type PastHuddle,
+  type PastHuddles,
   type PasswordResetDone,
   type PasswordResetRequest,
   type PasswordResetWithCode,
@@ -978,6 +980,14 @@ export async function dismissInvitation(): Promise<void> {
 /** Stops an invitation into room `roomId`'s huddle ringing in every tab this person has open, as joining from it or declining it does. */
 export async function answerHuddleInvitation(roomId: RoomId): Promise<void> {
   await request(`/api/rooms/${encodeURIComponent(roomId)}/huddle/invitation`, { method: "DELETE" });
+}
+
+/**
+ * The latest huddles that are over in this person's rooms and DMs, the latest first, as the Huddles page
+ * lists them: those someone else joined, and those whose threads have a reply.
+ */
+export async function fetchHuddles(): Promise<PastHuddle[]> {
+  return (await request<PastHuddles>("/api/huddles")).huddles;
 }
 
 /** A copy of the people directory, and the ETag the server sent it with. */

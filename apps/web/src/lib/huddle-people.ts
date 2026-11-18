@@ -102,6 +102,18 @@ export function wereInTheHuddle(others: string[], you: boolean): string {
   return `${everyone} were in the huddle`;
 }
 
+/**
+ * Who was in a room's huddle that's over, for anyone in the room, where only their ids are known:
+ * `others` are the names known of the `count` people who were in it besides them, and `you` says they
+ * were in it too, when it's as `wereInTheHuddle` says it. Whoever has no name known is counted, "Sam and
+ * 2 others were in the huddle", and with them in it, everyone is: "3 people were in the huddle".
+ */
+export function wereInItsHuddle(others: string[], count: number, you: boolean): string {
+  if (others.length === count) return wereInTheHuddle(others, you);
+  const [named, people] = you ? [[], count + 1] : [others, count];
+  return `${peopleListed(named, people)} ${people === 1 ? "was" : "were"} in the huddle`;
+}
+
 const counted = (count: number, one: string) => (count === 1 ? `1 ${one}` : `${count} ${one}s`);
 
 /**

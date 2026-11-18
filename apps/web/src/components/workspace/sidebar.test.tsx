@@ -37,6 +37,7 @@ function renderSidebar(props: Partial<Props> = {}, account = EMBER, people: read
     favorites: unstarred,
     sharedOrder: [],
     huddles: {},
+    onHuddles: false,
     loaded: true,
     currentRoomId: null,
     unreadOnly: false,
@@ -375,6 +376,85 @@ describe("Rooms with a huddle", () => {
   });
 });
 
+describe("Huddles, over the rooms", () => {
+  const WITH_HUDDLES: Account = { ...EMBER, huddles: true };
+  /** A huddle with Grace in it. */
+  const huddle: LiveHuddle = { startedAt: at(0), userIds: ["u2"] };
+  const huddlesRow = () => screen.queryByRole("link", { name: /^Huddles/ });
+
+  afterEach(() => history.replaceState(null, "", "/"));
+
+  it("is a row between the workspace's name and the rooms, where huddles are on, with the headphones, which goes to the Huddles page", async () => {
+    renderSidebar({}, WITH_HUDDLES);
+    const row = huddlesRow()!;
+    expect(row).toHaveAttribute("href", "/huddles");
+    expect(row).toHaveAccessibleName("Huddles");
+    expect(row.querySelector("svg")).toHaveClass("iconoir-headset", "text-muted-foreground");
+    expect(row).not.toHaveAttribute("aria-current");
+    expect(row.previousElementSibling?.tagName).toBe("HGROUP");
+    expect(row.nextElementSibling).toBe(screen.getByRole("region", { name: "Rooms" }));
+    // As tall as a room's row, and for a fingertip.
+    expect(row).toHaveClass("min-h-9", "touch:min-h-11");
+
+    await userEvent.click(row);
+    expect(location.pathname).toBe("/huddles");
+  });
+
+  it("isn't there where huddles are off, whatever huddles the sidebar has heard of, nor while Activity lists only what's unread", () => {
+    const { rerender } = renderSidebar({ huddles: { general: huddle } });
+    expect(huddlesRow()).toBeNull();
+    rerender({ huddles: { general: huddle } }, WITH_HUDDLES);
+    expect(huddlesRow()).toBeInTheDocument();
+    rerender({ huddles: { general: huddle }, unreadOnly: true }, WITH_HUDDLES);
+    expect(huddlesRow()).toBeNull();
+  });
+
+  it("is marked as the page that's open while the Huddles page is", () => {
+    const { rerender } = renderSidebar({ onHuddles: true }, WITH_HUDDLES);
+    expect(huddlesRow()).toHaveAttribute("aria-current", "page");
+    expect(huddlesRow()).toHaveClass("aria-[current=page]:bg-hover", "aria-[current=page]:font-semibold");
+    rerender({ onHuddles: false });
+    expect(huddlesRow()).not.toHaveAttribute("aria-current");
+  });
+
+  it("ends with how many huddles are going on in your rooms and DMs, on green, which its name says too, and with nothing while none is", () => {
+    const withGrace = direct("d1", [ada!, grace!]);
+    const { rerender } = renderSidebar({ rooms: [...rooms, withGrace], huddles: { general: huddle, d1: huddle } }, WITH_HUDDLES);
+    expect(huddlesRow()).toHaveAccessibleName("Huddles, 2 happening now");
+    const count = huddlesRow()!.lastElementChild!;
+    expect(count).toHaveTextContent(/^2$/);
+    expect(count).toHaveClass("ml-auto", "rounded-full", "bg-positive", "text-white", "tabular-nums");
+    // The name says what the number counts, so the number itself is the eye's.
+    expect(count).toHaveAttribute("aria-hidden", "true");
+
+    rerender({ rooms: [...rooms, withGrace], huddles: { d1: huddle } });
+    expect(huddlesRow()).toHaveAccessibleName("Huddles, 1 happening now");
+    expect(huddlesRow()!.lastElementChild).toHaveTextContent(/^1$/);
+
+    rerender({ rooms: [...rooms, withGrace], huddles: {} });
+    expect(huddlesRow()).toHaveAccessibleName("Huddles");
+    expect(huddlesRow()).not.toHaveAttribute("aria-label");
+    expect(Array.from(huddlesRow()!.children).map((child) => child.textContent)).toEqual(["", "Huddles"]);
+  });
+
+  it("counts neither the huddle of a room you've hidden nor one of a room the sidebar doesn't list", () => {
+    const hidden = { ...rooms[1]!, involvement: "invisible" as const };
+    renderSidebar({ rooms: [rooms[0]!, hidden], huddles: { general: huddle, random: huddle, elsewhere: huddle } }, WITH_HUDDLES);
+    expect(huddlesRow()).toHaveAccessibleName("Huddles, 1 happening now");
+    expect(huddlesRow()!.lastElementChild).toHaveTextContent(/^1$/);
+  });
+
+  it("counts as far as 99 huddles, shows 99+ past that, and still says how many there are", () => {
+    const many = Array.from({ length: 100 }, (_, i) => ({ ...rooms[0]!, id: `room-${i}`, name: `room ${i}` }));
+    const goingOnIn = (listed: SidebarRoom[]) => Object.fromEntries(listed.map((room) => [room.id, huddle]));
+    const { rerender } = renderSidebar({ rooms: many, huddles: goingOnIn(many.slice(0, 99)) }, WITH_HUDDLES);
+    expect(huddlesRow()!.lastElementChild).toHaveTextContent(/^99$/);
+    rerender({ rooms: many, huddles: goingOnIn(many) });
+    expect(huddlesRow()!.lastElementChild).toHaveTextContent(/^99\+$/);
+    expect(huddlesRow()).toHaveAccessibleName("Huddles, 100 happening now");
+  });
+});
+
 describe("Reorder starred rooms", () => {
   const team = [...rooms, { id: "design", name: "design", kind: "open" as const, icon: null, unread: false, involvement: "mentions" as const }, { id: "ops", name: "ops", kind: "open" as const, icon: null, unread: false, involvement: "mentions" as const }];
   const stars: Favorites = { rooms: ["general", "random", "design"], version: 3 };
@@ -645,7 +725,7 @@ describe("Group DMs and DM names", () => {
     render(
       <PeopleContext value={new Map([[renamed.id, renamed]])}>
         <Sidebar
-          {...{ workspaceName: "Ember", meId: ada!.id, loaded: true, favorites: unstarred, sharedOrder: [], huddles: {}, currentRoomId: null, unreadOnly: false }}
+          {...{ workspaceName: "Ember", meId: ada!.id, loaded: true, favorites: unstarred, sharedOrder: [], huddles: {}, onHuddles: false, currentRoomId: null, unreadOnly: false }}
           {...{ agents: 0, agentsOpen: false, onSelect: vi.fn(), onNewDirect: vi.fn(), onOpenAgents: vi.fn(), onStarred: vi.fn(), onSessionChanged: vi.fn() }}
           rooms={[direct("d1", [ada!, grace!])]}
         />

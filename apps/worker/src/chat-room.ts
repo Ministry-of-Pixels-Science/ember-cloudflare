@@ -309,6 +309,8 @@ interface Couriers {
   index: Courier;
   /** Has R2 delete the files the room has marked deleted. */
   files: Courier;
+  /** Sends the Workspace the huddles' messages its list of the huddles that are over has yet to hear of. */
+  huddles: Courier;
 }
 
 /**
@@ -401,9 +403,11 @@ export class ChatRoom extends DurableObject<Env> {
       if (visible && !apart) void this.serially(() => this.read(roomId, user.id)).catch((error) => console.error("Could not log a read", error));
       // Otherwise the first socket since the object started sends whatever a restart left in the log.
       else if (!couriers.workspace.checked) couriers.workspace.deliver();
-      // And the search index's, which nothing else here sends, and the files to delete.
+      // And the search index's, which nothing else here sends, the files to delete, and the huddles
+      // there were before the Workspace listed them, which their log starts with.
       if (!couriers.index.checked) couriers.index.deliver();
       if (!couriers.files.checked) couriers.files.deliver();
+      if (!couriers.huddles.checked) couriers.huddles.deliver();
       return new Response(null, { status: 101, webSocket: client });
     });
   }
@@ -536,13 +540,13 @@ export class ChatRoom extends DurableObject<Env> {
     // Whatever is left to send after this says when it's due.
     await this.serially(() => this.ctx.storage.delete(LOGS_DUE));
     const couriers = this.couriersFor(roomId);
-    await Promise.all([couriers.workspace.retry(), couriers.index.retry(), couriers.files.retry()]);
+    await Promise.all([couriers.workspace.retry(), couriers.index.retry(), couriers.files.retry(), couriers.huddles.retry()]);
     // Whatever the couriers came to, so that a call is forgotten in time while a delivery keeps failing.
     const nextLateCall = await this.forgetLateCalls(roomId);
     // Kept until then, so an alarm cut off as it sends, as a deploy can do, sends the rest when it's
     // retried. A courier whose last call failed has set the alarm again, for its next try, which comes
     // sooner for a call that will have waited too long by then.
-    if (couriers.workspace.failing || couriers.index.failing || couriers.files.failing) {
+    if (couriers.workspace.failing || couriers.index.failing || couriers.files.failing || couriers.huddles.failing) {
       if (nextLateCall !== null) await this.wakeAt(roomId, nextLateCall);
       return;
     }
@@ -568,11 +572,11 @@ export class ChatRoom extends DurableObject<Env> {
     if (await this.huddle.closeUnclosed()) return this.ctx.storage.setAlarm(Date.now() + HUDDLE_CHECK_MS);
     const due = await this.ctx.storage.get<number>(ERASE_DUE);
     if (due !== undefined && due > Date.now()) return this.ctx.storage.setAlarm(due);
-    const { workspace, index, files } = this.couriersFor(roomId);
+    const { workspace, index, files, huddles } = this.couriersFor(roomId);
     await files.retry();
     if (files.failing) return this.ctx.storage.setAlarm(Date.now() + ERASE_RETRY_MS);
     // A call still out would read its log once the tables are gone, which makes them again.
-    await Promise.all([workspace.settled(), index.settled()]);
+    await Promise.all([workspace.settled(), index.settled(), huddles.settled()]);
     await this.serially(async () => {
       await this.revocationsFor(roomId).forget();
       await this.ctx.storage.deleteAll();
@@ -1144,6 +1148,8 @@ export class ChatRoom extends DurableObject<Env> {
     const couriers = this.couriersFor(store.roomId);
     couriers.workspace.deliver();
     couriers.index.deliver();
+    // A reply in a huddle's thread is counted in the list of the huddles that are over, once it is.
+    if (inThread?.parent.huddle) couriers.huddles.deliver();
     return message;
   }
 
@@ -1238,13 +1244,15 @@ export class ChatRoom extends DurableObject<Env> {
   }
 
   /**
-   * Deletes each message `ids` names, as `MessageStore.delete` does, telling everyone in the room. The
-   * room's message of its huddle stays deleted when it's one of them, though the room has yet to hear
-   * that it was written (./huddles/message.ts).
+   * Deletes each message `ids` names, as `MessageStore.delete` does, telling everyone in the room, and
+   * the Workspace's list of the huddles that are over when a huddle's message is deleted, or its thread
+   * loses replies. The room's message of its huddle stays deleted when it's one of them, though the room
+   * has yet to hear that it was written (./huddles/message.ts).
    */
   private async deleteEach(store: MessageStore, ids: string[]): Promise<void> {
     const deletion = await store.delete(ids);
     this.broadcastDeletion(deletion);
+    if (deletion.huddles) this.couriersFor(store.roomId).huddles.deliver();
     await this.huddleMessage.deleted(deletion.deletedIds);
   }
 
@@ -1362,13 +1370,15 @@ export class ChatRoom extends DurableObject<Env> {
    * What sends each of the room's logs. Each has a call of its own out at a time, and waits on its own
    * failures. The search index's is patient, since a search can find a message a moment late: its call
    * doesn't go with the Workspace's as a message is written, so the unread marks the Workspace sends
-   * everyone away don't wait behind its queries, as on D1 they would.
+   * everyone away don't wait behind its queries, as on D1 they would. The huddles' is too, as the list
+   * of the huddles that are over can be a moment late.
    */
   private couriersFor(roomId: RoomId): Couriers {
     return (this.couriers ??= {
       workspace: new Courier(() => this.sendEvents(roomId), (time) => this.wakeAt(roomId, time), `room ${roomId}'s log to the Workspace`),
       index: new Courier(() => this.sendMessages(roomId), (time) => this.wakeAt(roomId, time), `room ${roomId}'s messages to the search index`, true),
       files: new Courier(() => this.purgeFiles(roomId), (time) => this.wakeAt(roomId, time), `room ${roomId}'s deleted files to R2`, true),
+      huddles: new Courier(() => this.sendHuddles(roomId), (time) => this.wakeAt(roomId, time), `room ${roomId}'s huddles to the Workspace`, true),
     });
   }
 
@@ -2071,6 +2081,21 @@ export class ChatRoom extends DurableObject<Env> {
   }
 
   /**
+   * Sends the Workspace the huddles' messages changed longest ago that its list of the huddles that are
+   * over hasn't taken, as many as one call takes, each once, as it is now, and forgets them once it has.
+   * Answers how many it read.
+   */
+  private async sendHuddles(roomId: RoomId): Promise<number> {
+    const log = this.logFor(roomId);
+    const logged = await log.changedHuddles(ENTRIES_PER_CALL);
+    if (logged.length === 0) return 0;
+    const changes = new Map(logged.map(({ change }) => [change.messageId, change]));
+    await workspace(this.env).applyHuddleChanges(roomId, [...changes.values()]);
+    await log.huddlesListed(logged.at(-1)!.seq);
+    return logged.length;
+  }
+
+  /**
    * Has R2 delete the files the room has marked deleted, as many as one call takes, with their previews,
    * then forgets them, and answers how many. Uploads still unfinished a day after they started are
    * marked first, and their uploads in parts aborted. Without a bucket, the room only forgets them.
@@ -2130,12 +2155,12 @@ export class ChatRoom extends DurableObject<Env> {
 
   /**
    * Brings the room's message of its huddle in step with `huddle`, the huddle as it is, or null with
-   * nobody in one, telling everyone in the room of what that writes and sending the search index its
-   * log: the message as a huddle starts, and what it says once the huddle is over. The huddle has this
-   * done whenever who's in it changes, with the huddle as that left it, since someone can have left
-   * again by the time the room gets to it, and the alarm with each check of the huddle. Answers whether
-   * it could: the alarm comes back when not. A room deleted by then has forgotten the message of its
-   * last huddle, and gets no other.
+   * nobody in one, telling everyone in the room of what that writes, and sending the search index its
+   * log and the Workspace the huddles': the message as a huddle starts, and what it says once the
+   * huddle is over. The huddle has this done whenever who's in it changes, with the huddle as that left
+   * it, since someone can have left again by the time the room gets to it, and the alarm with each
+   * check of the huddle. Answers whether it could: the alarm comes back when not. A room deleted by
+   * then has forgotten the message of its last huddle, and gets no other.
    */
   private async keepHuddleMessage(huddle: HuddleNow | null): Promise<boolean> {
     try {
@@ -2146,7 +2171,9 @@ export class ChatRoom extends DurableObject<Env> {
       const couriers = this.couriersFor(roomId);
       await this.huddleMessage.keepUp(this.storeFor(roomId), huddle, (frames) => {
         for (const frame of frames) this.broadcast(frame);
-        if (frames.length > 0) couriers.index.deliver();
+        if (frames.length === 0) return;
+        couriers.index.deliver();
+        couriers.huddles.deliver();
       });
       return true;
     } catch (error) {

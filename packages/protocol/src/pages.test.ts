@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { huddlePath, isAppPage, MAX_ID_LENGTH, pageAfterWelcome, signInReturnPathIn, threadPath, TRANSFER_PATH, transferLink, welcomePath, workspacePageOf, workspacePathIn } from "./index";
+import { huddlePath, HUDDLES_PATH, isAppPage, MAX_ID_LENGTH, pageAfterWelcome, signInReturnPathIn, threadPath, TRANSFER_PATH, transferLink, welcomePath, workspacePageOf, workspacePathIn } from "./index";
 
 // This package is typed without a platform's library.
 declare const URL: object;
@@ -225,6 +225,14 @@ describe("Private sign-in link", () => {
   it("leaves a sign-in link's page to the Worker, as it's no workspace page", () => {
     expect(workspacePageOf(TRANSFER_PATH)).toBeNull();
     expect(isAppPage(TRANSFER_PATH)).toBe(false);
+  });
+});
+
+describe("Huddles page", () => {
+  it("shows the huddles at `/huddles`, and nothing under it", () => {
+    expect(workspacePageOf(HUDDLES_PATH)).toEqual({ page: "huddles" });
+    expect(isAppPage("/huddles")).toBe(true);
+    for (const path of ["/huddles/", "/huddles/new", "/huddle"]) expect(workspacePageOf(path), path).toBeNull();
   });
 });
 

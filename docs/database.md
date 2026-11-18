@@ -386,6 +386,28 @@ Objects, D1 or speed call for something else.
   object that came back with nobody left in its huddle. A row still unwritten as its huddle ends is
   written then, saying that it's over, and one deleted before the room heard that it was written
   stays deleted.
+- **The huddles that are over are rows of the Workspace's.** The Huddles page lists the latest
+  huddles that are over in all of someone's rooms, as Slack's lists its recent huddles, which no
+  room's object can answer for the others, so the Workspace keeps a row for each in `past_huddles`
+  (workspace migration 0074): its message's id, which is its key and sorts by when the huddle
+  started, its room, when it started and ended, a JSON list of the ids of everyone who was in it, in
+  the order they first joined, and how many replies its thread has. The rows say what each room
+  says of its huddles' messages. A room logs a huddle's message in `changed_huddles` (room migration
+  0075) in the batch that has it say its huddle is over, or that it goes on after all, that gives
+  its thread a reply or deletes one, or that deletes the message, and a courier of its own sends
+  the Workspace what each logged message says as it sends it, forgetting the log's rows once the
+  Workspace has taken them, as the search index's log goes: a call that failed is made again, and
+  the list can be a moment late. The Workspace takes a call in one batch. A huddle that's over,
+  which someone else joined or whose thread has a reply, is listed, or its row brought in step, by
+  one upsert that leaves a row alone that says the same already; any other goes from the list; and
+  the room's members are read, to be told on their workspace sockets that the list changed, when it
+  did, so a call made twice tells nobody twice. The frame names no huddle, since each tab on the
+  page asks for the list again, and the others do nothing with it. A deleted room's rows go with it
+  (`ON DELETE CASCADE`). The page's statement goes through someone's memberships and reads each
+  room's latest 50 from the end of `index_past_huddles_on_room_id_and_message_id`, keeping the
+  latest 50 of them all, so a room's older huddles are never read, however many it has had.
+  Migration 0075 logs the huddles there were before it, so each is listed once its room is next
+  opened.
 - **Rooms are named by their ids, and some have no creator.** A room's id names its Durable Object
   too, so it's a 16-character sortable string like a message's rather than an integer, and its kind
   is `open`, `closed` or `direct` rather than Rails' class name. The rooms from before the Workspace

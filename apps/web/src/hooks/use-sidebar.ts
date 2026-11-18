@@ -94,6 +94,9 @@ const isSame = (you: Me, me: Me) => you.id === me.id && you.name === me.name && 
  * socket says is gone as it leaves the list. `onInvitation` hears of each invitation into a huddle the
  * socket brings this person, and of each that's over: one they've answered, in this tab or another,
  * and one into a room the socket says is gone.
+ *
+ * `huddleChanges` counts each time it loads everything again, and each time the socket says that the
+ * huddles that are over have changed, which the Huddles page loads its list again by.
  */
 export function useSidebar(
   me: Me,
@@ -112,6 +115,7 @@ export function useSidebar(
   const roomFrames = useRef({ count: 0, lastOf: new Map<RoomId, number>() });
   // How many of them have said which of a huddle's sounds this person hears.
   const soundFrames = useRef(0);
+  const [huddleChanges, huddlesChanged] = useReducer((heard: number) => heard + 1, 0);
   const [refresh] = useState(() => {
     // The last list the server sent, which it says is still current rather than send again.
     let copy: SidebarCopy | null = null;
@@ -168,6 +172,7 @@ export function useSidebar(
       waiting = undefined;
       reloadPeople();
       reloadRooms();
+      huddlesChanged();
     };
     const reloadRoomsSoon = () => {
       waiting ??= setTimeout(() => {
@@ -238,6 +243,8 @@ export function useSidebar(
         case "huddle.sounds":
           soundFrames.current++;
           return change({ type: "huddle sounds", sounds: frame.sounds });
+        case "huddles.changed":
+          return huddlesChanged();
         case "user.updated":
           if (!isSomeoneElse(frame.user)) {
             toldOf.you = true;
@@ -346,5 +353,5 @@ export function useSidebar(
     };
   }, []);
 
-  return { list, answered, change, refresh, askForRoom, askForHuddleSounds, active };
+  return { list, answered, change, refresh, askForRoom, askForHuddleSounds, active, huddleChanges };
 }
