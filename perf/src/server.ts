@@ -120,8 +120,8 @@ async function waitForHealth(url: string, child: ChildProcess, output: () => str
  */
 export const stateRoot = existsSync("/dev/shm") ? "/dev/shm" : tmpdir();
 
-/** Starts `wrangler dev` for `storage`, serving `assetsDir` (an empty directory if omitted). */
-export async function startServer(storage: Storage, assetsDir?: string): Promise<Server> {
+/** Starts `wrangler dev` for `storage`, serving `assetsDir` (an empty directory if omitted), with `vars` beside the Worker's own. */
+export async function startServer(storage: Storage, assetsDir?: string, vars: Record<string, string> = {}): Promise<Server> {
   const dir = await mkdtemp(path.join(stateRoot, `ember-perf-${storage}-`));
   scratch.add(dir);
   const removeDir = async () => {
@@ -142,10 +142,8 @@ export async function startServer(storage: Storage, assetsDir?: string): Promise
   }
 
   const port = await freePort();
-  const child = wrangler(
-    ["dev", "--config", config, "--port", String(port), "--ip", "127.0.0.1", "--persist-to", state, "--var", "SESSION_SECRET:perf-secret", "--var", "EMBER_GUEST_SIGN_IN:true", "--log-level", "warn", "--show-interactive-dev-session=false"],
-    dir,
-  );
+  const given = Object.entries({ SESSION_SECRET: "perf-secret", EMBER_GUEST_SIGN_IN: "true", ...vars }).flatMap(([name, value]) => ["--var", `${name}:${value}`]);
+  const child = wrangler(["dev", "--config", config, "--port", String(port), "--ip", "127.0.0.1", "--persist-to", state, ...given, "--log-level", "warn", "--show-interactive-dev-session=false"], dir);
   const output = captureOutput(child);
   const url = `http://127.0.0.1:${port}`;
 

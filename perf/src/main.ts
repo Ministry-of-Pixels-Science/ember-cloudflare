@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { runBackend, SCENARIOS, type Scenario } from "./backend.ts";
+import { LOCAL_SCENARIOS, runBackend, SCENARIOS, type Scenario } from "./backend.ts";
 import { compare } from "./compare.ts";
 import { environment } from "./environment.ts";
 import { PROFILES } from "./profiles.ts";
@@ -16,7 +16,8 @@ const USAGE = `Usage: pnpm perf [backend] [web] [options]
   --storage <list>     do-sqlite, d1, or both (the default). Backend only.
   --scenario <list>    ${SCENARIOS.join(", ")}. Backend only.
   --url <url>          Test a server that's already running instead of starting wrangler dev. Backend only; --storage names
-                       its backend, or EMBER_RECOVERY_TOKEN in the environment lets /api/health tell it.
+                       its backend, or EMBER_RECOVERY_TOKEN in the environment lets /api/health tell it. Leaves out
+                       ${LOCAL_SCENARIOS.join(", ")}, which only the wrangler dev this starts can run.
   --out <dir>          Where to write results.json and report.md (default perf/results/<time>).
   --threshold <pct>    For compare: how much worse a metric may get before it counts (default 10).`;
 
@@ -41,6 +42,15 @@ function pick<T extends string>(value: string | undefined, all: readonly T[], wh
   return picked;
 }
 
+/** The scenarios to run: those --scenario names, or all of them, which for a server that's already running is all that can run against one. */
+function scenariosFor(url: string | undefined): Scenario[] {
+  const scenarios = pick<Scenario>(values.scenario, SCENARIOS, "scenario");
+  if (!url) return scenarios;
+  const local = scenarios.filter((scenario) => LOCAL_SCENARIOS.includes(scenario));
+  if (values.scenario && local.length) throw new Error(`--url can't run ${local.join(", ")}: only the wrangler dev that pnpm perf starts can.`);
+  return scenarios.filter((scenario) => !local.includes(scenario));
+}
+
 /** Anything but a plain number, such as "10%", would make every comparison pass. */
 function parseThreshold(value: string): number {
   if (!/^\d+(\.\d+)?$/.test(value)) throw new Error(`--threshold takes a percentage as a plain number, such as 10, not "${value}".`);
@@ -60,11 +70,11 @@ async function run(): Promise<Results> {
   const results: Results = { environment: environment(profileName, target), backend: {}, web: null };
 
   if (suites.includes("backend")) {
+    const scenarios = scenariosFor(values.url);
     // A running server has one storage backend: the one --storage names, else the one /api/health tells.
     const named = values.url && values.storage ? pick<Storage>(values.storage, STORAGES, "storage") : [];
     if (named.length > 1) throw new Error("--url tests one server, so --storage names one backend.");
     const storages = values.url ? [(await existingServer(values.url, named[0])).storage] : pick<Storage>(values.storage, STORAGES, "storage");
-    const scenarios = pick<Scenario>(values.scenario, SCENARIOS, "scenario");
     for (const storage of storages) {
       results.backend[storage] = await runBackend({ storage, url: values.url }, profile, scenarios, log);
     }

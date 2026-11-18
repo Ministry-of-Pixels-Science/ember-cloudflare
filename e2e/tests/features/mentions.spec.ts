@@ -1,4 +1,4 @@
-import type { Locator } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import { cookieHeader } from "../../fixtures";
 import { expect, test, type Member } from "./fixtures";
 
@@ -28,17 +28,23 @@ async function listClosed(member: Member): Promise<void> {
 const mention = (scope: Locator, name: string) => scope.getByText(name, { exact: true });
 
 /**
+ * Resolves as `page` gets the list of people for all of `filter`. Lexxy searches whenever typing pauses and
+ * draws each answer as it comes, picking its first, and an answer for less of `filter` can list the same
+ * people first, as on a busy machine. When someone is picked from that list, the answer for all of it comes
+ * after: Lexxy then closes its list once more, and misses an @ typed in the frame that follows.
+ */
+const answerFor = (page: Page, filter: string) => page.waitForResponse((response) => new URL(response.url()).searchParams.get("filter") === filter);
+
+/**
  * Types @ and then `filter` into `field`, waiting for the list between them, as someone does who reads it
- * first. The list follows what's typed while it loads too ("lists the people for what's typed while…").
- * Lexxy searches whenever typing pauses and draws each answer as it comes, picking its first. An answer
- * for less of `filter` can list the same people first, as on a busy machine, so this waits for the
- * answer for all of it.
+ * first, and then for the answer for all of `filter`. The list follows what's typed while it loads too
+ * ("lists the people for what's typed while…").
  */
 async function typeMention(field: Locator, filter: string): Promise<void> {
   const page = field.page();
   await field.pressSequentially("@");
   await expect(page.getByRole("listbox")).toBeVisible();
-  const answered = page.waitForResponse((response) => new URL(response.url()).searchParams.get("filter") === filter);
+  const answered = answerFor(page, filter);
   await field.pressSequentially(filter);
   await answered;
 }
@@ -109,7 +115,9 @@ test.describe("@-mention people", () => {
 
     // The first time, Lexxy fetches the list before it reads what follows the @, and after that, as the @ is typed.
     for (const time of ["first", "second"]) {
+      const answered = answerFor(zed.page, tag);
       await zed.composer().pressSequentially(`@${tag}`);
+      await answered;
       await expect(offered(zed), `the ${time} time`).toHaveText([`Bea ${tag}`, `Zed ${tag}`]);
       await zed.composer().press("Tab");
       await listClosed(zed);
