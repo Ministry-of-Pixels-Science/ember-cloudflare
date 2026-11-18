@@ -77,20 +77,20 @@ export function huddleSounds(speaker: HuddleSpeaker) {
   let musicTimer: ReturnType<typeof setTimeout> | undefined;
 
   /**
-   * Plays `sound` as soon as it has its file, unless the huddle has ended by then, which only its `last`
-   * sound outlasts: a sound that came late would be heard after the huddle, or in the next. One whose
-   * file can't be fetched goes unplayed.
+   * Plays `sound`, one of the two of someone joining or leaving, as soon as it has its file, if the tab's
+   * person hears them: as it's due, or its file isn't fetched, and still once that has come, as they may
+   * have turned them off meanwhile. It goes unplayed once the huddle has ended, too, which only its `last`
+   * sound outlasts: a sound that came late would be heard after the huddle, or in the next. So does one
+   * whose file can't be fetched.
    */
-  const playOnce = ({ audio, load }: Sound, last = false) =>
+  const chime = ({ audio, load }: Sound, last = false) => {
+    if (!heardSounds().chimes) return;
     void load().then(
       () => {
-        if (last || !ended) speaker.playOnce(audio);
+        if ((last || !ended) && heardSounds().chimes) speaker.playOnce(audio);
       },
       () => {},
     );
-  /** Plays `sound`, one of the two of someone joining or leaving, if the tab's person hears them. */
-  const chime = (sound: Sound, last = false) => {
-    if (heardSounds().chimes) playOnce(sound, last);
   };
   // Fetched as the huddle is joined, so that each is there to play the moment it's due, unless they're
   // turned off, and then one turned on since is fetched as it's first due.

@@ -26,6 +26,8 @@ function hold(name: string) {
 
 /** The huddle's sounds in a page that has fetched none of them yet. */
 const inNewPage = async () => (await import("./huddle-sounds")).huddleSounds;
+/** One huddle's sounds, as that page gives them. */
+type Sounds = ReturnType<Awaited<ReturnType<typeof inNewPage>>>;
 
 /** Has the tab's person hear every sound of a huddle but those `off` turns off, as the page does once their profile's switches say so, in the page `inNewPage` gives. */
 const hear = async (off: Partial<HuddleSounds> = {}) => (await import("./huddle-store")).hearSounds({ ...ALL_HUDDLE_SOUNDS, ...off });
@@ -314,6 +316,31 @@ describe("A huddle's sounds for someone who has turned some off", () => {
     await settled();
     expect(speaker.playOnce).toHaveBeenCalledTimes(1);
     expect(fetched).toEqual(["joined.mp3"]);
+  });
+
+  it.each([
+    ["someone joining", "joined.mp3", (sounds: Sounds) => sounds.joined()],
+    ["someone leaving", "left.mp3", (sounds: Sounds) => sounds.left()],
+    ["their own leaving", "left.mp3", (sounds: Sounds) => sounds.end(true)],
+  ] as const)("plays no sound of %s whose file comes once they've turned such sounds off, though it was due while they heard them", async (_, file, due) => {
+    const give = hold(file);
+    const sounds = (await inNewPage())(speaker);
+    due(sounds);
+    await hear({ chimes: false });
+    give(await theFile());
+    await settled();
+    expect(speaker.playOnce).not.toHaveBeenCalled();
+  });
+
+  it("plays a sound whose file comes once they've turned such sounds back on", async () => {
+    const give = hold("joined.mp3");
+    const sounds = (await inNewPage())(speaker);
+    sounds.joined();
+    await hear({ chimes: false });
+    await hear();
+    give(await theFile());
+    await settled();
+    expect(asked("playOnce")).toEqual([["joined", "blob:copy-2"]]);
   });
 
   it("neither starts nor fetches its music for someone who has turned it off, however long they're alone", async () => {
