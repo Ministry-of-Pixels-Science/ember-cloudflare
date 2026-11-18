@@ -924,6 +924,51 @@ describe("Bot cards", () => {
     expect(await answerTo(bot.key, general, { meta: {}, incident: {} })).toEqual(refused(400, "no_text"));
   });
 
+  it("shows a Statuspage update's line breaks, those githubstatus.com writes in HTML too, any other tag as its text, and a postmortem's Markdown", async () => {
+    const { administrator, bot, general } = await withBot();
+    const inRoom = await connect(general, administrator);
+    const meta = { unsubscribe: "https://status.example.com/?unsubscribe=x" };
+    // As githubstatus.com writes an update, whose `<br />` Statuspage shows as a line break.
+    const resolved = { status: "resolved", body: 'Copilot is available again.<br /><br />Calls using `<Gather input="speech">` failed.<BR>Fixed.', display_at: "2026-11-18T09:34:07Z" };
+    const incident = { name: "Disruption with some GitHub services", status: "resolved", impact: "minor", incident_updates: [resolved] };
+    expect(await answerTo(bot.key, general, { meta, incident })).toEqual(OK);
+    const { message } = await inRoom.next("message.created");
+    expect(message.cards?.[0]?.parts).toContainEqual({ kind: "text", html: '<p>Copilot is available again.<br><br>Calls using `&lt;Gather input="speech"&gt;` failed.<br>Fixed.</p>' });
+
+    // A postmortem's update, which Statuspage shows as Markdown, and which says no time it's shown at.
+    const postmortem = { status: "postmortem", body: "### Summary\n\nJobs were **delayed**.\n\n- Retried\n- Fixed", display_at: null, created_at: "2026-11-19T18:24:30Z" };
+    expect(await answerTo(bot.key, general, { meta, incident: { ...incident, status: "postmortem", incident_updates: [postmortem, resolved] } })).toEqual(OK);
+    const { message: published } = await inRoom.next("message.created");
+    expect(published.cards).toEqual([
+      {
+        source: "attachment",
+        color: "#2fcc66",
+        parts: [
+          { kind: "title", text: "Disruption with some GitHub services" },
+          { kind: "text", html: "<div><h4>Summary</h4></div><p>Jobs were <strong>delayed</strong>.</p><ul><li>Retried</li><li>Fixed</li></ul>" },
+          {
+            kind: "fields",
+            fields: [
+              { title: "Status", html: "<p>Postmortem</p>", short: true },
+              { title: "Impact", html: "<p>Minor</p>", short: true },
+            ],
+          },
+          { kind: "footer", at: Date.parse("2026-11-19T18:24:30Z") / 1000 },
+        ],
+      },
+    ]);
+
+    // An impact or status that names one of every object's properties, such as `constructor`, has no color.
+    expect(slackMessage({ meta, incident: { name: "Odd", impact: "constructor" } })).toEqual({
+      markup: "",
+      cards: [{ source: "attachment", parts: [{ kind: "title", text: "Odd" }, { kind: "fields", fields: [{ title: "Impact", html: "<p>Constructor</p>", short: true }] }] }],
+    });
+    expect(slackMessage({ meta, component_update: { new_status: "__proto__" }, component: { name: "API" } })).toEqual({
+      markup: "",
+      cards: [{ source: "attachment", parts: [{ kind: "text", html: "<p><strong>API</strong>: Proto</p>" }] }],
+    });
+  });
+
   it("answers no_text when neither text nor cards show anything, and msg_too_long for cards longer than a message's markup can be, text and cards longer than a message, or more Markdown than Slack takes", async () => {
     const { bot, general } = await withBot();
     expect(await answerTo(bot.key, general, { attachments: [{ color: "good" }, { fallback: " ", footer: " " }] })).toEqual(refused(400, "no_text"));

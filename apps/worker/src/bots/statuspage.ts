@@ -1,14 +1,15 @@
 import { parseParts, showsAnything, type Card, type CardField, type CardPart } from "@ember/protocol";
 import { cardAddress } from "@ember/richtext";
+import { markdownHtml, MAX_MARKDOWN_LENGTH } from "./markdown";
 import { escapeText, plainTextHtml, utcTime } from "./mrkdwn";
 
 // What Atlassian Statuspage's webhooks send (https://support.atlassian.com/statuspage/docs/enable-webhook-notifications/),
 // which pages such as githubstatus.com offer their subscribers: its own JSON, with no `text`, so tools that only
 // know Statuspage can post to a bot's Slack-compatible address. Cloudflare's status page sends the same `{ meta, incident }`
 // from its generic webhook (https://www.cloudflarestatus.com/docs/notifications), with the incident's `latest_update`
-// in place of its list of updates. An incident shows as a card of its name, linked, its latest update, its status,
-// impact and affected components, in a bar the color of its impact, green once it's resolved, and a maintenance as one
-// in blue with its window; a component's change of status shows as a line.
+// in place of its list of updates. An incident shows as a card of its name, linked, its latest update as the page shows
+// it, its status, impact and affected components, in a bar the color of its impact, green once it's resolved, and a
+// maintenance as one in blue with its window; a component's change of status shows as a line.
 
 type Payload = Record<string, unknown>;
 
@@ -27,6 +28,9 @@ const COLORS: Record<string, string> = {
 
 /** The statuses that end an incident or a maintenance, whose card turns green. */
 const ENDED = new Set(["resolved", "postmortem", "completed"]);
+
+/** A line break as HTML writes it, which Statuspage shows in an update, as githubstatus.com's have them. */
+const LINE_BREAK = /<br\s*\/?>/gi;
 
 /** The card a Statuspage webhook's payload shows, or null when `payload` isn't one. */
 export function statuspageCard(payload: Payload): Card | null {
@@ -54,7 +58,7 @@ function incidentCard(incident: Payload): Card | null {
     ...field("Window", windowOf(incident.scheduled_for, incident.scheduled_until), false),
     ...field("Components", componentsOf(update, incident), false),
   ];
-  const body = plainTextHtml(stringOf(update?.body), false);
+  const body = updateHtml(update);
   const at = secondsOf(update?.display_at ?? update?.created_at ?? incident.updated_at);
   const candidates: (CardPart | null)[] = [
     name ? { kind: "title", text: name, ...(href && { href }) } : null,
@@ -64,8 +68,19 @@ function incidentCard(incident: Payload): Card | null {
   ];
   const parts = parseParts(candidates.filter((part) => part !== null), addressOf);
   if (!showsAnything(parts)) return null;
-  const color = ENDED.has(status) ? COLORS.operational : COLORS[impact];
+  const color = ENDED.has(status) ? COLORS.operational : colorOf(impact);
   return { source: "attachment", ...(color && { color }), parts };
+}
+
+/**
+ * An update's text as Statuspage shows it: a postmortem's Markdown, and any other update's lines, with the line
+ * breaks it writes in HTML too, though any other tag stays the text it's written in. A postmortem with more
+ * Markdown than a Slack payload can hold shows as text.
+ */
+function updateHtml(update: Payload | undefined): string {
+  const text = stringOf(update?.body);
+  if (update?.status === "postmortem" && text.length <= MAX_MARKDOWN_LENGTH) return markdownHtml(text);
+  return plainTextHtml(text.replace(LINE_BREAK, "\n"), false);
 }
 
 /** A component's change of status, on one line: its name, and its status before and after. */
@@ -75,7 +90,7 @@ function componentCard(update: Payload, component: Payload): Card | null {
   const before = stringOf(update.old_status);
   if (!name || !after) return null;
   const change = before && before !== after ? `${label(before)} → ${label(after)}` : label(after);
-  const color = COLORS[after];
+  const color = colorOf(after);
   return { source: "attachment", ...(color && { color }), parts: [{ kind: "text", html: `<p><strong>${escapeText(name)}</strong>: ${escapeText(change)}</p>` }] };
 }
 
@@ -119,6 +134,9 @@ const label = (value: string) => {
   const words = value.replace(/_/g, " ").trim();
   return words.charAt(0).toUpperCase() + words.slice(1);
 };
+
+/** Statuspage's color for an impact or a component's status, or undefined for any other, even a name every object has, such as `constructor`. */
+const colorOf = (value: string) => (Object.hasOwn(COLORS, value) ? COLORS[value] : undefined);
 
 /** A moment Statuspage writes, in seconds, or undefined when it isn't one. */
 function secondsOf(value: unknown): number | undefined {
