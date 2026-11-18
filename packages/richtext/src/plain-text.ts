@@ -12,7 +12,7 @@ import { ancestors, nodeName, textContent, type Element, type Node, type Parent 
  * be less than), so the room refuses the body either way, but for a card's table cell, whose text is
  * measured on one line.
  */
-export const MAX_LIST_INDENTATION = 10_000;
+export const MAX_LIST_INDENTATION = 40_000;
 
 /** The spaces of `MAX_LIST_INDENTATION` that the list items of the body being read have yet to take. */
 interface IndentationBudget {

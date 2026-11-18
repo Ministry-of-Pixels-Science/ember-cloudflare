@@ -1994,8 +1994,8 @@ export const workspaceSocketQuery = ({ visible }: WorkspaceSocketParams) => `?vi
  */
 export const parseWorkspaceSocketParams = (query: SearchParams): WorkspaceSocketParams => ({ visible: query.get("visible") === "1" });
 
-/** The most characters a message's plain text can have. */
-export const MAX_MESSAGE_LENGTH = 10_000;
+/** The most characters a message's plain text can have: Slack's most, room for a long paste. */
+export const MAX_MESSAGE_LENGTH = 40_000;
 /** What the room says of a message with more, which the app says itself rather than send one. */
 export const MESSAGE_TOO_LONG = `Messages can be up to ${MAX_MESSAGE_LENGTH.toLocaleString("en-US")} characters.`;
 /** Whether a message whose plain text is `plainText` is longer than the room takes. */

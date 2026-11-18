@@ -803,7 +803,7 @@ describe("Send a message", () => {
     expect(sent).toBeNull();
     expect(socket().sentOfType("message.create")).toEqual([]);
     expect(result.current.state.messages).toEqual([]);
-    expect(result.current.state.notice).toBe("Messages can be up to 10,000 characters.");
+    expect(result.current.state.notice).toBe("Messages can be up to 40,000 characters.");
     act(() => {
       sent = result.current.postMessage(overformatted);
     });
@@ -1200,7 +1200,7 @@ describe("Edit a message", () => {
     });
     expect(sent).toBe(false);
     expect(socket().sentOfType("message.update")).toEqual([]);
-    expect(result.current.state.notice).toBe("Messages can be up to 10,000 characters.");
+    expect(result.current.state.notice).toBe("Messages can be up to 40,000 characters.");
   });
 
   it("shows the room's refusal", () => {

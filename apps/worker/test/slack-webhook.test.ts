@@ -779,7 +779,7 @@ describe("Bot cards", () => {
     // Each escaped ampersand takes five characters.
     const attachments = Array.from({ length: 25 }, () => ({ text: "&".repeat(900) }));
     expect(await answerTo(bot.key, general, { attachments })).toEqual(refused(400, "msg_too_long"));
-    const long = [{ text: "x".repeat(6000) }, { text: "y".repeat(6000) }];
+    const long = [{ text: "x".repeat(24_000) }, { text: "y".repeat(24_000) }];
     expect(await answerTo(bot.key, general, { attachments: long })).toEqual(refused(400, "msg_too_long"));
     expect(await answerTo(bot.key, general, { text: "Hi", attachments: long })).toEqual(refused(400, "msg_too_long"));
     // Slack takes 12,000 characters of Markdown across a payload's markdown blocks, its attachments' too.

@@ -1,4 +1,4 @@
-import type { ServerFrame } from "@ember/protocol";
+import { MAX_MESSAGE_LENGTH, type ServerFrame } from "@ember/protocol";
 import type { Locator, Page } from "@playwright/test";
 import { administratorOn, allowClipboard, editorField, ROOM_SOCKET } from "../../fixtures";
 import { expect, test, type Member } from "./fixtures";
@@ -903,12 +903,12 @@ test.describe("Edit a message", () => {
     const ada = await members.signIn("Ada");
     await ada.send("Short");
     await (await ada.actions("Short")).getByRole("button", { name: "Edit" }).click();
-    await ada.editor().evaluate((content) => {
-      (content.closest("lexxy-editor") as HTMLElement & { value: string }).value = `<p>${"x".repeat(10_001)}</p>`;
-    });
+    await ada.editor().evaluate((content, length) => {
+      (content.closest("lexxy-editor") as HTMLElement & { value: string }).value = `<p>${"x".repeat(length)}</p>`;
+    }, MAX_MESSAGE_LENGTH + 1);
     await ada.editor().press("ControlOrMeta+Enter");
-    await expect(ada.page.getByRole("alert")).toHaveText("Messages can be up to 10,000 characters.");
-    await expect(ada.editor().locator("p")).toHaveText(["x".repeat(10_001)]);
+    await expect(ada.page.getByRole("alert")).toHaveText("Messages can be up to 40,000 characters.");
+    await expect(ada.editor().locator("p")).toHaveText(["x".repeat(MAX_MESSAGE_LENGTH + 1)]);
     await expect(ada.page.getByRole("article")).not.toContainText("(edited)");
   });
 
