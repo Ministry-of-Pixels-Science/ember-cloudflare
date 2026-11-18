@@ -40,6 +40,12 @@ describe("AI agents someone can ask", () => {
     expect(asListed(recap, herald).adminsOnly).toBe(true);
   });
 
+  it("takes someone's username as the directory lists it, which it leaves out once they've taken theirs away", () => {
+    const grace = listed("grace", { username: "amazing.grace" });
+    expect(asListed(grace, listed("grace", { username: "grace" })).username).toBe("grace");
+    expect(asListed(grace, listed("grace")).username).toBeUndefined();
+  });
+
   it("counts the active agents, @ember among them, leaving out people, other bots and agents deleted", () => {
     expect(agentsToAsk([ember, recap, deleted, webhook, linus], member)).toBe(2);
     expect(agentsToAsk([linus, webhook], member)).toBe(0);

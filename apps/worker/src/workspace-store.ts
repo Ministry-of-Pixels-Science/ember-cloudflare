@@ -296,6 +296,8 @@ export interface StoredSession {
 
 /** Someone as the people directory lists them, with when they last changed, which their avatar's address follows. */
 export interface DirectoryEntry extends User {
+  /** The username they picked, or null while they have none. */
+  username: string | null;
   bio: string | null;
   role: Role;
   status: UserStatus;
@@ -345,6 +347,8 @@ export interface AssistantPicks {
 export interface NewLinkedPerson {
   id: UserId;
   name: string;
+  /** The username they start with, or null for none. */
+  username: string | null;
   /** Their Memberful account's email address, or null for one Ember can't keep. */
   emailAddress: string | null;
 }
@@ -542,7 +546,7 @@ export interface AvatarChange {
 }
 
 /** What `WorkspaceStore.changeProfile` saves: someone's profile, and the digest of a new password, or null to keep theirs. */
-export interface ProfileChange extends Pick<Profile, "name" | "emailAddress" | "bio"> {
+export interface ProfileChange extends Pick<Profile, "name" | "username" | "emailAddress" | "bio"> {
   passwordDigest: string | null;
 }
 
@@ -617,8 +621,8 @@ export interface SavedRoomChange {
 
 /** What applying events from a room's log changed. */
 export interface AppliedEvents {
-  /** Whose unread marks changed, and when the message each is now marked unread as of came, or null for one now read. */
-  marks: Map<UserId, string | null>;
+  /** Whose unread marks changed, and how each is marked now, or null for one now read. */
+  marks: Map<UserId, Mark | null>;
   /** When messages came in a DM, when the latest did and everyone in the DM; null otherwise. */
   active: { at: string; userIds: UserId[] } | null;
   /** The new messages' pushes, oldest message first, when they were asked for. */
@@ -627,6 +631,15 @@ export interface AppliedEvents {
   webhooks: MessageWebhook[];
   /** The new messages @ember and the agents are to answer, oldest first, each agent mentioned once. */
   asks: AssistantAsk[];
+}
+
+/**
+ * Someone's unread mark on a room: when the first message they haven't seen came, and in a DM how many
+ * have come since, which a room doesn't count.
+ */
+export interface Mark {
+  at: string;
+  count?: number;
 }
 
 /**
@@ -1027,6 +1040,7 @@ const SESSION = `SELECT sessions.id AS session_id, sessions.last_active_at, user
 interface DirectoryRow {
   id: UserId;
   name: string;
+  username: string | null;
   bio: string | null;
   role: number;
   status: number;
@@ -1087,6 +1101,7 @@ const keptForOf = (access: AgentAccess): KeptFor | null => (access === "everyone
 const directoryEntry = (row: DirectoryRow): DirectoryEntry => ({
   id: row.id,
   name: row.name,
+  username: row.username,
   bio: row.bio,
   role: ROLES[row.role] ?? "member",
   status: STATUSES[row.status] ?? "active",
@@ -1467,8 +1482,14 @@ interface HuddleRow {
   huddle_user_ids: string;
 }
 
+/** A room as the statements that read a DM's start read it: who it welcomes, if anyone, and when it started. */
+interface StartRow {
+  newcomer_id: UserId | null;
+  started_at: string;
+}
+
 /** A room someone is in, as `ROOMS_FOR_USER` reads it: a DM's name and icon are null. */
-interface SidebarRow extends HuddleRow, HuddlesAllowedRow {
+interface SidebarRow extends HuddleRow, HuddlesAllowedRow, StartRow {
   id: RoomId;
   kind: SidebarRoom["kind"];
   name: string | null;
@@ -1476,6 +1497,7 @@ interface SidebarRow extends HuddleRow, HuddlesAllowedRow {
   active_at: string;
   unread: number;
   unread_since: string | null;
+  unread_count: number;
   involvement: Involvement;
   shared_position: number | null;
 }
@@ -1485,8 +1507,8 @@ interface DirectMemberRow extends User {
   room_id: RoomId;
 }
 
-/** Someone in a DM, as `DIRECT_WITH_KEY` reads them, with when the DM was last active. */
-interface KeyedDirectMemberRow extends DirectMemberRow {
+/** Someone in a DM, as `DIRECT_WITH_KEY` reads them, with when the DM was last active, and its start. */
+interface KeyedDirectMemberRow extends DirectMemberRow, StartRow {
   active_at: string;
 }
 
@@ -1523,20 +1545,30 @@ const isRanked = (rows: unknown[]) => (rows as Array<{ ranked: number }>)[0]?.ra
 /** A DM's people, as the app has them, from the rows naming them. */
 const membersOf = (rows: DirectMemberRow[]): User[] => rows.map(({ id, name }) => ({ id, name }));
 
+/** Who a DM welcomes, and since when, when it started as they joined: nothing for any other. */
+const joinedOf = ({ newcomer_id, started_at }: StartRow): Pick<DirectRoom, "joined"> => (newcomer_id === null ? {} : { joined: { userId: newcomer_id, at: started_at } });
+
 /** What a shared room says of huddles in it: that they're off while its settings don't allow them, and nothing otherwise. */
 export const allowingHuddles = (allowed: boolean): Pick<SharedRoom, "huddles"> => (allowed ? {} : { huddles: false });
 
 const allowsHuddles = ({ huddles_allowed }: HuddlesAllowedRow) => huddles_allowed !== 0;
 
+/** A DM, `id`, last active at `activeAt`, with the people `members` reads, and who it welcomes, if anyone. */
+const directOf = (id: RoomId, activeAt: string, members: DirectMemberRow[], start: StartRow): DirectRoom => ({ id, kind: "direct", members: membersOf(members), activeAt, ...joinedOf(start) });
+
 /** A room someone is in, with the people in it if it's a DM, whom `members` reads. */
 const roomOf = (row: SidebarRow, members: DirectMemberRow[] = []): Room =>
-  row.kind === "direct" ? { id: row.id, kind: row.kind, members: membersOf(members), activeAt: row.active_at } : { id: row.id, kind: row.kind, name: row.name ?? "", icon: row.icon, ...allowingHuddles(allowsHuddles(row)) };
+  row.kind === "direct" ? directOf(row.id, row.active_at, members, row) : { id: row.id, kind: row.kind, name: row.name ?? "", icon: row.icon, ...allowingHuddles(allowsHuddles(row)) };
 
-/** A room as someone's sidebar lists it, with whether it's marked unread for them, since when, and their level in it. */
+/**
+ * A room as someone's sidebar lists it, with whether it's marked unread for them, since when, and in a
+ * DM how many messages have come since, at least the one that marked it, and their level in it.
+ */
 const sidebarRoom = (row: SidebarRow, members?: DirectMemberRow[]): SidebarRoom => ({
   ...roomOf(row, members),
   unread: row.unread === 1,
   ...(row.unread_since !== null && { unreadSince: row.unread_since }),
+  ...(row.unread === 1 && row.kind === "direct" && { unreadCount: Math.max(row.unread_count, 1) }),
   involvement: row.involvement,
 });
 
@@ -1553,6 +1585,36 @@ const storedSession = (row: SessionRow): StoredSession => ({
 /** When a room was last active: when its latest message came, or when it was made, until one has. */
 const ACTIVE_AT = `coalesce(rooms.last_message_at, rooms.created_at) AS active_at`;
 
+/** Who a room welcomes, for a DM started as they joined, and when it was made (`StartRow`). */
+const START = `rooms.newcomer_id, rooms.created_at AS started_at`;
+
+/** Someone here, and the DM, `roomId`, that is to welcome a newcomer to them. */
+export interface Welcome {
+  roomId: RoomId;
+  user: User;
+}
+
+/** The statements that start the DMs `welcomes` lists for newcomer `newcomerId`, as of `now`, the first answering the ones it starts. */
+function welcoming(newcomerId: UserId, welcomes: Welcome[], now: string): Statement[] {
+  const listed = JSON.stringify(welcomes.map(({ roomId, user }) => ({ id: roomId, key: directKey([newcomerId, user.id]), userId: user.id })));
+  return [statement(START_WELCOMES, listed, newcomerId, now), statement(GRANT_WELCOMES, listed, now)];
+}
+
+/** The DMs of `welcomes` that `started` names, as `welcoming` started them for `newcomer`, as of `now`. */
+function welcomedBy({ id, name }: User, welcomes: Welcome[], started: Array<{ id: RoomId }>, now: string): DirectRoom[] {
+  const ids = new Set(started.map((row) => row.id));
+  return welcomes
+    .filter((welcome) => ids.has(welcome.roomId))
+    .map(({ roomId, user }) => ({
+      id: roomId,
+      kind: "direct",
+      // By id, as a DM's people always come.
+      members: [{ id, name }, user].sort((a, b) => (a.id < b.id ? -1 : 1)),
+      activeAt: now,
+      joined: { userId: id, at: now },
+    }));
+}
+
 /**
  * The rooms someone is in, hidden ones too, with whether each is marked unread for them, their level in
  * it and when it was last active, which orders DMs, and each room's place in the shared order. They come
@@ -1562,9 +1624,9 @@ const ACTIVE_AT = `coalesce(rooms.last_message_at, rooms.created_at) AS active_a
  * joins is put in every open room, go in the order they were made, and rooms from before the Workspace
  * kept a list (`LEGACY_ROOMS`), whose ids don't sort by time, by when they were listed.
  */
-export const ROOMS_FOR_USER = `SELECT rooms.id, rooms.kind, rooms.name, rooms.icon, ${ACTIVE_AT}, memberships.unread_at IS NOT NULL AS unread,
-    memberships.unread_at AS unread_since, memberships.involvement, rooms.shared_position, rooms.huddle_started_at, rooms.huddle_user_ids,
-    rooms.huddles_allowed
+export const ROOMS_FOR_USER = `SELECT rooms.id, rooms.kind, rooms.name, rooms.icon, ${ACTIVE_AT}, ${START}, memberships.unread_at IS NOT NULL AS unread,
+    memberships.unread_at AS unread_since, memberships.unread_count, memberships.involvement, rooms.shared_position, rooms.huddle_started_at,
+    rooms.huddle_user_ids, rooms.huddles_allowed
   FROM memberships JOIN rooms ON rooms.id = memberships.room_id
   WHERE memberships.user_id = ? ORDER BY memberships.created_at, rooms.created_at, rooms.id`;
 
@@ -1703,8 +1765,27 @@ const GRANT_DIRECT = `INSERT INTO memberships (room_id, user_id, involvement, cr
   WHERE users.id IN (SELECT value FROM json_each(?3)) AND EXISTS (SELECT 1 FROM rooms WHERE id = ?1)
   ON CONFLICT DO NOTHING`;
 
-/** The DM a key names, when it was last active, and who's in it, by id. */
-const DIRECT_WITH_KEY = `SELECT rooms.id AS room_id, ${ACTIVE_AT}, users.id, users.name
+/** Everyone a new member's DMs welcome them to, as they join: everyone active but bots and guests. */
+const WELCOMERS = `SELECT id, name FROM users WHERE status = ${ACTIVE} AND role <> ${BOT} AND guest = 0 ORDER BY id`;
+
+/**
+ * Starts the DMs ?1 lists, each `{ id, key, userId }` for one between newcomer ?2 and someone here
+ * who's still active, as of ?3, welcoming ?2, unless those two have one already, answering the ones it
+ * starts.
+ */
+const START_WELCOMES = `INSERT INTO rooms (id, kind, creator_id, direct_key, newcomer_id, created_at, updated_at)
+  SELECT json_extract(value, '$.id'), 'direct', ?2, json_extract(value, '$.key'), ?2, ?3, ?3 FROM json_each(?1)
+  WHERE EXISTS (SELECT 1 FROM users WHERE id = json_extract(value, '$.userId') AND status = ${ACTIVE})
+  ON CONFLICT (direct_key) DO NOTHING RETURNING id`;
+
+/** Puts both people in each DM ?1 lists that `START_WELCOMES` started, as of ?2, at everything, as `GRANT_DIRECT` does. */
+const GRANT_WELCOMES = `INSERT INTO memberships (room_id, user_id, involvement, created_at, updated_at)
+  SELECT rooms.id, people.value, 'everything', ?2, ?2
+  FROM json_each(?1) AS welcomes JOIN rooms ON rooms.id = json_extract(welcomes.value, '$.id') JOIN json_each(rooms.direct_key) AS people
+  WHERE true ON CONFLICT DO NOTHING`;
+
+/** The DM a key names, when it was last active, who it welcomes, and who's in it, by id. */
+const DIRECT_WITH_KEY = `SELECT rooms.id AS room_id, ${ACTIVE_AT}, ${START}, users.id, users.name
   FROM rooms JOIN memberships ON memberships.room_id = rooms.id JOIN users ON users.id = memberships.user_id
   WHERE rooms.direct_key = ? ORDER BY memberships.user_id`;
 
@@ -1847,20 +1928,35 @@ export const ROOM_ACCESS = `SELECT EXISTS (SELECT 1 FROM memberships WHERE room_
   EXISTS (SELECT 1 FROM bans WHERE ip_address = ?) AS banned`;
 
 /**
- * Marks a room unread, as of a message, for its members who aren't marked already, haven't hidden it,
- * didn't write the message, haven't blocked whoever did and aren't among the people a JSON list names,
- * who are viewing it, answering a row for each. It writes only the rows it changes. Nothing changes once
- * the Workspace has applied the message's event, so one delivered again is applied once.
+/**
+ * Marks a room unread, as of a message, for its members who haven't hidden it, didn't write the message,
+ * haven't blocked whoever did and aren't among the people a JSON list names, who are viewing it, answering
+ * a row for each, with when the first message they haven't seen came and, in a DM, how many have come
+ * since. In a room it writes only the rows of those not marked already, which a message in a DM writes
+ * too, to count it. Nothing changes once the Workspace has applied the message's event, so one delivered
+ * again is applied once.
  */
-export const MARK_UNREAD = `UPDATE memberships SET unread_at = ?1
-  WHERE room_id = ?2 AND unread_at IS NULL AND involvement <> 'invisible' AND user_id <> ?3
+export const MARK_UNREAD = `UPDATE memberships SET unread_at = coalesce(unread_at, ?1), unread_count = unread_count + 1
+  WHERE room_id = ?2 AND involvement <> 'invisible' AND user_id <> ?3
+    AND (unread_at IS NULL OR EXISTS (SELECT 1 FROM rooms WHERE id = ?2 AND kind = 'direct'))
     AND user_id NOT IN (SELECT value FROM json_each(?4)) AND ?5 > (SELECT applied_seq FROM rooms WHERE id = ?2) AND NOT ${blockedBy("?3")}
-  RETURNING user_id`;
+  RETURNING user_id, unread_at, unread_count`;
 
-/** Clears someone's unread mark on a room, answering a row if there was one, once for each event. */
-export const MARK_READ = `UPDATE memberships SET unread_at = NULL
+/** A membership whose mark `MARK_UNREAD` or `MARK_READ` changed, as it is now. */
+interface MarkRow {
+  user_id: UserId;
+  unread_at: string | null;
+  unread_count: number;
+}
+
+/** The mark `row` leaves, with its count where messages are `counted`, or null for none. */
+const markOf = (row: MarkRow, counted: boolean): Mark | null =>
+  row.unread_at === null ? null : { at: row.unread_at, ...(counted && { count: Math.max(row.unread_count, 1) }) };
+
+/** Clears someone's unread mark on a room, and its count, answering a row if there was one, once for each event. */
+export const MARK_READ = `UPDATE memberships SET unread_at = NULL, unread_count = 0
   WHERE room_id = ?1 AND user_id = ?2 AND unread_at IS NOT NULL AND ?3 > (SELECT applied_seq FROM rooms WHERE id = ?1)
-  RETURNING user_id`;
+  RETURNING user_id, unread_at, unread_count`;
 
 /**
  * Everyone in DM ?1, to tell of a message in it, numbered ?2, that the Workspace hasn't applied yet,
@@ -2292,7 +2388,7 @@ export const ACTIVE_PEOPLE = `SELECT id, name FROM users WHERE status = ${ACTIVE
  * are, deleted agents too, whose answers stay, and whom an agent not everyone can ask is kept for
  * (migrations/0063_agent_access.sql).
  */
-const DIRECTORY_COLUMNS = `users.id, users.name, users.bio, users.role, users.status, users.updated_at,
+const DIRECTORY_COLUMNS = `users.id, users.name, users.username, users.bio, users.role, users.status, users.updated_at,
   (users.role = ${BOT} AND users.bot_token IS NULL) AS agent, users.agent_access`;
 
 /** Everyone ?1 is told of, for the people directory: removed and banned people too, whose messages stay (`listedTo`). */
@@ -2562,9 +2658,10 @@ const DEACTIVATE = `UPDATE users SET status = ${DEACTIVATED}, email_address = re
 /**
  * Deletes someone's account, ?3's, recording when, ?2: their row stays, deactivated, as a removed
  * person's does, so the rooms and DMs they were in still name somebody, but called ?1, with no email
- * address, password, bio, avatar or picks of theirs, and no longer an administrator.
+ * address, password, username, bio, avatar or picks of theirs, and no longer an administrator. Their
+ * username is free for anyone then, as their email address is.
  */
-const DELETE_ACCOUNT = `UPDATE users SET name = ?1, status = ${DEACTIVATED}, role = ${MEMBER}, email_address = NULL, password_digest = NULL, bio = NULL,
+const DELETE_ACCOUNT = `UPDATE users SET name = ?1, status = ${DEACTIVATED}, role = ${MEMBER}, email_address = NULL, password_digest = NULL, username = NULL, bio = NULL,
   avatar_key = NULL, avatar_variant = NULL, assistant_thinking = NULL, assistant_answer_length = NULL, assistant_model = NULL,
   invitation_dismissed_at = NULL, deleted_at = ?2, updated_at = ?2 WHERE id = ?3`;
 
@@ -2630,7 +2727,7 @@ const QUEUE_PICTURE_DELETION = `INSERT INTO pending_picture_deletions (object_ke
 const KEEP_PICTURE = `DELETE FROM pending_picture_deletions WHERE object_key = ?`;
 
 /** Saves someone's profile and records when, keeping their password unless given a new one's digest. */
-const CHANGE_PROFILE = `UPDATE users SET name = ?, email_address = ?, bio = ?, password_digest = coalesce(?, password_digest), updated_at = ?
+const CHANGE_PROFILE = `UPDATE users SET name = ?, username = ?, email_address = ?, bio = ?, password_digest = coalesce(?, password_digest), updated_at = ?
   WHERE id = ?`;
 
 /** The same, with whether each is in a room, for its settings. */
@@ -2660,16 +2757,19 @@ const DIRECTORY_WITH_IDS = `SELECT ${DIRECTORY_COLUMNS} FROM users WHERE id IN (
 export const MENTIONABLE_PAGE = 20;
 
 /**
- * Active people whose names contain ?1, by name, whom ?2 can ask (`askedBy`). It's `LIKE`, so only ASCII
- * letters ignore case, `%` and `_` match anything, and "" matches everyone.
+ * Active people whose names contain ?1, or whose usernames start with it, by name, whom ?2 can ask
+ * (`askedBy`). It's `LIKE`, so only ASCII letters ignore case, `%` and `_` match anything, and "" matches
+ * everyone.
  */
 const MENTIONABLE_PEOPLE = `SELECT ${DIRECTORY_COLUMNS} FROM users
-  WHERE status = ${ACTIVE} AND name LIKE '%' || ?1 || '%' AND ${askedBy("?2")} ORDER BY lower(name), id LIMIT ${MENTIONABLE_PAGE}`;
+  WHERE status = ${ACTIVE} AND (name LIKE '%' || ?1 || '%' OR username LIKE ?1 || '%') AND ${askedBy("?2")}
+  ORDER BY lower(name), id LIMIT ${MENTIONABLE_PAGE}`;
 
 /** The same of room ?2's members (`Current.user.rooms.find(room_id).users`), for ?3. */
 const MENTIONABLE_MEMBERS = `SELECT ${DIRECTORY_COLUMNS}
   FROM memberships JOIN users ON users.id = memberships.user_id
-  WHERE memberships.room_id = ?2 AND users.status = ${ACTIVE} AND users.name LIKE '%' || ?1 || '%' AND ${askedBy("?3")}
+  WHERE memberships.room_id = ?2 AND users.status = ${ACTIVE} AND (users.name LIKE '%' || ?1 || '%' OR users.username LIKE ?1 || '%')
+    AND ${askedBy("?3")}
   ORDER BY lower(users.name), users.id LIMIT ${MENTIONABLE_PAGE}`;
 
 /** Whether someone in a room can change it: administrators and the room's creator can. */
@@ -3135,13 +3235,14 @@ export class WorkspaceStore {
 
   /**
    * Adds someone who joined with the join link as a member, with their session, in every open room,
-   * recording who invited them, if they joined with an invitation. Any invitation to their email address
-   * is accepted, and the links to it spent, whichever way they joined. If someone has their email
-   * address already, the address's unique index refuses the first statement, and so the whole batch,
-   * which leaves the links as they were.
+   * recording who invited them, if they joined with an invitation, and starts the DMs `welcomes` lists
+   * to welcome them, answering the ones it started. Any invitation to their email address is accepted,
+   * and the links to it spent, whichever way they joined. If someone has their email address already,
+   * the address's unique index refuses the first statement, and so the whole batch, which leaves the
+   * links as they were.
    */
-  async createMember(person: NewPerson, sessionId: string, tokenDigest: string, client: Client, now: string): Promise<void> {
-    await this.db.batch([
+  async createMember(person: NewPerson, welcomes: Welcome[], sessionId: string, tokenDigest: string, client: Client, now: string): Promise<DirectRoom[]> {
+    const results = await this.db.batch([
       statement(
         `INSERT INTO users (id, name, email_address, password_digest, avatar_key, avatar_variant, invited_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         person.id,
@@ -3158,18 +3259,38 @@ export class WorkspaceStore {
       statement(INSERT_SESSION, sessionId, person.id, tokenDigest, client.ip, client.userAgent, now, now, now),
       statement(GRANT_OPEN_ROOMS_TO_USER, person.id, now, now),
       statement(SPEND_EMAIL_LINKS, person.emailAddress),
+      ...welcoming(person.id, welcomes, now),
     ]);
+    return welcomedBy(person, welcomes, results.at(-2) as Array<{ id: RoomId }>, now);
   }
 
   /**
    * Adds someone who signed in with `account`, an account elsewhere, as a member with no password, linked
-   * to it, with their session, in every open room, spending the links to their email address, as
-   * `createMember` adds someone who joins. If someone has their email address already, or the account
-   * is linked to someone already, a unique index refuses its statement, and so the whole batch.
+   * to it, with their session, in every open room, spending the links to their email address and
+   * starting the DMs `welcomes` lists, as `createMember` adds someone who joins. If someone has their
+   * email address already, or the account is linked to someone already, a unique index refuses its
+   * statement, and so the whole batch.
    */
-  async createLinkedMember(person: NewLinkedPerson, account: LinkedAccount, checkedAt: number, sessionId: string, tokenDigest: string, client: Client, now: string): Promise<void> {
-    await this.db.batch([
-      statement(`INSERT INTO users (id, name, email_address, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`, person.id, person.name, person.emailAddress, now, now),
+  async createLinkedMember(
+    person: NewLinkedPerson,
+    account: LinkedAccount,
+    checkedAt: number,
+    welcomes: Welcome[],
+    sessionId: string,
+    tokenDigest: string,
+    client: Client,
+    now: string,
+  ): Promise<DirectRoom[]> {
+    const results = await this.db.batch([
+      statement(
+        `INSERT INTO users (id, name, username, email_address, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+        person.id,
+        person.name,
+        person.username,
+        person.emailAddress,
+        now,
+        now,
+      ),
       statement(
         `INSERT INTO identities (issuer, subject, user_id, checked_at, created_at, updated_at, name, email_address) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         account.issuer,
@@ -3184,7 +3305,14 @@ export class WorkspaceStore {
       statement(INSERT_SESSION, sessionId, person.id, tokenDigest, client.ip, client.userAgent, now, now, now),
       statement(GRANT_OPEN_ROOMS_TO_USER, person.id, now, now),
       statement(SPEND_EMAIL_LINKS, person.emailAddress),
+      ...welcoming(person.id, welcomes, now),
     ]);
+    return welcomedBy(person, welcomes, results.at(-2) as Array<{ id: RoomId }>, now);
+  }
+
+  /** Everyone already here whom a DM is to welcome someone who joins to (`WELCOMERS`). */
+  async welcomers(): Promise<User[]> {
+    return this.db.all<User>(WELCOMERS);
   }
 
   /** The person the account elsewhere that `issuer` and `subject` name is linked to, whatever their status, or null for nobody. */
@@ -4146,15 +4274,16 @@ export class WorkspaceStore {
   /**
    * Applies `events` from room `roomId`'s log, in order and in one transaction, with `viewerIds`, who
    * is viewing the room, or for a message whose event names its own `viewerIds`, those: a message marks
-   * it unread for the members who aren't, and a read clears the reader's mark. The latest message also records when the room was last active. A reply sent only to
+   * it unread for the members who aren't, in a DM counting it for them too, and a read clears the
+   * reader's mark. The latest message also records when the room was last active. A reply sent only to
    * its thread does neither, and isn't pushed to those its event's `viewerIds` say are viewing the thread,
    * in place of those viewing the room. Those the Workspace has applied before change nothing. Answers
-   * whose marks changed, and whether each is now unread, and, when a message has come in a DM, when the
-   * latest did and everyone in the DM, to tell. With `pushing`, it answers each new message's pushes too,
-   * found just after its marks, so that a push's badge counts them and none of the events after it, and
-   * to guests only if `guests` says they can stay signed in. It answers the bots' webhooks each new
-   * message is delivered to, but for a bot's reply to one, which reaches the room as any message does but
-   * goes to no webhook.
+   * whose marks changed, in a DM whose counts did, and how each is marked now, and, when a message has
+   * come in a DM, when the latest did and everyone in the DM, to tell. With `pushing`, it answers each
+   * new message's pushes too, found just after its marks, so that a push's badge counts them and none of
+   * the events after it, and to guests only if `guests` says they can stay signed in. It answers the
+   * bots' webhooks each new message is delivered to, but for a bot's reply to one, which reaches the room
+   * as any message does but goes to no webhook.
    */
   async applyRoomEvents(roomId: RoomId, events: RoomEvent[], viewerIds: UserId[], pushing = false, guests = false): Promise<AppliedEvents> {
     const viewers = JSON.stringify(viewerIds);
@@ -4180,16 +4309,18 @@ export class WorkspaceStore {
     const told = statements.length;
     statements.push(...(message ? [statement(TOLD_OF_DIRECT_MESSAGE, roomId, message.seq), statement(APPLIED_WITH_MESSAGE, last, roomId, messageAt!)] : [statement(APPLIED, last, roomId)]));
     const results = await this.db.batch(statements);
-    const marks = new Map<UserId, string | null>();
-    for (const { event, marks: at } of applied) {
+    const toldIds = message ? userIdsOf(results[told] as UserIdRow[]) : [];
+    // Only a DM's people are told of its messages, and only a DM counts them.
+    const counted = toldIds.length > 0;
+    const marks = new Map<UserId, Mark | null>();
+    for (const { marks: at } of applied) {
       if (at === null) continue;
-      for (const { user_id } of results[at] as UserIdRow[]) marks.set(user_id, isNewMessage(event) ? event.at : null);
+      for (const row of results[at] as MarkRow[]) marks.set(row.user_id, markOf(row, counted));
     }
     const pushes = applied.flatMap(({ event, pushes: at }) => (at === null ? [] : messagePushes(roomId, event, results[at] as PushRow[])));
     const deliveries = applied.flatMap(({ event, bots: at }) => (at === null ? [] : messageDeliveries(event, results[at] as MessageBotRow[])));
     const webhooks = deliveries.flatMap(({ answers, ...delivery }) => (answers ? [] : [delivery]));
     const asks = deliveries.flatMap(({ answers, ...ask }) => (answers ? [ask] : []));
-    const toldIds = message ? userIdsOf(results[told] as UserIdRow[]) : [];
     return { marks, active: toldIds.length > 0 ? { at: messageAt!, userIds: toldIds } : null, pushes, webhooks, asks };
   }
 
@@ -4443,11 +4574,30 @@ export class WorkspaceStore {
   /**
    * The names of everyone but `userId` who's active, or can be again with the name they have: people,
    * bots and agents active, and people banned, whom lifting the ban lets back, or suspended for their
-   * membership's lapsing, whom renewing it does.
+   * membership's lapsing, whom renewing it does. And everyone else's usernames, whatever their status, as
+   * a username stays its person's, and lifting a ban lets back even someone removed.
    */
   async namesInUse(userId: UserId | null): Promise<string[]> {
-    const rows = await this.db.all<{ name: string }>(`SELECT name FROM users WHERE status IN (${ACTIVE}, ${BANNED}, ${SUSPENDED}) AND id IS NOT ?`, userId);
+    const rows = await this.db.all<{ name: string }>(
+      `SELECT name FROM users WHERE status IN (${ACTIVE}, ${BANNED}, ${SUSPENDED}) AND id IS NOT ?1
+        UNION ALL SELECT username FROM users WHERE username IS NOT NULL AND id IS NOT ?1`,
+      userId,
+    );
     return rows.map((row) => row.name);
+  }
+
+  /** Whether anyone but `userId`, whatever their status, has `username`. */
+  async hasUsername(username: string, userId: UserId): Promise<boolean> {
+    return (await this.db.all(`SELECT 1 FROM users WHERE username = ? AND id <> ?`, username, userId)).length > 0;
+  }
+
+  /**
+   * The usernames that start with `start`, whatever their owners' status: a range of the index on them,
+   * since `{` sorts after every character a username can have.
+   */
+  async usernamesStartingWith(start: string): Promise<string[]> {
+    const rows = await this.db.all<{ username: string }>(`SELECT username FROM users WHERE username >= ?1 AND username < ?1 || '{'`, start);
+    return rows.map((row) => row.username);
   }
 
   /**
@@ -4796,8 +4946,8 @@ export class WorkspaceStore {
    * they had one and keep an email address to sign in with (`UNLINK_ON_NEW_PASSWORD`). Answers whether it
    * queued any.
    */
-  async changeProfile(userId: UserId, { name, emailAddress, bio, passwordDigest }: ProfileChange, now: string, ended: EndedByPassword | null): Promise<boolean> {
-    const change = statement(CHANGE_PROFILE, name, emailAddress, bio, passwordDigest, now, userId);
+  async changeProfile(userId: UserId, { name, username, emailAddress, bio, passwordDigest }: ProfileChange, now: string, ended: EndedByPassword | null): Promise<boolean> {
+    const change = statement(CHANGE_PROFILE, name, username, emailAddress, bio, passwordDigest, now, userId);
     if (!ended) {
       await this.db.batch([change]);
       return false;
@@ -5082,7 +5232,7 @@ export class WorkspaceStore {
     ])) as [unknown[], unknown[], KeyedDirectMemberRow[], Array<{ name: string }>];
     const [first] = members;
     if (!first) return { refusedBy: blockers[0]!.name };
-    return { room: { id: first.room_id, kind: "direct", members: membersOf(members), activeAt: first.active_at }, started: added!.length > 0 };
+    return { room: directOf(first.room_id, first.active_at, members, first), started: added!.length > 0 };
   }
 
   /** Of the rooms `ids` names, the ones that aren't registered yet and were never deleted. The ids go as one JSON value. */

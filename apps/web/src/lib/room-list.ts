@@ -9,6 +9,7 @@ import {
   type SharedRoom,
   type Sidebar,
   type SidebarRoom,
+  type UserId,
 } from "@ember/protocol";
 import { isHidden } from "./involvement";
 
@@ -37,6 +38,13 @@ export function apart(rooms: SidebarRoom[]): { shared: SharedSidebarRoom[]; dire
   }
   return { shared, directs };
 }
+
+/**
+ * Whether `room` is a DM started as `meId` joined, with someone who was here already, that nobody has
+ * written in yet. Everyone here has one with them, so their own lists leave those out until a message
+ * comes in one, while the people already here see theirs from the start, as Slack shows someone new.
+ */
+export const isQuietWelcome = (room: SidebarRoom, meId: UserId) => room.kind === "direct" && room.joined?.userId === meId && room.activeAt === room.joined.at;
 
 /** Each room's place in `order`. */
 const placesIn = (order: RoomId[]) => new Map(order.map((id, place) => [id, place]));
@@ -96,20 +104,23 @@ export function withRoom(rooms: SidebarRoom[], room: Room): SidebarRoom[] {
     : [...rooms, { ...room, unread: false, involvement: startingInvolvement(room) }];
 }
 
-/** `listed`'s unread mark, and since when, when it's marked. */
-const markOf = ({ unread, unreadSince }: SidebarRoom): Pick<SidebarRoom, "unread" | "unreadSince"> => (unreadSince === undefined ? { unread } : { unread, unreadSince });
+/** `listed`'s unread mark, since when, and in a DM how many messages it counts, when it's marked. */
+const markOf = ({ unread, unreadSince, unreadCount }: SidebarRoom): Pick<SidebarRoom, "unread" | "unreadSince" | "unreadCount"> => ({
+  unread,
+  ...(unreadSince !== undefined && { unreadSince }),
+  ...(unreadCount !== undefined && { unreadCount }),
+});
 
 /**
- * `room` marked unread as of `at`, or read when that's null. The server tells of a mark only as it makes
- * one, so a room marked already takes the new time: the read between them came in the same events as the
- * message after it, and the server told only of the mark they leave.
+ * `room` marked unread as of `at`, with `count` messages in a DM, or read when `at` is null. The server
+ * tells of a room's mark only as it makes one, so a room marked already takes the new time: the read
+ * between them came in the same events as the message after it, and the server told only of the mark
+ * they leave. A DM's comes with each message, with how many there are now.
  */
-function marked(room: SidebarRoom, at: string | null): SidebarRoom {
-  if (at === null) {
-    const { unreadSince: _, ...read } = room;
-    return { ...read, unread: false };
-  }
-  return { ...room, unread: true, unreadSince: at };
+function marked(room: SidebarRoom, at: string | null, count?: number): SidebarRoom {
+  const { unreadSince: _, unreadCount: __, ...unmarked } = room;
+  if (at === null) return { ...unmarked, unread: false };
+  return { ...unmarked, unread: true, unreadSince: at, ...(count !== undefined && { unreadCount: count }) };
 }
 
 /** `listed`'s time last active, when it's a DM and that's later than `room`'s. */
@@ -138,7 +149,7 @@ function withHuddle(huddles: Sidebar["huddles"], roomId: RoomId, huddle: LiveHud
 export type RoomChange =
   | { type: "saved"; room: Room }
   | { type: "gone"; roomId: RoomId }
-  | { type: "marked"; roomId: RoomId; at: string | null }
+  | { type: "marked"; roomId: RoomId; at: string | null; count?: number }
   | { type: "active"; roomId: RoomId; at: string }
   | { type: "huddle"; roomId: RoomId; huddle: LiveHuddle | null }
   | { type: "involved"; roomId: RoomId; involvement: Involvement }
@@ -188,7 +199,7 @@ function changed(list: Sidebar, change: SidebarChange): Sidebar {
       return { ...list, rooms: list.rooms.filter((room) => room.id !== change.roomId), favorites, huddles: withHuddle(list.huddles, change.roomId, null) };
     }
     case "marked":
-      return { ...list, rooms: list.rooms.map((room) => (room.id === change.roomId ? marked(room, change.at) : room)) };
+      return { ...list, rooms: list.rooms.map((room) => (room.id === change.roomId ? marked(room, change.at, change.count) : room)) };
     case "active":
       return { ...list, rooms: withActivity(list.rooms, change.roomId, change.at) };
     case "huddle":

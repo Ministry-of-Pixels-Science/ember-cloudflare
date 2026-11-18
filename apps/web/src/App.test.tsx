@@ -11,6 +11,7 @@ import {
   type AccountDeletion,
   type Bootstrap,
   type Message,
+  type ProfileChanges,
   type WorkspaceSettings,
 } from "@ember/protocol";
 import type { HuddlesSetup } from "@ember/protocol/huddles";
@@ -210,7 +211,11 @@ function serve({
       return Response.json({ huddles: { appId: (JSON.parse(String(init?.body)) as HuddlesSetup).appId, relayKeyId: null } });
     }
     if (route === "GET /api/users") return Response.json({ users: [] });
-    if (route === "GET /api/users/me/profile") return Response.json({ profile: { name: me.name, emailAddress: null, bio: null, apps: [], outsideAi: null } });
+    if (route === "GET /api/users/me/profile") return Response.json({ profile: { name: me.name, username: null, emailAddress: null, bio: null, apps: [], outsideAi: null } });
+    if (route === "PATCH /api/users/me/profile") {
+      const { username = null } = JSON.parse(String(init?.body)) as ProfileChanges;
+      return Response.json({ profile: { name: me.name, username, emailAddress: null, bio: null, apps: [], outsideAi: null } });
+    }
     if (route === "PATCH /api/account") {
       const { name = account.name, tagline = account.tagline, settings, customDomain = account.customDomain } = JSON.parse(String(init?.body)) as AccountChanges;
       account = { ...account, name, tagline, hideTranslationButtons: settings?.hideTranslationButtons ?? account.hideTranslationButtons, customDomain };
@@ -936,6 +941,28 @@ describe("Sign in with Memberful", () => {
     render(<App />);
     expect(await signInPage()).toBeInTheDocument();
     expect(sessionStorage.getItem("ember:return-to")).toBe("/rooms/general");
+  });
+
+  it("welcomes someone new who joined with it, outside the workspace, then goes on to the page they signed in from", async () => {
+    history.replaceState(null, "", "/welcome?return_to=%2Frooms%2Fgeneral");
+    serve({ signedIn: true });
+    render(<App />);
+    expect(await screen.findByRole("heading", { level: 1, name: "Welcome to Ember" })).toBeInTheDocument();
+    expect(screen.queryAllByRole("link", { name: "Your profile" })).toHaveLength(0);
+    const user = userEvent.setup();
+    await waitFor(() => expect(screen.getByLabelText("Username")).toBeEnabled());
+    await user.type(screen.getByLabelText("Username"), "ada");
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    expect(await roomHeading()).toBeInTheDocument();
+    expect(location.pathname + location.search).toBe("/rooms/general");
+  });
+
+  it("sends someone signed out at the welcome page to sign in, coming back to it after", async () => {
+    history.replaceState(null, "", "/welcome?return_to=%2Frooms%2Fgeneral");
+    serve({ signedIn: false });
+    render(<App />);
+    expect(await signInPage()).toBeInTheDocument();
+    expect(sessionStorage.getItem("ember:return-to")).toBe("/welcome?return_to=%2Frooms%2Fgeneral");
   });
 });
 

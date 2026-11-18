@@ -40,6 +40,29 @@ describe("@-mention people", () => {
     expect(await offered(ada, `${inRoom}&filter=a_l`)).toEqual(["Ada Lovelace"]);
   });
 
+  it("offers people whose usernames start with what's typed too, by name", async () => {
+    const ada = await signIn("Ada Lovelace");
+    const grace = await signIn("Grace Hopper");
+    await signIn("Zing Zhao");
+    await workspaceSql("UPDATE users SET username = 'amazing.grace' WHERE id = ?", grace.user.id);
+    await workspaceSql("UPDATE users SET username = 'countess' WHERE id = ?", ada.user.id);
+    expect(await offered(ada, "?filter=amaz")).toEqual(["Grace Hopper"]);
+    expect(await offered(ada, "?filter=COUNT")).toEqual(["Ada Lovelace"]);
+    // Not the middle of one, which names more people than it finds.
+    expect(await offered(ada, "?filter=zing")).toEqual(["Zing Zhao"]);
+    const room = await createRoom("Leads", { closedTo: [ada.user.id, grace.user.id], as: ada });
+    expect(await offered(ada, `?room_id=${room.id}&filter=amazing.`)).toEqual(["Grace Hopper"]);
+  });
+
+  it("shows each one's username in their prompt item", async () => {
+    const ada = await signIn("Ada Lovelace");
+    await workspaceSql("UPDATE users SET username = 'countess' WHERE id = ?", ada.user.id);
+    const { users } = (await (await api("/api/users", { headers: { Cookie: ada.cookie } })).json()) as Directory;
+    const listed = users.find((user) => user.id === ada.user.id)!;
+    expect(listed.username).toBe("countess");
+    expect(await (await prompt(ada, "?filter=countess")).text()).toBe(mentionPromptItem({ ...ada.user, username: "countess", avatarUrl: listed.avatarUrl }));
+  });
+
   it("offers anyone active without a room, or with a blank one", async () => {
     const ada = await signIn("Ada Lovelace");
     const grace = await signIn("Grace Hopper");

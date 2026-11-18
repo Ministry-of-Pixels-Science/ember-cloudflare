@@ -48,6 +48,7 @@ import {
   MAX_TAGLINE_LENGTH,
   MAX_TURNSTILE_TOKEN_LENGTH,
   MAX_USER_NAME_LENGTH,
+  MAX_USERNAME_LENGTH,
   memberfulProblemOf,
   memberfulSignInPath,
   MIN_PASSWORD_LENGTH,
@@ -77,6 +78,9 @@ import {
   parsePasswordResetWithCode,
   parseMemberfulDisconnection,
   parseProfileChanges,
+  usernameFrom,
+  usernameOf,
+  USERNAME_REFUSED,
   parseResendApiKey,
   parseRoleChange,
   parseRoomChanges,
@@ -296,15 +300,27 @@ describe("Presence", () => {
 });
 
 describe("One live connection per tab outside the open room", () => {
-  it("takes pings on the workspace socket, and whether its tab is shown, as a boolean, and nothing else", () => {
+  it("takes pings on the workspace socket, whether its tab is in use and whether it's shown, as booleans, and nothing else", () => {
     expect(parseWorkspaceClientFrame('{"type":"ping"}')).toEqual({ type: "ping" });
     expect(parseWorkspaceClientFrame('{"type":"ping","nonce":"n1"}')).toEqual({ type: "ping" });
+    expect(parseWorkspaceClientFrame('{"type":"presence.active","active":false}')).toEqual({ type: "presence.active", active: false });
+    expect(parseWorkspaceClientFrame('{"type":"presence.active","active":true,"userId":"u2"}')).toEqual({ type: "presence.active", active: true });
     expect(parseWorkspaceClientFrame('{"type":"presence.visible","visible":false}')).toEqual({ type: "presence.visible", visible: false });
     expect(parseWorkspaceClientFrame('{"type":"presence.visible","visible":true,"extra":1}')).toEqual({ type: "presence.visible", visible: true });
-    for (const visible of [undefined, null, 1, "true", "visible"]) {
-      expect(parseWorkspaceClientFrame(JSON.stringify({ type: "presence.visible", visible })), String(visible)).toBeNull();
+    for (const value of [undefined, null, 1, "true", "yes"]) {
+      expect(parseWorkspaceClientFrame(JSON.stringify({ type: "presence.active", active: value })), String(value)).toBeNull();
+      expect(parseWorkspaceClientFrame(JSON.stringify({ type: "presence.visible", visible: value })), String(value)).toBeNull();
     }
-    for (const raw of ['{"type":"typing.start"}', '{"type":"message.create","clientMessageId":"c1","body":"hi"}', "[]", "null", "{"]) {
+    for (const raw of [
+      '{"type":"typing.start"}',
+      '{"type":"message.create","clientMessageId":"c1","body":"hi"}',
+      '{"type":"presence","active":true}',
+      '{"type":"presence.active","visible":true}',
+      '{"type":"presence.visible","active":true}',
+      "[]",
+      "null",
+      "{",
+    ]) {
       expect(parseWorkspaceClientFrame(raw), raw).toBeNull();
     }
   });
@@ -1116,8 +1132,39 @@ describe("Edit your profile", () => {
     ["a current password that isn't text", { currentPassword: 12345678 }, "Current password must be text"],
     ["an endpoint that isn't text", { pushSubscriptionEndpoint: {} }, "Push subscription endpoint must be text"],
     ["an endpoint longer than a subscription's", { pushSubscriptionEndpoint: "x".repeat(MAX_PUSH_ENDPOINT_LENGTH + 1) }, "Endpoint can't be longer than 2048 characters"],
+    ["a username that isn't text", { username: 7 }, "Username must be text"],
+    ["a username that starts with a period", { username: ".ada" }, USERNAME_REFUSED],
+    ["a username with a letter that isn't ASCII's", { username: "adá" }, USERNAME_REFUSED],
+    ["a username with a comma", { username: "ada,grace" }, USERNAME_REFUSED],
+    ["a username longer than one can be", { username: "a".repeat(MAX_USERNAME_LENGTH + 1) }, USERNAME_REFUSED],
   ])("refuses %s and says why", (_, body, error) => {
     expect(parseProfileChanges(body)).toBe(error);
+  });
+
+  it("keeps a username in lowercase, without spaces or the @ before it, in ASCII for fullwidth letters, and a blank one as none", () => {
+    expect(parseProfileChanges({ username: " @Ada.Lovelace_1815 " })).toEqual({ username: "ada.lovelace_1815" });
+    expect(parseProfileChanges({ username: "@@ａｄａ" })).toEqual({ username: "ada" });
+    expect(parseProfileChanges({ username: "ada love-lace" })).toEqual({ username: "adalove-lace" });
+    expect(parseProfileChanges({ username: " " })).toEqual({ username: "" });
+    expect(parseProfileChanges({ username: "a".repeat(MAX_USERNAME_LENGTH) })).toEqual({ username: "a".repeat(MAX_USERNAME_LENGTH) });
+  });
+});
+
+describe("Usernames", () => {
+  it("keep what's typed as Ember keeps a username", () => {
+    expect(usernameOf("@Grace Hopper")).toBe("gracehopper");
+    expect(usernameOf("GRACE\t\n")).toBe("grace");
+    expect(usernameOf("grace@navy")).toBe("grace@navy");
+  });
+
+  it("start from a name's letters and numbers, without accents, in lowercase, with room for four digits, or as member without any", () => {
+    expect(usernameFrom("Katherine Johnson")).toBe("katherinejohnson");
+    expect(usernameFrom("Ada Lovelace (1815)")).toBe("adalovelace1815");
+    expect(usernameFrom("Émilie du Châtelet")).toBe("emilieduchatelet");
+    expect(usernameFrom("Maximiliana Wolfeschlegelsteinhausen")).toBe("maximilianawolfes");
+    expect(usernameFrom("Maximiliana Wolfeschlegelsteinhausen")).toHaveLength(MAX_USERNAME_LENGTH - 4);
+    expect(usernameFrom("李白")).toBe("member");
+    expect(usernameFrom(" ")).toBe("member");
   });
 });
 

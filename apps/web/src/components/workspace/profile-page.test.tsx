@@ -37,7 +37,7 @@ vi.mock("@/lib/previews", () => ({ avatarVariantOf: vi.fn(async () => new Blob([
 const ada = { id: "u1", name: "Ada Lovelace", administrator: false };
 /** Ada's avatar as the profile loads it: her initials, until she uploads one. */
 const INITIALS = "/users/t0k3n/avatar?v=1";
-const profile: Profile = { name: "Ada Lovelace", emailAddress: "ada@example.com", bio: "Wrote the first program", avatarUrl: INITIALS, avatar: false, password: true, membershipNeeded: true, memberful: null, assistant: null, apps: [], outsideAi: null };
+const profile: Profile = { name: "Ada Lovelace", username: null, emailAddress: "ada@example.com", bio: "Wrote the first program", avatarUrl: INITIALS, avatar: false, password: true, membershipNeeded: true, memberful: null, assistant: null, apps: [], outsideAi: null };
 /** Ada's levels of @ember's dials while Ember AI is on: where they start, up to Medium thinking, with the one model people can pick, which she leaves to administrators. */
 const LEVELS: YourAssistant = {
   levels: { thinking: "low", length: "medium" },
@@ -245,6 +245,25 @@ describe("Edit your profile", () => {
     expect(field("Bio")).toHaveValue("");
     expect(field("New password")).toHaveValue("");
     expect(onFailed).not.toHaveBeenCalled();
+  });
+
+  it("saves your username as Ember keeps one, in lowercase without spaces or an @, which you can leave blank", async () => {
+    serve({ loaded: () => Response.json({ profile: { ...profile, username: "ada" }, transferId: LOADED_LINK } satisfies ProfileAnswer) });
+    const { user } = showPage();
+    await loaded();
+    const username = field("Username");
+    expect(username).toHaveValue("ada");
+    expect(username).not.toBeRequired();
+    expect(username).toHaveAttribute("maxlength", "21");
+    expect(username).toHaveAccessibleDescription("People find you by typing @ and your username.");
+    await user.clear(username);
+    await user.type(username, "@Ada Lovelace");
+    expect(username).toHaveValue("adalovelace");
+    await user.click(saveButton());
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Changes saved");
+    expect(saved()).toEqual([{ username: "adalovelace" }]);
+    expect(username).toHaveValue("adalovelace");
   });
 
   it("sends only what you changed, then shows what's saved, so it doesn't undo another tab's save", async () => {

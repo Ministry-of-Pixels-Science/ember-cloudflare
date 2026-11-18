@@ -42,7 +42,7 @@ export const RESERVED_CLOSE_CODES = new Set([1004, 1005, 1006, 1015]);
  */
 export const MAX_ROOM_FRAME_SIZE = 1 << 20;
 
-/** The most bytes a frame from a client can take on a workspace socket, which takes only pings. */
+/** The most bytes a frame from a client can take on a workspace socket, which takes only pings and presence. */
 export const MAX_WORKSPACE_FRAME_SIZE = 1 << 10;
 
 /** Whether `raw`, a frame from a client, takes more than `limit` bytes, counting text in UTF-8, as it came. */

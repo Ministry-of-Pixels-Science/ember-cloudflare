@@ -109,7 +109,7 @@ async function listed(viewer: Session, userId: UserId): Promise<DirectoryUser> {
 /** What's stored of someone. */
 const stored = async (userId: UserId) =>
   ((await workspaceSql(
-    `SELECT name, email_address, password_digest, bio, avatar_key, avatar_variant, role, status, deleted_at, updated_at FROM users WHERE id = ?`,
+    `SELECT name, email_address, password_digest, username, bio, avatar_key, avatar_variant, role, status, deleted_at, updated_at FROM users WHERE id = ?`,
     userId,
   )) as Array<Record<string, string | number | null>>)[0]!;
 
@@ -176,10 +176,13 @@ describe("Delete my account", () => {
     expect(await signedIn(administrator)).toBe(true);
   });
 
-  it("leaves nothing of you but your row, deactivated and named Deleted person, without an email address, password, bio or avatar", async () => {
+  it("leaves nothing of you but your row, deactivated and named Deleted person, without an email address, password, username, bio or avatar", async () => {
     const administrator = await setUp();
     const member = await join(grace);
-    await workspaceSql("UPDATE users SET bio = 'Admiral', avatar_key = 'avatars/grace', avatar_variant = 'webp', assistant_model = 'some-model', role = 1 WHERE id = ?", member.user.id);
+    await workspaceSql(
+      "UPDATE users SET username = 'amazing.grace', bio = 'Admiral', avatar_key = 'avatars/grace', avatar_variant = 'webp', assistant_model = 'some-model', role = 1 WHERE id = ?",
+      member.user.id,
+    );
     await bindings.FILES!.put("avatars/grace", recordedImage("moon-thumb.jpg"));
 
     await deleteGraces(member);
@@ -188,6 +191,7 @@ describe("Delete my account", () => {
       name: DELETED_PERSON_NAME,
       email_address: null,
       password_digest: null,
+      username: null,
       bio: null,
       avatar_key: null,
       avatar_variant: null,
@@ -195,7 +199,9 @@ describe("Delete my account", () => {
       status: 1,
     });
     expect(row.deleted_at).toBe(row.updated_at);
-    expect(await listed(administrator, member.user.id)).toMatchObject({ id: member.user.id, name: DELETED_PERSON_NAME, bio: null, role: "member", status: "deactivated" });
+    const listing = await listed(administrator, member.user.id);
+    expect(listing).toMatchObject({ id: member.user.id, name: DELETED_PERSON_NAME, bio: null, role: "member", status: "deactivated" });
+    expect(listing).not.toHaveProperty("username");
     // R2 deletes the avatar they had.
     await vi.waitFor(async () => expect(await bindings.FILES!.head("avatars/grace")).toBeNull(), { timeout: 5_000 });
     expect(await workspaceSql("SELECT object_key FROM pending_picture_deletions")).toEqual([]);
@@ -230,6 +236,19 @@ describe("Delete my account", () => {
     const again = await join(grace);
     expect(again.user.id).not.toBe(member.user.id);
     expect(await stored(again.user.id)).toMatchObject({ name: grace.name, email_address: grace.emailAddress, status: 0 });
+  });
+
+  it("frees your username, so someone else can take it", async () => {
+    const administrator = await setUp();
+    const member = await join(grace);
+    const takeGrace = (session: Session) =>
+      api("/api/users/me/profile", { method: "PATCH", headers: { Cookie: session.cookie }, body: JSON.stringify({ username: "grace" }) });
+    expect((await takeGrace(member)).status).toBe(200);
+    expect((await takeGrace(administrator)).status).toBe(422);
+
+    await deleteGraces(member);
+    expect((await takeGrace(administrator)).status).toBe(200);
+    expect(await listed(administrator, administrator.user.id)).toMatchObject({ username: "grace" });
   });
 
   it("refuses without your password, or with one that isn't yours, deleting nothing", async () => {
