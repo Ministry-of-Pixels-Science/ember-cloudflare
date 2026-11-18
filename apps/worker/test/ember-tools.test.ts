@@ -197,12 +197,14 @@ describe("A tool Ember runs", () => {
 
   it("runs as many calls as an answer may make, tells the model of the rest that it has none left, and then has it answer", async () => {
     const { general, inGeneral } = await setUp(CLAUDE);
-    script = [{ calls: ["one", "two", "three"] }, { calls: ["four", "five", "six"] }, { text: "I found nothing." }];
+    // All but two of the calls an answer may make search in its first round, and of the three in its next, the last is one too many.
+    const searches = (count: number) => Array.from({ length: count }, (_, index) => `word${index}`);
+    script = [{ calls: searches(TOOL_CALLS_PER_ANSWER - 2) }, { calls: searches(3) }, { text: "I found nothing." }];
 
     const { answer } = await ask(inGeneral, general, EMBER);
     expect(answer.plainText).toBe("I found nothing.");
 
-    expect(TOOL_CALLS_PER_ANSWER).toBe(5);
+    expect(TOOL_CALLS_PER_ANSWER).toBe(20);
     const [, second, third] = answers();
     expect(answers()).toHaveLength(3);
     expect(second!.body).not.toHaveProperty("tool_choice");
@@ -505,14 +507,17 @@ describe("An answer that waits at a call", () => {
     const call = (id: string, name: string) => ({ type: "function_call", id: `fc_${id}`, call_id: id, name, arguments: "{}", status: "completed" });
     const turn = (output: unknown[]) => ({ object: "response", status: "completed", output, usage: { input_tokens: 1_000, output_tokens: 100 } });
     const said = { type: "message", role: "assistant", content: [{ type: "output_text", text: "Done." }] };
-    answering([turn([REASONED, call("call_1", "look"), call("call_2", "look"), call("call_3", "look")]), turn([call("call_4", "send"), call("call_5", "send"), call("call_6", "send")]), turn([said])]);
+    // All but two of the calls an answer may make look it up, and of the three sends after them, the last is one too many.
+    const looks = TOOL_CALLS_PER_ANSWER - 2;
+    const [sendOne, sendTwo, sendThree] = [1, 2, 3].map((n) => `call_${looks + n}`) as [string, string, string];
+    answering([turn([REASONED, ...Array.from({ length: looks }, (_, index) => call(`call_${index + 1}`, "look"))]), turn([call(sendOne, "send"), call(sendTwo, "send"), call(sendThree, "send")]), turn([said])]);
     const gateway = gatewayFor(GPT, "openai");
 
     const first = waitingIn(await askWaiting(bindings, gateway, question, 5_000));
-    expect(first.asks).toEqual({ id: "call_4", name: "send", input: {} });
-    expect(first.paused).toMatchObject({ called: 3, tokensLeft: 800, results: [] });
+    expect(first.asks).toEqual({ id: sendOne, name: "send", input: {} });
+    expect(first.paused).toMatchObject({ called: looks, tokensLeft: 800, results: [] });
     const second = waitingIn(await goOn(bindings, gateway, tools, kept(first.paused), true, 5_000));
-    expect(second.asks.id).toBe("call_5");
+    expect(second.asks.id).toBe(sendTwo);
 
     // The tool isn't the agent's any more by the time the second is allowed, and the third is past what an answer may call.
     expect(await goOn(bindings, gateway, tools.slice(0, 1), kept(second.paused), true, 5_000)).toMatchObject({ text: "Done." });
@@ -520,9 +525,9 @@ describe("An answer that waits at a call", () => {
     const [, , last] = asked;
     expect(last!.body).toMatchObject({ tool_choice: "none", max_output_tokens: 800 });
     expect(last!.body.input!.slice(-3)).toEqual([
-      { type: "function_call_output", call_id: "call_4", output: "Sent 1" },
-      { type: "function_call_output", call_id: "call_5", output: "There's no tool called send any more." },
-      { type: "function_call_output", call_id: "call_6", output: NO_CALLS_LEFT },
+      { type: "function_call_output", call_id: sendOne, output: "Sent 1" },
+      { type: "function_call_output", call_id: sendTwo, output: "There's no tool called send any more." },
+      { type: "function_call_output", call_id: sendThree, output: NO_CALLS_LEFT },
     ]);
   });
 

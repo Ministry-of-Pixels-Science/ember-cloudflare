@@ -129,7 +129,7 @@ interface RepliesProps {
 export function ThreadReplies({ room, name, me, thread, offline, deleted, roomNotice, onDismissRoomNotice, intro, autoFocus, mentionsAbove }: RepliesProps) {
   const { parentId, parent, replies } = thread.state;
   // Replying tells nobody you're typing, so only @ember shows as typing here, as it answers in the thread.
-  const typing = useMemo(() => Object.values(replies.typing).map((t) => t.user), [replies.typing]);
+  const typing = useMemo(() => Object.values(replies.typing), [replies.typing]);
   const direct = room.kind === "direct";
   const composer = useRef<ComposerHandle>(null);
   const { editing, editors } = useMessageEditors(composer);

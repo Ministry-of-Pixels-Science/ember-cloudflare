@@ -1,9 +1,10 @@
-import { MAX_FILE_SIZE, type LinkPreview, type User } from "@ember/protocol";
+import { MAX_FILE_SIZE, type LinkPreview } from "@ember/protocol";
 import { OPENGRAPH_EMBED_CONTENT_TYPE, previewContent } from "@ember/richtext/dom";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PeopleContext } from "@/hooks/use-directory";
+import type { Typist } from "@/lib/room-state";
 import { createRef } from "react";
 import { Composer, RoomDeleted, type AddPreview, type ComposerHandle } from "./composer";
 import { editorLoaded } from "./editor";
@@ -24,7 +25,7 @@ vi.mock("./emoji-panel", () => ({
 /** What `onSend` answers for a message that went, where nothing's to come after it. */
 const went: AddPreview = () => {};
 
-async function showComposer({ typing = [] as User[], disabled = false, roomId = "r1", threadId = undefined as string | undefined, direct = false, autoFocus = true, mentionsAbove = false } = {}) {
+async function showComposer({ typing = [] as Typist[], disabled = false, roomId = "r1", threadId = undefined as string | undefined, direct = false, autoFocus = true, mentionsAbove = false } = {}) {
   // Hears a link's preview that comes once the message has gone.
   const addPreview = vi.fn((_preview: LinkPreview) => {});
   const onSend = vi.fn((_body: string, _alsoSend: boolean): AddPreview | null => addPreview);
@@ -1208,7 +1209,7 @@ describe("Typing indicator", () => {
     expect(onTyping).not.toHaveBeenCalledWith(false);
   });
 
-  const typist = (name: string, i: number): User => ({ id: `u${i}`, name });
+  const typist = (name: string, i: number): Typist => ({ user: { id: `u${i}`, name } });
 
   it.each([
     [["Ada"], "Ada"],
@@ -1243,6 +1244,15 @@ describe("Typing indicator", () => {
     );
     await screen.findByRole("textbox", { name: "Write a message" });
     expect(container.querySelector(".spinner")).toHaveTextContent("Grace Hopper, Linus", { normalizeWhitespace: false });
+  });
+
+  it("follows an answerer's name with what it's doing meanwhile, when it says, among the others typing", async () => {
+    const digg = { user: { id: "u9", name: "digg" }, doing: "is using Digg: digg_get_post" };
+    const { view } = await showComposer({ typing: [typist("Grace", 2), digg, typist("Ada", 1)] });
+    expect(view.container.querySelector(".spinner")).toHaveTextContent("Ada, Grace, digg is using Digg: digg_get_post", { normalizeWhitespace: false });
+
+    view.rerender(<Composer roomId="r1" roomName="general" userId="u1" typing={[{ user: digg.user }]} disabled={false} onSend={() => went} onSendFiles={() => {}} onTyping={() => {}} />);
+    expect(view.container.querySelector(".spinner")).toHaveTextContent(/^digg$/, { normalizeWhitespace: false });
   });
 
   it("shows nothing while nobody is typing, and fades in when someone starts", async () => {

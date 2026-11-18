@@ -47,6 +47,8 @@ export interface FakeMcp {
   calls: Array<{ name: string; arguments: unknown }>;
   /** The Block Kit blocks it answers a call of `name` with `given` with, beside its text, when a spec has it answer with any. */
   blocks: ((name: string, given: unknown) => unknown[] | undefined) | null;
+  /** What a call of one of its tools waits for before it's run, when a spec holds its calls, to see what the room shows meanwhile. */
+  held: Promise<void> | null;
   /** Its sign-in, when it signs people in rather than taking its token. */
   signIn: FakeSignIn | null;
   close: () => Promise<void>;
@@ -213,6 +215,7 @@ async function answer(mcp: FakeMcp, request: IncomingMessage, response: ServerRe
   if (message.id === undefined) return reply(202);
   const needs = message.method === "tools/call" ? (mcp.signIn?.needs ?? null) : null;
   if (needs !== null && !mcp.signIn?.allows.includes(needs)) return reply(403, { error: "Forbidden" }, { "WWW-Authenticate": `Bearer error="insufficient_scope", scope="${needs}"` });
+  if (message.method === "tools/call") await mcp.held;
   const result = resultOf(mcp, message);
   if (result === undefined) return reply(200, { jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "Method not found" } });
   reply(200, { jsonrpc: "2.0", id: message.id, result });
@@ -225,7 +228,7 @@ async function answer(mcp: FakeMcp, request: IncomingMessage, response: ServerRe
  */
 export async function startFakeMcp({ signsIn = false, client = null as FakeClient | null } = {}): Promise<FakeMcp> {
   const signIn: FakeSignIn = { access: null, refresh: null, client, allows: [], needs: null, revoked: [], codes: new Map(), exchanged: 0, refreshed: 0, end: () => void Object.assign(signIn, { access: null, refresh: null }) };
-  const mcp: FakeMcp = { url: "", tools: [...TOOLS], asked: [], calls: [], blocks: null, signIn: signsIn ? signIn : null, close: async () => {} };
+  const mcp: FakeMcp = { url: "", tools: [...TOOLS], asked: [], calls: [], blocks: null, held: null, signIn: signsIn ? signIn : null, close: async () => {} };
   const server = createServer((request, response) => {
     answer(mcp, request, response).catch(() => response.destroy());
   });
