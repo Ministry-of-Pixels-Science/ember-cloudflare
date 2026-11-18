@@ -8,13 +8,14 @@ import { Button } from "@/components/ui/button";
 import { Sheet, SheetClose, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
 import { useAccount, useCamerasAllowed, useScreensAllowed } from "@/hooks/use-account";
 import { useAppBadge } from "@/hooks/use-app-badge";
+import { BlockingContext, type Blocking } from "@/hooks/use-blocking";
 import { DirectoryLoaded, PeopleContext, useDirectory } from "@/hooks/use-directory";
 import { useHuddle } from "@/hooks/use-huddle";
 import { useMounted } from "@/hooks/use-mounted";
 import { useReleaseCheck } from "@/hooks/use-release-check";
 import { useSidebar } from "@/hooks/use-sidebar";
 import { agentsToAsk } from "@/lib/agents";
-import { answerHuddleInvitation, ApiError, dismissInvitation, isSignedOut, startDirect } from "@/lib/api";
+import { answerHuddleInvitation, ApiError, changeBlock, dismissInvitation, isSignedOut, startDirect } from "@/lib/api";
 import { invitationsReducer, NO_INVITATIONS } from "@/lib/huddle-invitations";
 import { hasHuddles } from "@/lib/huddle-people";
 import { hearHuddle, leaveHuddle, muteHuddle, OPEN_HUDDLE, openHuddle, shareHuddleScreen, showHuddleCamera } from "@/lib/huddle-store";
@@ -488,6 +489,26 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onDe
     }
   }, [failed]);
   const starredRooms = useCallback((favorites: Favorites) => changeRooms({ type: "starred", favorites }), []);
+  // Blocking someone, or unblocking them, collapses their messages here or shows them again once the
+  // server answers, and hides your DM with them alone or shows it again. The set changes only with
+  // whom you've blocked, so that a sidebar loaded again draws no message again.
+  const setBlocked = useCallback(
+    async (person: User, blocked: boolean) => {
+      const answered = askForRoom();
+      try {
+        const changed = await changeBlock(person.id, blocked);
+        changeRooms({ type: "blocked", blocks: changed.blocks });
+        if (changed.direct) answered({ type: "involved", ...changed.direct });
+        return true;
+      } catch (error) {
+        failed(error);
+        return false;
+      }
+    },
+    [askForRoom, failed],
+  );
+  const blockedKey = (list?.blocks.userIds ?? []).join(" ");
+  const blocking = useMemo<Blocking>(() => ({ blocked: new Set(blockedKey ? blockedKey.split(" ") : []), setBlocked }), [blockedKey, setBlocked]);
   // A save's answer can come after a newer order has loaded, so the rooms load again once it's taken.
   const reorderedRooms = useCallback(
     (sharedOrder: RoomId[]) => {
@@ -1011,7 +1032,9 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onDe
       <DirectoryLoaded value={directory.loaded}>
         <SettingsLayout value={settings}>
           <OpenSearchContext value={openSearch}>
-            <HuddlesContext value={huddles}>{layout}</HuddlesContext>
+            <HuddlesContext value={huddles}>
+              <BlockingContext value={blocking}>{layout}</BlockingContext>
+            </HuddlesContext>
           </OpenSearchContext>
         </SettingsLayout>
       </DirectoryLoaded>

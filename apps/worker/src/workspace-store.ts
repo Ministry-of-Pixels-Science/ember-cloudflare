@@ -16,8 +16,10 @@ import {
   mailboxText,
   parseSearch,
   type Account,
+  type Blocks,
   type BotChanges,
   type BotRoom,
+  type ChangedBlocks,
   type CloseCode,
   type DirectRoom,
   type EmailInvitation,
@@ -564,9 +566,25 @@ export interface SidebarRooms {
   favorites: Favorites;
   sharedOrder: RoomId[];
   huddles: Record<RoomId, LiveHuddle>;
+  blocks: Blocks;
   /** The workspace's first room, if they're given the welcome card. */
   invitationRoomId: RoomId | null;
 }
+
+interface BlockedRow {
+  blocked_id: UserId;
+}
+
+interface DirectLevelRow {
+  room_id: RoomId;
+  involvement: Involvement;
+}
+
+/** Whom someone has blocked, as a change to their blocks leaves them, and their DM with that person alone, when it hid it or showed it again. */
+const blocksChange = (blocked: BlockedRow[], counted: { version: number } | undefined, direct: DirectLevelRow[]): ChangedBlocks => ({
+  blocks: { userIds: blocked.map((row) => row.blocked_id), version: counted?.version ?? 0 },
+  direct: direct[0] ? { roomId: direct[0].room_id, involvement: direct[0].involvement } : null,
+});
 
 /** What became of a room's report of its huddle. */
 export interface ReportedHuddle {
@@ -1608,12 +1626,19 @@ const KEEP_REPORT_TIME = `UPDATE rooms SET huddle_reported_at = ?2 WHERE id = ?1
 const HUDDLE_REPORTED_AT = `SELECT huddle_reported_at FROM rooms WHERE id = ?`;
 
 /**
- * Who of the people a JSON list ?2 names an invitation into room ?1's huddle reaches: those in the room,
- * active, who hear its @mentions of them or more, since an invitation names them as a mention does.
+ * Whether whoever has the membership `memberships` reads has blocked `blocked`, a parameter, so that
+ * nothing of theirs reaches them: no unread mark, push or huddle invitation.
+ */
+const blockedBy = (blocked: string) => `EXISTS (SELECT 1 FROM blocks WHERE blocks.user_id = memberships.user_id AND blocks.blocked_id = ${blocked})`;
+
+/**
+ * Who of the people a JSON list ?2 names an invitation into room ?1's huddle by ?3 reaches: those in the
+ * room, active, who hear its @mentions of them or more, since an invitation names them as a mention does,
+ * and haven't blocked ?3.
  */
 export const HUDDLE_INVITEES = `SELECT memberships.user_id FROM memberships JOIN users ON users.id = memberships.user_id
   WHERE memberships.room_id = ?1 AND memberships.user_id IN (SELECT value FROM json_each(?2))
-    AND memberships.involvement IN ('everything', 'mentions') AND users.status = ${ACTIVE}`;
+    AND memberships.involvement IN ('everything', 'mentions') AND users.status = ${ACTIVE} AND NOT ${blockedBy("?3")}`;
 
 /**
  * Where an invitation into room ?1's huddle by ?2 is pushed: to the subscriptions of those of the
@@ -1629,7 +1654,7 @@ export const INVITATION_PUSHES = `SELECT push_subscriptions.id, push_subscriptio
     JOIN users ON users.id = memberships.user_id
     JOIN push_subscriptions ON push_subscriptions.user_id = memberships.user_id
   WHERE rooms.id = ?1 AND memberships.user_id IN (SELECT value FROM json_each(?3))
-    AND memberships.involvement IN ('everything', 'mentions') AND users.status = ${ACTIVE} AND (users.guest = 0 OR ?4 = 1)
+    AND memberships.involvement IN ('everything', 'mentions') AND users.status = ${ACTIVE} AND (users.guest = 0 OR ?4 = 1) AND NOT ${blockedBy("?2")}
   ORDER BY push_subscriptions.id`;
 
 /** A room's huddle, as its row keeps it. */
@@ -1643,9 +1668,10 @@ const directKey = (memberIds: UserId[]) => JSON.stringify([...new Set(memberIds)
 
 /**
  * Adds a DM, ?1, made by ?2 for the people ?3 is the key of, as of ?4, unless those people have one
- * already, answering it if it added it.
+ * already, or one of them has blocked ?2, answering it if it added it.
  */
-const INSERT_DIRECT = `INSERT INTO rooms (id, kind, creator_id, direct_key, created_at, updated_at) VALUES (?1, 'direct', ?2, ?3, ?4, ?4)
+const INSERT_DIRECT = `INSERT INTO rooms (id, kind, creator_id, direct_key, created_at, updated_at)
+  SELECT ?1, 'direct', ?2, ?3, ?4, ?4 WHERE NOT EXISTS (SELECT 1 FROM blocks WHERE blocked_id = ?2 AND user_id IN (SELECT value FROM json_each(?3)))
   ON CONFLICT (direct_key) DO NOTHING RETURNING id`;
 
 /**
@@ -1802,13 +1828,13 @@ export const ROOM_ACCESS = `SELECT EXISTS (SELECT 1 FROM memberships WHERE room_
 
 /**
  * Marks a room unread, as of a message, for its members who aren't marked already, haven't hidden it,
- * didn't write the message and aren't among the people a JSON list names, who are viewing it, answering
- * a row for each. It writes only the rows it changes. Nothing changes once the Workspace has applied the
- * message's event, so one delivered again is applied once.
+ * didn't write the message, haven't blocked whoever did and aren't among the people a JSON list names,
+ * who are viewing it, answering a row for each. It writes only the rows it changes. Nothing changes once
+ * the Workspace has applied the message's event, so one delivered again is applied once.
  */
 export const MARK_UNREAD = `UPDATE memberships SET unread_at = ?1
   WHERE room_id = ?2 AND unread_at IS NULL AND involvement <> 'invisible' AND user_id <> ?3
-    AND user_id NOT IN (SELECT value FROM json_each(?4)) AND ?5 > (SELECT applied_seq FROM rooms WHERE id = ?2)
+    AND user_id NOT IN (SELECT value FROM json_each(?4)) AND ?5 > (SELECT applied_seq FROM rooms WHERE id = ?2) AND NOT ${blockedBy("?3")}
   RETURNING user_id`;
 
 /** Clears someone's unread mark on a room, answering a row if there was one, once for each event. */
@@ -1825,8 +1851,9 @@ const TOLD_OF_DIRECT_MESSAGE = `SELECT user_id FROM memberships
 
 /**
  * Where a new message, numbered ?5, by ?2 in room ?1 is pushed: to the subscriptions of the room's
- * active members other than its author and the people a JSON list ?3 names, who are viewing it, or its
- * thread for a reply sent only there, at all messages, when it's in the room's timeline, as ?7 says, then
+ * active members other than its author, those who have blocked its author and the people a JSON list ?3
+ * names, who are viewing it, or its thread for a reply sent only there, at all messages, when it's in the
+ * room's timeline, as ?7 says, then
  * of those at @mentions or all messages whom it mentions, a JSON list ?4, or who follow the thread it's a
  * reply in, a JSON list ?8, each in the order they were saved. Guests are left out unless ?6 says they
  * can stay signed in. Each comes with the room, its author's name and the count its push sets the badge
@@ -1841,7 +1868,7 @@ export const MESSAGE_PUSHES = `SELECT push_subscriptions.id, push_subscriptions.
     JOIN users ON users.id = memberships.user_id
     JOIN push_subscriptions ON push_subscriptions.user_id = memberships.user_id
   WHERE rooms.id = ?1 AND ?5 > rooms.applied_seq AND memberships.user_id <> ?2 AND users.status = ${ACTIVE} AND (users.guest = 0 OR ?6 = 1)
-    AND memberships.user_id NOT IN (SELECT value FROM json_each(?3))
+    AND memberships.user_id NOT IN (SELECT value FROM json_each(?3)) AND NOT ${blockedBy("?2")}
     AND ((memberships.involvement = 'everything' AND ?7 = 1) OR (memberships.involvement IN ('everything', 'mentions')
       AND (memberships.user_id IN (SELECT value FROM json_each(?4)) OR memberships.user_id IN (SELECT value FROM json_each(?8)))))
   ORDER BY memberships.involvement = 'mentions', push_subscriptions.id`;
@@ -2105,10 +2132,10 @@ const AFTER_UNSTAR = afterStarring(STARRABLE);
 const FAVORITES_FOR_USER = `SELECT room_id FROM favorites WHERE user_id = ?1 AND room_id IN (${STARRABLE_ROOMS}) ORDER BY position`;
 
 /**
- * The version of ?'s stars, and whether they're given the welcome card: whether they're an active
- * administrator who hasn't dismissed it.
+ * The versions of ?'s stars and blocks, and whether they're given the welcome card: whether they're an
+ * active administrator who hasn't dismissed it.
  */
-const SIDEBAR_USER = `SELECT favorites_version AS version,
+const SIDEBAR_USER = `SELECT favorites_version AS version, blocks_version,
     role = ${ADMINISTRATOR} AND status = ${ACTIVE} AND invitation_dismissed_at IS NULL AS invited
   FROM users WHERE id = ?`;
 
@@ -2129,6 +2156,44 @@ const COUNT_HIDDEN_STAR = `UPDATE users SET favorites_version = favorites_versio
 
 /** Gives ?1 level ?3 in room ?2, if they're in it. */
 const SET_INVOLVEMENT = `UPDATE memberships SET involvement = ?3 WHERE user_id = ?1 AND room_id = ?2 RETURNING involvement`;
+
+/**
+ * Records that ?1 blocked ?2 at ?4, unless they had already, or ?2 is ?1, with their level in the DM
+ * that key ?3 names, theirs with ?2 alone, if they have it and it isn't hidden, for unblocking to give back.
+ */
+const BLOCK = `INSERT INTO blocks (user_id, blocked_id, created_at, direct_involvement)
+  SELECT ?1, users.id, ?4, (SELECT memberships.involvement FROM rooms JOIN memberships ON memberships.room_id = rooms.id
+      WHERE rooms.direct_key = ?3 AND memberships.user_id = ?1 AND memberships.involvement <> 'invisible')
+  FROM users WHERE users.id = ?2 AND users.id <> ?1
+  ON CONFLICT DO NOTHING`;
+
+/** Hides from ?1's sidebar the DM that key ?2 names, theirs with ?3 alone, while they've blocked ?3, answering it if it did. */
+const HIDE_BLOCKED_DIRECT = `UPDATE memberships SET involvement = 'invisible'
+  WHERE user_id = ?1 AND room_id = (SELECT id FROM rooms WHERE direct_key = ?2) AND involvement <> 'invisible'
+    AND EXISTS (SELECT 1 FROM blocks WHERE user_id = ?1 AND blocked_id = ?3)
+  RETURNING room_id, involvement`;
+
+/**
+ * Shows ?1's DM that key ?2 names, theirs with ?3 alone, at the level it had before blocking ?3 hid it,
+ * if it's hidden still, answering it if it did. It runs before the block goes, to read that level.
+ */
+const SHOW_UNBLOCKED_DIRECT = `UPDATE memberships SET involvement = (SELECT direct_involvement FROM blocks WHERE user_id = ?1 AND blocked_id = ?3)
+  WHERE user_id = ?1 AND room_id = (SELECT id FROM rooms WHERE direct_key = ?2) AND involvement = 'invisible'
+    AND EXISTS (SELECT 1 FROM blocks WHERE user_id = ?1 AND blocked_id = ?3 AND direct_involvement IS NOT NULL)
+  RETURNING room_id, involvement`;
+
+/** Counts a change to ?'s blocks. */
+const COUNT_BLOCKS_CHANGE = `UPDATE users SET blocks_version = blocks_version + 1 WHERE id = ? RETURNING blocks_version AS version`;
+
+/** Whom ? has blocked, in the order they blocked them. */
+export const BLOCKED_BY_USER = `SELECT blocked_id FROM blocks WHERE user_id = ? ORDER BY created_at, blocked_id`;
+
+/**
+ * The names of the people a JSON array ?2 names who have blocked ?1, by name, for refusing a DM ?1 starts
+ * with them (`notTakingDirects`).
+ */
+const BLOCKERS_OF = `SELECT users.name FROM blocks JOIN users ON users.id = blocks.user_id
+  WHERE blocks.blocked_id = ?1 AND blocks.user_id IN (SELECT value FROM json_each(?2)) ORDER BY lower(users.name), users.id`;
 
 /**
  * Whether ?2, a JSON array of distinct room ids, is exactly the rooms ?1 has starred and can star, so
@@ -3496,11 +3561,11 @@ export class WorkspaceStore {
    * Deletes someone's account, in one transaction: queues closing their sockets with `code` in every
    * room they're in, DMs included, turning away whatever was let through as them before, and deleting
    * their messages and boosts in every room they can have written in, all due at `dueAt`, then forgets
-   * everything of theirs that removing them does, and the rooms they starred, the accounts elsewhere they
-   * connected, the sign-ins they were making to apps and any code they were emailed to reset their
-   * password, and queues R2 deleting their avatar, `avatar`, if they have one, due then too. Their row
-   * stays, as `DELETE_ACCOUNT` leaves it, recording when, `now`, and so do their DMs, which name them.
-   * Answers whether it queued any revocations or purges.
+   * everything of theirs that removing them does, and the rooms they starred, the people they blocked and
+   * who blocked them, the accounts elsewhere they connected, the sign-ins they were making to apps and any
+   * code they were emailed to reset their password, and queues R2 deleting their avatar, `avatar`, if they
+   * have one, due then too. Their row stays, as `DELETE_ACCOUNT` leaves it, recording when, `now`, and so
+   * do their DMs, which name them. Answers whether it queued any revocations or purges.
    */
   async deleteAccount(userId: UserId, avatar: string | null, code: CloseCode, dueAt: number, now: string): Promise<boolean> {
     const [revocations, purges] = (await this.db.batch([
@@ -3512,6 +3577,7 @@ export class WorkspaceStore {
       ...forgettingSearches(userId),
       statement(`DELETE FROM push_subscriptions WHERE user_id = ?`, userId),
       statement(`DELETE FROM favorites WHERE user_id = ?`, userId),
+      statement(`DELETE FROM blocks WHERE user_id = ?1 OR blocked_id = ?1`, userId),
       statement(`DELETE FROM identities WHERE user_id = ?`, userId),
       statement(`DELETE FROM pending_identities WHERE user_id = ?`, userId),
       statement(`DELETE FROM password_resets WHERE user_id = ?`, userId),
@@ -3848,25 +3914,60 @@ export class WorkspaceStore {
 
   /**
    * The rooms someone is in, with their unread marks and the people in their DMs, the ones they've
-   * starred, the huddles going on in their rooms, and the workspace's first room, if there is one yet
-   * and they're given the welcome card: an active administrator who hasn't dismissed it.
+   * starred, the huddles going on in their rooms, whom they've blocked, and the workspace's first room,
+   * if there is one yet and they're given the welcome card: an active administrator who hasn't dismissed it.
    */
   async roomsFor(userId: UserId): Promise<SidebarRooms> {
-    const [rows, [original], starred, [user], members] = (await this.db.batch([
+    const [rows, [original], starred, [user], members, blocked] = (await this.db.batch([
       statement(ROOMS_FOR_USER, userId),
       statement(ORIGINAL_ROOM),
       statement(FAVORITES_FOR_USER, userId),
       statement(SIDEBAR_USER, userId),
       statement(DIRECT_MEMBERS_FOR_USER, userId),
-    ])) as [SidebarRow[], Array<{ id: RoomId }>, Array<{ room_id: RoomId }>, Array<{ version: number; invited: number }>, DirectMemberRow[]];
+      statement(BLOCKED_BY_USER, userId),
+    ])) as [SidebarRow[], Array<{ id: RoomId }>, Array<{ room_id: RoomId }>, Array<{ version: number; blocks_version: number; invited: number }>, DirectMemberRow[], BlockedRow[]];
     const membersByRoom = Map.groupBy(members, (member) => member.room_id);
     return {
       rooms: rows.map((row) => sidebarRoom(row, membersByRoom.get(row.id))),
       favorites: { rooms: starred.map((row) => row.room_id), version: user?.version ?? 0 },
       sharedOrder: sharedOrderOf(rows),
       huddles: liveHuddlesIn(rows),
+      blocks: { userIds: blocked.map((row) => row.blocked_id), version: user?.blocks_version ?? 0 },
       invitationRoomId: user?.invited === 1 ? (original?.id ?? null) : null,
     };
+  }
+
+  /**
+   * Has `userId` block `blockedId` as of `now`, in one transaction, hiding their DM with them alone from
+   * their sidebar, unless it's hidden already, and keeping its level for unblocking to give back. Answers
+   * whom they've blocked now, and the DM, when it hid it. Blocking someone again changes nothing, and
+   * nobody can block themselves.
+   */
+  async block(userId: UserId, blockedId: UserId, now: string): Promise<ChangedBlocks> {
+    const key = directKey([userId, blockedId]);
+    const [, hidden, [counted], blocked] = (await this.db.batch([
+      statement(BLOCK, userId, blockedId, key, now),
+      statement(HIDE_BLOCKED_DIRECT, userId, key, blockedId),
+      statement(COUNT_BLOCKS_CHANGE, userId),
+      statement(BLOCKED_BY_USER, userId),
+    ])) as [unknown[], DirectLevelRow[], Array<{ version: number }>, BlockedRow[]];
+    return blocksChange(blocked, counted, hidden);
+  }
+
+  /**
+   * Has `userId` unblock `blockedId`, in one transaction, giving their DM with them alone the level it
+   * had before blocking hid it, if it's hidden still. Answers whom they've blocked now, and the DM, when
+   * it showed it again.
+   */
+  async unblock(userId: UserId, blockedId: UserId): Promise<ChangedBlocks> {
+    const key = directKey([userId, blockedId]);
+    const [shown, , [counted], blocked] = (await this.db.batch([
+      statement(SHOW_UNBLOCKED_DIRECT, userId, key, blockedId),
+      statement(`DELETE FROM blocks WHERE user_id = ? AND blocked_id = ?`, userId, blockedId),
+      statement(COUNT_BLOCKS_CHANGE, userId),
+      statement(BLOCKED_BY_USER, userId),
+    ])) as [DirectLevelRow[], unknown[], Array<{ version: number }>, BlockedRow[]];
+    return blocksChange(blocked, counted, shown);
   }
 
   /**
@@ -3886,9 +3987,12 @@ export class WorkspaceStore {
     return { memberIds: changed.length > 0 ? userIdsOf(members) : null, outdatedBy: null };
   }
 
-  /** Who of `userIds` an invitation into room `roomId`'s huddle reaches: those in the room who hear its @mentions of them or more. */
-  async huddleInvitees(roomId: RoomId, userIds: UserId[]): Promise<UserId[]> {
-    return userIdsOf(await this.db.all<UserIdRow>(HUDDLE_INVITEES, roomId, JSON.stringify(userIds)));
+  /**
+   * Who of `userIds` an invitation into room `roomId`'s huddle by `by` reaches: those in the room who
+   * hear its @mentions of them or more and haven't blocked `by`.
+   */
+  async huddleInvitees(roomId: RoomId, by: UserId, userIds: UserId[]): Promise<UserId[]> {
+    return userIdsOf(await this.db.all<UserIdRow>(HUDDLE_INVITEES, roomId, JSON.stringify(userIds), by));
   }
 
   /**
@@ -4917,17 +5021,21 @@ export class WorkspaceStore {
 
   /**
    * The DM whose people are exactly the ones `memberIds` names, who all exist, adding it as `roomId`,
-   * made by `creatorId`, if they have none, in one transaction. Answers it, and whether it added it.
+   * made by `creatorId`, if they have none, in one transaction. Answers it, and whether it added it, or,
+   * when it would add it but someone it names has blocked `creatorId`, the name of the first of them by
+   * name, having added nothing.
    */
-  async startDirect(roomId: RoomId, creatorId: UserId, memberIds: UserId[], now: string): Promise<{ room: DirectRoom; started: boolean }> {
+  async startDirect(roomId: RoomId, creatorId: UserId, memberIds: UserId[], now: string): Promise<{ room: DirectRoom; started: boolean } | { refusedBy: string }> {
     const key = directKey(memberIds);
-    const [added, , members] = (await this.db.batch([
+    const [added, , members, blockers] = (await this.db.batch([
       statement(INSERT_DIRECT, roomId, creatorId, key, now),
       statement(GRANT_DIRECT, roomId, now, key),
       statement(DIRECT_WITH_KEY, key),
-    ])) as [unknown[], unknown[], KeyedDirectMemberRow[]];
-    const [{ room_id: id, active_at: activeAt }] = members as [KeyedDirectMemberRow];
-    return { room: { id, kind: "direct", members: membersOf(members), activeAt }, started: added!.length > 0 };
+      statement(BLOCKERS_OF, creatorId, key),
+    ])) as [unknown[], unknown[], KeyedDirectMemberRow[], Array<{ name: string }>];
+    const [first] = members;
+    if (!first) return { refusedBy: blockers[0]!.name };
+    return { room: { id: first.room_id, kind: "direct", members: membersOf(members), activeAt: first.active_at }, started: added!.length > 0 };
   }
 
   /** Of the rooms `ids` names, the ones that aren't registered yet and were never deleted. The ids go as one JSON value. */

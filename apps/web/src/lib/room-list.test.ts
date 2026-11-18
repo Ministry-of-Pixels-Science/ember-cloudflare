@@ -26,7 +26,7 @@ const direct = (id: string, ...names: string[]): DirectSidebarRoom => ({
 });
 const unstarred: Favorites = { rooms: [], version: 0 };
 /** The sidebar's list of `rooms`, starred as `favorites` says. */
-const sidebar = (rooms: SidebarRoom[], favorites = unstarred): Sidebar => ({ rooms, favorites, sharedOrder: [], invitation: null, huddles: {} });
+const sidebar = (rooms: SidebarRoom[], favorites = unstarred): Sidebar => ({ rooms, favorites, sharedOrder: [], invitation: null, huddles: {}, blocks: { userIds: [], version: 0 } });
 
 describe("Create an open room", () => {
   it("puts a new room last, as the room someone was put in most recently, and the sidebar below every other room, whatever its name", () => {
@@ -248,6 +248,33 @@ describe("Star rooms", () => {
     const unanswered = roomListReducer(NO_ROOM_LIST, { type: "unanswered" });
     expect(unanswered.list!.favorites).toEqual(unstarred);
     expect(roomListReducer(unanswered, { type: "starred", favorites: { rooms: ["r1"], version: 1 } }).list!.favorites.rooms).toEqual(["r1"]);
+  });
+});
+
+describe("Block someone", () => {
+  const blocks = (userIds: string[], version: number) => ({ userIds, version });
+
+  it("keeps the newest blocks, from a block's answer, the socket or the list, whichever arrives last", () => {
+    const loaded = roomListReducer(NO_ROOM_LIST, { type: "loaded", list: { ...sidebar(four), blocks: blocks(["u2"], 2) } });
+    const blocked = roomListReducer(loaded, { type: "blocked", blocks: blocks(["u2", "u3"], 3) });
+    expect(blocked.list!.blocks).toEqual(blocks(["u2", "u3"], 3));
+    // The answer to the block, arriving after the socket's news of the unblock that followed it.
+    expect(roomListReducer(blocked, { type: "blocked", blocks: blocks(["u2"], 2) }).list).toBe(blocked.list);
+    expect(roomListReducer(blocked, { type: "blocked", blocks: blocks(["u3"], 3) }).list).toBe(blocked.list);
+  });
+
+  it("keeps blocks made while a list is on its way over the list's, unless the list's are newer", () => {
+    const loaded = roomListReducer(NO_ROOM_LIST, { type: "loaded", list: sidebar(four) });
+    const blocked = roomListReducer(roomListReducer(loaded, { type: "asked" }), { type: "blocked", blocks: blocks(["u3"], 1) });
+    expect(roomListReducer(blocked, { type: "loaded", list: sidebar(four) }).list!.blocks).toEqual(blocks(["u3"], 1));
+    const newer = { ...sidebar(four), blocks: blocks(["u3", "u4"], 2) };
+    expect(roomListReducer(blocked, { type: "loaded", list: newer }).list!.blocks).toEqual(blocks(["u3", "u4"], 2));
+  });
+
+  it("starts with nobody blocked when the first list fails to arrive, so the next block counts", () => {
+    const unanswered = roomListReducer(NO_ROOM_LIST, { type: "unanswered" });
+    expect(unanswered.list!.blocks).toEqual(blocks([], 0));
+    expect(roomListReducer(unanswered, { type: "blocked", blocks: blocks(["u2"], 1) }).list!.blocks.userIds).toEqual(["u2"]);
   });
 });
 

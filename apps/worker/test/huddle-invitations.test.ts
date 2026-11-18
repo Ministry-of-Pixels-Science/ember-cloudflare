@@ -209,12 +209,12 @@ describe("Inviting people into a huddle", () => {
     const grace = await signIn("Grace");
     const dm = (await direct(ada, grace)).id;
     const named = JSON.stringify([grace.user.id]);
-    expect(await workspaceSql(HUDDLE_INVITEES, dm, named)).toEqual([{ user_id: grace.user.id }]);
+    expect(await workspaceSql(HUDDLE_INVITEES, dm, named, ada.user.id)).toEqual([{ user_id: grace.user.id }]);
 
     // Banning her closes her tabs, so nothing the Workspace sends shows it: only who it would tell does.
     expect((await api(`/api/users/${grace.user.id}/ban`, { method: "POST", headers: { Cookie: ada.cookie } })).status).toBe(200);
     expect(await workspaceSql(`SELECT user_id FROM memberships WHERE room_id = ? AND user_id = ?`, dm, grace.user.id)).toHaveLength(1);
-    expect(await workspaceSql(HUDDLE_INVITEES, dm, named)).toEqual([]);
+    expect(await workspaceSql(HUDDLE_INVITEES, dm, named, ada.user.id)).toEqual([]);
   });
 
   it("leaves out whoever is in the huddle already, and asks the Workspace nothing when that's everyone named", async () => {
@@ -296,7 +296,7 @@ describe("Inviting people into a huddle", () => {
     expect(members).toBeGreaterThanOrEqual(7);
     expect(await workspaceStub().inviteToHuddle(room, ada.user.id, [grace.user.id])).toEqual([]);
     // Her membership and herself, and the list she's named in, which counts for two.
-    expect(await rowsRead(HUDDLE_INVITEES, room, JSON.stringify([grace.user.id]))).toBeLessThanOrEqual(4);
+    expect(await rowsRead(HUDDLE_INVITEES, room, JSON.stringify([grace.user.id]), ada.user.id)).toBeLessThanOrEqual(4);
   });
 });
 
