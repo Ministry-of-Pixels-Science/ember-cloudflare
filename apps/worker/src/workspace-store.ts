@@ -64,7 +64,7 @@ import {
 } from "@ember/protocol/assistant";
 import type { AgentAccess, AgentProfile, AgentRoom } from "@ember/protocol/agents";
 import type { AppId } from "@ember/protocol/apps";
-import type { LiveHuddle } from "@ember/protocol/huddles";
+import { ALL_HUDDLE_SOUNDS, type HuddleSoundChanges, type HuddleSounds, type LiveHuddle } from "@ember/protocol/huddles";
 import { statement, type Db, type Statement } from "./db";
 import type { StoredPicture } from "./files/pictures";
 import { INVITATION_TTL_SECONDS, invitationPayload, messagePayload, type PushPayload } from "./push/payload";
@@ -571,6 +571,8 @@ export interface SidebarRooms {
   sharedOrder: RoomId[];
   huddles: Record<RoomId, LiveHuddle>;
   blocks: Blocks;
+  /** Which of a huddle's sounds they hear. */
+  huddleSounds: HuddleSounds;
   /** The workspace's first room, if they're given the welcome card. */
   invitationRoomId: RoomId | null;
   /** How many open reports an active administrator sees, which leave out the reports of them, or else null. */
@@ -2249,13 +2251,41 @@ const AFTER_UNSTAR = afterStarring(STARRABLE);
 /** The rooms ?1 has starred and can star, in the order they starred them. */
 const FAVORITES_FOR_USER = `SELECT room_id FROM favorites WHERE user_id = ?1 AND room_id IN (${STARRABLE_ROOMS}) ORDER BY position`;
 
+/** Which of a huddle's sounds someone hears, as their row keeps each: 1 until they turn it off. */
+const HUDDLE_SOUNDS = `huddle_music AS music, huddle_chimes AS chimes, huddle_ring AS ring`;
+
+interface HuddleSoundsRow {
+  music: number;
+  chimes: number;
+  ring: number;
+}
+
+const huddleSoundsOf = ({ music, chimes, ring }: HuddleSoundsRow): HuddleSounds => ({ music: music === 1, chimes: chimes === 1, ring: ring === 1 });
+
+/** Whether a sound is turned on, 1, or off, 0, or left as it is, null. */
+const turned = (on: boolean | undefined) => (on === undefined ? null : on ? 1 : 0);
+
 /**
- * The versions of ?'s stars and blocks, and whether they're given the welcome card: whether they're an
- * active administrator who hasn't dismissed it.
+ * Turns the music of a huddle on or off for ?1, as ?2 says, its chimes as ?3 does and its ring as ?4
+ * does, each staying as it is at null, answering which they hear then. Nothing is kept for someone who
+ * has deleted their account, whose row keeps none of their picks.
+ */
+const SET_HUDDLE_SOUNDS = `UPDATE users SET huddle_music = coalesce(?2, huddle_music), huddle_chimes = coalesce(?3, huddle_chimes), huddle_ring = coalesce(?4, huddle_ring)
+  WHERE id = ?1 AND deleted_at IS NULL RETURNING ${HUDDLE_SOUNDS}`;
+
+/**
+ * The versions of ?'s stars and blocks, whether they're given the welcome card: whether they're an
+ * active administrator who hasn't dismissed it, and which of a huddle's sounds they hear.
  */
 const SIDEBAR_USER = `SELECT favorites_version AS version, blocks_version,
-    role = ${ADMINISTRATOR} AND status = ${ACTIVE} AND invitation_dismissed_at IS NULL AS invited
+    role = ${ADMINISTRATOR} AND status = ${ACTIVE} AND invitation_dismissed_at IS NULL AS invited, ${HUDDLE_SOUNDS}
   FROM users WHERE id = ?`;
+
+interface SidebarUserRow extends HuddleSoundsRow {
+  version: number;
+  blocks_version: number;
+  invited: number;
+}
 
 /** Records that ?2 dismissed the welcome card at ?1, unless they had already. */
 const DISMISS_INVITATION = `UPDATE users SET invitation_dismissed_at = ?1 WHERE id = ?2 AND invitation_dismissed_at IS NULL`;
@@ -2669,7 +2699,7 @@ const DEACTIVATE = `UPDATE users SET status = ${DEACTIVATED}, email_address = re
  */
 const DELETE_ACCOUNT = `UPDATE users SET name = ?1, status = ${DEACTIVATED}, role = ${MEMBER}, email_address = NULL, password_digest = NULL, username = NULL, bio = NULL,
   avatar_key = NULL, avatar_variant = NULL, assistant_thinking = NULL, assistant_answer_length = NULL, assistant_model = NULL,
-  invitation_dismissed_at = NULL, deleted_at = ?2, updated_at = ?2 WHERE id = ?3`;
+  huddle_music = 1, huddle_chimes = 1, huddle_ring = 1, invitation_dismissed_at = NULL, deleted_at = ?2, updated_at = ?2 WHERE id = ?3`;
 
 /** Someone as the directory lists them, whatever their status. */
 const PERSON = `SELECT ${DIRECTORY_COLUMNS} FROM users WHERE id = ?`;
@@ -4102,15 +4132,7 @@ export class WorkspaceStore {
       statement(DIRECT_MEMBERS_FOR_USER, userId),
       statement(BLOCKED_BY_USER, userId),
       statement(OPEN_REPORTS_OF_ADMINISTRATOR, userId),
-    ])) as [
-      SidebarRow[],
-      Array<{ id: RoomId }>,
-      Array<{ room_id: RoomId }>,
-      Array<{ version: number; blocks_version: number; invited: number }>,
-      DirectMemberRow[],
-      BlockedRow[],
-      Array<{ open: number }>,
-    ];
+    ])) as [SidebarRow[], Array<{ id: RoomId }>, Array<{ room_id: RoomId }>, SidebarUserRow[], DirectMemberRow[], BlockedRow[], Array<{ open: number }>];
     const membersByRoom = Map.groupBy(members, (member) => member.room_id);
     return {
       rooms: rows.map((row) => sidebarRoom(row, membersByRoom.get(row.id))),
@@ -4118,6 +4140,7 @@ export class WorkspaceStore {
       sharedOrder: sharedOrderOf(rows),
       huddles: liveHuddlesIn(rows),
       blocks: { userIds: blocked.map((row) => row.blocked_id), version: user?.blocks_version ?? 0 },
+      huddleSounds: user ? huddleSoundsOf(user) : ALL_HUDDLE_SOUNDS,
       invitationRoomId: user?.invited === 1 ? (original?.id ?? null) : null,
       openReports: reports?.open ?? null,
     };
@@ -4199,6 +4222,15 @@ export class WorkspaceStore {
   async roomAllowsHuddles(roomId: RoomId): Promise<boolean> {
     const [row] = await this.db.all<HuddlesAllowedRow>(HUDDLES_ALLOWED, roomId);
     return !row || allowsHuddles(row);
+  }
+
+  /**
+   * Turns each of a huddle's sounds that `changes` names on or off for someone, the rest staying as they
+   * are, answering which they hear then, or null for nobody, or someone who has deleted their account.
+   */
+  async setHuddleSounds(userId: UserId, changes: HuddleSoundChanges): Promise<HuddleSounds | null> {
+    const [row] = await this.db.all<HuddleSoundsRow>(SET_HUDDLE_SOUNDS, userId, turned(changes.music), turned(changes.chimes), turned(changes.ring));
+    return row ? huddleSoundsOf(row) : null;
   }
 
   /** Records that someone has dismissed the welcome card, at `now`, unless they had already. */

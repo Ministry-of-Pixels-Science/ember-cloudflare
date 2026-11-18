@@ -19,6 +19,7 @@ import {
   type SidebarRoom,
 } from "@ember/protocol";
 import { MODEL_NOT_LISTED, type YourAssistant, type YourAssistantChanged, type YourAssistantChanges } from "@ember/protocol/assistant";
+import type { HuddleSounds, HuddleSoundsChanged } from "@ember/protocol/huddles";
 import { FlashProvider } from "@/components/flash";
 import { Sheet } from "@/components/ui/sheet";
 import { AccountContext } from "@/hooks/use-account";
@@ -105,9 +106,12 @@ function serve({
   });
 }
 
-/** The profile, with Ada's rooms as the sidebar's list has them, or none while it loads, on `platform`. */
-function showPage(shown = account, rooms: SidebarRoom[] | null = null, platform: Platform = CHROME_MAC) {
-  const [onSignOut, onFailed, answered] = [vi.fn(), vi.fn(), vi.fn()];
+/**
+ * The profile, with Ada's rooms as the sidebar's list has them, or none while it loads, on `platform`,
+ * and with the huddle sounds she hears as the list has them, or none while huddles are off.
+ */
+function showPage(shown = account, rooms: SidebarRoom[] | null = null, platform: Platform = CHROME_MAC, huddleSounds: HuddleSounds | null = null) {
+  const [onSignOut, onFailed, answered, soundsAnswered] = [vi.fn(), vi.fn(), vi.fn(), vi.fn()];
   const onDeleteAccount = vi.fn(async () => {});
   const setBlocked = vi.fn(async () => true);
   const page = (listed: SidebarRoom[] | null, people: People = new Map(), blocked: string[] = []) => (
@@ -117,7 +121,16 @@ function showPage(shown = account, rooms: SidebarRoom[] | null = null, platform:
           <PushContext value={{ ...PUSH_ON, platform }}>
             <FlashProvider workspace>
               <Sheet>
-                <ProfilePage me={ada} rooms={listed} askForRoom={() => answered} onSignOut={onSignOut} onDeleteAccount={onDeleteAccount} onFailed={onFailed} />
+                <ProfilePage
+                  me={ada}
+                  rooms={listed}
+                  askForRoom={() => answered}
+                  huddleSounds={huddleSounds}
+                  askForHuddleSounds={() => soundsAnswered}
+                  onSignOut={onSignOut}
+                  onDeleteAccount={onDeleteAccount}
+                  onFailed={onFailed}
+                />
               </Sheet>
             </FlashProvider>
           </PushContext>
@@ -131,6 +144,7 @@ function showPage(shown = account, rooms: SidebarRoom[] | null = null, platform:
     onDeleteAccount,
     onFailed,
     answered,
+    soundsAnswered,
     user: userEvent.setup(),
     showRooms: (listed: SidebarRoom[]) => rerender(page(listed)),
     showPeople: (people: People) => rerender(page(rooms, people)),
@@ -553,6 +567,44 @@ describe("Levels on your profile", () => {
     await user.click(screen.getByRole("checkbox", { name: "Notifying about @ mentions" }));
     expect(onFailed).toHaveBeenCalledOnce();
     expect(answered).not.toHaveBeenCalled();
+  });
+});
+
+describe("Huddle sounds on your profile", () => {
+  const design: SidebarRoom = { id: "design", name: "Design", kind: "open", icon: null, unread: false, involvement: "mentions" };
+  const NO_CHIMES: HuddleSounds = { music: true, chimes: false, ring: true };
+  const section = () => screen.queryByRole("region", { name: "Huddle sounds" });
+  const switched = () => within(section()!).getAllByRole("switch").map((each) => each.getAttribute("aria-checked") === "true");
+
+  it("has a switch for each of a huddle's sounds while huddles are on, between the form and your rooms' levels, each as the sidebar's list has it", async () => {
+    showPage(account, [design], CHROME_MAC, NO_CHIMES);
+    await loaded();
+    expect(switched()).toEqual([true, false, true]);
+    expect(saveButton().compareDocumentPosition(section()!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(section()!.compareDocumentPosition(screen.getByRole("list", { name: "Conversation notifications" }))).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+
+  it("has none while huddles are off, or the list hasn't said which you hear", async () => {
+    showPage(account, [design]);
+    await loaded();
+    expect(section()).toBeNull();
+    expect(screen.getByRole("list", { name: "Conversation notifications" })).toBeVisible();
+  });
+
+  it("hands the sounds a switch saves to the sidebar's list, and says why one couldn't save", async () => {
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      if (String(input) !== "/api/users/me/huddle-sounds") return Response.json({ profile, transferId: LOADED_LINK } satisfies ProfileAnswer);
+      return init?.body === JSON.stringify({ chimes: true }) ? Response.json({ sounds: { ...NO_CHIMES, chimes: true } } satisfies HuddleSoundsChanged) : Response.json({ error: "Something went wrong" }, { status: 500 });
+    });
+    const { soundsAnswered, onFailed, user } = showPage(account, [design], CHROME_MAC, NO_CHIMES);
+    await loaded();
+    await user.click(within(section()!).getByRole("switch", { name: "Play a sound when someone joins or leaves" }));
+    expect(soundsAnswered).toHaveBeenCalledExactlyOnceWith({ music: true, chimes: true, ring: true });
+    expect(onFailed).not.toHaveBeenCalled();
+
+    await user.click(within(section()!).getByRole("switch", { name: "Ring when someone invites you to a huddle" }));
+    expect(onFailed).toHaveBeenCalledOnce();
+    expect(soundsAnswered).toHaveBeenCalledOnce();
   });
 });
 

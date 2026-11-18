@@ -445,3 +445,35 @@ describe("Huddles in your rooms", () => {
     expect(roomListReducer(started, { type: "loaded", list }).list!.huddles).toEqual({ r1: huddle("ada"), r2: huddle("grace") });
   });
 });
+
+describe("Huddle sounds, which each person turns on or off for themselves", () => {
+  const EVERY_SOUND = { music: true, chimes: true, ring: true };
+  const NO_MUSIC = { ...EVERY_SOUND, music: false };
+  const list = sidebar([room("r1", "general")]);
+  const loaded = roomListReducer(NO_ROOM_LIST, { type: "loaded", list });
+
+  it("keeps which of a huddle's sounds its person hears, and says nothing of them once they hear them all, as the server's list doesn't", () => {
+    const quieter = roomListReducer(loaded, { type: "huddle sounds", sounds: NO_MUSIC });
+    expect(quieter.list!.huddleSounds).toEqual(NO_MUSIC);
+    expect(quieter.list!.rooms).toBe(loaded.list!.rooms);
+    const ringless = roomListReducer(quieter, { type: "huddle sounds", sounds: { ...NO_MUSIC, ring: false } });
+    expect(ringless.list!.huddleSounds).toEqual({ music: false, chimes: true, ring: false });
+
+    const all = roomListReducer(ringless, { type: "huddle sounds", sounds: EVERY_SOUND });
+    expect(all.list).not.toHaveProperty("huddleSounds");
+    expect(all.list).toEqual(list);
+  });
+
+  it("keeps the sounds a switch saved while a list was on its way over the ones the list has, a sound turned back on too", () => {
+    const asked = roomListReducer(loaded, { type: "asked" });
+    const off = roomListReducer(asked, { type: "huddle sounds", sounds: NO_MUSIC });
+    expect(roomListReducer(off, { type: "loaded", list }).list!.huddleSounds).toEqual(NO_MUSIC);
+    const on = roomListReducer(asked, { type: "huddle sounds", sounds: EVERY_SOUND });
+    expect(roomListReducer(on, { type: "loaded", list: { ...list, huddleSounds: NO_MUSIC } }).list).not.toHaveProperty("huddleSounds");
+  });
+
+  it("takes the sounds the list has otherwise, and has them all heard when the first list fails to arrive", () => {
+    expect(roomListReducer(roomListReducer(loaded, { type: "asked" }), { type: "loaded", list: { ...list, huddleSounds: NO_MUSIC } }).list!.huddleSounds).toEqual(NO_MUSIC);
+    expect(roomListReducer(NO_ROOM_LIST, { type: "unanswered" }).list).not.toHaveProperty("huddleSounds");
+  });
+});

@@ -37,6 +37,9 @@ import {
   type EmailSettings,
   type Favorites,
   type HuddleRelaySetup,
+  type HuddleSoundChanges,
+  type HuddleSounds,
+  type HuddleSoundsChanged,
   type HuddlesForgotten,
   type HuddlesSaved,
   type HuddlesSettings,
@@ -883,6 +886,14 @@ export async function tryAgent(trial: AgentTrial, agentId: UserId | null): Promi
  */
 export async function changeYourAssistant(changes: YourAssistantChanges): Promise<YourAssistantChanged["assistant"]> {
   return (await request<YourAssistantChanged>("/api/users/me/assistant", { method: "PATCH", body: JSON.stringify(changes) })).assistant;
+}
+
+/**
+ * Turns each of a huddle's sounds that `changes` names on or off for this person, wherever they're signed
+ * in, answering which they hear then.
+ */
+export async function changeHuddleSounds(changes: HuddleSoundChanges): Promise<HuddleSounds> {
+  return (await request<HuddleSoundsChanged>("/api/users/me/huddle-sounds", { method: "PATCH", body: JSON.stringify(changes) })).sounds;
 }
 
 /**

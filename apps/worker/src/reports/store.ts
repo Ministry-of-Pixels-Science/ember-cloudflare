@@ -13,7 +13,7 @@ import {
 import { statement, type Db } from "../db";
 import { ACTIVE, ADMINISTRATOR, deliveryOf, type DeliveryRow, type PushDelivery } from "../workspace-store";
 
-// What the Workspace keeps of reports (migrations/0071_reports.sql): who reported whom, for which of
+// What the Workspace keeps of reports (migrations/0073_reports.sql): who reported whom, for which of
 // their messages or for themselves, why, and the message or the person as they were then, until an
 // administrator handles it. Every list and count of them leaves out the reports of whoever it's for, so
 // an administrator never learns who reported them.

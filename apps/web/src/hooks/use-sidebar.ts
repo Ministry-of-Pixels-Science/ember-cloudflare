@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useReducer, useRef, useState } from "react";
-import { CloseCode, parseServerFrame, type Account, type DirectoryUser, type Me, type RoomId, type User, type UserId, type WorkspaceClientFrame, type WorkspaceServerFrame } from "@ember/protocol";
+import { CloseCode, parseServerFrame, type Account, type DirectoryUser, type HuddleSounds, type Me, type RoomId, type User, type UserId, type WorkspaceClientFrame, type WorkspaceServerFrame } from "@ember/protocol";
 import { fetchMe, fetchSidebar, isSignedOut, workspaceSocketUrl, type SidebarCopy } from "@/lib/api";
 import type { InvitationsChange } from "@/lib/huddle-invitations";
 import { activeStore, watchUse } from "@/lib/presence";
@@ -72,7 +72,9 @@ const isSame = (you: Me, me: Me) => you.id === me.id && you.name === me.name && 
  * it wasn't connected reached it. Meanwhile the socket brings rooms as they're made, changed and
  * deleted, and as this person is put in them and taken out, marks rooms unread and read, moves DMs as
  * messages come in them, and brings the stars saved in any of their tabs, whom they've blocked in any of
- * them, the welcome card dismissed in any of them, and for an administrator, how many reports are open. It loads again when the tab is shown after more than a minute hidden too, as
+ * them, the welcome card dismissed in any of them, which of a huddle's sounds they hear, as a switch in
+ * any of them leaves them, and for an administrator, how many reports are open. It loads again when the
+ * tab is shown after more than a minute hidden too, as
  * `refresh-room:visible` reloads it (Campfire's users/sidebar_helper.rb), which Campfire does on a
  * room's page and this does on every page, and, its rooms only, a while after the socket says the shared
  * order has changed. Once it says this person has been given another role, it loads again with the
@@ -114,6 +116,8 @@ export function useSidebar(
   // How many of the workspace socket's frames have said what became of a room or of this person's level
   // in it, and the number of the last to speak of each room.
   const roomFrames = useRef({ count: 0, lastOf: new Map<RoomId, number>() });
+  // How many of them have said which of a huddle's sounds this person hears.
+  const soundFrames = useRef(0);
   const [refresh] = useState(() => {
     // The last list the server sent, which it says is still current rather than send again.
     let copy: SidebarCopy | null = null;
@@ -238,6 +242,9 @@ export function useSidebar(
           return invitation({ type: "invited", roomId: frame.roomId, by: frame.by, at: Date.now() });
         case "huddle.answered":
           return invitation({ type: "over", roomId: frame.roomId });
+        case "huddle.sounds":
+          soundFrames.current++;
+          return change({ type: "huddle sounds", sounds: frame.sounds });
         case "user.updated":
           if (!isSomeoneElse(frame.user)) {
             toldOf.you = true;
@@ -336,5 +343,18 @@ export function useSidebar(
     };
   }, []);
 
-  return { list, answered, change, refresh, askForRoom, active, reportsHeard };
+  /**
+   * Called as a switch saves which of a huddle's sounds this person hears: what keeps the sounds the
+   * server answers, unless the workspace socket has said which they hear since, which the answer could
+   * undo, as with a sound turned on or off in another tab just after. The socket brings this change too,
+   * in its turn.
+   */
+  const askForHuddleSounds = useCallback(() => {
+    const asked = soundFrames.current;
+    return (sounds: HuddleSounds) => {
+      if (soundFrames.current === asked) change({ type: "huddle sounds", sounds });
+    };
+  }, []);
+
+  return { list, answered, change, refresh, askForRoom, askForHuddleSounds, active, reportsHeard };
 }

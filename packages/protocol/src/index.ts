@@ -7,7 +7,7 @@ import type { YourApp } from "./apps.ts";
 import type { AssistantSettings, YourAssistant } from "./assistant.ts";
 import { isActionId, isActionValue, type Card } from "./cards.ts";
 import type { StoredFile } from "./files.ts";
-import type { HuddlesSettings, LiveHuddle, MessageHuddle } from "./huddles.ts";
+import type { HuddleSounds, HuddlesSettings, LiveHuddle, MessageHuddle } from "./huddles.ts";
 import type { OutsideConnection } from "./outside.ts";
 import { MAX_ID_LENGTH } from "./pages.ts";
 import { MAX_PUSH_ENDPOINT_LENGTH } from "./push.ts";
@@ -80,7 +80,20 @@ export type {
   YourAssistantChanges,
 } from "./assistant.ts";
 // And the rest of huddles.ts, from "@ember/protocol/huddles", which only the Huddles card, its setup and the Worker's huddles use.
-export type { HuddleRelayField, HuddleRelaySetup, HuddlesField, HuddlesForgotten, HuddlesSaved, HuddlesSettings, HuddlesSetup, LiveHuddle, MessageHuddle } from "./huddles.ts";
+export type {
+  HuddleRelayField,
+  HuddleRelaySetup,
+  HuddleSoundChanges,
+  HuddleSounds,
+  HuddleSoundsChanged,
+  HuddlesField,
+  HuddlesForgotten,
+  HuddlesSaved,
+  HuddlesSettings,
+  HuddlesSetup,
+  LiveHuddle,
+  MessageHuddle,
+} from "./huddles.ts";
 export {
   FILE_NAME_NOT_KEPT,
   FILE_TOO_LARGE,
@@ -336,8 +349,9 @@ export interface Blocks {
 /**
  * What `GET /api/sidebar` answers: the rooms someone is in, in the order they were made, the ones
  * they've starred, the invitation, when they're an administrator in its room who hasn't dismissed the
- * card, the huddles going on in their rooms, and the people they've blocked. It comes with an ETag, and
- * a request whose If-None-Match names it gets 304 Not Modified instead.
+ * card, the huddles going on in their rooms, the people they've blocked, and which of a huddle's sounds
+ * they hear, once they've turned one off. It comes with an ETag, and a request whose If-None-Match names
+ * it gets 304 Not Modified instead.
  */
 export interface Sidebar {
   rooms: SidebarRoom[];
@@ -358,6 +372,11 @@ export interface Sidebar {
    * `reports.changed` frames keep it. Nobody else is given it.
    */
   openReports?: number;
+  /**
+   * Which of a huddle's sounds they hear, as the switches on their profile leave them, left out while
+   * they hear them all. `huddle.sounds` frames keep it current.
+   */
+  huddleSounds?: HuddleSounds;
 }
 
 /**
@@ -1832,6 +1851,8 @@ export type WorkspaceServerFrame =
   | { type: "huddle.invited"; roomId: RoomId; by: UserId }
   /** They've answered an invitation into a room's huddle, joining from it or declining it, in this tab or another, so it rings in none of them from now on. */
   | { type: "huddle.answered"; roomId: RoomId }
+  /** They've turned one of a huddle's sounds on or off on their profile, in this tab or another: the ones they hear now. */
+  | { type: "huddle.sounds"; sounds: HuddleSounds }
   /** They've starred or unstarred a room, in this tab or another: their stars as they are now. */
   | { type: "favorites.changed"; favorites: Favorites }
   /** They've blocked or unblocked someone, in this tab or another: whom they've blocked now. */
