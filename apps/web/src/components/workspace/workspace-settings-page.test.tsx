@@ -26,6 +26,7 @@ import {
   type WorkspaceSettings,
 } from "@ember/protocol";
 import { formatOf, TOP_LEVELS, modelName, type AssistantChanges, type AssistantSettings, type NewAssistantModel } from "@ember/protocol/assistant";
+import { blockedWordUnmatchable } from "@ember/protocol/blocked-words";
 import type { Agent, Agents } from "@ember/protocol/agents";
 import { RELAY_WITHOUT_HUDDLES, type HuddleRelaySetup, type HuddlesSetup } from "@ember/protocol/huddles";
 import type { MemberfulKeysChange, MemberfulSaved } from "@ember/protocol/memberful";
@@ -80,6 +81,7 @@ const asAdministrator: WorkspaceSettings = {
   email: { provider: "cloudflare", resendKey: null, cloudflare: true, from: null },
   invitations: [],
   emailDomains: [],
+  blockedWords: [],
   addresses: { deployed: null, others: [] },
 };
 const asMember: WorkspaceSettings = { ...asAdministrator, canAdminister: false };
@@ -2001,6 +2003,49 @@ describe("Join with an email domain", () => {
     showPage(asLinus);
     expect(await screen.findByRole("textbox", { name: "Share so anyone can sign up" })).toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: /^Share with people at/ })).not.toBeInTheDocument();
+  });
+});
+
+describe("Blocked words", () => {
+  showingSection("membership-settings");
+  const card = () => screen.findByRole("region", { name: "Blocked words" });
+  const wordsField = async () => within(await card()).getByRole("textbox", { name: "Words and phrases, one a line or apart by commas" });
+  const saveButton = async () => within(await card()).queryByRole("button", { name: "Save blocked words" });
+
+  it("lists the words and phrases kept, one a line, for an administrator to change and save, saying Changes saved.", async () => {
+    serve({ ...asAdministrator, blockedWords: ["fudge", "darn it"] });
+    const { user } = showPage();
+    const words = await wordsField();
+    expect(words).toHaveValue("fudge\ndarn it");
+    expect(await saveButton()).toBeNull();
+
+    await user.type(words, ", Heck,  FUDGE");
+    await user.click((await saveButton())!);
+    expect(await screen.findByRole("alert")).toHaveTextContent(CHANGES_SAVED);
+    expect(saved()).toEqual([{ blockedWords: ["fudge", "darn it", "Heck"] }]);
+    expect(words).toHaveValue("fudge\ndarn it\nHeck");
+    expect(await saveButton()).toBeNull();
+  });
+
+  it("says which word or phrase it can't block, saving nothing, until it's changed", async () => {
+    const { user } = showPage();
+    const words = await wordsField();
+    await user.type(words, "fudge, ...");
+    await user.click((await saveButton())!);
+    const refusal = blockedWordUnmatchable("...");
+    expect(within(await card()).getByRole("alert")).toHaveTextContent(refusal);
+    expect(words).toHaveAccessibleDescription(refusal);
+    expect(saved()).toEqual([]);
+
+    await user.type(words, "{Backspace}");
+    expect(within(await card()).queryByRole("alert")).toBeNull();
+  });
+
+  it("isn't shown to members", async () => {
+    serve(asMember);
+    showPage(asLinus);
+    expect(await joinLink()).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Blocked words" })).not.toBeInTheDocument();
   });
 });
 

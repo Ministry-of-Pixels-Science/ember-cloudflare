@@ -82,6 +82,11 @@ Objects, D1 or speed call for something else.
   gave it (`turnstile_keys`, the secret key sealed), those of the Realtime SFU app huddles run
   through (`huddles`, the app's secret sealed) and those of the Memberful site whose members sign in
   (`memberful_keys`, its custom app's secret and API key and its webhook's secret sealed together).
+  The words and phrases Blocked words keeps out are one more (`blocked_words`), saved without
+  touching `updated_at`, since no page shows them: the Workspace checks names, bios and rooms' names
+  against them, and each room keeps them in memory to check its messages and files' names against,
+  asking again once a message it saves comes back from the Workspace with another version of them, or
+  once they're a minute old.
 - **Unread marks are a column of the membership.** `memberships.unread_at` is when a room was marked
   unread for someone, null while it isn't, and one `UPDATE` marks every member a message should. We
   skip Campfire's `connections` and `connected_at` columns: each room's object knows from its

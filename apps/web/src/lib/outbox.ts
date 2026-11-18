@@ -106,7 +106,8 @@ function hear(roomId: string, outbox: Outbox, frame: ServerFrame): void {
       break;
     case "error": {
       const refused = frame.clientMessageIds ?? (frame.clientMessageId === undefined ? [] : [frame.clientMessageId]);
-      outbox.messages = outbox.messages.map((m) => (refused.includes(m.clientMessageId) ? { ...m, failed: true } : m));
+      // One refused for what it says goes back to the composer of the view that takes it back, if it can.
+      outbox.messages = outbox.messages.map((m) => (refused.includes(m.clientMessageId) ? { ...m, failed: true, ...(frame.rewrite && { rewrite: frame.message }) } : m));
       break;
     }
     default:

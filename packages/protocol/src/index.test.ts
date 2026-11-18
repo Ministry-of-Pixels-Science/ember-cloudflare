@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { BLOCKED_WORDS_NOT_A_LIST, blockedWordUnmatchable } from "./blocked-words";
 import {
   ASSISTANT_NAME,
   canBeCustomDomain,
@@ -956,6 +957,13 @@ describe("Join with an email domain", () => {
     ["more than 100", Array.from({ length: 101 }, (_, n) => `team${n}.example`)],
   ])("refuses %s for Email domain's domains", (_, emailDomains) => {
     expect(parseAccountChanges({ name: "Ember", emailDomains })).toBe(EMAIL_DOMAINS_REFUSED);
+  });
+
+  it("takes the words and phrases Blocked words keeps out, as it keeps them, or says why it can't", () => {
+    expect(parseAccountChanges({ blockedWords: [" fudge", "Darn  it", "FUDGE"] })).toEqual({ blockedWords: ["fudge", "Darn it"] });
+    expect(parseAccountChanges({ blockedWords: [] })).toEqual({ blockedWords: [] });
+    expect(parseAccountChanges({ name: "Ember", blockedWords: "fudge" })).toBe(BLOCKED_WORDS_NOT_A_LIST);
+    expect(parseAccountChanges({ name: "Ember", blockedWords: ["..."] })).toBe(blockedWordUnmatchable("..."));
   });
 
   it("names the domains in words", () => {

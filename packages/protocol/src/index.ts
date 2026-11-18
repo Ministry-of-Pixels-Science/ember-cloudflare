@@ -5,6 +5,7 @@
 import type { AgentProfile } from "./agents.ts";
 import type { YourApp } from "./apps.ts";
 import type { AssistantSettings, YourAssistant } from "./assistant.ts";
+import { parseBlockedWords } from "./blocked-words.ts";
 import { isActionId, isActionValue, type Card } from "./cards.ts";
 import type { StoredFile } from "./files.ts";
 import type { HuddleSounds, HuddlesSettings, LiveHuddle, MessageHuddle } from "./huddles.ts";
@@ -614,6 +615,8 @@ export interface WorkspaceSettings {
   invitations: EmailInvitation[];
   /** The domains Email domain lets in, as kept, whether it's on or not, for administrators, and none for anyone else. */
   emailDomains: string[];
+  /** The words and phrases Blocked words keeps out of messages, reactions, names, usernames and bios, for administrators, and none for anyone else. */
+  blockedWords: string[];
   /** The addresses Ember knows reach it besides its own, which the Custom domain card names, for administrators, and none for anyone else. */
   addresses: EmberAddresses;
   /** Ember AI as the AI assistant tab shows it, for administrators while it's on, and null otherwise. */
@@ -806,7 +809,8 @@ export interface NewJoinCode {
  * What `PATCH /api/account` changes, as workspace settings save it: the workspace's name, its tagline,
  * its settings, its custom domain, which can only be the address the request comes to, or null for
  * none, the icons of the rail's buttons and the appearance modes, the address Ember's email comes from,
- * or null for none, and the domains Email domain lets in, in place of those it had.
+ * or null for none, the domains Email domain lets in, in place of those it had, and the words and
+ * phrases Blocked words keeps out, in place of those it had too.
  */
 export interface AccountChanges {
   name?: string;
@@ -816,6 +820,7 @@ export interface AccountChanges {
   navigationIcons?: NavigationIconChanges;
   emailFrom?: string | null;
   emailDomains?: string[];
+  blockedWords?: string[];
 }
 
 /**
@@ -1787,9 +1792,11 @@ export type ServerFrame =
   | { type: "card.clicked"; clickId: string }
   /**
    * `failed` names the request that went wrong, when the error answers one, and `clientMessageId` or
-   * `clientMessageIds` the messages it was about, or `clickId` the click.
+   * `clientMessageIds` the messages it was about, or `clickId` the click. `rewrite` says the room won't
+   * take a message for what it says, as one with a word Blocked words keeps out, which is its writer's to
+   * change and send again.
    */
-  | { type: "error"; message: string; clientMessageId?: string; clientMessageIds?: string[]; clickId?: string; failed?: ClientFrame["type"] }
+  | { type: "error"; message: string; clientMessageId?: string; clientMessageIds?: string[]; clickId?: string; failed?: ClientFrame["type"]; rewrite?: true }
   | { type: "pong" };
 
 /**
@@ -2539,12 +2546,12 @@ function navigationIconsOf(data: unknown): NavigationIconChanges | undefined {
  * is saved as typed, even blank. The tagline is kept on one line without space at its ends, and blank is
  * none. Each setting is true or false, and one it doesn't know is refused. A custom domain is a host or
  * null, which the Worker then checks is the address the request came to. Navigation icons are as
- * `navigationIconsOf` reads them, the From address as `emailFromOf` does, and Email domain's domains as
- * `emailDomainsOf` does.
+ * `navigationIconsOf` reads them, the From address as `emailFromOf` does, Email domain's domains as
+ * `emailDomainsOf` does, and the blocked words as `parseBlockedWords` does.
  */
 export function parseAccountChanges(data: unknown): AccountChanges | string {
   if (!isJsonObject(data)) return "Expected a JSON object";
-  const { name, tagline, settings, customDomain, navigationIcons, emailFrom, emailDomains } = data;
+  const { name, tagline, settings, customDomain, navigationIcons, emailFrom, emailDomains, blockedWords } = data;
   if (name !== undefined && (typeof name !== "string" || name.length > MAX_ACCOUNT_NAME_LENGTH)) return `Name must be at most ${MAX_ACCOUNT_NAME_LENGTH} characters`;
   const kept = typeof tagline === "string" ? taglineOf(tagline) : undefined;
   if (tagline !== undefined && (kept === undefined || kept.length > MAX_TAGLINE_LENGTH)) return TAGLINE_TOO_LONG;
@@ -2556,6 +2563,8 @@ export function parseAccountChanges(data: unknown): AccountChanges | string {
   if (emailFrom !== undefined && from === undefined) return EMAIL_FROM_REFUSED;
   const domains = emailDomainsOf(emailDomains);
   if (emailDomains !== undefined && domains === undefined) return EMAIL_DOMAINS_REFUSED;
+  const blocked = blockedWords === undefined ? undefined : parseBlockedWords(blockedWords);
+  if (blocked !== undefined && "error" in blocked) return blocked.error;
   const changes: AccountChanges = {
     ...(name !== undefined && { name }),
     ...(kept !== undefined && { tagline: kept }),
@@ -2563,6 +2572,7 @@ export function parseAccountChanges(data: unknown): AccountChanges | string {
     ...(icons !== undefined && { navigationIcons: icons }),
     ...(from !== undefined && { emailFrom: from }),
     ...(domains !== undefined && { emailDomains: domains }),
+    ...(blocked !== undefined && { blockedWords: blocked }),
   };
   if (settings === undefined) return changes;
   if (!isJsonObject(settings)) return "Settings must be a JSON object";
