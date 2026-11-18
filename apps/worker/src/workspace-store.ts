@@ -2770,6 +2770,18 @@ const DELETE_ACCOUNT = `UPDATE users SET name = ?1, status = ${DEACTIVATED}, rol
   avatar_key = NULL, avatar_variant = NULL, assistant_thinking = NULL, assistant_answer_length = NULL, assistant_model = NULL,
   huddle_music = 1, huddle_chimes = 1, huddle_ring = 1, invitation_dismissed_at = NULL, deleted_at = ?2, updated_at = ?2 WHERE id = ?3`;
 
+/**
+ * Takes what the reports of someone, ?2, kept of them (reports/store.ts) once they've deleted their
+ * account: a message's text, the people it mentions, its file and cards, or their bio, and their name,
+ * calling them ?1 as `DELETE_ACCOUNT` does. Who reported it, why, when, and how it was handled stay.
+ */
+export const CLEAR_REPORTS_OF = `UPDATE reports SET subject = CASE WHEN message_id IS NULL
+    THEN json_set(subject, '$.person.name', ?1, '$.person.bio', NULL, '$.person.accountDeleted', json('true'))
+    ELSE json_set(json_remove(subject, '$.message.attachment', '$.message.cards'), '$.message.creator.name', ?1, '$.message.body', '',
+      '$.message.plainText', '', '$.message.mentions', json('[]'), '$.message.accountDeleted', json('true'))
+  END
+  WHERE subject_id = ?2`;
+
 /** Someone as the directory lists them, whatever their status. */
 const PERSON = `SELECT ${DIRECTORY_COLUMNS} FROM users WHERE id = ?`;
 
@@ -3833,9 +3845,10 @@ export class WorkspaceStore {
    * their messages and boosts in every room they can have written in, all due at `dueAt`, then forgets
    * everything of theirs that removing them does, and the rooms they starred, the people they blocked and
    * who blocked them, the accounts elsewhere they connected, the sign-ins they were making to apps and any
-   * code they were emailed to reset their password, and queues R2 deleting their avatar, `avatar`, if they
-   * have one, due then too. Their row stays, as `DELETE_ACCOUNT` leaves it, recording when, `now`, and so
-   * do their DMs, which name them. Answers whether it queued any revocations or purges, and whom everyone
+   * code they were emailed to reset their password, and what the reports of them kept of them, and queues
+   * R2 deleting their avatar, `avatar`, if they have one, due then too. Their row stays, as `DELETE_ACCOUNT`
+   * leaves it, recording when, `now`, and so do their DMs, which name them, and the reports of them, as
+   * `CLEAR_REPORTS_OF` leaves them. Answers whether it queued any revocations or purges, and whom everyone
    * who had blocked them has blocked now.
    */
   async deleteAccount(userId: UserId, avatar: string | null, code: CloseCode, dueAt: number, now: string): Promise<DeletedAccount> {
@@ -3860,6 +3873,7 @@ export class WorkspaceStore {
       statement(`DELETE FROM outside_spent_tokens WHERE connection_id IN (SELECT id FROM outside_connections WHERE user_id = ?)`, userId),
       statement(`DELETE FROM outside_connections WHERE user_id = ?`, userId),
       ...(avatar ? [statement(QUEUE_PICTURE_DELETION, avatar, dueAt)] : []),
+      statement(CLEAR_REPORTS_OF, DELETED_PERSON_NAME, userId),
       statement(DELETE_ACCOUNT, DELETED_PERSON_NAME, now, userId),
     ])) as [unknown[], unknown[], Array<{ id: UserId; version: number }>, Array<BlockedRow & { user_id: UserId }>, ...unknown[][]];
     const blockedBy = Map.groupBy(blocked, (row) => row.user_id);
