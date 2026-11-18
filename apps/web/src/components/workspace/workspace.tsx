@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useReducer, useRef, useState, type MouseEvent, type ReactNode } from "react";
-import { ASSISTANT_ID, searchOfQuery, startingInvolvement, type Account, type AccountDeletion, type DirectRoom, type Favorites, type Me, type Room, type RoomId, type SidebarRoom, type User } from "@ember/protocol";
+import { ASSISTANT_ID, searchOfQuery, startingInvolvement, type Account, type AccountDeletion, type Blocks, type DirectRoom, type Favorites, type Me, type Room, type RoomId, type SidebarRoom, type User, type UserId } from "@ember/protocol";
 import { CAMERAS_OFF, SCREENS_OFF } from "@ember/protocol/huddles";
 import { useFlash } from "@/components/flash";
 import { Xmark } from "@/components/icons/iconoir";
@@ -135,6 +135,7 @@ interface Redirect {
 const NO_ROOMS: SidebarRoom[] = [];
 const NO_FAVORITES: Favorites = { rooms: [], version: 0 };
 const NO_ORDER: RoomId[] = [];
+const NO_BLOCKS: Blocks = { userIds: [], version: 0 };
 
 /** What the page shows while its rooms, or the page itself, load. */
 const LOADING = (
@@ -507,8 +508,9 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onDe
     },
     [askForRoom, failed],
   );
-  const blockedKey = (list?.blocks.userIds ?? []).join(" ");
-  const blocking = useMemo<Blocking>(() => ({ blocked: new Set(blockedKey ? blockedKey.split(" ") : []), setBlocked }), [blockedKey, setBlocked]);
+  // Whom you've blocked, by a key that stays the same while they do, so a list loaded again renders no message again.
+  const blockedKey = JSON.stringify((list?.blocks ?? NO_BLOCKS).userIds);
+  const blocking = useMemo<Blocking>(() => ({ blocked: new Set(JSON.parse(blockedKey) as UserId[]), setBlocked }), [blockedKey, setBlocked]);
   // A save's answer can come after a newer order has loaded, so the rooms load again once it's taken.
   const reorderedRooms = useCallback(
     (sharedOrder: RoomId[]) => {
