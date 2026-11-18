@@ -39,6 +39,7 @@ import { AgentList } from "./agent-list";
 import { AppList } from "./app-list";
 import { AssistantSettings } from "./assistant-settings";
 import { AssistantSetup } from "./assistant-setup";
+import { BlockedWordsSettings } from "./blocked-words-settings";
 import { CustomDomainSettings } from "./custom-domain-settings";
 import { EmberVersion } from "./ember-version";
 import { EmailSettings, sendsEmail } from "./email-settings";
@@ -50,10 +51,11 @@ import { InviteLink } from "./invite-link";
 import { MemberfulSetup } from "./memberful-setup";
 import { OutsideAiSettings } from "./outside-ai-settings";
 import { PeopleList } from "./people-list";
+import { ReportsList } from "./reports-list";
 import { PicturePicker } from "./picture-picker";
 import { RelaySetup } from "./relay-setup";
 import { RoomOrder } from "./room-order";
-import { workspaceSectionOf } from "./settings-navigation";
+import { SettingsLayout, workspaceSectionOf } from "./settings-navigation";
 import { CHANGES_SAVED, PageHeading, Panel, SECTION_HEADING, SettingsPage, TITLE, TITLE_LINK } from "./settings-page";
 import { TurnstileSettings } from "./turnstile-settings";
 import { TurnstileSetup } from "./turnstile-setup";
@@ -104,8 +106,9 @@ interface Props {
  * - Rooms and permissions: New room, which members don't get while only administrators can create
  *   rooms, then for administrators, the switch that says so, and the rooms' order for everyone, each
  *   linking to its settings.
- * - Membership: for administrators, who can join, with switches for Open, the join link, which they can
- *   regenerate, and Memberful, how Ember sends email, and whether Cloudflare Turnstile checks who joins,
+ * - Membership: for administrators, the Reports list first, then who can join, with switches for Open,
+ *   the join link, which they can regenerate, and Memberful, how Ember sends email, and whether
+ *   Cloudflare Turnstile checks who joins,
  *   or for members, the links that let people in, then the administrators and members, whom
  *   administrators can make administrators or members and remove.
  * - Domain settings: for administrators, the custom domain Ember answers at.
@@ -133,6 +136,9 @@ export function WorkspaceSettingsPage({
   onCheckForUpdates,
 }: Props) {
   const [settings, setSettings] = useState<WorkspaceSettings | null>(null);
+  // How many reports are open, as the sidebar last heard, and how many times it has heard, which the Reports list loads again on.
+  const openReports = useContext(SettingsLayout)?.openReports ?? 0;
+  const reportsHeard = useContext(SettingsLayout)?.reportsHeard ?? 0;
   // What's typed in Workspace name and Tagline, or null for either while it's as the workspace has it,
   // when the field follows the workspace socket, so that saving one never puts back what another tab
   // changed in the other.
@@ -304,6 +310,22 @@ export function WorkspaceSettingsPage({
         answered(account);
         if (!mounted.current) return;
         setSettings((settings) => settings && { ...settings, account, emailDomains });
+        settled(true);
+        flash("notice", CHANGES_SAVED);
+      },
+      (error: unknown) => {
+        if (!mounted.current && !isSignedOut(error)) return;
+        settled(false);
+        onFailed(error);
+      },
+    );
+  };
+  /** Saves the words and phrases Blocked words keeps out, flashing a notice once they're saved. */
+  const saveBlockedWords = (blockedWords: string[], settled: (saved: boolean) => void) => {
+    changeAccount({ blockedWords }).then(
+      () => {
+        if (!mounted.current) return;
+        setSettings((settings) => settings && { ...settings, blockedWords });
         settled(true);
         flash("notice", CHANGES_SAVED);
       },
@@ -524,6 +546,8 @@ export function WorkspaceSettingsPage({
           <div className="min-w-0">
             {settings.canAdminister ? (
               <div className="flex flex-col gap-6">
+                <ReportsList meId={me.id} shown={section === "membership-settings"} open={openReports} heard={reportsHeard} onFailed={onFailed} />
+                <BlockedWordsSettings words={settings.blockedWords} saveWords={saveBlockedWords} />
                 <WaysToJoin
                   settings={settings}
                   saveSwitch={saveSwitch}

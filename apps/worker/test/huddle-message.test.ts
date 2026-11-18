@@ -5,7 +5,7 @@ import { ChatRoom } from "../src/chat-room";
 import { HUDDLE_RESUMED_MS, HUDDLE_STARTED } from "../src/huddles/message";
 import { HUDDLE_TAG, type HuddleAttachment } from "../src/huddles/room";
 import { MessageStore } from "../src/store";
-import { alarmOf, giveKeys, huddlesOn, joinHuddle, kept, OTHER_APP, ring, setUp, welcomed, type HuddleSocket } from "./huddle-support";
+import { alarmOf, giveKeys, huddlesOn, joinHuddle, kept, OTHER_APP, reached, ring, setUp, welcomed, type HuddleSocket } from "./huddle-support";
 import { api, connect, createRoom, freshDeploy, freshRoom, post, roomSql, roomStub, settle, signIn, workspaceSql, type Session, type Socket } from "./support";
 
 // The message a room keeps of each huddle in it (src/huddles/message.ts), as the room's own sockets hear
@@ -74,6 +74,24 @@ function savedUnanswered(): void {
   vi.spyOn(MessageStore.prototype, "createHuddle").mockImplementationOnce(async function (this: MessageStore, ...given) {
     await create.apply(this, given);
     throw unreachable();
+  });
+}
+
+/** Has a deletion of messages fail once, though it's saved, as a write to D1 can whose answer is lost. */
+function deletedUnanswered(): void {
+  const deleting = MessageStore.prototype.delete;
+  vi.spyOn(MessageStore.prototype, "delete").mockImplementationOnce(async function (this: MessageStore, ...given) {
+    await deleting.apply(this, given);
+    throw unreachable();
+  });
+}
+
+/** Has a huddle's message be unable to say that its huddle goes on, for as long as it does: it can still say that it's over. */
+function sayingOnlyThatItsOver(): void {
+  const update = MessageStore.prototype.updateHuddle;
+  vi.spyOn(MessageStore.prototype, "updateHuddle").mockImplementation(async function (this: MessageStore, ...given) {
+    if (given[1].endedAt === undefined) throw unreachable();
+    return update.apply(this, given);
   });
 }
 
@@ -224,25 +242,116 @@ describe("A huddle's message in its room", () => {
     expect((await tab.next("message.updated")).message).toMatchObject({ id: message.id, thread, boosts: [boost], huddle: { startedAt, people: [ada.user] } });
   });
 
-  it("goes on as the huddle it was for someone back in it within half a minute, and starts another for anyone else, or later", async () => {
+  it("is taken back once the huddle is over, when nobody joined whoever started it, as Slack leaves no message of such a huddle", async () => {
     vi.useFakeTimers({ toFake: ["Date"], now: Date.now() });
     const { ada } = await huddlesOn();
-    const [grace, linus] = [await signIn("Grace"), await signIn("Linus")];
+    const linus = await signIn("Linus");
+    const room = await freshRoom("standup");
+    const watching = await connect(room, linus);
+    const { socket: adas, startedAt, message, seq } = await started(room, ada, watching);
+    // Someone who moves to another tab is still the only one who was in it.
+    const moved = await welcomed(room, ada);
+    await adas.closed;
+
+    await left(moved);
+    expect(await watching.next("message.deleted")).toEqual({ type: "message.deleted", messageId: message.id, seq: seq + 1 });
+    await heardNoMore(watching);
+    // Nothing is left of it: in the room, in what the room's object keeps, or for the alarm to come back for.
+    expect((await connect(room, ada)).welcome.messages).toEqual([]);
+    expect(await kept(room, "huddleMessage")).toBeUndefined();
+    await ring(room);
+    expect(await alarmOf(room)).toBeNull();
+    await heardNoMore(watching);
+
+    // So Ada, back at once, starts another, with a message of its own.
+    vi.setSystemTime(Date.now() + 1);
+    const again = await (await joinHuddle(room, ada)).next("huddle.welcome");
+    expect(Date.parse(again.startedAt)).toBeGreaterThan(Date.parse(startedAt));
+    expect(again.messageId).not.toBe(message.id);
+    expect((await watching.next("message.created")).message).toEqual({ ...written(room, ada), id: again.messageId, huddle: { startedAt: again.startedAt } });
+  });
+
+  it("stays for whoever was invited into the huddle, though nobody joined it", async () => {
+    const { ada } = await huddlesOn();
+    const linus = await signIn("Linus");
     const room = await freshRoom("standup");
     const watching = await connect(room, linus);
     const { socket: adas, startedAt, message } = await started(room, ada, watching);
+
+    adas.send({ type: "huddle.invite", userIds: [linus.user.id] });
+    await reached(adas);
     await left(adas);
-    expect((await watching.next("message.updated")).message.huddle).toMatchObject({ people: [ada.user] });
+    expect((await watching.next("message.updated")).message).toMatchObject({ id: message.id, huddle: { startedAt, people: [ada.user] } });
+    expect(await kept(room, "huddleMessage")).toMatchObject({ messageId: message.id, invited: true });
+
+    // Inviting only whoever is in the huddle already invites nobody.
+    const other = await freshRoom("retro");
+    const otherTab = await connect(other, linus);
+    const { socket: again, message: second } = await started(other, ada, otherTab);
+    again.send({ type: "huddle.invite", userIds: [ada.user.id] });
+    await reached(again);
+    await left(again);
+    expect(await otherTab.next("message.deleted")).toMatchObject({ messageId: second.id });
+  });
+
+  it("stays for a reply in its thread, and for a boost, though nobody joined its huddle", async () => {
+    const { ada } = await huddlesOn();
+    const linus = await signIn("Linus");
+    const room = await freshRoom("standup");
+    const tab = await connect(room, linus);
+    const { socket: adas, message } = await started(room, ada, tab);
+    tab.send({ type: "message.create", clientMessageId: crypto.randomUUID(), body: "<p>Starting without me?</p>", parentId: message.id });
+    await tab.next("message.created");
+    const { thread } = (await tab.next("message.updated")).message;
+    await left(adas);
+    expect((await tab.next("message.updated")).message).toMatchObject({ id: message.id, thread, huddle: { people: [ada.user] } });
+
+    const other = await freshRoom("retro");
+    const otherTab = await connect(other, linus);
+    const { socket: again, message: second } = await started(other, ada, otherTab);
+    otherTab.send({ type: "boost.create", messageId: second.id, content: "👀" });
+    const { boost } = await otherTab.next("boost.created");
+    await left(again);
+    expect((await otherTab.next("message.updated")).message).toMatchObject({ id: second.id, boosts: [boost], huddle: { people: [ada.user] } });
+  });
+
+  it("is written and taken back for whoever started a huddle and had left it, alone, by the time the room got to their joining", async () => {
+    const { ada } = await huddlesOn();
+    const linus = await signIn("Linus");
+    const room = await freshRoom("standup");
+    const watching = await connect(room, linus);
+    // The room is asked for something else as it lets Ada in, and she has left by the time it gets to her joining.
+    busyAsItLetsIn(250);
+
+    const adas = await joinHuddle(room, ada);
+    const { startedAt } = await adas.next("huddle.welcome");
+    await left(adas);
+    const { message } = await watching.next("message.created");
+    expect(message).toEqual({ ...written(room, ada), huddle: { startedAt } });
+    expect(await watching.next("message.deleted")).toMatchObject({ messageId: message.id });
+    await heardNoMore(watching);
+  });
+
+  it("goes on as the huddle it was for someone back in it within half a minute, and starts another for anyone else, or later", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() });
+    const { ada } = await huddlesOn();
+    const [grace, linus, margaret] = [await signIn("Grace"), await signIn("Linus"), await signIn("Margaret")];
+    const room = await freshRoom("standup");
+    const watching = await connect(room, linus);
+    const { socket: adas, startedAt, message } = await started(room, ada, watching);
+    await left(await welcomed(room, grace));
+    await left(adas);
+    expect((await watching.next("message.updated")).message.huddle).toMatchObject({ people: [ada.user, grace.user] });
 
     // Ada's tab, which had lost its connection, is back: the huddle goes on from when it started, and so does its message.
     vi.setSystemTime(Date.now() + HUDDLE_RESUMED_MS);
     const back = await joinHuddle(room, ada);
     expect((await back.next("huddle.welcome")).startedAt).toBe(startedAt);
     expect((await watching.next("message.updated")).message).toEqual({ ...message, updatedAt: expect.any(String) as string, huddle: { startedAt } });
-    const graces = await welcomed(room, grace);
+    const margarets = await welcomed(room, margaret);
     await left(back);
-    await left(graces);
-    expect((await watching.next("message.updated")).message).toMatchObject({ id: message.id, huddle: { startedAt, people: [ada.user, grace.user] } });
+    await left(margarets);
+    expect((await watching.next("message.updated")).message).toMatchObject({ id: message.id, huddle: { startedAt, people: [ada.user, grace.user, margaret.user] } });
 
     // Linus wasn't in it, so his is another huddle, with a message of its own.
     vi.setSystemTime(Date.now() + 1);
@@ -250,8 +359,9 @@ describe("A huddle's message in its room", () => {
     expect(Date.parse(later)).toBeGreaterThan(Date.parse(startedAt));
     expect(second).toEqual({ ...written(room, linus), huddle: { startedAt: later } });
     expect(second.id).not.toBe(message.id);
+    await left(await welcomed(room, grace));
     await left(linuses);
-    expect((await watching.next("message.updated")).message).toMatchObject({ id: second.id, huddle: { people: [linus.user] } });
+    expect((await watching.next("message.updated")).message).toMatchObject({ id: second.id, huddle: { people: [linus.user, grace.user] } });
 
     // And so is the one he starts once half a minute has passed.
     vi.setSystemTime(Date.now() + HUDDLE_RESUMED_MS + 1);
@@ -283,18 +393,16 @@ describe("A huddle's message in its room", () => {
 
   it("counts whoever was in the huddle as who's in it changed, though they've left again by the time the room gets to its message", async () => {
     const { ada } = await huddlesOn();
-    const linus = await signIn("Linus");
+    const [grace, linus] = [await signIn("Grace"), await signIn("Linus")];
     const room = await freshRoom("standup");
     const watching = await connect(room, linus);
-    // The room is asked for something else as it lets Ada in, and she has left by the time it gets to her joining.
+    const { socket: adas, startedAt, message } = await started(room, ada, watching);
+    // The room is asked for something else as it lets Grace in, and she has left by the time it gets to her joining.
     busyAsItLetsIn(250);
 
-    const adas = await joinHuddle(room, ada);
-    const { startedAt } = await adas.next("huddle.welcome");
+    await left(await welcomed(room, grace));
     await left(adas);
-    const { message } = await watching.next("message.created");
-    expect(message).toEqual({ ...written(room, ada), huddle: { startedAt } });
-    expect((await watching.next("message.updated")).message).toMatchObject({ id: message.id, huddle: { startedAt, people: [ada.user] } });
+    expect((await watching.next("message.updated")).message).toMatchObject({ id: message.id, huddle: { startedAt, people: [ada.user, grace.user] } });
   });
 
   it("gives a huddle that was going on before rooms kept messages of them its message as the next person joins", async () => {
@@ -314,6 +422,24 @@ describe("A huddle's message in its room", () => {
     const { message: late } = await watching.next("message.created");
     expect(late).toEqual({ ...written(room, ada), huddle: { startedAt } });
     expect(late.id).not.toBe(message.id);
+  });
+
+  it("stays for whoever was invited into a huddle that the room's object has kept nothing of, as after an update, though nobody joined it", async () => {
+    const { ada } = await huddlesOn();
+    const linus = await signIn("Linus");
+    const room = await freshRoom("updated");
+    const watching = await connect(room, linus);
+    const { socket: adas, startedAt, message } = await started(room, ada, watching);
+    adas.send({ type: "huddle.invite", userIds: [linus.user.id] });
+    await vi.waitFor(async () => expect(await kept(room, "huddleMessage")).toMatchObject({ invited: true }));
+    // The room's object, which starts afresh, has kept nothing of the huddle, whose socket still says that someone was invited.
+    await runInDurableObject(roomStub(room), (_room, state: DurableObjectState) => state.storage.delete("huddleMessage"));
+    await evictDurableObject(roomStub(room));
+    await ring(room);
+    expect(await kept(room, "huddleMessage")).toMatchObject({ messageId: message.id, invited: true });
+
+    await left(adas);
+    expect((await watching.next("message.updated")).message).toMatchObject({ id: message.id, huddle: { startedAt, people: [ada.user] } });
   });
 
   it("is written with the room's next check of the huddle when it couldn't be as the huddle started", async () => {
@@ -360,7 +486,7 @@ describe("A huddle's message in its room", () => {
     await heardNoMore(watching);
   });
 
-  it("is written saying that the huddle is over when it couldn't be as the huddle started, and nobody is left in it by the room's next check", async () => {
+  it("isn't written at all when it couldn't be as the huddle started, and whoever started it has left, with nobody having joined, by the room's next check", async () => {
     const { ada } = await huddlesOn();
     const linus = await signIn("Linus");
     const room = await freshRoom("standup");
@@ -369,22 +495,136 @@ describe("A huddle's message in its room", () => {
     vi.spyOn(MessageStore.prototype, "createHuddle").mockRejectedValueOnce(unreachable());
 
     const adas = await joinHuddle(room, ada);
-    const { startedAt } = await adas.next("huddle.welcome");
+    const { messageId } = await adas.next("huddle.welcome");
     await heardNoMore(watching);
     await left(adas);
-    const { message } = await watching.next("message.created");
-    expect(message).toEqual({ ...written(room, ada), huddle: { startedAt, endedAt: message.createdAt, people: [ada.user] } });
+    await heardNoMore(watching);
     // Nothing is left for the check to make up for.
     await ring(room);
     await heardNoMore(watching);
-    expect([failures(), await alarmOf(room)]).toEqual([1, null]);
+    expect([failures(), await alarmOf(room), await kept(room, "huddleMessage")]).toEqual([1, null, undefined]);
+    expect(await roomSql(room, "SELECT id FROM messages WHERE room_id = ?", room)).toEqual([]);
+    // The huddle Ada starts next is another, whose message is written as it starts.
+    const { message } = await started(room, ada, watching);
+    expect(message.id).not.toBe(messageId);
+  });
+
+  it("is written saying that the huddle is over, and names everyone who was in it, whoever came and went meanwhile, when it could only be written then", async () => {
+    const { ada } = await huddlesOn();
+    const [grace, linus] = [await signIn("Grace"), await signIn("Linus")];
+    const room = await freshRoom("standup");
+    const watching = await connect(room, linus);
+    const failures = countFailures();
+    // The room can't write the message for as long as the huddle goes on.
+    const create = MessageStore.prototype.createHuddle;
+    vi.spyOn(MessageStore.prototype, "createHuddle").mockImplementation(async function (this: MessageStore, ...given) {
+      if (given[3].endedAt === undefined) throw unreachable();
+      return create.apply(this, given);
+    });
+
+    const adas = await joinHuddle(room, ada);
+    const { startedAt } = await adas.next("huddle.welcome");
+    await left(await welcomed(room, grace));
+    await heardNoMore(watching);
+    await left(adas);
+    const { message } = await watching.next("message.created");
+    expect(message).toEqual({ ...written(room, ada), huddle: { startedAt, endedAt: message.createdAt, people: [ada.user, grace.user] } });
+    // Nothing is left for the check to make up for.
+    await ring(room);
+    await heardNoMore(watching);
+    expect([failures(), await alarmOf(room)]).toEqual([3, null]);
     expect(await roomSql(room, "SELECT id FROM messages WHERE room_id = ?", room)).toEqual([{ id: message.id }]);
     // Back in it within half a minute, Ada finds it the huddle it was, as its message says from then.
     expect((await (await joinHuddle(room, ada)).next("huddle.welcome")).startedAt).toBe(startedAt);
     expect((await watching.next("message.updated")).message).toEqual({ ...message, updatedAt: expect.any(String) as string, huddle: { startedAt } });
   });
 
-  it("says that the huddle is over, though the room never heard of it, when its write failed, was saved all the same, and nobody is left by the next check", async () => {
+  it("says when a huddle ended, and who was in it, though it went on after its message said that it was over, and the message couldn't say that it did", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() });
+    const { ada } = await huddlesOn();
+    const [grace, linus, margaret] = [await signIn("Grace"), await signIn("Linus"), await signIn("Margaret")];
+    const room = await freshRoom("standup");
+    const watching = await connect(room, linus);
+    const failures = countFailures();
+    const { socket: adas, startedAt, message } = await started(room, ada, watching);
+    await left(await welcomed(room, grace));
+    await left(adas);
+    const { message: over } = await watching.next("message.updated");
+    expect(over.huddle).toEqual({ startedAt, endedAt: over.updatedAt, people: [ada.user, grace.user] });
+    sayingOnlyThatItsOver();
+
+    vi.setSystemTime(Date.now() + 5_000);
+    const back = await joinHuddle(room, ada);
+    expect((await back.next("huddle.welcome")).startedAt).toBe(startedAt);
+    await left(await welcomed(room, margaret));
+    await heardNoMore(watching);
+    expect(failures()).toBe(3);
+    vi.setSystemTime(Date.now() + 5_000);
+    await left(back);
+    const { message: ended } = await watching.next("message.updated");
+    expect(ended).toEqual({ ...message, updatedAt: expect.any(String) as string, huddle: { startedAt, endedAt: ended.updatedAt, people: [ada.user, grace.user, margaret.user] } });
+    expect(Date.parse(ended.updatedAt) - Date.parse(over.updatedAt)).toBeGreaterThanOrEqual(10_000);
+    // Nothing is left for the check to make up for, and the huddle is one to go on with for half a minute from then.
+    await ring(room);
+    await heardNoMore(watching);
+    expect([failures(), await alarmOf(room)]).toEqual([3, null]);
+  });
+
+  it("goes on as the huddle it was for whoever joins before its message could say that it ended a second time", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() });
+    const { ada } = await huddlesOn();
+    const [grace, linus, margaret] = [await signIn("Grace"), await signIn("Linus"), await signIn("Margaret")];
+    const room = await freshRoom("standup");
+    const watching = await connect(room, linus);
+    countFailures();
+    const { socket: adas, startedAt, message } = await started(room, ada, watching);
+    await left(await welcomed(room, margaret));
+    await left(adas);
+    await watching.next("message.updated");
+    // From here on the message can say nothing more of its huddle: not that it goes on, nor that it's over again.
+    const unwritable = vi.spyOn(MessageStore.prototype, "updateHuddle").mockRejectedValue(unreachable());
+    vi.setSystemTime(Date.now() + 5_000);
+    const back = await joinHuddle(room, ada);
+    expect((await back.next("huddle.welcome")).startedAt).toBe(startedAt);
+    await left(back);
+    await heardNoMore(watching);
+
+    // Grace wasn't in it, and joins long after its message said that it was over: the room has yet to find it over since.
+    vi.setSystemTime(Date.now() + HUDDLE_RESUMED_MS + 1);
+    const graces = await joinHuddle(room, grace);
+    expect(await graces.next("huddle.welcome")).toMatchObject({ startedAt, messageId: message.id });
+    unwritable.mockRestore();
+    await ring(room);
+    expect((await watching.next("message.updated")).message).toEqual({ ...message, updatedAt: expect.any(String) as string, huddle: { startedAt } });
+    await left(graces);
+    expect((await watching.next("message.updated")).message).toMatchObject({ id: message.id, huddle: { startedAt, people: [ada.user, margaret.user, grace.user] } });
+  });
+
+  it("says that the huddle is over, though the room never heard of it, when its write failed, was saved all the same, and it could say nothing more until nobody was left", async () => {
+    const { ada } = await huddlesOn();
+    const [grace, linus] = [await signIn("Grace"), await signIn("Linus")];
+    const room = await freshRoom("standup");
+    const watching = await connect(room, linus);
+    countFailures();
+    savedUnanswered();
+    sayingOnlyThatItsOver();
+
+    const adas = await joinHuddle(room, ada);
+    const { startedAt } = await adas.next("huddle.welcome");
+    await left(await welcomed(room, grace));
+    await heardNoMore(watching);
+    // Whoever opens the room meanwhile finds the message nobody was told of, of a huddle that's going on.
+    const [saved] = (await connect(room, ada)).welcome.messages;
+    expect(saved).toEqual({ ...written(room, ada), huddle: { startedAt } });
+    await left(adas);
+    const { message } = await watching.next("message.created");
+    expect(message).toEqual({ ...saved, updatedAt: expect.any(String) as string, huddle: { startedAt, endedAt: message.updatedAt, people: [ada.user, grace.user] } });
+    await ring(room);
+    await heardNoMore(watching);
+    expect((await connect(room, ada)).welcome.messages).toEqual([message]);
+  });
+
+  it("takes back a message whose write failed and was saved all the same, of a huddle that nobody joined", async () => {
     const { ada } = await huddlesOn();
     const linus = await signIn("Linus");
     const room = await freshRoom("standup");
@@ -393,26 +633,25 @@ describe("A huddle's message in its room", () => {
     savedUnanswered();
 
     const adas = await joinHuddle(room, ada);
-    const { startedAt } = await adas.next("huddle.welcome");
+    await adas.next("huddle.welcome");
     await heardNoMore(watching);
-    // Whoever opens the room meanwhile finds the message nobody was told of, of a huddle that's going on.
     const [saved] = (await connect(room, ada)).welcome.messages;
-    expect(saved).toEqual({ ...written(room, ada), huddle: { startedAt } });
     await left(adas);
-    const { message } = await watching.next("message.created");
-    expect(message).toEqual({ ...saved, updatedAt: expect.any(String) as string, huddle: { startedAt, endedAt: message.updatedAt, people: [ada.user] } });
-    await ring(room);
+    // Nobody was told of it, and whoever opened the room meanwhile, and found it, is told that it's gone.
+    expect(await watching.next("message.deleted")).toMatchObject({ messageId: saved!.id });
     await heardNoMore(watching);
-    expect((await connect(room, ada)).welcome.messages).toEqual([message]);
+    expect(await roomSql(room, "SELECT id FROM messages WHERE room_id = ?", room)).toEqual([]);
+    expect(await kept(room, "huddleMessage")).toBeUndefined();
   });
 
   it("says that a huddle is over with a later check when it couldn't as the last person left, though the room's object has started afresh since", async () => {
     const { ada } = await huddlesOn();
-    const linus = await signIn("Linus");
+    const [grace, linus] = [await signIn("Grace"), await signIn("Linus")];
     const room = await freshRoom("standup");
     const watching = await connect(room, linus);
     const failures = countFailures();
     const { socket: adas, startedAt, message } = await started(room, ada, watching);
+    await left(await welcomed(room, grace));
     vi.spyOn(MessageStore.prototype, "updateHuddle").mockRejectedValueOnce(unreachable()).mockRejectedValueOnce(unreachable());
 
     await left(adas);
@@ -424,8 +663,76 @@ describe("A huddle's message in its room", () => {
     // An object that starts afresh remembers only what it stored: the message, which it hasn't found over.
     await evictDurableObject(roomStub(room));
     await ring(room);
-    expect((await watching.next("message.updated")).message).toMatchObject({ id: message.id, huddle: { startedAt, people: [ada.user] } });
+    expect((await watching.next("message.updated")).message).toMatchObject({ id: message.id, huddle: { startedAt, people: [ada.user, grace.user] } });
     expect([failures(), await alarmOf(room)]).toEqual([2, null]);
+  });
+
+  it("is taken back with a later check when it couldn't be as whoever started the huddle left, though the room's object has started afresh since", async () => {
+    const { ada } = await huddlesOn();
+    const linus = await signIn("Linus");
+    const room = await freshRoom("standup");
+    const watching = await connect(room, linus);
+    const failures = countFailures();
+    const { socket: adas, message } = await started(room, ada, watching);
+    vi.spyOn(MessageStore.prototype, "delete").mockRejectedValueOnce(unreachable());
+
+    await left(adas);
+    await heardNoMore(watching);
+    // The alarm comes back for as long as the message is there, and the huddle is Ada's to go on with meanwhile.
+    expect([failures(), await alarmOf(room)]).toEqual([1, expect.any(Number)]);
+    expect(await kept(room, "huddleMessage")).toMatchObject({ messageId: message.id });
+    await evictDurableObject(roomStub(room));
+    await ring(room);
+    expect(await watching.next("message.deleted")).toMatchObject({ messageId: message.id });
+    expect([failures(), await alarmOf(room), await kept(room, "huddleMessage")]).toEqual([1, null, undefined]);
+  });
+
+  it("tells the room that it's gone with a later check when its deletion failed and was saved all the same, and has the search index hear of it", async () => {
+    const { ada } = await huddlesOn();
+    const linus = await signIn("Linus");
+    const room = await freshRoom("standup");
+    const watching = await connect(room, linus);
+    await sentItsFirstLog(room);
+    const found = async () => ((await (await api("/api/searches?q=huddle", { headers: { Cookie: linus.cookie } })).json()) as SearchResults).matches.map(({ message }) => message);
+    const failures = countFailures();
+    const { socket: adas, message, seq } = await started(room, ada, watching);
+    await indexed(room);
+    deletedUnanswered();
+
+    await left(adas);
+    // The message is gone, with nobody told and the search index's log unsent, so the alarm comes back.
+    await settle(watching);
+    expect(watching.pending("message.deleted")).toEqual([]);
+    expect(await roomSql(room, "SELECT id FROM messages WHERE room_id = ?", room)).toEqual([]);
+    expect(await found()).toEqual([message]);
+    expect([failures(), await alarmOf(room)]).toEqual([1, expect.any(Number)]);
+    await ring(room);
+    expect(await watching.next("message.deleted")).toEqual({ type: "message.deleted", messageId: message.id, seq: seq + 1 });
+    await indexed(room);
+    expect(await found()).toEqual([]);
+    expect([failures(), await alarmOf(room), await kept(room, "huddleMessage")]).toEqual([1, null, undefined]);
+  });
+
+  it("tells whoever found it meanwhile that it's gone, with a later check, when its write and its deletion both failed and were saved all the same", async () => {
+    const { ada } = await huddlesOn();
+    const linus = await signIn("Linus");
+    const room = await freshRoom("standup");
+    const failures = countFailures();
+    savedUnanswered();
+    const adas = await joinHuddle(room, ada);
+    await adas.next("huddle.welcome");
+    // Nobody was told of the message, which Linus finds as he opens the room.
+    const linuses = await connect(room, linus);
+    const [saved] = linuses.welcome.messages;
+    deletedUnanswered();
+
+    await left(adas);
+    await settle(linuses);
+    expect(linuses.pending("message.deleted")).toEqual([]);
+    expect([failures(), await alarmOf(room)]).toEqual([2, expect.any(Number)]);
+    await ring(room);
+    expect(await linuses.next("message.deleted")).toEqual({ type: "message.deleted", messageId: saved!.id, seq: linuses.welcome.seq + 1 });
+    expect([failures(), await alarmOf(room), await kept(room, "huddleMessage")]).toEqual([2, null, undefined]);
   });
 
   it("tells the room that a huddle is over though the message of the one going on can't be written then", async () => {
@@ -435,15 +742,16 @@ describe("A huddle's message in its room", () => {
     const watching = await connect(room, linus);
     const failures = countFailures();
     const { startedAt, message } = await started(room, ada, watching);
-    // The room's object keeps the message as that of an earlier huddle it hasn't found over, and the one going on has yet to name its own: no join leaves it with either.
+    // The room's object keeps the message as that of an earlier huddle, of Ada and Linus, that it hasn't found over, and the one going on has yet to name its own: no join leaves it with either.
     const earlier = new Date(Date.parse(startedAt) - 60_000).toISOString();
-    await runInDurableObject(roomStub(room), async (_room, state: DurableObjectState) => state.storage.put("huddleMessage", { ...(await state.storage.get<object>("huddleMessage")), startedAt: earlier }));
+    const people = [ada.user, linus.user];
+    await runInDurableObject(roomStub(room), async (_room, state: DurableObjectState) => state.storage.put("huddleMessage", { ...(await state.storage.get<object>("huddleMessage")), startedAt: earlier, people }));
     await namingNoMessage(room);
     await evictDurableObject(roomStub(room));
     vi.spyOn(MessageStore.prototype, "createHuddle").mockRejectedValueOnce(unreachable());
 
     await welcomed(room, grace);
-    expect((await watching.next("message.updated")).message).toMatchObject({ id: message.id, huddle: { startedAt: earlier, people: [ada.user] } });
+    expect((await watching.next("message.updated")).message).toMatchObject({ id: message.id, huddle: { startedAt: earlier, people } });
     await heardNoMore(watching);
     expect(failures()).toBe(1);
     await ring(room);
@@ -550,7 +858,7 @@ describe("A huddle's message in its room", () => {
 
   it("is found by a search for what it says, which shows it as it is by then: of a huddle that's going on, and once that's over, of one that is", async () => {
     const { ada } = await huddlesOn();
-    const linus = await signIn("Linus");
+    const [grace, linus] = [await signIn("Grace"), await signIn("Linus")];
     const room = await freshRoom("standup");
     const watching = await connect(room, linus);
     await sentItsFirstLog(room);
@@ -560,8 +868,18 @@ describe("A huddle's message in its room", () => {
     await indexed(room);
     expect(await found()).toEqual([message]);
 
+    await left(await welcomed(room, grace));
     await left(adas);
     const over = (await watching.next("message.updated")).message;
+    await indexed(room);
+    expect(await found()).toEqual([over]);
+
+    // The message of a huddle that nobody joined goes from what's found as it goes from the room.
+    const { socket: linuses, message: second } = await started(room, linus, watching);
+    await indexed(room);
+    expect((await found()).map(({ id }) => id).sort()).toEqual([over.id, second.id].sort());
+    await left(linuses);
+    await watching.next("message.deleted");
     await indexed(room);
     expect(await found()).toEqual([over]);
   });

@@ -92,8 +92,8 @@ export const HUDDLE_CHECK_MS = 30_000;
  */
 export const HUDDLE_SILENT_MS = 90_000;
 
-/** How long the room goes by what the Workspace last said of the SFU app huddles run through. */
-const APP_KEPT_MS = 30_000;
+/** How long the room goes by what the Workspace last said of the SFU app huddles run through, and of huddles in the room. */
+export const APP_KEPT_MS = 30_000;
 
 /** How many of a socket's frames for one of its connections can wait behind the one the SFU is answering. */
 const FRAMES_WAITING = 4;
@@ -128,6 +128,13 @@ const UNCLOSED_KEPT = 200;
  * many requests as an event may make. The rest wait for its alarm.
  */
 const SILENCED_PER_DELETE = 50;
+
+/**
+ * The most sessions a check has the SFU close what was published on as it ends a huddle that its room's
+ * settings no longer allow: with the sessions the check asks about again, as many requests as an event
+ * may make. The rest wait for the checks after it.
+ */
+const SILENCED_PER_CHECK = SILENCED_PER_DELETE - RETRIED_PER_CHECK;
 
 /** What the room's object keeps in its own storage while the SFU has tracks to close that it didn't: the sessions and their tracks. */
 const UNCLOSED = "huddleUnclosed";
@@ -254,6 +261,8 @@ export interface HuddleAttachment {
   screens?: Connections;
   /** How often the tab has invited people into the huddle in the minute that started at `since`, once it has. */
   inviting?: Tally;
+  /** Set once the tab has invited someone who isn't in the huddle into it. */
+  invited?: true;
   /** How many reactions of the tab's the room has told the huddle of in the ten seconds that started at `since`, once it has told of one. */
   reacting?: Tally;
   /** Set once the room has closed the socket itself, having told the others whatever they're to hear of it. */
@@ -368,8 +377,12 @@ const logged = (error: unknown) => (error instanceof SfuError ? error.message : 
 const isRefusal = (error: unknown): error is SfuError => error instanceof SfuError && error.status !== null && (error.status >= 400 || error.code !== null);
 
 export class Huddle {
-  /** The SFU app huddles run through, and whether cameras may go on in them and screens be shared, as the Workspace last said, and when it did. */
-  private known: { app: HuddleApp | null; at: number } | null = null;
+  /**
+   * The SFU app huddles run through, and whether cameras may go on in them and screens be shared, as the
+   * Workspace last said, and when it did, with whether the room's settings allow huddles in it, if that
+   * was asked too.
+   */
+  private known: { app: HuddleApp | null; allowed?: boolean; at: number } | null = null;
   /** What each socket's frames for its sending connections wait behind, and those for its receiving connections. */
   private readonly sending = noLines();
   private readonly receiving = noLines();
@@ -413,21 +426,23 @@ export class Huddle {
     const first = members[0]?.attachment;
     if (!first) return null;
     const { roomId, startedAt, messageId } = first;
-    return { roomId, startedAt, people: members.map(({ attachment }) => attachment.user), ...(messageId !== undefined && { messageId }) };
+    const invited = members.some(({ attachment }) => attachment.invited === true);
+    return { roomId, startedAt, people: members.map(({ attachment }) => attachment.user), ...(messageId !== undefined && { messageId }), ...(invited && { invited }) };
   }
 
   /**
    * Lets `user` into room `roomId`'s huddle, on a socket carrying `tags`, once the room has checked the
-   * Workspace's word for them. A huddle that's full, or huddles being off, closes the socket at once
-   * with the code that says so. Someone already in the huddle moves to this tab: their other socket
-   * closes, and the others hear that they changed rather than that they left and joined. The room,
-   * which lets people in one at a time, sets its alarm to check the huddle once someone's in it. The
-   * tab is welcomed with `iceServers`, the servers its connections go by, if the room has any for it.
-   * Whoever joins with nobody in the huddle starts one, whose message gets its id here, unless
-   * `resumed` is the room's last, which then goes on (./message.ts).
+   * Workspace's word for them. A huddle that's full, or huddles being off, for everyone or in the
+   * room's settings, closes the socket at once with the code that says so. Someone already in the
+   * huddle moves to this tab: their other socket closes, and the others hear that they changed rather
+   * than that they left and joined. The room, which lets people in one at a time, sets its alarm to
+   * check the huddle once someone's in it. The tab is welcomed with `iceServers`, the servers its
+   * connections go by, if the room has any for it. Whoever joins with nobody in the huddle starts one,
+   * whose message gets its id here, unless `resumed` is the room's last, which then goes on
+   * (./message.ts).
    */
   async join(user: User, roomId: RoomId, tags: string[], muted: boolean, iceServers: HuddleIceServer[] | null, resumed?: ResumedHuddle): Promise<Response> {
-    const app = await this.appNow();
+    const app = await this.appIn(roomId);
     if (!app) return closedAtOnce(HuddleCloseCode.Off);
     let members = this.members();
     // Whoever joined through an app huddles no longer run through connects again, through this one, to
@@ -455,13 +470,14 @@ export class Huddle {
   }
 
   /**
-   * The servers a tab that joins now makes its connections by, while huddles have a relay: what
-   * Cloudflare answers the room with for the tab, or null without a relay, or when the room can't say.
-   * The tab is let in either way. The Workspace is asked afresh, so a relay set up a moment ago is
-   * the next tab's to use.
+   * The servers a tab that joins room `roomId`'s huddle now makes its connections by, while huddles
+   * have a relay: what Cloudflare answers the room with for the tab, or null without a relay, or when
+   * the room can't say. The tab is let in either way. The Workspace is asked afresh, so a relay set up
+   * a moment ago is the next tab's to use, and the join that follows goes by what the room's settings
+   * say of huddles now.
    */
-  async iceServers(): Promise<HuddleIceServer[] | null> {
-    const app = await this.appNow(true).catch(() => null);
+  async iceServers(roomId: RoomId): Promise<HuddleIceServer[] | null> {
+    const app = await this.appIn(roomId, true).catch(() => null);
     return app?.relay ? relayServers(this.env, app.relay) : null;
   }
 
@@ -526,32 +542,36 @@ export class Huddle {
    * went, and every tab closes its own connections as its socket closes. Unless `silence` says to, the
    * SFU is asked nothing: with huddles off or their app changed there's no asking it as the app those
    * connections are with. A room that's deleted can ask, and has it close what everyone published, so
-   * that a tab which kept its connections open is heard by nobody, and hears nobody.
+   * that a tab which kept its connections open is heard by nobody, and hears nobody. So can the check
+   * of a huddle that only its room's settings end (`check`), which asks about `most` of it at once.
+   * It's what each had published as their socket closed that the SFU closes, so a tab that published
+   * while the room was finding out that the huddle ends is no exception.
    */
-  end(code: CloseCode | HuddleCloseCode, silence = false): void {
+  end(code: CloseCode | HuddleCloseCode, silence = false, most = SILENCED_PER_DELETE): void {
     const members = this.members();
     if (members.length === 0) return;
     for (const { socket } of members) this.close(socket, code, false);
-    if (silence) this.ctx.waitUntil(this.silence(members));
+    if (silence) this.ctx.waitUntil(this.silence(members, most));
     this.reportSoon();
   }
 
   /**
    * Has the SFU close what each of `members` published, as it was when their sockets closed. That's a
-   * request for each microphone, each camera and each screen, the microphones first, and as many now as
-   * the 50 an event may make on Workers' free plan: a full huddle's microphones fit, which closing what
-   * each heard as well wouldn't, and it's all it takes for nobody to hear anything. The cameras and
-   * screens that don't fit, and whatever the SFU didn't close, are kept for the deleted room's alarm,
-   * which asks about them (`closeUnclosed`) before it erases the room.
+   * request for each microphone, each camera and each screen, the microphones first, and `most` of them
+   * now. A deleted room's are as many as the 50 an event may make on Workers' free plan: a full huddle's
+   * microphones fit, which closing what each heard as well wouldn't, and it's all it takes for nobody
+   * to hear anything. The cameras and screens that don't fit, and whatever the SFU didn't close, are
+   * kept for the room's alarm, which asks about them (`closeUnclosed`), a deleted room's before it
+   * erases the room.
    */
-  private async silence(members: Member[]): Promise<void> {
+  private async silence(members: Member[], most: number): Promise<void> {
     const app = await this.appNow().catch(() => undefined);
     if (!app) return;
     const published = HUDDLE_TRACK_KINDS.flatMap((kind) =>
       members.flatMap(({ socket, attachment }) => (attachment.appId === app.appId ? sessionsOf({ publishing: connectionsOf(attachment, kind).publishing }).map((session) => ({ socket, kind, session })) : [])),
     );
-    const unclosed = published.slice(SILENCED_PER_DELETE).map(({ session }) => session);
-    for (const { socket, kind, session } of published.slice(0, SILENCED_PER_DELETE)) {
+    const unclosed = published.slice(most).map(({ session }) => session);
+    for (const { socket, kind, session } of published.slice(0, most)) {
       // A tab publishing as its socket closed has what that made closed by the frame that made it.
       await this.sending[kind].get(socket)?.last;
       const mids = await this.closeOn(app, session);
@@ -562,18 +582,22 @@ export class Huddle {
 
   /**
    * Checks the huddle, as the room's alarm has it do every `HUDDLE_CHECK_MS` while one goes on: ends it
-   * once huddles are off or run through another app, takes out whoever's socket has gone unheard, tells
-   * the Workspace who's in it again, which is what makes up for a report that failed, and asks the SFU
-   * again to close the tracks it didn't. Answers when to check next, or null once there's nobody in the
-   * huddle, the Workspace has heard so, and nothing is left to close.
+   * once huddles are off, for everyone or in the room's settings, or run through another app, takes
+   * out whoever's socket has gone unheard, tells the Workspace who's in it again, which is what makes
+   * up for a report that failed, and asks the SFU again to close the tracks it didn't. A huddle the
+   * room's settings end has the SFU close what everyone in it published, as a deleted room's does.
+   * Answers when to check next, or null once there's nobody in the huddle, the Workspace has heard so,
+   * and nothing is left to close.
    */
   async check(now = Date.now()): Promise<number | null> {
     const members = this.members();
     if (members.length > 0) {
-      // Asked afresh, so turning huddles off ends one within a check. Unanswered, the huddle goes on.
-      const app = await this.appNow(true).catch(() => undefined);
-      if (app === null || (app && members.some(({ attachment }) => attachment.appId !== app.appId))) this.end(app ? CloseCode.Reconnect : HuddleCloseCode.Off);
-      else {
+      // Asked afresh, so turning huddles off, for everyone or in this room, ends one within a check. Unanswered, the huddle goes on.
+      const app = await this.appIn(members[0]!.attachment.roomId, true).catch(() => undefined);
+      if (app === null || (app && members.some(({ attachment }) => attachment.appId !== app.appId))) {
+        // Where only the room's settings end it, huddles still run through the app, which the SFU is asked as.
+        this.end(app ? CloseCode.Reconnect : HuddleCloseCode.Off, !app, SILENCED_PER_CHECK);
+      } else {
         for (const { socket } of members.filter((member) => this.isSilent(member, now)).slice(0, REMOVED_PER_CHECK)) this.remove(socket, CloseCode.Reconnect);
         if (app) this.takeDownWhatsOff(app);
       }
@@ -640,7 +664,9 @@ export class Huddle {
    * Workspace tells those of them who are in the room, on every tab they have open, and the room pushes
    * the invitation to whoever the Workspace finds with Ember in view nowhere, without the tab waiting
    * on it. A tab that has invited people as often as one may in a minute hears that nobody more is, and
-   * so does one whose invitation the Workspace couldn't be given.
+   * so does one whose invitation the Workspace couldn't be given. The room's message of the huddle is
+   * theirs to come back to, should they not join, so the room keeps that someone was invited before
+   * anyone is, and whoever invites them can leave at once (./message.ts).
    */
   private async invite(ws: WebSocket, userIds: UserId[]): Promise<void> {
     const inviting = oneMore(attachmentOf(ws).inviting, Date.now(), MINUTE_MS, INVITES_A_MINUTE);
@@ -649,6 +675,8 @@ export class Huddle {
     const inIt = new Set(this.members().map(({ attachment }) => attachment.user.id));
     const invited = userIds.filter((userId) => !inIt.has(userId));
     if (invited.length === 0) return;
+    change(ws, (attachment) => ({ ...attachment, invited: true }));
+    this.ctx.waitUntil(this.changed(this.now()));
     try {
       const pushes = await workspace(this.env).inviteToHuddle(roomId, user.id, invited);
       // A Workspace still on the code from before it answered pushes, as it may be for some minutes after an update, answers nothing.
@@ -973,11 +1001,21 @@ export class Huddle {
   }
 
   /** The SFU app huddles run through, or null while they're off, as the Workspace said within `APP_KEPT_MS`, or says now. */
-  private async appNow(fresh = false): Promise<HuddleApp | null> {
-    if (!fresh && this.known && Date.now() - this.known.at < APP_KEPT_MS) return this.known.app;
+  private async appNow(): Promise<HuddleApp | null> {
+    if (this.known && Date.now() - this.known.at < APP_KEPT_MS) return this.known.app;
     const app = await workspace(this.env).huddleApp();
     this.known = { app, at: Date.now() };
     return app;
+  }
+
+  /**
+   * The same for a huddle in room `roomId`, as the Workspace said of the room within `APP_KEPT_MS`, or
+   * says now: null, too, while the room's settings don't allow huddles in it. The app is known either
+   * way, so the room still has the SFU close what a huddle that its settings end leaves open.
+   */
+  private async appIn(roomId: RoomId, fresh = false): Promise<HuddleApp | null> {
+    if (fresh || this.known?.allowed === undefined || Date.now() - this.known.at >= APP_KEPT_MS) this.known = { ...(await workspace(this.env).huddlesIn(roomId)), at: Date.now() };
+    return this.known.allowed ? this.known.app : null;
   }
 
   /**

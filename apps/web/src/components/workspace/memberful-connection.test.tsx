@@ -24,6 +24,7 @@ const grace: MemberfulAccount = { name: "Grace Hopper", emailAddress: "grace@exa
 const DISCONNECTED: ProfileAnswer = {
   profile: {
     name: "Grace Hopper",
+    username: null,
     emailAddress: "grace@example.com",
     bio: null,
     avatarUrl: "/users/t0k3n/avatar?v=1",

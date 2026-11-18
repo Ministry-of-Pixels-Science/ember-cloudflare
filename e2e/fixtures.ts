@@ -1,4 +1,4 @@
-import { test as base, expect, type APIRequestContext, type APIResponse, type Browser, type BrowserContext, type Locator, type Page, type WebSocketRoute } from "@playwright/test";
+import { test as base, expect, type APIRequestContext, type APIResponse, type Browser, type BrowserContext, type Download, type Locator, type Page, type Route, type WebSocketRoute } from "@playwright/test";
 import { roomSocketQuery, type Account, type Bootstrap, type ClientFrame, type Invitation, type LiveHuddle, type Message, type ServerFrame, type Sidebar, type User, type WorkspaceServerFrame, type WorkspaceSettings } from "@ember/protocol";
 import { bodyFromPlainText } from "@ember/richtext";
 
@@ -160,6 +160,33 @@ export interface PushOptions {
   on?: boolean;
 }
 
+/** The name `download` was offered under, which WebKit on Linux suggests with an underscore for each space. */
+export function downloadName(download: Download): string {
+  return download.suggestedFilename().replaceAll("_", " ");
+}
+
+/**
+ * Lets every page in `context` read the clipboard, and write to it, which WebKit lets a page do
+ * without asking, so it has no permission to grant for that.
+ */
+export async function allowClipboard(context: BrowserContext): Promise<void> {
+  const writing = context.browser()?.browserType().name() === "webkit" ? [] : ["clipboard-write"];
+  await context.grantPermissions(["clipboard-read", ...writing]);
+}
+
+/**
+ * Answers `route` with the server's answer, its JSON changed by `change`, or with a refusal as it came.
+ * It asks for the whole answer, leaving out what the page says it has a copy of: a 304 can't be handed
+ * to WebKit, and the page's request sent on to the server instead could find the data changed by then
+ * and bring the page the server's answer unchanged.
+ */
+export async function answerChanged<T>(route: Route, change: (body: T) => unknown): Promise<void> {
+  const headers = Object.fromEntries(Object.entries(route.request().headers()).filter(([name]) => !name.startsWith("if-")));
+  const response = await route.fetch({ headers });
+  if (!response.ok()) return route.fulfill({ response });
+  await route.fulfill({ response, json: change((await response.json()) as T) });
+}
+
 /**
  * Lets every page in `context` show notifications, with Web Push on, which the test server's isn't,
  * and a stand-in for the browser's push service, which headless Chromium can't reach: a subscription
@@ -167,16 +194,16 @@ export interface PushOptions {
  */
 export async function allowNotifications(context: BrowserContext, { endpoint = uniqueEndpoint(), on = true }: PushOptions = {}): Promise<void> {
   await context.grantPermissions(["notifications"]);
-  await context.route("**/api/bootstrap", async (route) => {
-    const response = await route.fetch();
-    await route.fulfill({ response, json: { ...((await response.json()) as Bootstrap), vapidPublicKey: VAPID_PUBLIC_KEY } });
-  });
+  await context.route("**/api/bootstrap", (route) => answerChanged<Bootstrap>(route, (bootstrap) => ({ ...bootstrap, vapidPublicKey: VAPID_PUBLIC_KEY })));
   await context.addInitScript(standInPushService, { endpoint, on, keys: PUSH_KEYS });
 }
 
 /** The push service `allowNotifications` stands in, for each page before the app loads. */
 function standInPushService({ endpoint, on, keys }: { endpoint: string; on: boolean; keys: typeof PUSH_KEYS }) {
-  if (!("PushManager" in window)) return;
+  // Safari on an iPhone has notifications and push only for Ember on the Home Screen, so WebKit's phones,
+  // which have neither, get them as Ember on the Home Screen has them.
+  if (!("Notification" in window)) Object.assign(window, { Notification: class {} });
+  if (!("PushManager" in window)) Object.assign(window, { PushManager: class {} });
   // The headless shell CI runs keeps notifications denied whatever the context grants.
   Object.defineProperty(Notification, "permission", { get: () => "granted" });
   Notification.requestPermission = async () => "granted";
@@ -239,7 +266,7 @@ export async function isolateRoom(page: Page, room: TestRoom, { joinCode, huddle
   const invitation = joinCode === undefined ? null : { roomId: room.id, joinCode };
   const huddles = huddle ? { [room.id]: huddle } : {};
   await page.route("**/api/sidebar", (route) =>
-    route.fulfill({ json: { rooms: [{ ...room, kind: "open", icon: null, unread: false, involvement: "mentions" }], favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation, huddles } satisfies Sidebar }),
+    route.fulfill({ json: { rooms: [{ ...room, kind: "open", icon: null, unread: false, involvement: "mentions" }], favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation, huddles, blocks: { userIds: [], version: 0 } } satisfies Sidebar }),
   );
   await keepOtherRoomsOut(page, [room.id]);
 }
@@ -259,13 +286,7 @@ export type Tells = (frame: WorkspaceServerFrame) => void;
 export async function changeTheWorkspace(page: Page, change: (account: Account) => Account, passes: Passes = () => true): Promise<Tells> {
   const changed = <T extends { account: Account }>(body: T): T => ({ ...body, account: change(body.account) });
   let socket: WebSocketRoute | undefined;
-  for (const path of ["**/api/bootstrap", "**/api/account"]) {
-    await page.route(path, async (route) => {
-      const response = await route.fetch();
-      if (!response.ok()) return route.fulfill({ response });
-      await route.fulfill({ response, json: changed(await response.json()) });
-    });
-  }
+  for (const path of ["**/api/bootstrap", "**/api/account"]) await page.route(path, (route) => answerChanged<{ account: Account }>(route, changed));
   await page.routeWebSocket(WORKSPACE_SOCKET, (ws) => {
     socket = ws;
     const server = ws.connectToServer();
@@ -359,6 +380,24 @@ export async function drawnPicture(page: Page, name: string, width: number, heig
     [width, height] as const,
   );
   return { name, mimeType: "image/png", buffer: Buffer.from(bytes) };
+}
+
+/**
+ * The type of the variants `page`'s browser makes of a PNG, such as an avatar or a picture's preview, as
+ * apps/web/src/lib/previews.ts makes them: a WebP, or where the browser can't encode WebP, as Safari
+ * can't, a PNG, which may be see-through as the picture may. A video's poster, which can't be, is a JPEG
+ * there instead.
+ */
+export async function variantType(page: Page, { seeThrough = true } = {}): Promise<string> {
+  const webp = await page.evaluate(
+    () =>
+      new Promise<string | undefined>((resolve) => {
+        const canvas = Object.assign(document.createElement("canvas"), { width: 1, height: 1 });
+        canvas.toBlob((blob) => resolve(blob?.type), "image/webp");
+      }),
+  );
+  if (webp === "image/webp") return webp;
+  return seeThrough ? "image/png" : "image/jpeg";
 }
 
 /** The size of the picture `image` shows, once it has loaded, and its type, as the server answers it. */
@@ -482,8 +521,10 @@ export interface AppFixtures {
   policyKept: void;
 }
 
-/** What Chromium logs when a page's Content-Security-Policy blocks something, which is all a browser does about it. */
+/** What a browser logs when a page's Content-Security-Policy blocks something, which is all it does about it. */
 const CSP_VIOLATION = /Content Security Policy/;
+/** Whether a violation the browser logged is of `directive`, as Chromium names it (`directive: "frame-ancestors 'self'"`) or WebKit does (`the frame-ancestors directive`). */
+const isOf = (violation: string, directive: string) => violation.includes(`directive: "${directive}`) || violation.includes(`the ${directive} directive`);
 /** The annotation a test that means to see the policy refuse something carries, naming the directive. */
 const EXPECTED_VIOLATION = "policy-violation";
 /** What the policy blocked on the pages of every context this worker opened, since the test began. */
@@ -493,6 +534,24 @@ const watchPolicy = (context: BrowserContext) =>
 
 /** Says the test means to see the policy refuse something under `directive`, which otherwise fails it. */
 export const expectsPolicyViolation = (directive: string) => test.info().annotations.push({ type: EXPECTED_VIOLATION, description: directive });
+
+/** The methods an `APIRequestContext` sends a request with. */
+const SENDS = ["delete", "fetch", "get", "head", "patch", "post", "put"] as const;
+
+/**
+ * Has `request` send a request again, once, should its connection be reset. Playwright keeps a
+ * connection open for the next request, and the test server closes one that has been idle for five
+ * seconds, so a request sent at that moment is lost before the server reads any of it, which
+ * Playwright calls a socket hang up.
+ */
+function sendAgainWhenReset(request: APIRequestContext): APIRequestContext {
+  for (const method of SENDS) {
+    const send = request[method].bind(request) as APIRequestContext["fetch"];
+    const again: APIRequestContext["fetch"] = (target, options) => send(target, { maxRetries: 1, ...options });
+    request[method] = again;
+  }
+  return request;
+}
 
 export const test = base.extend<AppFixtures>({
   // The Worker's policy applies to every page a test opens, in its own context or one it makes for
@@ -504,6 +563,8 @@ export const test = base.extend<AppFixtures>({
       browser.newContext = async (...options) => {
         const context = await newContext(...options);
         watchPolicy(context);
+        // Its requests, a page's among them, are sent again when their connection is reset, as the test's own are.
+        sendAgainWhenReset(context.request);
         return context;
       };
       await use(browser);
@@ -515,12 +576,15 @@ export const test = base.extend<AppFixtures>({
     async ({}, use, testInfo) => {
       blocked.length = 0;
       await use();
-      const expected = testInfo.annotations.filter((annotation) => annotation.type === EXPECTED_VIOLATION).map((annotation) => annotation.description);
-      const unexpected = blocked.filter((message) => !expected.some((directive) => message.includes(`directive: "${directive}`)));
+      const expected = testInfo.annotations.filter((annotation) => annotation.type === EXPECTED_VIOLATION).flatMap((annotation) => annotation.description ?? []);
+      const unexpected = blocked.filter((message) => !expected.some((directive) => isOf(message, directive)));
       expect(unexpected, "The Content-Security-Policy blocked something on a page").toEqual([]);
     },
     { auto: true },
   ],
+  request: async ({ request }, use) => {
+    await use(sendAgainWhenReset(request));
+  },
   session: async ({ request }, use) => {
     await use(await createSession(request, "Test Person"));
   },

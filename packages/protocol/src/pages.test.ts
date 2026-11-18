@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { huddlePath, isAppPage, MAX_ID_LENGTH, threadPath, TRANSFER_PATH, transferLink, workspacePageOf } from "./index";
+import { huddlePath, HUDDLES_PATH, isAppPage, MAX_ID_LENGTH, pageAfterWelcome, signInReturnPathIn, threadPath, TRANSFER_PATH, transferLink, welcomePath, workspacePageOf, workspacePathIn } from "./index";
+
+// This package is typed without a platform's library.
+declare const URL: object;
 
 describe("Error pages", () => {
   it("names the pages the app shows, for the Worker to serve the app at", () => {
     const pages = ["/", "/rooms", "/rooms/general", "/rooms/caf%C3%A9", "/rooms/opens/general", "/rooms/directs/ada-grace", "/rooms/opens/new", "/rooms/closeds/new"];
-    for (const path of [...pages, "/rooms/opens/general/edit", "/account/edit", "/account/custom_styles/edit", "/session/new", "/oauth/authorize"]) expect(isAppPage(path), path).toBe(true);
+    for (const path of [...pages, "/rooms/opens/general/edit", "/account/edit", "/account/custom_styles/edit", "/session/new", "/oauth/authorize", "/welcome"]) expect(isAppPage(path), path).toBe(true);
     expect(workspacePageOf("/rooms/caf%C3%A9")).toEqual({ page: "room", roomId: "café" });
   });
 
@@ -99,6 +102,47 @@ describe("Huddles", () => {
   });
 });
 
+describe("Welcome", () => {
+  const origin = "https://ember.example.com";
+
+  it("goes on to the page someone new signed in from, which its address names, or home", () => {
+    expect(welcomePath("/")).toBe("/welcome");
+    expect(welcomePath("/rooms/abc?tab=pins#latest")).toBe("/welcome?return_to=%2Frooms%2Fabc%3Ftab%3Dpins%23latest");
+    expect(pageAfterWelcome("?return_to=%2Frooms%2Fabc%3Ftab%3Dpins%23latest", origin)).toBe("/rooms/abc?tab=pins#latest");
+    expect(pageAfterWelcome("", origin)).toBe("/");
+    expect(pageAfterWelcome("?return_to=", origin)).toBe("/");
+  });
+
+  it("goes home rather than to another site, or a page that isn't the workspace's", () => {
+    for (const address of ["https://example.com/rooms/abc", "//example.com/rooms/abc", "/api/me", "/welcome", "/session/new", "javascript:alert(1)", "http://["]) {
+      expect(workspacePathIn(address, origin), address).toBe("/");
+      expect(pageAfterWelcome(`?return_to=${encodeURIComponent(address)}`, origin), address).toBe("/");
+    }
+    expect(workspacePathIn(`${origin}/rooms/abc`, origin)).toBe("/rooms/abc");
+    expect(workspacePathIn(null, origin)).toBe("/");
+  });
+
+  it("goes on in browsers without `URL.parse`, as Safari's before 18 and Chrome's before 126 are", () => {
+    const parse = Object.getOwnPropertyDescriptor(URL, "parse");
+    Reflect.deleteProperty(URL, "parse");
+    try {
+      expect(pageAfterWelcome("?return_to=%2Frooms%2Fabc", origin)).toBe("/rooms/abc");
+      expect(pageAfterWelcome(`?return_to=${encodeURIComponent("http://[")}`, origin)).toBe("/");
+    } finally {
+      if (parse) Object.defineProperty(URL, "parse", parse);
+    }
+  });
+
+  it("is a page signing in comes back to, for someone whose session ended there, which checks where it goes on to itself", () => {
+    for (const address of ["/welcome", "/welcome?return_to=%2Frooms%2Fabc", "/welcome?return_to=https%3A%2F%2Fexample.com", "/rooms/abc?tab=pins#latest"]) {
+      expect(signInReturnPathIn(address, origin), address).toBe(address);
+    }
+    for (const address of ["https://example.com/welcome", "//example.com/welcome", "/welcome/", "/api/me", "/session/new", null]) {
+      expect(signInReturnPathIn(address, origin), String(address)).toBe("/");
+    }
+  });
+});
+
 describe("Edit your profile", () => {
   it("shows your profile at anyone's profile address", () => {
     for (const path of ["/users/me/profile", "/users/01J9Z3/profile"]) expect(workspacePageOf(path), path).toEqual({ page: "profile" });
@@ -181,6 +225,14 @@ describe("Private sign-in link", () => {
   it("leaves a sign-in link's page to the Worker, as it's no workspace page", () => {
     expect(workspacePageOf(TRANSFER_PATH)).toBeNull();
     expect(isAppPage(TRANSFER_PATH)).toBe(false);
+  });
+});
+
+describe("Huddles page", () => {
+  it("shows the huddles at `/huddles`, and nothing under it", () => {
+    expect(workspacePageOf(HUDDLES_PATH)).toEqual({ page: "huddles" });
+    expect(isAppPage("/huddles")).toBe(true);
+    for (const path of ["/huddles/", "/huddles/new", "/huddle"]) expect(workspacePageOf(path), path).toBeNull();
   });
 });
 

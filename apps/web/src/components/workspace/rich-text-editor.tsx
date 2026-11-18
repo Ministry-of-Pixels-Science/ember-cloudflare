@@ -188,14 +188,24 @@ function changeText(lexxy: LexxyEditor, change: () => void, tag?: string) {
  * Keeps the editor's selection while focus is outside the text, as on the formatting row, where the page's
  * selection moves only as the editor redraws what's under it: Bold, pressed from the keyboard, redraws
  * what's selected and leaves the page's selection collapsed before it, which the editor would take once the
- * page told it, so the row's next button would format nothing. As focus leaves, the editor takes what's
- * selected on the page, which the page may not have told it of yet, as when Tab comes straight after Home.
+ * page told it, so the row's next button would format nothing. As Tab is pressed, and as focus leaves, the
+ * editor takes what's selected on the page, which the page may not have told it of yet, as when Tab comes
+ * straight after Home: Safari lets go of the page's selection as Tab takes focus to a button, before the
+ * text hears that focus has gone.
  */
 function keepSelectionWhileAway(lexxy: LexxyEditor) {
   const { editor } = lexxy;
   // Left off the page, where it would put focus back in the text.
   const leavingThePage = () => Lexical.$addUpdateTag(Lexical.SKIP_DOM_SELECTION_TAG);
   return Lexical.mergeRegister(
+    editor.registerCommand(
+      Lexical.KEY_TAB_COMMAND,
+      () => {
+        $catchUpWithThePage(editor);
+        return false;
+      },
+      Lexical.COMMAND_PRIORITY_CRITICAL,
+    ),
     editor.registerCommand(
       Lexical.BLUR_COMMAND,
       () => {

@@ -26,8 +26,12 @@ function peopleListed(names: string[], count: number): string {
  */
 export const huddledWith = (room: DirectRoom, meId: UserId, joinsNone: (user: User) => boolean): User[] => room.members.filter((member) => member.id !== meId && !joinsNone(member));
 
-/** Whether a room has huddles where they're on: every shared room, and a direct message with someone to huddle with. */
-export const hasHuddles = (room: Room, meId: UserId, joinsNone: (user: User) => boolean): boolean => room.kind !== "direct" || huddledWith(room, meId, joinsNone).length > 0;
+/**
+ * Whether a room has huddles where they're on: every shared room whose settings allow them, and a
+ * direct message with someone to huddle with.
+ */
+export const hasHuddles = (room: Room, meId: UserId, joinsNone: (user: User) => boolean): boolean =>
+  room.kind === "direct" ? huddledWith(room, meId, joinsNone).length > 0 : room.huddles !== false;
 
 /**
  * Who the person `meId` signs in can invite into a huddle they're in, of the people in its room
@@ -96,6 +100,18 @@ export function wereInTheHuddle(others: string[], you: boolean): string {
   if (others.length === 1 && !you) return `${firstName(others[0]!)} was in the huddle`;
   const everyone = you && others.length <= MAX_NAMED ? toSentence([...others.map(firstName), "you"]) : peopleListed(others, others.length);
   return `${everyone} were in the huddle`;
+}
+
+/**
+ * Who was in a room's huddle that's over, for anyone in the room, where only their ids are known:
+ * `others` are the names known of the `count` people who were in it besides them, and `you` says they
+ * were in it too, when it's as `wereInTheHuddle` says it. Whoever has no name known is counted, "Sam and
+ * 2 others were in the huddle", and with them in it, everyone is: "3 people were in the huddle".
+ */
+export function wereInItsHuddle(others: string[], count: number, you: boolean): string {
+  if (others.length === count) return wereInTheHuddle(others, you);
+  const [named, people] = you ? [[], count + 1] : [others, count];
+  return `${peopleListed(named, people)} ${people === 1 ? "was" : "were"} in the huddle`;
 }
 
 const counted = (count: number, one: string) => (count === 1 ? `1 ${one}` : `${count} ${one}s`);

@@ -437,8 +437,9 @@ environment has them, so the Preview workflow passes repository secrets of the s
 
 While it's on, the sign-in page offers Member? Sign in with Memberful under its form. Someone with an
 active subscription, or the all access pass, signs in as the person their Memberful account is
-linked to, or else joins as a new member, in every open room, and everyone else joins and signs in
-as before. Accounts are linked by the Memberful site and the member's id there, never by email
+linked to, or else joins as a new member, in every open room, and goes on from a welcome page where
+they choose their photo, name and username, which starts as their name in lowercase letters and
+numbers. Everyone else joins and signs in as before. Accounts are linked by the Memberful site and the member's id there, never by email
 address, since Memberful lets anyone register an address without proving it's theirs: someone new
 whose Memberful email address someone here has already is turned away, and asked to sign in with
 their password. At another address, even the same site's, every member would be someone new, so
@@ -1283,6 +1284,17 @@ you're the only one in it, quiet music plays on a loop, as Slack's does, from fi
 find yourself alone until someone joins you. The two sounds, and an invitation's ring, were written
 for Ember and the music was generated for it by Google's AI, so nothing is owed for playing them, and
 `apps/web/src/lib/huddle-sounds/` says where each came from and how to change them.
+
+Each person chooses which of these they hear, under **Huddle sounds** on their profile, where
+huddles are on: a switch for the music, "Play music when you're the only one in a huddle", one for
+the two sounds, "Play a sound when someone joins or leaves", and one for an invitation's ring, "Ring
+when someone invites you to a huddle". Each is on until they turn it off, and is saved as it's
+moved, with their account, as Slack keeps its preferences, so it holds wherever they're signed in,
+and their other tabs and devices go by it at once. So does the huddle they're in: the music stops
+as it's turned off, and turned on while they're alone, starts five seconds later. With the ring off
+an invitation still shows, without a sound, and still reaches them as a push notification where it
+would have.
+
 Ctrl+Alt+Shift+H (⌘⌥⇧H on a Mac) leaves the huddle you're in, or opens the preview for the room
 you're looking at, and Ctrl+Shift+Space (⌘⇧Space) mutes and unmutes. The arrow beside the headphones
 copies the huddle's link, which opens the room at the preview, or the huddle once you're in it. A
@@ -1302,6 +1314,12 @@ wanted in it, and nobody can edit it. Whoever started the huddle can delete it, 
 administrator, which leaves the huddle going with no message. Someone who was in a huddle and joins
 the room's again within half a minute of its end goes on with that huddle, under the same message,
 so the last person's lost connection doesn't leave the room two of them. Anyone else starts another.
+
+A huddle that nobody joined leaves no message, as Slack's leaves none: once whoever started it has
+left, its message goes from the room, as a deleted message does. It stays where it's someone's to
+come back to: for whoever was invited into the huddle, as the others in a direct message are, so
+that a huddle nobody answered still shows there, and for a reply in its thread or a reaction.
+Whoever comes back to a huddle that left no message starts another.
 
 The huddle shows that thread itself, beside the people in it, where Slack's huddle window has it:
 under Thread, it says what a huddle's thread is for, then what's been written in it, over a composer
@@ -1323,13 +1341,13 @@ sidebar, when there's someone in it to huddle with, which a bot or an AI agent i
 can no longer sign in. Starting one there invites the others in it. Wherever they have Ember open,
 an invitation shows in the window's corner, under the header, whatever page they're on: who invites
 them, over Decline and Join. It rings for half a minute, in one of a browser's tabs at a time, and
-without a sound for someone who's in a huddle already. Join opens the huddle's preview, so nobody is
-in a huddle before they've said how they join it, and answering an invitation, either way, takes it
-down in their other tabs and on their other devices. Whoever started the huddle isn't told of a
-Decline. It stops ringing by itself once the huddle is over, or once they're in it. An invitation
-reaches the people in the direct message who hear its @mentions or more, so nobody who has turned
-its notifications off. Nothing is kept of an invitation, so a tab whose connection is down when one
-comes never shows it.
+without a sound for someone who's in a huddle already, or who has turned the ring off on their
+profile. Join opens the huddle's preview, so nobody is in a huddle before they've said how they join
+it, and answering an invitation, either way, takes it down in their other tabs and on their other
+devices. Whoever started the huddle isn't told of a Decline. It stops ringing by itself once the
+huddle is over, or once they're in it. An invitation reaches the people in the direct message who
+hear its @mentions or more, so nobody who has turned its notifications off. Nothing is kept of an
+invitation, so a tab whose connection is down when one comes never shows it.
 
 Anyone in a huddle can invite more of its room's people into it. Invite people, the first button
 along the huddle's base, or in the menu of More, the last before Leave, on a phone, lists the people
@@ -1352,6 +1370,22 @@ down. A tab in the background still shows the invitation, and rings if its brows
 someone with Ember behind another tab may get both. So may someone looking at a tab left open
 since before Ember was updated to do this: such a tab doesn't say whether it's shown, so it
 doesn't count until it's reloaded.
+
+While huddles are on, the sidebar has a Huddles row over the rooms, as Slack's has, which opens the
+Huddles page. Happening now lists the huddles going on in your rooms and direct messages, the
+latest to start first: each with its room, LIVE, who's in it and when it started, their faces, and
+Join, which opens the preview, unless this tab is in that huddle. The rest of its card goes to the
+room. The row ends with how many of them there are, on green. Under them, Recent huddles lists the
+latest 50 that are over, as Slack's page does: each with its room, when it started, how long it
+went on, how many replies its thread has, and the faces of the first who were in it, whom a pointer
+names. A row goes to the huddle's thread, beside its room. Everyone in a room has its huddles
+there, whether they were in them or not, and the huddles from before Ember had the page are listed
+once someone next opens their room. A huddle nobody else joined is listed only while its thread has
+a reply, as Slack lists none that left nothing behind. One whose message is deleted goes from the
+list, as a deleted room's do, and the rooms you've hidden from your sidebar are left out of both
+lists and of the row's count. The page keeps up by itself: a huddle shows as it starts, moves to
+the recent ones as it ends, and counts its thread's replies as they're written. With huddles
+turned off the row goes from the sidebar, and the page, at `/huddles`, still lists the recent ones.
 
 An administrator turns huddles on under Huddles in community settings, with the switch on its card.
 Huddles run through Cloudflare's [Realtime SFU](https://developers.cloudflare.com/realtime/sfu/),
@@ -1380,6 +1414,16 @@ its person is told, and the room refuses any it's asked to show. With both off, 
 only. The room takes down whichever cameras and screens a tab left on, eight every half minute.
 Turning a switch on again gives its buttons back, and nobody's camera comes on, or screen is shared,
 by itself.
+
+A room can go without huddles, as a Slack channel can. While huddles are on, a room's settings have
+a Huddles switch for whoever can change the room, an administrator or the person who made it, which
+is on until they turn it off and save. A room with it off has no headphones at its top, its
+huddle's link opens the room and says that huddles are turned off there, and the room lets nobody
+into a huddle. A huddle going on there ends, which the settings say before they're saved: each tab
+in it leaves as it hears of the change, and tells its person why, and the room ends it within half a
+minute for any that didn't. Everyone else in the room reads in its settings that it has no huddles.
+A direct message has no settings, and its huddles go by who's in it. Turning huddles off for
+everyone leaves each room's switch as it was, for when they're on again.
 
 Some networks, like an office's or a hotel's, block the way a browser reaches the SFU, and nobody on
 one can connect to a huddle. A third card, Relay for strict networks, gives huddles a relay for them:

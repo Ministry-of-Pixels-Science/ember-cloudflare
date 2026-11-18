@@ -1,4 +1,4 @@
-import { CloseCode, type NewRoomForm, type RoomId, type RoomSettings, type SharedRoom, type UserId } from "@ember/protocol";
+import { CloseCode, type NewRoomForm, type RoomId, type RoomSettings, type SharedRoom, type Sidebar, type UserId } from "@ember/protocol";
 import { runInDurableObject } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Workspace } from "../src/workspace";
@@ -200,6 +200,96 @@ describe("Who can change a room", () => {
     });
     expect(crossSite.status).toBe(422);
     expect(await nameOf(room.id)).toBe("Design");
+  });
+});
+
+describe("Allow huddles in a room", () => {
+  /** A room as `session`'s sidebar lists it. */
+  const listed = async (roomId: RoomId, session: Session) => ((await (await api("/api/sidebar", as(session))).json()) as Sidebar).rooms.find((room) => room.id === roomId);
+
+  /** What the Workspace keeps of whether a room's settings allow huddles in it. */
+  const kept = (roomId: RoomId) => workspaceSql("SELECT huddles_allowed FROM rooms WHERE id = ?", roomId);
+
+  it("allows huddles in a room until its settings turn them off, which its settings and its people's sidebars then say", async () => {
+    const [ada, grace] = [await signIn("Ada"), await signIn("Grace")];
+    const [room, other] = [await createRoom("Announcements", { as: ada }), await createRoom("Design", { as: ada })];
+    expect(room).not.toHaveProperty("huddles");
+
+    const response = await change(room.id, ada, { huddles: false });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ room: { ...room, huddles: false } satisfies SharedRoom });
+    expect(((await (await settings(room.id, grace)).json()) as RoomSettings).room).toEqual({ ...room, huddles: false });
+    expect(await listed(room.id, grace)).toMatchObject({ ...room, huddles: false });
+    // In that room alone.
+    expect(await listed(other.id, grace)).not.toHaveProperty("huddles");
+    expect(await kept(other.id)).toEqual([{ huddles_allowed: 1 }]);
+  });
+
+  it("keeps huddles off through the room's other changes, and allows them again once its settings say so", async () => {
+    const ada = await signIn("Ada");
+    const room = await createRoom("Announcements", { as: ada });
+    expect((await change(room.id, ada, { huddles: false })).status).toBe(200);
+
+    const news: SharedRoom = { ...room, name: "News", icon: "rocket", kind: "closed", huddles: false };
+    expect(await (await change(room.id, ada, { name: "News", icon: "rocket", kind: "closed", memberIds: [ada.user.id] })).json()).toEqual({ room: news });
+    expect(await (await change(room.id, ada, {})).json()).toEqual({ room: news });
+
+    const { room: allowing } = (await (await change(room.id, ada, { huddles: true })).json()) as { room: SharedRoom };
+    expect(allowing).toEqual({ ...room, name: "News", icon: "rocket", kind: "closed" });
+    expect(allowing).not.toHaveProperty("huddles");
+    expect(await listed(room.id, ada)).not.toHaveProperty("huddles");
+    expect(await kept(room.id)).toEqual([{ huddles_allowed: 1 }]);
+  });
+
+  it("takes only true or false, and otherwise keeps the room as it is", async () => {
+    const ada = await signIn("Ada");
+    const room = await createRoom("Design", { as: ada });
+    for (const huddles of [null, 0, "false", "off"]) {
+      const response = await change(room.id, ada, { name: "Renamed", huddles });
+      expect(response.status, JSON.stringify(huddles)).toBe(422);
+      expect(await response.json()).toEqual({ error: "Huddles must be true or false" });
+    }
+    expect(await nameOf(room.id)).toBe("Design");
+    expect(await kept(room.id)).toEqual([{ huddles_allowed: 1 }]);
+  });
+
+  it("is for whoever can change the room, its creator and administrators, and nobody else in it", async () => {
+    const [ada, grace, linus] = [await signIn("Ada"), await signIn("Grace"), await signIn("Linus")];
+    const room = await createRoom("Design", { as: ada });
+    await promote(grace);
+
+    expect((await change(room.id, linus, { huddles: false })).status).toBe(403);
+    expect(await kept(room.id)).toEqual([{ huddles_allowed: 1 }]);
+    expect((await change(room.id, grace, { huddles: false })).status).toBe(200);
+    expect(await kept(room.id)).toEqual([{ huddles_allowed: 0 }]);
+    expect((await change(room.id, ada, { huddles: true })).status).toBe(200);
+    expect(await kept(room.id)).toEqual([{ huddles_allowed: 1 }]);
+  });
+
+  it("records no change when huddles are already as the room's settings say", async () => {
+    const ada = await signIn("Ada");
+    const room = await createRoom("Design", { as: ada });
+    const changedAt = () => workspaceSql("SELECT updated_at FROM rooms WHERE id = ?", room.id);
+    const then = () => workspaceSql("UPDATE rooms SET updated_at = 'then' WHERE id = ?", room.id);
+
+    await then();
+    expect((await change(room.id, ada, { huddles: true })).status).toBe(200);
+    expect(await changedAt()).toEqual([{ updated_at: "then" }]);
+    expect((await change(room.id, ada, { huddles: false })).status).toBe(200);
+    expect(await changedAt()).not.toEqual([{ updated_at: "then" }]);
+
+    await then();
+    expect((await change(room.id, ada, { huddles: false })).status).toBe(200);
+    expect(await changedAt()).toEqual([{ updated_at: "then" }]);
+  });
+
+  it("starts a new room with huddles allowed, whatever New room is sent of them", async () => {
+    const ada = await signIn("Ada");
+    const response = await api("/api/rooms", { method: "POST", headers: { Cookie: ada.cookie }, body: JSON.stringify({ kind: "open", name: "Design", huddles: false }) });
+    expect(response.status).toBe(201);
+    const { room } = (await response.json()) as { room: SharedRoom };
+    expect(room).not.toHaveProperty("huddles");
+    expect(await kept(room.id)).toEqual([{ huddles_allowed: 1 }]);
   });
 });
 

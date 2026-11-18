@@ -4,6 +4,7 @@ import {
   apart,
   inDirectOrder,
   inSidebarOrder,
+  isQuietWelcome,
   markedUnread,
   NO_ROOM_LIST,
   roomListReducer,
@@ -26,7 +27,7 @@ const direct = (id: string, ...names: string[]): DirectSidebarRoom => ({
 });
 const unstarred: Favorites = { rooms: [], version: 0 };
 /** The sidebar's list of `rooms`, starred as `favorites` says. */
-const sidebar = (rooms: SidebarRoom[], favorites = unstarred): Sidebar => ({ rooms, favorites, sharedOrder: [], invitation: null, huddles: {} });
+const sidebar = (rooms: SidebarRoom[], favorites = unstarred): Sidebar => ({ rooms, favorites, sharedOrder: [], invitation: null, huddles: {}, blocks: { userIds: [], version: 0 } });
 
 describe("Create an open room", () => {
   it("puts a new room last, as the room someone was put in most recently, and the sidebar below every other room, whatever its name", () => {
@@ -158,6 +159,16 @@ describe("Unread rooms", () => {
     const read = roomListReducer(asked, { type: "marked", roomId: "r2", at: null });
     expect(roomListReducer(read, { type: "loaded", list }).list!.rooms).toEqual([room("r1", "Design"), room("r2", "general")]);
   });
+
+  it("counts the messages a DM's mark says have come since, until it's read, keeping the count as the DM's saved", () => {
+    const dm = direct("d1", "Ada", "Grace");
+    const listed = roomListReducer(NO_ROOM_LIST, { type: "loaded", list: sidebar([dm]) });
+    const marked = roomListReducer(roomListReducer(listed, { type: "marked", roomId: "d1", at: NOON, count: 1 }), { type: "marked", roomId: "d1", at: NOON, count: 2 });
+    const counted: SidebarRoom = { ...dm, unread: true, unreadSince: NOON, unreadCount: 2 };
+    expect(marked.list!.rooms).toEqual([counted]);
+    expect(withRoom(marked.list!.rooms, { id: "d1", kind: "direct", members: dm.members, activeAt: NOON })).toEqual([counted]);
+    expect(roomListReducer(marked, { type: "marked", roomId: "d1", at: null }).list!.rooms).toEqual([dm]);
+  });
 });
 
 describe("Regenerate the join link", () => {
@@ -251,11 +262,59 @@ describe("Star rooms", () => {
   });
 });
 
+describe("Block someone", () => {
+  const blocks = (userIds: string[], version: number) => ({ userIds, version });
+
+  it("keeps the newest blocks, from a block's answer, the socket or the list, whichever arrives last", () => {
+    const loaded = roomListReducer(NO_ROOM_LIST, { type: "loaded", list: { ...sidebar(four), blocks: blocks(["u2"], 2) } });
+    const blocked = roomListReducer(loaded, { type: "blocked", blocks: blocks(["u2", "u3"], 3) });
+    expect(blocked.list!.blocks).toEqual(blocks(["u2", "u3"], 3));
+    // The answer to the block, arriving after the socket's news of the unblock that followed it.
+    expect(roomListReducer(blocked, { type: "blocked", blocks: blocks(["u2"], 2) }).list).toBe(blocked.list);
+    expect(roomListReducer(blocked, { type: "blocked", blocks: blocks(["u3"], 3) }).list).toBe(blocked.list);
+  });
+
+  it("keeps blocks made while a list is on its way over the list's, unless the list's are newer", () => {
+    const loaded = roomListReducer(NO_ROOM_LIST, { type: "loaded", list: sidebar(four) });
+    const blocked = roomListReducer(roomListReducer(loaded, { type: "asked" }), { type: "blocked", blocks: blocks(["u3"], 1) });
+    expect(roomListReducer(blocked, { type: "loaded", list: sidebar(four) }).list!.blocks).toEqual(blocks(["u3"], 1));
+    const newer = { ...sidebar(four), blocks: blocks(["u3", "u4"], 2) };
+    expect(roomListReducer(blocked, { type: "loaded", list: newer }).list!.blocks).toEqual(blocks(["u3", "u4"], 2));
+  });
+
+  it("starts with nobody blocked when the first list fails to arrive, so the next block counts", () => {
+    const unanswered = roomListReducer(NO_ROOM_LIST, { type: "unanswered" });
+    expect(unanswered.list!.blocks).toEqual(blocks([], 0));
+    expect(roomListReducer(unanswered, { type: "blocked", blocks: blocks(["u2"], 1) }).list!.blocks.userIds).toEqual(["u2"]);
+  });
+});
+
+describe("Reports", () => {
+  it("takes an administrator's count of open reports from the socket, the last count standing even over a list that came after it", () => {
+    const loaded = roomListReducer(NO_ROOM_LIST, { type: "loaded", list: { ...sidebar(four), openReports: 1 } });
+    expect(roomListReducer(loaded, { type: "reports", open: 2 }).list!.openReports).toBe(2);
+    const asked = roomListReducer(roomListReducer(loaded, { type: "asked" }), { type: "reports", open: 0 });
+    expect(roomListReducer(asked, { type: "loaded", list: { ...sidebar(four), openReports: 1 } }).list!.openReports).toBe(0);
+  });
+});
+
 describe("Reorder starred rooms", () => {
   it("drops the star of a room that's gone, as the server's stars do, so an order saved next is one it knows", () => {
     const loaded = roomListReducer(NO_ROOM_LIST, { type: "loaded", list: sidebar(four, { rooms: ["r1", "r3"], version: 2 }) });
     expect(roomListReducer(loaded, { type: "gone", roomId: "r1" }).list!.favorites).toEqual({ rooms: ["r3"], version: 2 });
     expect(roomListReducer(loaded, { type: "gone", roomId: "r2" }).list!.favorites).toBe(loaded.list!.favorites);
+  });
+});
+
+describe("Welcome someone who joins", () => {
+  const welcome: DirectSidebarRoom = { ...direct("d1", "Ada", "Grace"), joined: { userId: "ada", at: NOON } };
+
+  it("keeps the DM that welcomed someone quiet for them until a message comes in it, but never for the person welcoming them", () => {
+    expect(isQuietWelcome(welcome, "ada")).toBe(true);
+    expect(isQuietWelcome(welcome, "grace")).toBe(false);
+    expect(isQuietWelcome({ ...welcome, activeAt: "2026-10-15T12:05:00.000Z" }, "ada")).toBe(false);
+    expect(isQuietWelcome(direct("d2", "Ada", "Grace"), "ada")).toBe(false);
+    expect(isQuietWelcome(room("r1", "Design"), "ada")).toBe(false);
   });
 });
 
@@ -364,6 +423,15 @@ describe("Huddles in your rooms", () => {
     expect(another.list!.rooms).toBe(loaded.list!.rooms);
   });
 
+  it("takes whether a room allows huddles from the room as it's saved, which says so only while it doesn't", () => {
+    const off = roomListReducer(loaded, { type: "saved", room: { id: "r1", kind: "open", name: "Design", icon: null, huddles: false } });
+    expect(off.list!.rooms).toEqual([{ ...room("r1", "Design"), huddles: false }, room("r2", "general")]);
+    // Its huddle is the room's to end, so the list keeps it until it hears that it's over.
+    expect(off.list!.huddles).toEqual({ r1: huddle("ada") });
+    const on = roomListReducer(off, { type: "saved", room: { id: "r1", kind: "open", name: "Design", icon: null } });
+    expect(on.list!.rooms).toEqual([room("r1", "Design"), room("r2", "general")]);
+  });
+
   it("forgets the huddle of a room that's gone", () => {
     expect(roomListReducer(loaded, { type: "gone", roomId: "r1" }).list!.huddles).toEqual({});
     expect(roomListReducer(loaded, { type: "gone", roomId: "r2" }).list!.huddles).toEqual({ r1: huddle("ada") });
@@ -375,5 +443,37 @@ describe("Huddles in your rooms", () => {
     expect(roomListReducer(over, { type: "loaded", list }).list!.huddles).toEqual({});
     const started = roomListReducer(asked, { type: "huddle", roomId: "r2", huddle: huddle("grace") });
     expect(roomListReducer(started, { type: "loaded", list }).list!.huddles).toEqual({ r1: huddle("ada"), r2: huddle("grace") });
+  });
+});
+
+describe("Huddle sounds, which each person turns on or off for themselves", () => {
+  const EVERY_SOUND = { music: true, chimes: true, ring: true };
+  const NO_MUSIC = { ...EVERY_SOUND, music: false };
+  const list = sidebar([room("r1", "general")]);
+  const loaded = roomListReducer(NO_ROOM_LIST, { type: "loaded", list });
+
+  it("keeps which of a huddle's sounds its person hears, and says nothing of them once they hear them all, as the server's list doesn't", () => {
+    const quieter = roomListReducer(loaded, { type: "huddle sounds", sounds: NO_MUSIC });
+    expect(quieter.list!.huddleSounds).toEqual(NO_MUSIC);
+    expect(quieter.list!.rooms).toBe(loaded.list!.rooms);
+    const ringless = roomListReducer(quieter, { type: "huddle sounds", sounds: { ...NO_MUSIC, ring: false } });
+    expect(ringless.list!.huddleSounds).toEqual({ music: false, chimes: true, ring: false });
+
+    const all = roomListReducer(ringless, { type: "huddle sounds", sounds: EVERY_SOUND });
+    expect(all.list).not.toHaveProperty("huddleSounds");
+    expect(all.list).toEqual(list);
+  });
+
+  it("keeps the sounds a switch saved while a list was on its way over the ones the list has, a sound turned back on too", () => {
+    const asked = roomListReducer(loaded, { type: "asked" });
+    const off = roomListReducer(asked, { type: "huddle sounds", sounds: NO_MUSIC });
+    expect(roomListReducer(off, { type: "loaded", list }).list!.huddleSounds).toEqual(NO_MUSIC);
+    const on = roomListReducer(asked, { type: "huddle sounds", sounds: EVERY_SOUND });
+    expect(roomListReducer(on, { type: "loaded", list: { ...list, huddleSounds: NO_MUSIC } }).list).not.toHaveProperty("huddleSounds");
+  });
+
+  it("takes the sounds the list has otherwise, and has them all heard when the first list fails to arrive", () => {
+    expect(roomListReducer(roomListReducer(loaded, { type: "asked" }), { type: "loaded", list: { ...list, huddleSounds: NO_MUSIC } }).list!.huddleSounds).toEqual(NO_MUSIC);
+    expect(roomListReducer(NO_ROOM_LIST, { type: "unanswered" }).list).not.toHaveProperty("huddleSounds");
   });
 });

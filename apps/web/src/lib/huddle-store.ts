@@ -1,5 +1,5 @@
 import type { RoomId, User, UserId } from "@ember/protocol";
-import type { HuddlePerson, HuddleSticker } from "@ember/protocol/huddles";
+import { ALL_HUDDLE_SOUNDS, type HuddlePerson, type HuddleSounds, type HuddleSticker } from "@ember/protocol/huddles";
 import type { HuddleDevice } from "./huddle-devices";
 import { NO_REACTIONS, type ShownReactions } from "./huddle-reactions";
 
@@ -114,6 +114,26 @@ export const shownReactions = () => reactions;
 export function showReactions(shown: ShownReactions): void {
   reactions = shown;
   for (const listener of reactionListeners) listener();
+}
+
+// Which of a huddle's own sounds the tab's person hears is theirs to say on their profile, whether or
+// not the tab is in a huddle, so it's kept apart from the huddle as well, for its sounds to go by.
+let heard = ALL_HUDDLE_SOUNDS;
+const heardListeners = new Set<() => void>();
+
+/** Hears whenever which of a huddle's sounds the tab's person hears changes, until the function returned is called. */
+export function watchHeardSounds(listener: () => void): () => void {
+  heardListeners.add(listener);
+  return () => void heardListeners.delete(listener);
+}
+
+/** Which of a huddle's own sounds the tab's person hears: all of them, until the page says which they've turned off. */
+export const heardSounds = () => heard;
+
+/** Has the huddle the tab is in, and the next it joins, play only those of its sounds its person hears, `sounds`. The page calls this. */
+export function hearSounds(sounds: HuddleSounds): void {
+  heard = sounds;
+  for (const listener of heardListeners) listener();
 }
 
 /** The huddle the tab is in, or null. */

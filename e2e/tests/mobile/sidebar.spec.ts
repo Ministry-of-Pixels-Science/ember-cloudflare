@@ -1,10 +1,11 @@
 import type { Sidebar } from "@ember/protocol";
-import { cookieHeader, createRoom, keepOtherRoomsOut, openRoom, rowsWithStars, signInAs } from "../../fixtures";
+import { answerChanged, cookieHeader, createRoom, keepOtherRoomsOut, openRoom, rowsWithStars, signInAs } from "../../fixtures";
 import { settle } from "./audits";
 import { expect, hasDrawerLayout, test } from "./fixtures";
 
 test.describe("Reorder starred rooms", () => {
-  test("a finger held on a starred room drags it to a new place", async ({ page, request, session }) => {
+  test("a finger held on a starred room drags it to a new place", async ({ page, request, session, browserName }) => {
+    test.skip(browserName !== "chromium", "The finger moves through Chromium's DevTools, which WebKit hasn't");
     const rooms = [await createRoom(request, session, "general"), await createRoom(request, session, "random")];
     for (const room of rooms) {
       const starred = await request.put(`/api/rooms/${room.id}/favorite`, { data: { favorite: true }, headers: { Cookie: cookieHeader(session) } });
@@ -12,12 +13,7 @@ test.describe("Reorder starred rooms", () => {
     }
     // Every other test's open rooms take everyone in too, so the sidebar lists just these.
     const ids = new Set(rooms.map((room) => room.id));
-    await page.route("**/api/sidebar", async (route) => {
-      const response = await route.fetch();
-      if (!response.ok()) return route.fulfill({ response });
-      const list = (await response.json()) as Sidebar;
-      await route.fulfill({ response, json: { ...list, rooms: list.rooms.filter((room) => ids.has(room.id)) } });
-    });
+    await page.route("**/api/sidebar", (route) => answerChanged<Sidebar>(route, (list) => ({ ...list, rooms: list.rooms.filter((room) => ids.has(room.id)) })));
     await keepOtherRoomsOut(page, ids);
     await signInAs(page, session);
     await openRoom(page, rooms[0]!);

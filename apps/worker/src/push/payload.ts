@@ -1,4 +1,5 @@
 import { threadPath, type RoomId, type RoomKind } from "@ember/protocol";
+import { REPORTS_PATH, type ReportReason, type ReportSubject } from "@ember/protocol/reports";
 
 // What a push says, of a new message or of an invitation into a huddle, for the service worker to show as it is.
 
@@ -59,6 +60,21 @@ export const INVITATION_TTL_SECONDS = 60;
 export function invitationPayload(roomId: RoomId, room: PushedRoom, inviterName: string): PushPayload {
   const body = room.kind === "direct" ? "Invites you to a huddle" : `Invites you to a huddle in ${room.name ?? ""}`;
   return { title: truncated(inviterName, MAX_TITLE_BYTES), body: truncated(body, MAX_BODY_BYTES), path: `/rooms/${roomId}` };
+}
+
+/** How a report's push says why, after what it reports. */
+const REPORTED_AS: Record<ReportReason, string> = { spam: " as spam", harassment: " for harassment", other: "" };
+
+/**
+ * The push of a report to an administrator, titled "New report", which reads who reported whom and why,
+ * and of a message, where it is, naming no DM: "Ada reported Grace's message in general for harassment",
+ * "Ada reported Grace's message in a direct message as spam", or "Ada reported Grace". `subjectName` is
+ * whoever wrote the message, or the person reported. Opening it opens the Reports list.
+ */
+export function reportPayload(reporterName: string, subjectName: string, subject: ReportSubject, reason: ReportReason): PushPayload {
+  const where = subject.kind === "person" ? "" : subject.room.kind === "direct" ? "'s message in a direct message" : `'s message in ${subject.room.name ?? ""}`;
+  const body = `${reporterName} reported ${subjectName}${where}${REPORTED_AS[reason]}`;
+  return { title: "New report", body: truncated(body, MAX_BODY_BYTES), path: REPORTS_PATH };
 }
 
 /**

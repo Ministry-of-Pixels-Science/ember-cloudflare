@@ -204,7 +204,9 @@ describe("Available Agents", () => {
 
   it("moves through the agents with the arrows, Home and End, picking each", async () => {
     const { user } = showDialog();
-    expect(await tab("Ember")).toHaveFocus();
+    // The agent picked takes focus in an effect, after its tab is rendered.
+    const ember = await tab("Ember");
+    await waitFor(() => expect(ember).toHaveFocus());
     const moves: Array<[string, string]> = [
       ["{ArrowDown}", "Recap"],
       ["{ArrowRight}", "Scout"],

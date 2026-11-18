@@ -16,6 +16,7 @@ import {
   type User,
 } from "@ember/protocol";
 import { writtenBody } from "@ember/richtext/dom";
+import type { AddPreview } from "@/components/workspace/composer";
 import type { MessageActions } from "@/components/workspace/message-item";
 import { ApiError, fetchMe, roomSocketUrl } from "@/lib/api";
 import { handOver, leftUnsent, takeBack } from "@/lib/outbox";
@@ -299,13 +300,14 @@ export function useRoom(roomId: string, me: User, onSessionChanged: (me: Me | nu
     if (awayFromNewest.current && send({ type: "history.around" })) dispatch({ type: "loading-page" });
   }, [send]);
 
-  // Answers whether the message went. One longer than the room takes doesn't, and stays where it was written.
+  // Answers how to add a link's preview to the message once it has gone, or null when it didn't go. One
+  // longer than the room takes doesn't, and stays where it was written.
   const postMessage = useCallback(
     (body: string) => {
       const { plainText: text, mentions } = writtenBody(body);
       if (isTooLong(body, text)) {
         warn(MESSAGE_TOO_LONG);
-        return false;
+        return null;
       }
       const message = pendingMessage(crypto.randomUUID(), roomId, me, body, text, mentions, new Date().toISOString());
       toNewest();
@@ -313,7 +315,7 @@ export function useRoom(roomId: string, me: User, onSessionChanged: (me: Me | nu
       // sent once the page is offline.
       if (!send({ type: "message.create", clientMessageId: message.clientMessageId, body })) message.queued = true;
       dispatch({ type: "pending", message });
-      return true;
+      return previewAdderOf(send, message.clientMessageId);
     },
     [me, roomId, send, warn, toNewest],
   );
@@ -390,8 +392,17 @@ export function useRoom(roomId: string, me: User, onSessionChanged: (me: Me | nu
   const messageActions = useMemo(() => messageActionsOf(frames, warn), [frames, warn]);
 
   const dismissNotice = useCallback(() => dispatch({ type: "dismiss-notice" }), []);
+  const givenBack = useCallback((clientMessageId: string, taken: boolean) => dispatch({ type: "given-back", clientMessageId, taken }), []);
 
-  return { state, frames, postMessage, postFiles, typing, loadOlder, loadNewer, jump, messageActions, dismissNotice };
+  return { state, frames, postMessage, postFiles, typing, loadOlder, loadNewer, jump, messageActions, dismissNotice, givenBack };
+}
+
+/**
+ * Adds the preview of a link in the message sent as `clientMessageId`, which came after it went, as Slack
+ * adds one a moment after its message. One the tab can't send now, while it's offline, is left out.
+ */
+export function previewAdderOf(send: RoomFrames["send"], clientMessageId: string): AddPreview {
+  return (preview) => void send({ type: "message.preview", clientMessageId, preview });
 }
 
 /** A message `me` is sending to `roomId` as `clientMessageId`, as the timeline shows it until the room has it. */

@@ -346,6 +346,13 @@ describe("Huddles", () => {
     expect(search).toHaveClass("max-[429px]:hidden");
   });
 
+  it("has none in a room whose settings don't allow huddles, which keeps Search", () => {
+    renderWithHuddles({ ...general, huddles: false }, "general");
+    expect(screen.queryByRole("button", { name: "Start huddle" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Huddle options" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Search messages" })).not.toHaveClass("max-[429px]:hidden");
+  });
+
   it("has it in a DM with someone to huddle with, where Search gives way to it too", () => {
     renderWithHuddles(adaDirect, "Ada");
     const search = screen.getByRole("link", { name: "Search messages" });

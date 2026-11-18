@@ -53,6 +53,42 @@ test.describe("Make or revoke administrators", () => {
   });
 });
 
+test.describe("Welcome someone who joins", () => {
+  test("starts a DM with each person here as someone joins, which opens with their having joined, and which they see once someone writes in it", async ({ page, browser, baseURL }) => {
+    await useOwnAddress(page);
+    await page.goto("/account/edit#membership-settings");
+    await signInAsAdministrator(page);
+    const joinUrl = await page.getByRole("textbox", { name: "Share to invite more people" }).inputValue();
+    await page.getByRole("link", { name: "Home", exact: true }).click();
+    await expect(editorField(page, "Write a message")).toBeVisible();
+
+    const name = `Grace ${crypto.randomUUID().slice(0, 8)}`;
+    const grace = await join(browser, baseURL!, joinUrl, name);
+    // The administrator's sidebar lists it as it starts, with her active, as her tab is in use.
+    const withGrace = page.getByRole("region", { name: "DMs" }).getByRole("link", { name: `Direct message with ${name}`, exact: true });
+    await expect(withGrace).toHaveAccessibleDescription("Active");
+    await expect(withGrace.locator("[data-presence]")).toHaveAttribute("data-presence", "active");
+    await withGrace.click();
+    const joined = page.getByRole("log").getByRole("article").first();
+    await expect(joined.getByRole("heading", { level: 3 })).toContainText(name);
+    await expect(joined).toContainText(/joined /);
+
+    // Hers waits for a message, then counts it.
+    const withAda = grace.getByRole("region", { name: "DMs" }).getByRole("link", { name: `Direct message with ${ADMINISTRATOR.name}`, exact: true });
+    await expect(withAda).toHaveCount(0);
+    const composer = editorField(page, "Write a message");
+    await composer.pressSequentially("Welcome aboard!");
+    await composer.press("Enter");
+    await expect(withAda).toHaveAccessibleDescription("Active 1 unread message");
+    await expect(withAda.getByText("1", { exact: true })).toBeVisible();
+    await withAda.click();
+    await expect(grace.getByRole("log").getByRole("article").first()).toContainText(/joined /);
+    await expect(grace.getByRole("log")).toContainText("Welcome aboard!");
+    await expect(withAda).toHaveAccessibleDescription("Active");
+    await grace.context().close();
+  });
+});
+
 test.describe("Remove someone from the workspace", () => {
   test("the administrator removes someone after asking, and that person's pages go to sign in at once", async ({ page, browser, baseURL }) => {
     await useOwnAddress(page);

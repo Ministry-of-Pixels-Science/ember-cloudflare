@@ -1,9 +1,16 @@
 import { PASSWORD_TOO_SHORT, SIGN_IN_REJECTED } from "@ember/protocol";
 import type { Page } from "@playwright/test";
-import { ADMINISTRATOR, administratorOn, drawnPicture, editorField, invitation, logOut, shownPicture, signInAsAdministrator, useOwnAddress } from "../../fixtures";
+import { ADMINISTRATOR, administratorOn, downloadName, drawnPicture, editorField, invitation, logOut, shownPicture, signInAsAdministrator, useOwnAddress, variantType } from "../../fixtures";
 import { expect, test, unique } from "./fixtures";
 
 const signInHeading = (page: Page) => page.getByRole("heading", { level: 1, name: "Sign in to Ember" });
+
+/**
+ * How long a tab can take to hear that the server closed its socket, and to go to sign in. A browser hears it
+ * once the connection under the socket ends, which wrangler dev leaves to the browser: Chrome ends it after
+ * 2 seconds, and WebKit on Linux after 5.
+ */
+const SOCKET_CLOSE_HEARD_MS = 10_000;
 
 test.describe("Sign in with email and password", () => {
   test.beforeEach(({ page }) => useOwnAddress(page));
@@ -87,7 +94,7 @@ test.describe("Sign up with the join link", () => {
 
     // The variant their browser made of it, within 512×512, which needs no scaling down.
     const avatar = page.getByRole("link", { name: "Your profile" }).locator("img");
-    expect(await shownPicture(avatar)).toEqual({ type: "image/webp", width: 256, height: 512 });
+    expect(await shownPicture(avatar)).toEqual({ type: await variantType(page), width: 256, height: 512 });
   });
 
   test("takes a password as long as first run's, saying why one is refused", async ({ page, request, session }) => {
@@ -264,7 +271,7 @@ test.describe("QR codes for links", () => {
     await expect(viewer.locator("img[src^='blob:']")).toBeVisible();
     const download = grace.page.waitForEvent("download");
     await viewer.getByRole("link", { name: "Download file" }).click();
-    expect((await download).suggestedFilename()).toBe("QR code.svg");
+    expect(downloadName(await download)).toBe("QR code.svg");
     expect(asked.filter((path) => path.startsWith("/qr_code/"))).toEqual([]);
   });
 });
@@ -292,8 +299,9 @@ test.describe("Sign out", () => {
 
       await logOut(laptop);
       await expect(signInHeading(laptop)).toBeVisible();
-      // The room closed the other tab's socket, so it found out without being touched.
-      await expect(signInHeading(otherTab)).toBeVisible();
+      // The room closed the other tab's socket, so it found out without being touched, once the browser heard
+      // (`SOCKET_CLOSE_HEARD_MS`).
+      await expect(signInHeading(otherTab)).toBeVisible({ timeout: SOCKET_CLOSE_HEARD_MS });
 
       const composer = editorField(phone, "Write a message");
       await composer.fill("Still signed in on the phone");
@@ -321,7 +329,7 @@ test.describe("One live connection per tab outside the open room", () => {
 
       await logOut(laptop);
       await expect(signInHeading(laptop)).toBeVisible();
-      await expect(signInHeading(settings)).toBeVisible();
+      await expect(signInHeading(settings)).toBeVisible({ timeout: SOCKET_CLOSE_HEARD_MS });
     } finally {
       await laptop.context().close();
     }
