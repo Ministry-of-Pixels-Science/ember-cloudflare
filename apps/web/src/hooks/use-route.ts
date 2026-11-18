@@ -171,9 +171,11 @@ window.addEventListener("popstate", (event) => {
   }
   proceeding = false;
   if (next !== null) position = next;
-  // Going back leaves the page it went from ahead, which an entry an earlier version of the app added
-  // doesn't say, though a reload keeps it in this page's history.
+  // Going back leaves the page it went from ahead. An entry an earlier version of the app added doesn't
+  // say so, though a reload keeps it in this page's history, so it's told, for Forward to know after
+  // going further back and on again, or a reload.
   ahead = distance < 0 || wentOnFrom(event.state);
+  if (ahead && !wentOnFrom(event.state)) history.replaceState({ ...history.state, ahead }, "");
   followUp = null;
   notify();
 });

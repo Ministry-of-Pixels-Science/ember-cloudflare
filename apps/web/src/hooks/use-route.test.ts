@@ -478,5 +478,11 @@ describe("Back and Forward", () => {
     act(() => history.back());
     await waitFor(() => expect(location.pathname).toBe("/rooms/general"));
     expect(result.current).toEqual({ back: false, forward: true });
+
+    // Each page it went back to keeps that one is ahead of it, going on again and through a reload.
+    act(() => history.forward());
+    await waitFor(() => expect(result.current).toEqual({ back: true, forward: true }));
+    expect(location.pathname).toBe("/rooms/random");
+    expect((await loaded()).result.current).toEqual({ back: true, forward: true });
   });
 });
