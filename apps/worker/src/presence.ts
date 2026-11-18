@@ -25,6 +25,8 @@ interface SocketPresence {
   visible: boolean;
   /** When the Workspace last heard from the socket, other than its pings: as it connected, or as it last said either. */
   heardAt: number;
+  /** Whether the tabs listening were last told the socket's person is active, which outlasts the Workspace's sleep here. */
+  told: boolean;
 }
 
 /**
@@ -58,16 +60,19 @@ function sendOn(socket: WebSocket, data: string): void {
  * Who's active in the workspace, as Slack shows it: someone with a tab open that's in use, which the
  * Workspace has heard from lately (`PRESENCE_TTL_MS`), and everyone else is away. Each socket keeps its
  * presence in its attachment, which hibernation keeps, with whether its tab is shown, which says who has
- * Ember in view (`inView`). What the tabs that listen were last told is kept in memory, and guessed from
- * the sockets once the Workspace wakes. Changes go to the tabs that listen, gathered over
- * `PRESENCE_GATHERING_MS`.
+ * Ember in view (`inView`). What the tabs that listen were last told is kept in memory, and on its
+ * people's sockets, which the Workspace reads it back from once it wakes. Changes go to the tabs that
+ * listen, gathered over `PRESENCE_GATHERING_MS`.
  */
 export class Presence {
-  /** Who the tabs listening were last told is active, or null once the Workspace has woken, until it guesses. */
+  /** Who the tabs listening were last told is active, or null once the Workspace has woken, until it reads that back. */
   private told: Set<UserId> | null = null;
-  /** Whether `told` is a guess, from the sockets as the Workspace woke, rather than what was told. */
-  private guessed = false;
-  /** Whose sockets have changed since the last frame, who are told of again while `told` is a guess. */
+  /**
+   * Whether `told` was read back from the sockets as the Workspace woke, rather than kept as it was told,
+   * which a socket let in or closed just before the Workspace stopped can't have had noted.
+   */
+  private readBack = false;
+  /** Whose sockets have changed since the last frame, who are told of again while `told` was read back. */
   private readonly changed = new Set<UserId>();
   /** The wait for the next frame, while one is due. */
   private gathering: ReturnType<typeof setTimeout> | null = null;
@@ -79,8 +84,8 @@ export class Presence {
    * says otherwise, and shown or not as its address said (`visible`).
    */
   connected(socket: WebSocket, userId: UserId, visible: boolean, now = Date.now()): void {
-    this.lastTold();
-    socket.serializeAttachment({ userId, active: true, listening: false, visible, heardAt: now } satisfies SocketPresence);
+    const told = this.lastTold().has(userId);
+    socket.serializeAttachment({ userId, active: true, listening: false, visible, heardAt: now, told } satisfies SocketPresence);
     this.change(userId);
   }
 
@@ -137,11 +142,12 @@ export class Presence {
     this.gathering = null;
     const before = this.lastTold();
     const now = this.activeAt(Date.now());
-    const changed = new Set(this.guessed ? this.changed : []);
+    const changed = new Set(this.readBack ? this.changed : []);
     for (const userId of before) if (!now.has(userId)) changed.add(userId);
     for (const userId of now) if (!before.has(userId)) changed.add(userId);
+    for (const userId of new Set([...this.changed, ...changed])) this.noteTold(userId, now.has(userId));
     this.told = now;
-    this.guessed = false;
+    this.readBack = false;
     this.changed.clear();
     if (changed.size === 0) return;
     const ids = [...changed];
@@ -150,24 +156,36 @@ export class Presence {
     for (const socket of this.ctx.getWebSockets()) if (socket.readyState === WebSocket.OPEN && presenceOf(socket)?.listening) sendOn(socket, data);
   }
 
+  /** Notes on each of `userId`'s open sockets whether the tabs listening were told they're active, for `lastTold` to read back. */
+  private noteTold(userId: UserId, told: boolean): void {
+    for (const socket of this.ctx.getWebSockets(userId)) {
+      const presence = socket.readyState === WebSocket.OPEN ? presenceOf(socket) : null;
+      if (presence && presence.told !== told) socket.serializeAttachment({ ...presence, told } satisfies SocketPresence);
+    }
+  }
+
   /**
-   * Who the tabs listening were last told is active, guessed once the Workspace has woken as everyone
-   * with a socket open that's in use, whenever it was last heard from, as they were told as it came.
+   * Who the tabs listening were last told is active, read back once the Workspace has woken from the open
+   * sockets, which note it (`noteTold`).
    */
   private lastTold(): Set<UserId> {
     if (this.told === null) {
-      this.told = this.activeAt(null);
-      this.guessed = true;
+      this.told = new Set();
+      for (const socket of this.ctx.getWebSockets()) {
+        const presence = socket.readyState === WebSocket.OPEN ? presenceOf(socket) : null;
+        if (presence?.told) this.told.add(presence.userId);
+      }
+      this.readBack = true;
     }
     return this.told;
   }
 
-  /** Everyone with a socket open that's in use and was heard from within `PRESENCE_TTL_MS` of `now`, or ever, for null. */
-  private activeAt(now: number | null): Set<UserId> {
+  /** Everyone with a socket open that's in use and was heard from within `PRESENCE_TTL_MS` of `now`. */
+  private activeAt(now: number): Set<UserId> {
     const active = new Set<UserId>();
     for (const socket of this.ctx.getWebSockets()) {
       const presence = socket.readyState === WebSocket.OPEN ? presenceOf(socket) : null;
-      if (presence?.active && (now === null || now - this.lastHeard(socket, presence) <= PRESENCE_TTL_MS)) active.add(presence.userId);
+      if (presence?.active && now - this.lastHeard(socket, presence) <= PRESENCE_TTL_MS) active.add(presence.userId);
     }
     return active;
   }

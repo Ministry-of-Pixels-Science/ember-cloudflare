@@ -138,7 +138,7 @@ describe("Presence", () => {
     expect(await presenceHeard(adas)).toEqual(presence([grace.user.id]));
   });
 
-  it("goes on telling only what changes once the Workspace has been evicted, guessing what the tabs were told from their sockets", async () => {
+  it("goes on telling only what changes once the Workspace has been evicted, reading what the tabs were told back from their sockets", async () => {
     const [ada, grace, linus] = [await signIn("Ada"), await signIn("Grace"), await signIn("Linus")];
     const adas = await listening(ada);
     const graces = await openWorkspaceSocket(grace);
@@ -150,5 +150,23 @@ describe("Presence", () => {
     await openWorkspaceSocket(linus);
     expect(await presenceHeard(adas)).toEqual(presence([linus.user.id]));
     expect(await heardNothing(adas)).toBe(true);
+  });
+
+  it("tells of someone heard from again once the Workspace has been evicted, after it told the tabs they'd gone", async () => {
+    const [ada, grace, linus] = [await signIn("Ada"), await signIn("Grace"), await signIn("Linus")];
+    const adas = await listening(ada);
+    const graces = await openWorkspaceSocket(grace);
+    expect(await presenceHeard(adas)).toEqual(presence([grace.user.id]));
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + PRESENCE_TTL_MS + 1_000 });
+    say(adas, true);
+    expect(await presenceHeard(adas)).toEqual(presence([], [grace.user.id]));
+    vi.useRealTimers();
+
+    // While the Workspace sleeps, Grace's tab, still in use, pings again.
+    await evictDurableObject(workspaceStub());
+    graces.send(JSON.stringify({ type: "ping" }));
+    expect(await graces.next()).toEqual({ type: "pong" });
+    await openWorkspaceSocket(linus);
+    expect(await presenceHeard(adas)).toEqual(presence([grace.user.id, linus.user.id]));
   });
 });
