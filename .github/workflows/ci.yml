@@ -88,8 +88,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @ember/e2e exec playwright install --with-deps webkit
-      # TEMPORARY, to come out again: the screens test's steps, five times over in each run, with the stand-in as it sends now, to see how often a screen stays still and what it then needs.
-      - run: pnpm --filter @ember/e2e exec playwright test tests/mobile/huddles.spec.ts --project "mobile iPhone SE" --project "mobile iPhone 17" --grep "\[trial\]" --repeat-each 20 --reporter=list
+      - run: pnpm test:e2e
       - uses: actions/upload-artifact@v6
         if: failure()
         with:
