@@ -13,6 +13,7 @@ import { ActivePeople, DirectoryLoaded, PeopleContext, useDirectory } from "@/ho
 import { useHuddle } from "@/hooks/use-huddle";
 import { useMounted } from "@/hooks/use-mounted";
 import { useReleaseCheck } from "@/hooks/use-release-check";
+import { ReportingContext, type OpenReport, type ReportTarget } from "@/hooks/use-reporting";
 import { useSidebar } from "@/hooks/use-sidebar";
 import { agentsToAsk } from "@/lib/agents";
 import { answerHuddleInvitation, ApiError, changeBlock, dismissInvitation, isSignedOut, startDirect } from "@/lib/api";
@@ -285,7 +286,7 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onDe
   const directory = useDirectory();
   // The invitations into huddles that ring in this tab, as the workspace socket brings them and says they're answered.
   const [invitations, changeInvitations] = useReducer(invitationsReducer, NO_INVITATIONS);
-  const { list, answered, change: changeRooms, refresh, askForRoom, askForHuddleSounds, active } = useSidebar(me, onSessionChanged, directory, accountHeard, shownRoomGone, changeInvitations);
+  const { list, answered, change: changeRooms, refresh, askForRoom, askForHuddleSounds, active, reportsHeard: heard } = useSidebar(me, onSessionChanged, directory, accountHeard, shownRoomGone, changeInvitations);
   const [drawerOpen, setDrawerOpen] = useState(false);
   // New direct message, while it's open, with the link that opened it, which gets focus back, or null
   // when its address did.
@@ -301,7 +302,10 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onDe
   // On a page of community settings, the links to their sections take the conversations' place.
   const section = settingsSectionOf(route, hash);
   const administrator = me.administrator;
-  const settings = useMemo<SettingsPlace | null>(() => section && { section, administrator }, [section, administrator]);
+  // How many reports are open, which only an administrator's sidebar says, and how many times it has said.
+  const openReports = administrator ? (list?.openReports ?? 0) : 0;
+  const reportsHeard = administrator ? heard : 0;
+  const settings = useMemo<SettingsPlace | null>(() => section && { section, administrator, openReports, reportsHeard }, [section, administrator, openReports, reportsHeard]);
 
   const rooms = list?.rooms ?? null;
   const invitation = list?.invitation ?? null;
@@ -352,6 +356,13 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onDe
     setAgentsList({ opener });
   };
   const agents = useMemo(() => (directory.loaded ? agentsToAsk(directory.people.values(), me) : 0), [directory.loaded, directory.people, me]);
+
+  // Report, while it's open, with what had focus as it opened, which gets it back unless what opened it says what does.
+  const [reporting, setReporting] = useState<{ target: ReportTarget; opener: HTMLElement | null; returnFocus?: () => void } | null>(null);
+  const openReport = useCallback<OpenReport>(
+    (target, returnFocus) => setReporting({ target, opener: document.activeElement instanceof HTMLElement ? document.activeElement : null, returnFocus }),
+    [],
+  );
 
   // The search box, while it's open, with what it opened with. On a phone, the drawer closes as it opens.
   const [searchBox, setSearchBox] = useState<SearchBoxOptions | null>(null);
@@ -488,6 +499,13 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onDe
   const agentsListFailed = useCallback(
     (error: unknown) => {
       setAgentsList(null);
+      failed(error);
+    },
+    [failed],
+  );
+  const reportFailed = useCallback(
+    (error: unknown) => {
+      setReporting(null);
       failed(error);
     },
     [failed],
@@ -735,7 +753,7 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onDe
   // once the server's list has come: the empty one a failed first load leaves knows nothing of what's unread.
   useAppBadge(answered ? activity.unread : null);
   const rail = (
-    <Rail me={me} workspaceName={workspaceName} current={RAIL_PAGES[route.page]} activity={activity} newRelease={newRelease} onNewDirect={openNewDirect} />
+    <Rail me={me} workspaceName={workspaceName} current={RAIL_PAGES[route.page]} activity={activity} newRelease={newRelease} openReports={openReports} onNewDirect={openNewDirect} />
   );
   const sidebar = (
     <Sidebar
@@ -1044,6 +1062,13 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onDe
             />
           )}
           <KeyboardShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
+          {reporting && (
+            <RarePage
+              show={({ ReportDialog }) => <ReportDialog {...reporting} meId={me.id} onClose={() => setReporting(null)} onFailed={reportFailed} />}
+              loading={null}
+              onFailed={reportFailed}
+            />
+          )}
           {searchBox && <SearchBox {...searchBox} me={me} rooms={rooms ?? NO_ROOMS} onClose={() => setSearchBox(null)} onFailed={failed} />}
           {previewed && (
             <RarePage
@@ -1066,7 +1091,9 @@ export function Workspace({ me, workspaceName, onAccountChanged, onSignOut, onDe
           <SettingsLayout value={settings}>
             <OpenSearchContext value={openSearch}>
               <HuddlesContext value={huddles}>
-                <BlockingContext value={blocking}>{layout}</BlockingContext>
+                <BlockingContext value={blocking}>
+                  <ReportingContext value={openReport}>{layout}</ReportingContext>
+                </BlockingContext>
               </HuddlesContext>
             </OpenSearchContext>
           </SettingsLayout>

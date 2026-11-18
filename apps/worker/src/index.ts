@@ -88,6 +88,7 @@ import {
 import { agentsName } from "@ember/protocol/agents";
 import { parseHuddleSoundChanges, type HuddleSoundsChanged } from "@ember/protocol/huddles";
 import { OUTSIDE_AUTHORIZE_PATH } from "@ember/protocol/outside";
+import { parseNewReport, parseReportHandling, type HandledReports, type Reports } from "@ember/protocol/reports";
 import { mentionPromptItem } from "@ember/richtext";
 import { isAccountLogoPath, showAccountLogo, storeLogo } from "./account-logo";
 import {
@@ -628,6 +629,66 @@ async function block(request: Request, env: Env, userId: UserId): Promise<Respon
   if (blocked === "not found") return problem(404, "Not found");
   if (blocked === "yourself") return problem(422, "You can't block yourself");
   return json(blocked satisfies ChangedBlocks);
+}
+
+/**
+ * Reports a message, as Report message in its More actions does, answering 204 once the administrators
+ * have the report, or had one of it from you already. Only someone in its room can, of someone else's.
+ */
+async function reportMessage(request: Request, env: Env, roomId: RoomId, messageId: string): Promise<Response> {
+  const credentials = await credentialsOf(request, env);
+  if (!credentials) return problem(401, "Not signed in");
+  const report = parseNewReport(await jsonBodyOf(request));
+  if ("error" in report) return problem(422, report.error);
+  const reported = await workspace(env).reportMessage(credentials, roomId, messageId, report);
+  if (!reported) return problem(401, "Not signed in");
+  if (reported === "not found") return problem(404, "Not found");
+  if (reported === "yours") return problem(422, "You can't report your own message");
+  return new Response(null, { status: 204 });
+}
+
+/** Reports someone, as Report on their page does, for their name, picture or bio, answering as `reportMessage` does. */
+async function reportPerson(request: Request, env: Env, userId: UserId): Promise<Response> {
+  const credentials = await credentialsOf(request, env);
+  if (!credentials) return problem(401, "Not signed in");
+  const report = parseNewReport(await jsonBodyOf(request));
+  if ("error" in report) return problem(422, report.error);
+  const reported = await workspace(env).reportPerson(credentials, userId, report);
+  if (!reported) return problem(401, "Not signed in");
+  if (reported === "not found") return problem(404, "Not found");
+  if (reported === "yourself") return problem(422, "You can't report yourself");
+  return new Response(null, { status: 204 });
+}
+
+/** The reports an administrator sees, as Membership's Reports list shows them. */
+async function listReports(request: Request, env: Env): Promise<Response> {
+  const credentials = await credentialsOf(request, env);
+  const reports = credentials && (await workspace(env).listReports(credentials));
+  if (!reports) return problem(401, "Not signed in");
+  if (reports === "forbidden") return problem(403, "Only administrators can see reports");
+  return json(reports satisfies Reports, { headers: { "Cache-Control": "no-store" } });
+}
+
+/**
+ * Handles a report, as the Reports list's Delete message, Remove, Ban and Dismiss do, answering the
+ * reports it closed. Removing and banning answer as Remove and Ban do when they can't, and a report
+ * another administrator has handled answers 409.
+ */
+async function handleReport(request: Request, env: Env, reportId: string): Promise<Response> {
+  const credentials = await credentialsOf(request, env);
+  if (!credentials) return problem(401, "Not signed in");
+  const handling = parseReportHandling(await jsonBodyOf(request));
+  if (!handling) return problem(422, "Delete the message, remove or ban whoever it reports, or dismiss the report");
+  const handled = await workspace(env).handleReport(credentials, reportId, handling.outcome);
+  if (!handled) return problem(401, "Not signed in");
+  if (handled === "forbidden") return problem(403, "Only administrators can handle reports");
+  if (handled === "not found") return problem(404, "Not found");
+  if (handled === "handled") return problem(409, "Another administrator has handled that report");
+  if (handled === "invalid") return problem(422, "Only a message's report can delete it");
+  if (handled === "unremovable") return problem(422, handling.outcome === "removed" ? "They can't be removed" : "They can't be banned");
+  if (handled === "yourself") return problem(403, "Administrators can't remove or ban themselves");
+  if (typeof handled === "string") return problem(422, BAN_PROBLEMS[handled]);
+  return json(handled satisfies HandledReports);
 }
 
 /** Unblocks someone, as Unblock on their page and in Blocked people on your profile does, answering as `block` does. */
@@ -1297,6 +1358,11 @@ function apiAction(request: Request, env: Env, pathname: string): (() => Respons
   const blocking = pathname.match(/^\/api\/users\/([^/]+)\/block$/);
   if (blocking && request.method === "POST") return () => block(request, env, segmentText(blocking[1]!));
   if (blocking && request.method === "DELETE") return () => unblock(request, env, segmentText(blocking[1]!));
+  const personReport = pathname.match(/^\/api\/users\/([^/]+)\/report$/);
+  if (personReport && request.method === "POST") return () => reportPerson(request, env, segmentText(personReport[1]!));
+  if (pathname === "/api/reports" && request.method === "GET") return () => listReports(request, env);
+  const report = pathname.match(/^\/api\/reports\/([^/]+)$/);
+  if (report && request.method === "POST") return () => handleReport(request, env, segmentText(report[1]!));
   if (pathname === "/api/socket") return () => connectToWorkspace(request, env);
   if (pathname === "/api/rooms" && request.method === "POST") return () => createRoom(request, env);
   if (pathname === "/api/rooms/new" && request.method === "GET") return () => newRoomForm(request, env);
@@ -1356,6 +1422,9 @@ function apiAction(request: Request, env: Env, pathname: string): (() => Respons
   const preview = pathname.match(/^\/api\/rooms\/([^/]+)\/uploads\/([^/]+)\/preview$/);
   if (preview && request.method === "PUT")
     return () => (isRoomId(preview[1]!) ? uploadPreview(request, env, preview[1]!, preview[2]!) : problem(404, ROOM_NOT_FOUND));
+  const messageReport = pathname.match(/^\/api\/rooms\/([^/]+)\/messages\/([^/]+)\/report$/);
+  if (messageReport && request.method === "POST")
+    return () => (isRoomId(messageReport[1]!) ? reportMessage(request, env, messageReport[1]!, segmentText(messageReport[2]!)) : problem(404, ROOM_NOT_FOUND));
   const room = pathname.match(/^\/api\/rooms\/([^/]+)$/);
   if (room && request.method === "PATCH") return () => (isRoomId(room[1]!) ? changeRoom(request, env, room[1]!) : problem(404, ROOM_NOT_FOUND));
   if (room && request.method === "DELETE") return () => (isRoomId(room[1]!) ? deleteRoom(request, env, room[1]!) : problem(404, ROOM_NOT_FOUND));

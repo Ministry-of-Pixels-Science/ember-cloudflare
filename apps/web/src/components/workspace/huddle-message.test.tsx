@@ -279,7 +279,7 @@ describe("What can be done to a huddle's message", () => {
     expect(within(article).getByRole("link", { name: /2 replies/ })).toHaveAttribute("href", "/rooms/general/threads/m1");
   });
 
-  it("offers reactions, Reply in thread and Copy link, with nothing to quote or copy, and Edit only to whoever can delete it", async () => {
+  it("offers reactions, Reply in thread and Copy link, with nothing to quote, copy or report, and Edit only to whoever can delete it", async () => {
     const { article, user } = show(huddleMessage(), { live: going("ada") });
     await user.click(options(article));
     expect(barNames()).toEqual(["👍Thumbs up", "👏Clapping", "👋Waving hand", "More reactions", "Reply in thread", "Copy link"]);

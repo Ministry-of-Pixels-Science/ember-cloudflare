@@ -1189,6 +1189,14 @@ export function Trash(props: IconoirIconProps) {
   );
 }
 
+export function TriangleFlag(props: IconoirIconProps) {
+  return (
+    <IconoirIcon name="triangle-flag" {...props}>
+      <path d="M8 21L8 16M8 16V3.57709C8 3.10699 8.5161 2.81949 8.91581 3.06693L17.7061 8.50854C18.0775 8.73848 18.0866 9.2756 17.7231 9.51793L8 16Z" {...LINE} />
+    </IconoirIcon>
+  );
+}
+
 export function Underline(props: IconoirIconProps) {
   return (
     <IconoirIcon name="underline" {...props}>

@@ -763,6 +763,18 @@ export class ChatRoom extends DurableObject<Env> {
   }
 
   /**
+   * Deletes message `messageId`, with its boosts, as an administrator's message.delete does, for an
+   * administrator who handled a report of it by deleting it, unless the room has deleted it already.
+   */
+  async deleteReportedMessage(roomId: RoomId, messageId: string): Promise<void> {
+    return this.serially(async () => {
+      const store = this.storeFor(roomId);
+      const message = await this.findUndeleted(store, messageId);
+      if (message) await this.deleteMessage(store, message);
+    });
+  }
+
+  /**
    * Adds the bot's boost of `content`, trimmed, to the message `messageId`: as a socket's boost.create
    * does, but even when the bot has added the same one, as there, answering it. Answers `NOT_FOUND` when
    * the room turns the bot away, as `createBotMessage` does, or has no such message, then `BLANK` when

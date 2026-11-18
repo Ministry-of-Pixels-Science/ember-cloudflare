@@ -6,6 +6,7 @@ import { useMemo, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { FlashProvider } from "@/components/flash";
 import { BlockingContext } from "@/hooks/use-blocking";
+import { ReportingContext } from "@/hooks/use-reporting";
 import { DirectoryLoaded, PeopleContext, type People } from "@/hooks/use-directory";
 import { RefusedUnboosts, RoomConnection } from "@/hooks/use-room";
 import { timeLabel } from "@/lib/messages";
@@ -60,8 +61,8 @@ const fileMessage = (overrides: Partial<Message> = {}) => message({ body: "", pl
  * thread's if `open`, who has blocked the people `blocked` names. `sent` is what a reaction, edit or
  * deletion reports: false when there's no connection. `update` hands it a new copy of the message, as the
  * room does when the message changes, `reconnect` lets the page into the room again, `refuse` has the
- * room refuse to delete a reaction, `setBlocked` is what Block and Unblock call, and `block` has the
- * sidebar hear that the people it names are the ones blocked.
+ * room refuse to delete a reaction, `setBlocked` is what Block and Unblock call, `block` has the
+ * sidebar hear that the people it names are the ones blocked, and `openReport` is what Report message opens.
  */
 function show(
   m: Message | PendingMessage,
@@ -69,6 +70,7 @@ function show(
 ) {
   const actions = { boost: vi.fn(() => sent), unboost: vi.fn(() => sent), edit: vi.fn(() => sent), remove: vi.fn(() => sent), click: vi.fn(() => Promise.resolve(sent)) };
   const setBlocked = vi.fn((_person: User, _blocked: boolean) => Promise.resolve(true));
+  const openReport = vi.fn();
   let setEditing: (editing: boolean) => void = () => {};
   let setMessage: (message: Message | PendingMessage) => void = () => {};
   let setConnections: (update: (connections: number) => number) => void = () => {};
@@ -92,7 +94,9 @@ function show(
         <RoomConnection value={connections}>
           <RefusedUnboosts value={refusals}>
             <BlockingContext value={blocking}>
-              <MessageItem message={shown} me={{ ...me, administrator }} threaded={threaded} editing={editing} actions={actions} editors={editors} thread={thread} open={open} />
+              <ReportingContext value={openReport}>
+                <MessageItem message={shown} me={{ ...me, administrator }} threaded={threaded} editing={editing} actions={actions} editors={editors} thread={thread} open={open} />
+              </ReportingContext>
             </BlockingContext>
           </RefusedUnboosts>
         </RoomConnection>
@@ -105,7 +109,7 @@ function show(
   const refuse = () => act(() => setRefusals((refusals) => refusals + 1));
   const block = (blockedNow: string[]) => act(() => setBlockedIds(blockedNow));
   // The message's article, which holds a bot's cards' own.
-  return { actions, editors, update, reconnect, refuse, setBlocked, block, user: userEvent.setup(), article: within(container).getAllByRole("article")[0]! };
+  return { actions, editors, update, reconnect, refuse, setBlocked, block, openReport, user: userEvent.setup(), article: within(container).getAllByRole("article")[0]! };
 }
 
 /** The editor Edit opens, test-setup.ts's stand-in for Lexxy, which shows a message's text. */
@@ -268,7 +272,7 @@ describe("Download and share files", () => {
   it("offers Download in place of Quote among a file message's actions", async () => {
     const { user } = show(fileMessage(), { me: grace });
     await user.click(optionsOn("Q3 report.pdf"));
-    expect(barNames()).toEqual(["👍Thumbs up", "👏Clapping", "👋Waving hand", "More reactions", "Reply in thread", "Download", "Copy link", "Block Ada"]);
+    expect(barNames()).toEqual(["👍Thumbs up", "👏Clapping", "👋Waving hand", "More reactions", "Reply in thread", "Download", "Copy link", "Block Ada", "Report message"]);
     const download = within(actionBar()).getByRole("link", { name: "Download" });
     expect(download).toHaveAttribute("href", report.downloadUrl);
     expect(download).toHaveAttribute("download", "");
@@ -483,7 +487,7 @@ describe("Edit a message", () => {
   it("puts Edit last, as Slack does, and Delete in the editor", async () => {
     const { user } = show(message({ creator: grace }), { administrator: true });
     await user.click(optionsOn("Hello"));
-    expect(barNames()).toEqual(["👍Thumbs up", "👏Clapping", "👋Waving hand", "More reactions", "Reply in thread", "Quote", "Copy link", "Block Grace", "Edit"]);
+    expect(barNames()).toEqual(["👍Thumbs up", "👏Clapping", "👋Waving hand", "More reactions", "Reply in thread", "Quote", "Copy link", "Block Grace", "Report message", "Edit"]);
   });
 
   it("edits in place of the message, starting from its text, and Ctrl or Cmd+Enter saves", async () => {
@@ -598,7 +602,7 @@ describe("Message action bar", () => {
     await user.click(options);
     expect(options).toHaveAttribute("aria-expanded", "true");
     expect(options).toHaveAttribute("aria-controls", actionBar().id);
-    expect(barNames()).toEqual(["👍Thumbs up", "👏Clapping", "👋Waving hand", "More reactions", "Reply in thread", "Quote", "Copy link", "Block Ada"]);
+    expect(barNames()).toEqual(["👍Thumbs up", "👏Clapping", "👋Waving hand", "More reactions", "Reply in thread", "Quote", "Copy link", "Block Ada", "Report message"]);
 
     await user.click(options);
     expect(options).toHaveAttribute("aria-expanded", "false");
@@ -809,7 +813,7 @@ describe("More actions on a message", () => {
     expect(screen.getByRole("tooltip")).toHaveTextContent("More actions");
 
     await user.click(options);
-    expect(items()).toEqual(["Quote", "Copy text", "Copy link", "Block Ada"]);
+    expect(items()).toEqual(["Quote", "Copy text", "Copy link", "Block Ada", "Report message"]);
     expect(within(moreActions()).getByRole("button", { name: "Quote" })).toHaveFocus();
     expect(options).toHaveClass("bg-hover");
     // The pointer leaving no longer closes the bar.
@@ -833,13 +837,13 @@ describe("More actions on a message", () => {
 
     const file = show(fileMessage(), { me: grace, administrator: true });
     await openMoreActions(file.user, file.article);
-    expect(items()).toEqual(["Copy link", "Block Ada", "Delete message"]);
+    expect(items()).toEqual(["Copy link", "Block Ada", "Report message", "Delete message"]);
     cleanup();
 
     // A bot's cards can't be edited either, but their text can be quoted and copied.
     const cards = show(cardMessage(), { me: grace, administrator: true });
     await openMoreActions(cards.user, cards.article);
-    expect(items()).toEqual(["Quote", "Copy text", "Copy link", "Block Ada", "Delete message"]);
+    expect(items()).toEqual(["Quote", "Copy text", "Copy link", "Block Ada", "Report message", "Delete message"]);
   });
 
   it("offers Block on touch screens on the bar, after Copy link, where More actions doesn't open", async () => {
@@ -865,9 +869,36 @@ describe("More actions on a message", () => {
     const blocked = show(message(), { me: grace, blocked: [ada.id] });
     await blocked.user.click(within(blocked.article).getByRole("button", { name: BLOCKED_MESSAGE }));
     await openMoreActions(blocked.user, screen.getByRole("article"));
-    expect(items()).toEqual(["Quote", "Copy text", "Copy link", "Unblock Ada"]);
+    expect(items()).toEqual(["Quote", "Copy text", "Copy link", "Unblock Ada", "Report message"]);
     await blocked.user.click(within(moreActions()).getByRole("button", { name: "Unblock Ada" }));
     expect(blocked.setBlocked).toHaveBeenCalledExactlyOnceWith(ada, false);
+  });
+
+  it("reports someone else's message from More actions, and on touch screens from the bar, the composer taking focus once Report closes", async () => {
+    withMouse();
+    const shown = message();
+    const { article, editors, openReport, user } = show(shown, { me: grace });
+    await openMoreActions(user, article);
+    const item = within(moreActions()).getByRole("button", { name: "Report message" });
+    expect(item.querySelector("svg")).toHaveClass("iconoir-triangle-flag");
+    await user.click(item);
+    expect(openReport).toHaveBeenCalledExactlyOnceWith({ kind: "message", message: shown }, editors.returnFocus);
+    expect(screen.queryByRole("group", { name: "More actions" })).not.toBeInTheDocument();
+    cleanup();
+    vi.unstubAllGlobals();
+
+    const touch = show(shown, { me: grace });
+    await touch.user.click(optionsOn("Hello"));
+    await touch.user.click(within(actionBar()).getByRole("button", { name: "Report message" }));
+    expect(touch.openReport).toHaveBeenCalledExactlyOnceWith({ kind: "message", message: shown }, touch.editors.returnFocus);
+    expect(optionsOn("Hello")).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("offers no Report on your own messages", async () => {
+    withMouse();
+    const { article, user } = show(message());
+    await openMoreActions(user, article);
+    expect(within(moreActions()).queryByRole("button", { name: "Report message" })).not.toBeInTheDocument();
   });
 
   it("names the author as the people directory lists them in Block", async () => {

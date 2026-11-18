@@ -72,13 +72,14 @@ const workspaceSettings: WorkspaceSettings = {
 
 /**
  * Answers each request as `responses` says, by its method and path, such as "POST /api/rooms", with
- * the workspace's settings for "GET /api/account", nobody for "GET /api/users", and the room list for
- * anything else.
+ * the workspace's settings for "GET /api/account", nobody for "GET /api/users", no reports for
+ * "GET /api/reports", and the room list for anything else.
  */
 function serve(responses: Record<string, () => Response | Promise<Response>> = {}) {
   const answers: typeof responses = {
     "GET /api/account": () => Response.json(workspaceSettings),
     "GET /api/users": () => Response.json({ users: [] }),
+    "GET /api/reports": () => Response.json({ open: [], handled: [] }),
     ...responses,
   };
   vi.mocked(fetch).mockImplementation(async (input, init) => (answers[`${init?.method ?? "GET"} ${String(input)}`] ?? (() => Response.json(roomList(rooms))))());
