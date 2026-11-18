@@ -1,7 +1,7 @@
-import { useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useContext, useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import { botMessagesPath, botSlackPath, type Bot, type BotRoom } from "@ember/protocol/bots";
 import { useFlash } from "@/components/flash";
-import { Attachment, ChatBubbleEmpty, EditPencil, Internet, Plus } from "@/components/icons/iconoir";
+import { Attachment, ChatBubbleEmpty, EditPencil, Internet, NavArrowRight, Plus } from "@/components/icons/iconoir";
 import { PageLink } from "@/components/page-link";
 import { TranslationButton } from "@/components/translation-button";
 import { PeopleContext, type People } from "@/hooks/use-directory";
@@ -10,6 +10,7 @@ import { useTitle } from "@/hooks/use-title";
 import { ApiError, fetchBots, isSignedOut } from "@/lib/api";
 import { byName } from "@/lib/people";
 import { cn } from "@/lib/utils";
+import { roomNames } from "./agent-list";
 import { CopyButton, ROUND_BUTTON } from "./link-buttons";
 import { Panel, SECTION_HEADING, SettingsPage, TITLE, TITLE_LINK } from "./settings-page";
 import { AvatarLink } from "./user-avatar";
@@ -22,6 +23,12 @@ export const curlUploadLine = (url: string) => `curl -F "attachment=@/path/to/fi
 
 /** Campfire's `.input.fill-white` in a panel: 42px tall, or 44px for fingers. */
 const INPUT = "min-h-[42px] w-full min-w-0 rounded-[9px] border bg-background px-[0.8em] py-[0.5em] text-base focus:border-muted-foreground touch:min-h-11";
+
+/** What a bot's row says of a bot in no rooms, which has no commands. */
+export const NO_ROOMS = "No rooms";
+
+/** A row that opens to what's under it, as a bot's opens to its rooms and a room's to its commands. */
+const DISCLOSURE = "group flex min-w-0 cursor-pointer items-center gap-x-[1ch] text-start";
 
 /**
  * Sends anyone but an administrator to workspace settings with an alert, as the Custom CSS page does:
@@ -41,10 +48,11 @@ export function useAdministratorsOnly(onFailed: (error: unknown) => void) {
 }
 
 /**
- * The Chat bots page: what bots do, in short, and Add a chat bot, then each active bot by name, with a
- * link to its settings and, for each room it's in, the commands that post to the room as it, which their
- * buttons copy. Go Back returns to workspace settings. A bot deleted or renamed elsewhere leaves or is
- * renamed here as soon as the people directory hears of it.
+ * The Chat bots page: what bots do, in short, and Add a chat bot, then a row for each active bot by name,
+ * with the rooms it's in and a link to its settings. A bot's row opens to its rooms, and each room to the
+ * commands that post to it as the bot, which their buttons copy, so a page of many bots stays short. Go
+ * Back returns to workspace settings. A bot deleted or renamed elsewhere leaves or is renamed here as soon
+ * as the people directory hears of it.
  */
 export function BotsPage({ onFailed }: { onFailed: (error: unknown) => void }) {
   const [bots, setBots] = useState<Bot[] | null>(null);
@@ -64,6 +72,7 @@ export function BotsPage({ onFailed }: { onFailed: (error: unknown) => void }) {
     return () => void (stopped = true);
   }, [failed]);
 
+  const listed = bots && listedNow(bots, people);
   return (
     <SettingsPage back={WORKSPACE_SETTINGS_PATH}>
       {/* `.panel--wide`: 900px. Spaced as workspace settings' sections are. */}
@@ -76,12 +85,12 @@ export function BotsPage({ onFailed }: { onFailed: (error: unknown) => void }) {
         <header className={cn(SECTION_HEADING, "grid grid-cols-[1fr_auto] items-center gap-x-3 upto-500px:grid-cols-1")}>
           {/* The globe sits beside the heading. */}
           <div className="flex items-center gap-2">
-            <h1 className={TITLE}>Chat bots</h1>
+            <h1 id="chat-bots-heading" className={TITLE}>Chat bots</h1>
             <TranslationButton translations="chat_bots" />
           </div>
           <p className="col-span-full mt-1.5 max-w-prose text-muted-foreground">
             Chat bots let other apps and services post in your rooms, and reply when people talk to them.
-            Each of a bot's rooms gets two addresses below, one for posting text or a file and one that takes a Slack incoming webhook's payload.
+            Each of a bot's rooms gets two addresses, one for posting text or a file and one that takes a Slack incoming webhook's payload.
             Give a bot a webhook URL, and Ember sends it every message that @mentions it or is sent to it in a DM, then posts whatever it answers within 30 seconds.
           </p>
           <PageLink
@@ -93,13 +102,14 @@ export function BotsPage({ onFailed }: { onFailed: (error: unknown) => void }) {
             <span>Add a chat bot</span>
           </PageLink>
         </header>
-        {/* As wide as the heading, as the cards in workspace settings are. */}
-        <menu className="flex flex-col gap-4">
-          {bots &&
-            listedNow(bots, people).map((bot) => (
+        {/* One card, as wide as the heading, with a row for each bot, as the AI assistant tab lists its agents. */}
+        {listed && listed.length > 0 && (
+          <menu aria-labelledby="chat-bots-heading" className="flex flex-col rounded-[10px] border bg-surface">
+            {listed.map((bot) => (
               <BotItem key={bot.id} bot={bot} />
             ))}
-        </menu>
+          </menu>
+        )}
       </Panel>
     </SettingsPage>
   );
@@ -109,41 +119,94 @@ export function BotsPage({ onFailed }: { onFailed: (error: unknown) => void }) {
 const listedNow = (bots: Bot[], people: People) =>
   byName(bots.filter(({ id }) => people.get(id)?.status !== "deactivated").map((bot) => ({ ...bot, name: people.get(bot.id)?.name ?? bot.name })));
 
-/** The bot, with its avatar, name and edit link, then its rooms' commands. */
+/**
+ * A bot's row: its avatar, linking to its page, its name over the rooms it's in, and its edit link. The
+ * name opens the bot to its rooms, unless it's in none, and shows them until it's clicked again.
+ */
 function BotItem({ bot }: { bot: Bot }) {
+  const [open, setOpen] = useState(false);
+  const nameId = useId();
+  const roomsNamedId = useId();
+  const roomsId = useId();
+  const named = (
+    <span className="min-w-0">
+      <strong id={nameId} className="block truncate text-[17px]">
+        {bot.name}
+      </strong>
+      <span id={roomsNamedId} className="block truncate text-[13px] text-muted-foreground">
+        {bot.rooms.length === 0 ? NO_ROOMS : roomNames(bot.rooms)}
+      </span>
+    </span>
+  );
   return (
-    <li className="flex flex-col gap-x-[1ch] gap-y-4 rounded-[10px] border bg-surface px-[2ch] py-4">
+    <li className="flex flex-col gap-3 border-t px-[2ch] py-3 first:border-t-0 max-md:px-3">
       <div className="flex items-center gap-x-[1ch]">
         <AvatarLink user={bot} lazy className="size-[2.65em]" />
-        <div className="min-w-0">
-          <div className="truncate text-[17px]">
-            <strong>{bot.name}</strong>
-          </div>
-        </div>
-        <PageLink href={botSettingsPath(bot.id)} className={cn(ROUND_BUTTON, "ml-auto")}>
+        {bot.rooms.length === 0 ? (
+          <div className="min-w-0 flex-1">{named}</div>
+        ) : (
+          <button
+            type="button"
+            aria-labelledby={nameId}
+            aria-describedby={roomsNamedId}
+            aria-expanded={open}
+            aria-controls={open ? roomsId : undefined}
+            onClick={() => setOpen(!open)}
+            className={cn(DISCLOSURE, "min-h-11 flex-1")}
+          >
+            {named}
+            <Chevron />
+          </button>
+        )}
+        <PageLink href={botSettingsPath(bot.id)} className={ROUND_BUTTON}>
           <EditPencil className="size-[1.3em]" />
           <span className="sr-only">Edit {bot.name}</span>
         </PageLink>
       </div>
-      {bot.rooms.map((room) => (
-        <RoomCommands key={room.id} room={room} botKey={bot.key} />
-      ))}
+      {open && (
+        <ul id={roomsId} aria-label={`Rooms for ${bot.name}`} className="flex flex-col rounded-[10px] border bg-background">
+          {bot.rooms.map((room) => (
+            <RoomItem key={room.id} room={room} botKey={bot.key} startsOpen={bot.rooms.length === 1} />
+          ))}
+        </ul>
+      )}
     </li>
   );
 }
 
 /**
- * The commands that post to `room` as the bot whose key is `botKey`, and its Slack-compatible webhook, in a
- * fieldset with the room's name on its border.
+ * One of a bot's rooms: its name, which opens to the commands that post to the room as the bot whose key
+ * is `botKey`, and its Slack-compatible webhook, in a group named for the room. A bot's only room starts
+ * open, as there's no other to choose.
  */
-function RoomCommands({ room, botKey }: { room: BotRoom; botKey: string }) {
+function RoomItem({ room, botKey, startsOpen }: { room: BotRoom; botKey: string; startsOpen: boolean }) {
+  const [open, setOpen] = useState(startsOpen);
+  const commandsId = useId();
   return (
-    <fieldset className="flex min-w-0 flex-col gap-x-[1ch] gap-y-4 rounded-[10px] border border-muted-foreground px-[1ch] py-4">
-      <legend className="mx-auto flex max-w-full min-w-0 justify-center px-[1ch] text-start">
-        <strong className="truncate">{room.name}</strong>
-      </legend>
-      <PostingCommands room={room} botKey={botKey} />
-    </fieldset>
+    <li className="border-t first:border-t-0">
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={open ? commandsId : undefined}
+        onClick={() => setOpen(!open)}
+        className={cn(DISCLOSURE, "min-h-10 w-full px-[1.5ch] touch:min-h-11")}
+      >
+        <span className="truncate font-medium">{room.name}</span>
+        <Chevron />
+      </button>
+      {open && (
+        <div id={commandsId} role="group" aria-label={room.name} className="flex min-w-0 flex-col gap-3 px-[1.5ch] pb-4">
+          <PostingCommands room={room} botKey={botKey} />
+        </div>
+      )}
+    </li>
+  );
+}
+
+/** The arrow at the end of a row that opens, which turns to point down while it's open. */
+function Chevron() {
+  return (
+    <NavArrowRight className="ms-auto size-[18px] shrink-0 text-muted-foreground transition-transform duration-150 ease-[ease] group-hover:text-foreground group-aria-expanded:rotate-90" />
   );
 }
 

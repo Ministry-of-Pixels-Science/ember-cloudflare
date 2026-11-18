@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useState, type FormEvent } from "react";
-import { MAX_USER_NAME_LENGTH, type Me, type RoomId, type UserId } from "@ember/protocol";
-import { BOTS_FORBIDDEN, MAX_WEBHOOK_URL_LENGTH, type Bot, type BotChanges, type BotSettings } from "@ember/protocol/bots";
+import { MAX_USER_NAME_LENGTH, type Me, type RoomId, type SidebarRoom, type UserId } from "@ember/protocol";
+import { BOTS_FORBIDDEN, MAX_WEBHOOK_URL_LENGTH, type BotChanges, type BotRoom, type BotSettings, type NewBot } from "@ember/protocol/bots";
 import { AUTH_FORM } from "@/components/auth-page";
 import defaultBotAvatar from "@/components/default-bot-avatar.svg";
 import { FIELD_INPUT, Field, SubmitButton } from "@/components/field";
@@ -12,6 +12,7 @@ import { BOTS_PATH, navigate } from "@/hooks/use-route";
 import { useTitle } from "@/hooks/use-title";
 import { changeBot, createBot, deleteBot, fetchBot, isSignedOut, resetBotKey } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { CHOICE, roomsToPick } from "./agent-page";
 import { PostingCommands, useAdministratorsOnly } from "./bots-page";
 import { DeleteButton, isMissing, NEGATIVE_BUTTON } from "./room-settings-page";
 import { PageHeading, Panel, SettingsPage } from "./settings-page";
@@ -25,15 +26,38 @@ export const CONFIRM_DELETE_BOT = "Are you sure you want to permanently remove t
 /** What Generate a new key asks first. */
 export const CONFIRM_NEW_KEY = "Are you sure you want to change the bot key? All usage of this bot must be updated.";
 
-/** The bot form's fields as typed: the bot's name, and where its webhook delivers, "" for nowhere. */
+/** What Rooms says of the bot. */
+export const ROOMS_EXPLAINED = "Where apps can post as the bot, and people can mention it. To put it in a private room, use that room's settings.";
+
+/**
+ * The bot form's fields as typed: the bot's name, where its webhook delivers, "" for nowhere, and
+ * whether it's in every open room or only the ones chosen.
+ */
 interface Fields {
   name: string;
   webhookUrl: string;
+  everyOpenRoom: boolean;
+  chosenRooms: RoomId[];
 }
 
-const NO_FIELDS: Fields = { name: "", webhookUrl: "" };
+/** A new bot's: nothing typed, in every open room, as a bot was before it could be kept to some. */
+const NO_FIELDS: Fields = { name: "", webhookUrl: "", everyOpenRoom: true, chosenRooms: [] };
 
-const fieldsOf = (bot: BotSettings): Fields => ({ name: bot.name, webhookUrl: bot.webhookUrl ?? "" });
+const fieldsOf = (bot: BotSettings): Fields => ({
+  name: bot.name,
+  webhookUrl: bot.webhookUrl ?? "",
+  everyOpenRoom: bot.pickedRooms === null,
+  chosenRooms: bot.pickedRooms?.map(({ id }) => id) ?? [],
+});
+
+/** The open rooms `fields` keep the bot to: null for every one. */
+const roomsChosen = ({ everyOpenRoom, chosenRooms }: Fields) => (everyOpenRoom ? null : chosenRooms);
+
+const sameRooms = (a: readonly RoomId[] | null, b: readonly RoomId[] | null) =>
+  a === null || b === null ? a === b : a.length === b.length && b.every((id) => a.includes(id));
+
+/** The bot `fields` add, as New chat bot sends it. */
+const newBotOf = (fields: Fields): NewBot => ({ name: fields.name, webhookUrl: fields.webhookUrl, rooms: roomsChosen(fields) });
 
 /**
  * The fields typed differently from `bot` as it loaded. Only they're sent, so a save doesn't put back
@@ -44,6 +68,8 @@ function changesOf(bot: BotSettings, typed: Fields): BotChanges {
   const changes: BotChanges = {};
   if (typed.name !== loaded.name) changes.name = typed.name;
   if (typed.webhookUrl !== loaded.webhookUrl) changes.webhookUrl = typed.webhookUrl;
+  const rooms = roomsChosen(typed);
+  if (!sameRooms(rooms, roomsChosen(loaded))) changes.rooms = rooms;
   return changes;
 }
 
@@ -68,8 +94,11 @@ function useSending(failed: (error: unknown) => void): [boolean, (request: () =>
   return [sending, send];
 }
 
-/** Add a chat bot, which only administrators may open: anyone else is sent to workspace settings at once. */
-export function NewBotPage({ me, onFailed }: { me: Me; onFailed: (error: unknown) => void }) {
+/**
+ * Add a chat bot, which only administrators may open: anyone else is sent to workspace settings at once.
+ * Its Rooms are picked from the sidebar's `rooms`, null until they're loaded.
+ */
+export function NewBotPage({ me, rooms, onFailed }: { me: Me; rooms: SidebarRoom[] | null; onFailed: (error: unknown) => void }) {
   const [fields, setFields] = useState(NO_FIELDS);
   const photo = useChosenPhoto();
   const { sendAway, failed } = useAdministratorsOnly(onFailed);
@@ -87,11 +116,12 @@ export function NewBotPage({ me, onFailed }: { me: Me; onFailed: (error: unknown
         <BotForm
           avatar={defaultBotAvatar}
           saved={null}
+          rooms={rooms}
           photo={photo}
           fields={fields}
           onChange={setFields}
           saving={saving}
-          onSave={() => send(async () => createBot(fields, await photo.photo()))}
+          onSave={() => send(async () => createBot(newBotOf(fields), await photo.photo()))}
         />
       </Panel>
     </SettingsPage>
@@ -100,6 +130,8 @@ export function NewBotPage({ me, onFailed }: { me: Me; onFailed: (error: unknown
 
 interface SettingsProps {
   botId: UserId;
+  /** The sidebar's rooms, which Rooms picks from, or null until they're loaded. */
+  rooms: SidebarRoom[] | null;
   /** For an id that isn't an active bot's, which gets the 404 page. */
   onMissing: () => void;
   /** Says why something else failed, as the workspace's alerts do. */
@@ -111,7 +143,7 @@ interface SettingsProps {
  * bot out of every room but its DMs, and Generate a new key, which stops its old key working. Each asks
  * first.
  */
-export function BotSettingsPage({ botId, onMissing, onFailed }: SettingsProps) {
+export function BotSettingsPage({ botId, rooms, onMissing, onFailed }: SettingsProps) {
   const [bot, setBot] = useState<BotSettings | null>(null);
   const [fields, setFields] = useState(NO_FIELDS);
   const photo = useChosenPhoto();
@@ -152,6 +184,7 @@ export function BotSettingsPage({ botId, onMissing, onFailed }: SettingsProps) {
             <BotForm
               avatar={bot.avatarUrl}
               saved={bot}
+              rooms={rooms}
               photo={photo}
               fields={fields}
               onChange={setFields}
@@ -176,8 +209,13 @@ export function BotSettingsPage({ botId, onMissing, onFailed }: SettingsProps) {
 interface FormProps {
   /** The bot's avatar as it is: its own, or Campfire's default bot picture, which the Worker serves for a bot without one. */
   avatar: string;
-  /** The bot as it's saved, whose key and rooms make the addresses it posts at, or null for one not yet added. */
-  saved: Pick<Bot, "key" | "rooms"> | null;
+  /**
+   * The bot as it's saved, whose key and rooms make the addresses it posts at, with the open rooms it's
+   * kept to, or null for one not yet added.
+   */
+  saved: Pick<BotSettings, "key" | "rooms" | "pickedRooms"> | null;
+  /** The sidebar's rooms, which Rooms picks from, or null until they're loaded. */
+  rooms: SidebarRoom[] | null;
   /** The picture chosen to be its avatar, which saves with the form. */
   photo: PhotoChoice;
   fields: Fields;
@@ -197,12 +235,12 @@ const CARD = "flex min-w-0 flex-col gap-4 rounded-[10px] border bg-surface px-[2
 const SELECT = cn("w-full min-w-0 border outline-none dark:bg-input/30", FIELD_INPUT);
 
 /**
- * The bot form: Chat bot setup, the bot's avatar and name, then the bot's two ways of talking, Incoming,
- * the addresses its rooms give it to post at, and Outgoing, the webhook URL Ember sends what people say
- * to it, and Save changes, which saves a picture chosen for its avatar too. The name and the webhook URL
- * have translation buttons.
+ * The bot form: Chat bot setup, the bot's avatar and name, its Rooms, then the bot's two ways of talking,
+ * Incoming, the addresses its rooms give it to post at, and Outgoing, the webhook URL Ember sends what
+ * people say to it, and Save changes, which saves a picture chosen for its avatar too. The name and the
+ * webhook URL have translation buttons.
  */
-function BotForm({ avatar, saved, photo, fields, onChange, saving, onSave }: FormProps) {
+function BotForm({ avatar, saved, rooms, photo, fields, onChange, saving, onSave }: FormProps) {
   const save = (event: FormEvent) => {
     event.preventDefault();
     if (!saving) onSave();
@@ -226,6 +264,7 @@ function BotForm({ avatar, saved, photo, fields, onChange, saving, onSave }: For
           className={FIELD_INPUT}
         />
       </Field>
+      <Rooms rooms={roomsToPick(rooms, saved?.pickedRooms ?? [])} fields={fields} onChange={onChange} disabled={saving} />
       <Incoming saved={saved} />
       <section aria-labelledby="bot-outgoing-heading" className={CARD}>
         <div>
@@ -255,10 +294,68 @@ function BotForm({ avatar, saved, photo, fields, onChange, saving, onSave }: For
 }
 
 /**
+ * The form's Rooms card, as an agent's page has it: Every room, which puts the bot in every open room, new
+ * ones too, or Only the rooms I choose, with a box for each open room there is, `rooms`, which keeps it to
+ * those ticked. Private rooms put it in themselves, in their settings.
+ */
+function Rooms({ rooms, fields, onChange, disabled }: { rooms: BotRoom[]; fields: Fields; onChange: (fields: Fields) => void; disabled: boolean }) {
+  const choose = (room: RoomId, chosen: boolean) =>
+    onChange({ ...fields, chosenRooms: chosen ? [...fields.chosenRooms, room] : fields.chosenRooms.filter((id) => id !== room) });
+  return (
+    <section aria-labelledby="bot-rooms-heading" className={CARD}>
+      <div>
+        <h2 id="bot-rooms-heading" className="text-base font-semibold">
+          Rooms
+        </h2>
+        <p id="bot-rooms-description" className={NOTE}>
+          {ROOMS_EXPLAINED}
+        </p>
+      </div>
+      <fieldset aria-labelledby="bot-rooms-heading" aria-describedby="bot-rooms-description" disabled={disabled} className="flex flex-col gap-1">
+        <label className={CHOICE}>
+          <input
+            type="radio"
+            name="bot-rooms"
+            checked={fields.everyOpenRoom}
+            onChange={() => onChange({ ...fields, everyOpenRoom: true })}
+            className="size-4 flex-none accent-foreground"
+          />
+          <span>Every room</span>
+        </label>
+        <label className={CHOICE}>
+          <input
+            type="radio"
+            name="bot-rooms"
+            checked={!fields.everyOpenRoom}
+            onChange={() => onChange({ ...fields, everyOpenRoom: false })}
+            className="size-4 flex-none accent-foreground"
+          />
+          <span>Only the rooms I choose</span>
+        </label>
+        {!fields.everyOpenRoom && (
+          <div className="ms-6 grid grid-cols-2 gap-x-[2ch] gap-y-1 upto-500px:grid-cols-1">
+            {rooms.map((room) => (
+              <label key={room.id} className={CHOICE}>
+                <input
+                  type="checkbox"
+                  checked={fields.chosenRooms.includes(room.id)}
+                  onChange={(event) => choose(room.id, event.target.checked)}
+                  className="size-4 flex-none accent-foreground"
+                />
+                <span className="truncate">{room.name}</span>
+              </label>
+            ))}
+          </div>
+        )}
+      </fieldset>
+    </section>
+  );
+}
+
+/**
  * The form's Incoming card: a menu of the bot's rooms, and the commands that post to the one chosen as the
- * bot, as the bots page gives them for each, or in their place, that they come once the bot is added,
- * which puts it in every open room, or that a bot in no rooms has none. The menu keeps a bot in many
- * rooms from pushing Outgoing out of sight.
+ * bot, as the bots page gives them for each, or in their place, that they come once the bot is added, or
+ * that a bot in no rooms has none. The menu keeps a bot in many rooms from pushing Outgoing out of sight.
  */
 function Incoming({ saved }: { saved: FormProps["saved"] }) {
   const [chosen, choose] = useState<RoomId | null>(null);
@@ -290,7 +387,7 @@ function Incoming({ saved }: { saved: FormProps["saved"] }) {
         </>
       ) : (
         <p className={cn(NOTE, "rounded-[10px] border border-dashed border-muted-foreground px-[1ch] py-4 text-center")}>
-          {saved ? "It isn't in any rooms, so it has no addresses yet." : "Each room's addresses appear once you save the bot, which puts it in every open room."}
+          {saved ? "It isn't in any rooms, so it has no addresses yet." : "Each room's addresses appear once you save the bot, which puts it in its rooms."}
         </p>
       )}
     </section>

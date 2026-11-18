@@ -285,6 +285,19 @@ describe("Bot keys", () => {
     expect(await storedIn(general)).toEqual([]);
   });
 
+  it("posts nothing for a bot kept to open rooms that leave this one out since its key was checked, which the room hears before the change answers", async () => {
+    const { administrator, bot, general } = await withBot();
+    const room = await createRoom("Launch", { as: administrator });
+    const letThrough = { bot: { id: bot.id, name: bot.name }, authorizedAt: Date.now() };
+    const keepToGeneral = JSON.stringify({ rooms: [general] });
+    expect((await api(`/api/account/bots/${bot.id}`, { method: "PATCH", headers: { Cookie: administrator.cookie }, body: keepToGeneral })).status).toBe(200);
+    expect(await workspaceSql("SELECT count(*) AS n FROM pending_revocations")).toEqual([{ n: 0 }]);
+    expect(await roomStub(room.id).createBotMessage(room.id, letThrough, "Too late")).toBeNull();
+    expect(await storedIn(room.id)).toEqual([]);
+    expect((await postAs(bot.key, room.id, "Too late")).status).toBe(404);
+    expect((await postAs(bot.key, general, "Still here")).status).toBe(201);
+  });
+
   it("changes nothing for a bot that the room has heard was taken out since its key was checked, as it posts nothing", async () => {
     const { administrator, bot } = await withBot();
     const room = await createRoom("Launch", { closedTo: [administrator.user.id, bot.id], as: administrator });

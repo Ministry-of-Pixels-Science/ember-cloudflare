@@ -6,7 +6,7 @@ import { FlashProvider } from "@/components/flash";
 import { Sheet } from "@/components/ui/sheet";
 import { AccountContext } from "@/hooks/use-account";
 import { PeopleContext, type People } from "@/hooks/use-directory";
-import { BotsPage } from "./bots-page";
+import { BotsPage, NO_ROOMS } from "./bots-page";
 
 const account: Account = { name: "Analytical Engines", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true };
 
@@ -24,6 +24,7 @@ const BUILD_BOT: Bot = {
   ],
 };
 const DEPLOY_BOT: Bot = { ...BUILD_BOT, id: "0mgk3x2a9b4c5f", name: "Deploy Bot", avatarUrl: "/users/d3p/avatar?v=1", key: "0mgk3x2a9b4c5f-Zy9xWv7uTs5r", rooms: [] };
+const UPTIME_BOT: Bot = { ...BUILD_BOT, id: "0mgk3x2a9b4c5g", name: "Uptime", avatarUrl: "/users/up7/avatar?v=1", key: "0mgk3x2a9b4c5g-Qp8oNm6lKj4h", rooms: [BUILD_BOT.rooms[1]!] };
 
 /** Answers loading the bots as the server does for an administrator, or as `loaded` says. */
 function serve(loaded = () => Response.json({ bots: [BUILD_BOT, DEPLOY_BOT] } satisfies Bots)) {
@@ -56,10 +57,18 @@ function showPage(shown = account) {
 /** A bot as the people directory lists it. */
 const listedAs = ({ id, name, bio, role, status, avatarUrl }: Bot, changes: Partial<DirectoryUser> = {}): [UserId, DirectoryUser] => [id, { id, name, bio, role, status, avatarUrl, ...changes }];
 
-/** Each bot the page lists, once they've loaded. */
+/** Each bot the page lists, once they've loaded: the list's own items, and not its bots' rooms. */
 async function listed(count: number): Promise<HTMLElement[]> {
-  await waitFor(() => expect(screen.queryAllByRole("listitem")).toHaveLength(count));
-  return screen.getAllByRole("listitem");
+  const bots = () => [...(screen.queryByRole("list", { name: "Chat bots" })?.children ?? [])] as HTMLElement[];
+  await waitFor(() => expect(bots()).toHaveLength(count));
+  return bots();
+}
+
+/** Opens the bot named `name`, which `bot` lists, to its rooms, then each room, answering the groups of their commands, in order. */
+async function openRooms(bot: HTMLElement, name: string): Promise<HTMLElement[]> {
+  await userEvent.click(within(bot).getByRole("button", { name }));
+  for (const room of within(within(bot).getByRole("list")).getAllByRole("button")) await userEvent.click(room);
+  return within(bot).getAllByRole("group");
 }
 
 /** Gives the browser a clipboard until the test ends. */
@@ -84,7 +93,7 @@ describe("Chat bots page", () => {
     expect(
       screen.getByText(
         "Chat bots let other apps and services post in your rooms, and reply when people talk to them. " +
-          "Each of a bot's rooms gets two addresses below, one for posting text or a file and one that takes a Slack incoming webhook's payload. " +
+          "Each of a bot's rooms gets two addresses, one for posting text or a file and one that takes a Slack incoming webhook's payload. " +
           "Give a bot a webhook URL, and Ember sends it every message that @mentions it or is sent to it in a DM, then posts whatever it answers within 30 seconds.",
       ),
     ).toBeInTheDocument();
@@ -92,7 +101,7 @@ describe("Chat bots page", () => {
     expect(screen.getByRole("link", { name: "Go Back" })).toHaveAttribute("href", "/account/edit");
   });
 
-  it("lists each bot as the server does, with its avatar linking to its page, its name, and a link to its settings", async () => {
+  it("lists each bot as the server does, with its avatar linking to its page, its name, the rooms it's in, and a link to its settings", async () => {
     showPage();
     const panel = screen.getByRole("heading", { level: 1 }).closest("section")!;
     expect(panel).toHaveAttribute("aria-busy", "true");
@@ -100,6 +109,8 @@ describe("Chat bots page", () => {
     expect(panel).toHaveAttribute("aria-busy", "false");
 
     expect(within(build!).getByText("Build Bot").tagName).toBe("STRONG");
+    expect(within(build!).getByText("general, random")).toBeInTheDocument();
+    expect(within(deploy!).getByText(NO_ROOMS)).toBeInTheDocument();
     const avatar = within(build!).getByTitle("Build Bot");
     expect(avatar).toHaveAttribute("href", `/users/${BUILD_BOT.id}`);
     // The bot's own avatar, as the people directory may not list a bot just added.
@@ -108,11 +119,53 @@ describe("Chat bots page", () => {
     expect(within(deploy!).getByRole("link", { name: "Edit Deploy Bot" })).toHaveAttribute("href", `/account/bots/${DEPLOY_BOT.id}/edit`);
   });
 
-  it("gives the commands that post to each of a bot's rooms as it, at the bot's address there on this host", async () => {
+  it("folds each bot away until it's clicked, opening it to its rooms, and each room to its commands, until they're clicked again", async () => {
     showPage();
     const [build, deploy] = await listed(2);
-    const rooms = within(build!).getAllByRole("group");
-    expect(rooms.map((room) => room.querySelector("legend")?.textContent)).toEqual(["general", "random"]);
+    expect(screen.queryAllByRole("textbox")).toEqual([]);
+
+    const bot = within(build!).getByRole("button", { name: "Build Bot", description: "general, random" });
+    expect(bot).toHaveAttribute("aria-expanded", "false");
+    await userEvent.click(bot);
+    expect(bot).toHaveAttribute("aria-expanded", "true");
+    const rooms = within(build!).getByRole("list", { name: "Rooms for Build Bot" });
+    expect(bot).toHaveAttribute("aria-controls", rooms.id);
+    const [general, random] = within(rooms).getAllByRole("button");
+    expect([general, random].map((room) => [room!.textContent, room!.getAttribute("aria-expanded")])).toEqual([
+      ["general", "false"],
+      ["random", "false"],
+    ]);
+    // Until a room's opened, it has no commands.
+    expect(screen.queryAllByRole("textbox")).toEqual([]);
+
+    await userEvent.click(random!);
+    expect(random).toHaveAttribute("aria-expanded", "true");
+    expect(random).toHaveAttribute("aria-controls", within(rooms).getByRole("group", { name: "random" }).id);
+    expect(within(rooms).getAllByRole("group")).toHaveLength(1);
+    await userEvent.click(random!);
+    expect(within(rooms).queryAllByRole("group")).toEqual([]);
+
+    await userEvent.click(bot);
+    expect(bot).toHaveAttribute("aria-expanded", "false");
+    expect(within(build!).queryByRole("list")).not.toBeInTheDocument();
+    // A bot in no rooms has nothing to open.
+    expect(within(deploy!).queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("opens a bot's only room with it", async () => {
+    serve(() => Response.json({ bots: [UPTIME_BOT] } satisfies Bots));
+    showPage();
+    const [uptime] = await listed(1);
+    await userEvent.click(within(uptime!).getByRole("button", { name: "Uptime" }));
+    expect(within(uptime!).getByRole("button", { name: "random" })).toHaveAttribute("aria-expanded", "true");
+    expect(within(uptime!).getByRole("group", { name: "random" })).toContainElement(within(uptime!).getByRole("textbox", { name: "curl command for posting messages" }));
+  });
+
+  it("gives the commands that post to each of a bot's rooms as it, at the bot's address there on this host", async () => {
+    showPage();
+    const [build] = await listed(2);
+    const rooms = await openRooms(build!, "Build Bot");
+    expect(rooms.map((room) => room.getAttribute("aria-label"))).toEqual(["general", "random"]);
 
     for (const [room, { id }] of [
       [rooms[0]!, BUILD_BOT.rooms[0]!],
@@ -126,8 +179,6 @@ describe("Chat bots page", () => {
       expect(attachment).toHaveValue(`curl -F "attachment=@/path/to/file" ${url}`);
       expect(attachment).toHaveAttribute("readonly");
     }
-    // A bot in no rooms has nothing to post with.
-    expect(within(deploy!).queryAllByRole("group")).toEqual([]);
   });
 
   it("copies each command with the button beside it", async () => {
@@ -135,7 +186,7 @@ describe("Chat bots page", () => {
     const [build] = await listed(2);
     const writeText = vi.fn().mockResolvedValue(undefined);
     stubClipboard(writeText);
-    const [general] = within(build!).getAllByRole("group");
+    const [general] = await openRooms(build!, "Build Bot");
     await userEvent.click(within(general!).getByRole("button", { name: "Copy message command" }));
     await userEvent.click(within(general!).getByRole("button", { name: "Copy attachment command" }));
     const url = `http://localhost:3000/rooms/${BUILD_BOT.rooms[0]!.id}/${BUILD_BOT.key}/messages`;
@@ -145,7 +196,7 @@ describe("Chat bots page", () => {
   it("follows a rename elsewhere, keeping the bots in order, and drops a bot deleted elsewhere, as the people directory hears of them", async () => {
     const { showPeople } = showPage();
     await listed(2);
-    const names = () => screen.getAllByRole("listitem").map((bot) => bot.querySelector("strong")?.textContent);
+    const names = () => [...screen.getByRole("list", { name: "Chat bots" }).children].map((bot) => bot.querySelector("strong")?.textContent);
 
     showPeople(new Map([listedAs(BUILD_BOT, { name: "Zulu Bot" }), listedAs(DEPLOY_BOT)]));
     await waitFor(() => expect(names()).toEqual(["Deploy Bot", "Zulu Bot"]));
@@ -186,7 +237,7 @@ describe("Slack-compatible webhooks", () => {
     const [build] = await listed(2);
     const writeText = vi.fn().mockResolvedValue(undefined);
     stubClipboard(writeText);
-    const rooms = within(build!).getAllByRole("group");
+    const rooms = await openRooms(build!, "Build Bot");
     for (const [room, { id }] of [
       [rooms[0]!, BUILD_BOT.rooms[0]!],
       [rooms[1]!, BUILD_BOT.rooms[1]!],

@@ -62,7 +62,11 @@ const ROOMS_NAMED = 3;
 /** What a row says of an agent's rooms: every open room, new ones too, or the ones it's kept to, or else that only its DMs reach it. */
 export function roomsOf(rooms: Agent["rooms"]): string {
   if (rooms === null) return EVERY_ROOM;
-  if (rooms.length === 0) return DMS_ONLY;
+  return rooms.length === 0 ? DMS_ONLY : roomNames(rooms);
+}
+
+/** Rooms by name, as a row names them, the Chat bots page's too: the first three, then how many more there are. */
+export function roomNames(rooms: Array<{ name: string }>): string {
   const names = rooms.map(({ name }) => name);
   return names.length > ROOMS_NAMED ? `${names.slice(0, ROOMS_NAMED).join(", ")} and ${names.length - ROOMS_NAMED} more` : names.join(", ");
 }

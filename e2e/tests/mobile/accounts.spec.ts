@@ -252,6 +252,7 @@ const BOT: BotSettings = {
   key: "0mgk3x2a9b4c5e-Ab3dEf5hiJ7k",
   rooms: [{ id: "0mgk3x2a9b4c5a", name: LONG_NAME }],
   webhookUrl: "https://ci.example.com/hook",
+  pickedRooms: null,
 };
 
 /** Shows `page` `BOT` as the only bot, without adding one to the test server, where it would join every other test's rooms. */
@@ -265,6 +266,11 @@ test("the Chat bots page, with a bot's commands, fits the phone", async ({ page,
   await showTheBot(page);
   await page.goto("/account/bots");
   await signInAsAdministrator(page);
+  // The bot's row, folded away, then open, with its only room open too.
+  const bot = page.getByRole("button", { name: BOT.name, exact: true });
+  await expect(bot).toBeVisible();
+  await screenIsFine();
+  await bot.click();
   await expect(page.getByRole("textbox", { name: "curl command for posting messages" })).toHaveValue(/^curl -d 'Hello!' /);
   await screenIsFine();
 });
@@ -279,8 +285,8 @@ test("a bot's settings fit the phone", async ({ page, screenIsFine }) => {
   await expect(page.getByRole("textbox", { name: "Bot name" })).toHaveValue(BOT.name);
   await expect(page.getByRole("button", { name: "Generate a new key" })).toBeVisible();
   await screenIsFine();
-  // Incoming, whose menu names a room as long as names go, then Outgoing, each scrolled to.
-  for (const name of ["Incoming", "Outgoing"]) {
+  // Rooms, then Incoming, whose menu names a room as long as names go, then Outgoing, each scrolled to.
+  for (const name of ["Rooms", "Incoming", "Outgoing"]) {
     await page.getByRole("region", { name }).scrollIntoViewIfNeeded();
     await screenIsFine();
   }
