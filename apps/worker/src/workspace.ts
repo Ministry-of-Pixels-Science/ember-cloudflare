@@ -3663,8 +3663,9 @@ export class Workspace extends DurableObject<Env> {
   /**
    * Reports message `messageId` in room `roomId` as the person `credentials` signs in, for `report`'s
    * reason, as Report message in its More actions does: "not found" unless they're in the room and it has
-   * the message, undeleted, "yours" for one of their own, or null without a valid session. The report keeps
-   * the message as it is now, with the room's kind, and its name unless it's a DM, and nothing else of the
+   * the message, undeleted, by someone who hasn't deleted their account, as it's on its way out of every
+   * room then, "yours" for one of their own, or null without a valid session. The report keeps the
+   * message as it is now, with the room's kind, and its name unless it's a DM, and nothing else of the
    * room. Every active administrator but whoever wrote it hears of it (`keepReport`). Reporting a message
    * again while their report of it is open changes nothing.
    */
@@ -3676,17 +3677,17 @@ export class Workspace extends DurableObject<Env> {
     if (!room || !message || message.deleted) return "not found";
     if (message.creator.id === user.id) return "yours";
     const subject: ReportSubject = { kind: "message", roomId, room: { kind: room.kind, name: room.kind === "direct" ? null : room.name }, message: reportedMessage(message) };
-    await this.keepReport(user, { ...report, id: sortableId(), reporterId: user.id, subjectId: message.creator.id, subject, createdAt: new Date().toISOString() }, message.creator.name);
-    return "reported";
+    const kept = await this.keepReport(user, { ...report, id: sortableId(), reporterId: user.id, subjectId: message.creator.id, subject, createdAt: new Date().toISOString() }, message.creator.name);
+    return kept ? "reported" : "not found";
   }
 
   /**
    * Reports whoever has id `userId` as the person `credentials` signs in, for `report`'s reason, as Report
    * on their page does, for their name, picture or bio: "not found" unless somebody active they're told of
-   * has it, as a person's page offers Report only for someone active, "yourself" for their own, or null
-   * without a valid session. The report keeps their name and bio
-   * as they are now, and every active administrator but them hears of it (`keepReport`). Reporting someone
-   * again while a report of theirs of them is open changes nothing.
+   * has it, as a person's page offers Report only for someone active, who hasn't deleted their account by
+   * the time it's kept, "yourself" for their own, or null without a valid session. The report keeps their
+   * name and bio as they are now, and every active administrator but them hears of it (`keepReport`).
+   * Reporting someone again while a report of theirs of them is open changes nothing.
    */
   async reportPerson(credentials: Credentials, userId: UserId, report: NewReport): Promise<"reported" | "not found" | "yourself" | null> {
     const user = await this.authenticate(credentials);
@@ -3695,23 +3696,26 @@ export class Workspace extends DurableObject<Env> {
     const [person] = (await this.isListedTo(userId, user.id)) ? await this.store.directoryEntries([userId]) : [];
     if (person?.status !== "active") return "not found";
     const subject: ReportSubject = { kind: "person", person: { id: person.id, name: person.name, bio: person.bio } };
-    await this.keepReport(user, { ...report, id: sortableId(), reporterId: user.id, subjectId: person.id, subject, createdAt: new Date().toISOString() }, person.name);
-    return "reported";
+    const kept = await this.keepReport(user, { ...report, id: sortableId(), reporterId: user.id, subjectId: person.id, subject, createdAt: new Date().toISOString() }, person.name);
+    return kept ? "reported" : "not found";
   }
 
   /**
    * Keeps `report`, made by `reporter` of someone named `subjectName`, unless they have an open report of
    * the same message or person. Then every tab of every active administrator but whoever it's of hears
    * how many reports are open, and their pushes say who reported whom, but to whoever made it, and those
-   * who've blocked them. Nobody else hears of it.
+   * who've blocked them. Nobody else hears of it. Answers false, keeping nothing, once whoever it's of
+   * has deleted their account, which they can have since what it keeps of them was read.
    */
-  private async keepReport(reporter: User, report: ReportToKeep, subjectName: string): Promise<void> {
+  private async keepReport(reporter: User, report: ReportToKeep, subjectName: string): Promise<boolean> {
     const kept = await this.reports.keep(report);
-    if (!kept) return;
+    if (!kept) return !(await this.reports.isDeletedAccount(report.subjectId));
     this.tellOpenReports(kept.open.filter(({ userId }) => userId !== report.subjectId));
-    if (kept.deliveries.length === 0) return;
-    const payload = reportPayload(reporter.name, subjectName, report.subject, report.reason);
-    this.ctx.waitUntil(this.pushReport([{ payload, deliveries: kept.deliveries }], reporter.id));
+    if (kept.deliveries.length > 0) {
+      const payload = reportPayload(reporter.name, subjectName, report.subject, report.reason);
+      this.ctx.waitUntil(this.pushReport([{ payload, deliveries: kept.deliveries }], reporter.id));
+    }
+    return true;
   }
 
   /**
@@ -4056,8 +4060,9 @@ export class Workspace extends DurableObject<Env> {
    * (`deactivate`), and their name, email address, password, bio and avatar go, as do the rooms they
    * starred and the accounts elsewhere they connected. Their row stays, named as deleted accounts are,
    * since their DMs name them. The outbox has every room they can have written in delete their messages
-   * and boosts, and R2 their avatar. Everyone's workspace sockets hear of it, and the tabs of whoever had
-   * blocked them whom they've blocked now.
+   * and boosts, and R2 their avatar. Everyone's workspace sockets hear of it, the tabs of whoever had
+   * blocked them whom they've blocked now, and, when any report was of them, which keeps nothing of them
+   * now, every active administrator's tabs how many reports are open.
    */
   async deleteAccount(
     credentials: Credentials,
@@ -4081,7 +4086,7 @@ export class Workspace extends DurableObject<Env> {
         if (tooSoon) return tooSoon;
         const deletedAt = new Date(now).toISOString();
         // As when removing someone, until the database says it queued nothing.
-        let deletion: DeletedAccount = { queued: true, blockers: [] };
+        let deletion: DeletedAccount = { queued: true, blockers: [], reportsCleared: false };
         try {
           deletion = await this.sessions.change(
             (session) => session.user.id === person.id,
@@ -4096,6 +4101,8 @@ export class Workspace extends DurableObject<Env> {
         for (const { userId, blocks } of deletion.blockers) this.tell([userId], { type: "blocks.changed", blocks });
         const deleted = { id: person.id, name: DELETED_PERSON_NAME, username: null, bio: null, role: "member", status: "deactivated", updatedAt: deletedAt, agent: false, keptFor: null } as const;
         this.broadcast({ type: "user.updated", user: await this.directoryUser(deleted) });
+        // As many reports are open as before, but a Reports list loads them again on hearing so.
+        if (deletion.reportsCleared) this.tellOpenReports(await this.reports.openByAdministrator());
         return "deleted";
       }),
     );

@@ -1930,8 +1930,9 @@ export type WorkspaceServerFrame =
   /** They've blocked or unblocked someone, in this tab or another: whom they've blocked now. */
   | { type: "blocks.changed"; blocks: Blocks }
   /**
-   * Someone has made a report, or an administrator has handled one: how many open reports whoever it's
-   * sent to sees now, which never include the reports of them. Sent to the administrators.
+   * Someone has made a report, or an administrator has handled one, or someone reported has deleted their
+   * account, which clears what the reports of them kept: how many open reports whoever it's sent to sees
+   * now, which never include the reports of them. Sent to the administrators.
    */
   | { type: "reports.changed"; open: number }
   /** They've given a room of theirs another notification level, in this tab or another. */

@@ -355,7 +355,10 @@ Objects, D1 or speed call for something else.
   someone, closes every open report of it, or of them, in one `UPDATE ... RETURNING` by
   `index_reports_on_message_id` or `index_reports_on_subject_id`. Every active administrator's count
   of open reports is one statement, which binds nothing however many there are. Reports stay when
-  whoever made them, or whoever they're of, deletes their account, as the administrators' record.
+  whoever made them, or whoever they're of, deletes their account, as the administrators' record, but
+  deleting an account takes what the reports of them kept of them out of `subject` in the same batch,
+  by `index_reports_on_subject_id` (`CLEAR_REPORTS_OF`), as workspace migration 0078 does for accounts
+  deleted before then, and keeping one is refused in its `INSERT` once whoever it's of has deleted theirs.
 - **A room's place in the shared order is a column of the room**, `rooms.shared_position` (workspace
   migration 0020), so the sidebar's statement reads each room's place with the room, and listing the
   order costs nothing more, nor reads the places of rooms someone isn't in. Saving it reads the
@@ -652,7 +655,7 @@ Objects, D1 or speed call for something else.
   `users.email_verified_at` keeps when someone joined with a link emailed to their address, which
   saving their profile with another forgets, and is what linking by an address the provider verified
   goes by, never linking an administrator.
-  Workspace migration 0052 adds what Memberful lacks. `identities.refresh_token` keeps the refresh
+  Workspace migration 0079 adds what Memberful lacks. `identities.refresh_token` keeps the refresh
   token each sign-in gave, sealed, and `refresh_due_at`, which an index serves, keeps when the
   Workspace's alarm next asks the provider with it, without a queue. Settling one checks that the
   token is still the one it asked with, so a sign-in meanwhile keeps its own. `sessions.identity_issuer`

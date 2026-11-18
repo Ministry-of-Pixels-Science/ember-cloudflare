@@ -1,6 +1,6 @@
 import { useContext, useEffect, useMemo, useState } from "react";
 import type { UserId } from "@ember/protocol";
-import { HANDLED_REPORTS_LISTED, OPEN_REPORTS_LISTED, REPORT_REASON_LABELS, type Report, type ReportedMessage, type ReportOutcome, type Reports } from "@ember/protocol/reports";
+import { HANDLED_REPORTS_LISTED, isOfDeletedAccount, OPEN_REPORTS_LISTED, REPORT_REASON_LABELS, type Report, type ReportedMessage, type ReportOutcome, type Reports } from "@ember/protocol/reports";
 import { TriangleFlag } from "@/components/icons/iconoir";
 import { PageLink } from "@/components/page-link";
 import { PeopleContext, useNameOf, type People } from "@/hooks/use-directory";
@@ -17,10 +17,14 @@ import { CONFIRM_BAN } from "./person-page";
 
 // The Reports list in Membership, for administrators: the open reports, newest first, each with what it
 // reports as it was then, who reported it, why and when, and what can be done of it, then the ones handled
-// last. It never shows an administrator the reports of themselves.
+// last. It never shows an administrator the reports of themselves. A report of someone who has deleted
+// their account keeps nothing they wrote, nor their name or bio, and can only be dismissed.
 
 /** What Delete message asks first, as More actions' does. */
 export const CONFIRM_DELETE = "Are you sure you want to delete this message?";
+
+/** What the list shows in place of what a report kept of someone, once they've deleted their account. */
+export const DELETED_WITH_ACCOUNT = { message: "Deleted with their account", person: "Name and bio deleted with their account" };
 
 /** What the list says of a report once it's handled. */
 export const HANDLED_AS: Record<ReportOutcome, string> = { deleted: "Message deleted", removed: "Removed", banned: "Banned", dismissed: "Dismissed" };
@@ -156,13 +160,15 @@ export function ReportsList({ meId, shown, open, heard, onFailed }: Props) {
 function OpenReport({ report, people, busy, onHandle }: { report: Report; people: People; busy: boolean; onHandle: (outcome: ReportOutcome) => void }) {
   const ofWhom = subjectId(report);
   const name = nameIn(people, ofWhom);
-  const { remove, ban } = handlingsFor(people, ofWhom);
+  // Their message went with their account, and nothing brings a deleted account back to remove or ban.
+  const accountDeleted = isOfDeletedAccount(report);
+  const { remove, ban } = accountDeleted ? { remove: false, ban: false } : handlingsFor(people, ofWhom);
   return (
     <li aria-label={`Report of ${name}`} aria-busy={busy || undefined} className="flex flex-col gap-2.5 rounded-[10px] border bg-background px-[2ch] py-3 max-md:px-3">
       <ReportedBy report={report} people={people} />
       <Subject report={report} />
       <div className="flex flex-wrap gap-2">
-        {report.subject.kind === "message" && (
+        {report.subject.kind === "message" && !accountDeleted && (
           <button type="button" disabled={busy} onClick={() => onHandle("deleted")} className={cn(BUTTON, "text-negative")}>
             Delete message
           </button>
@@ -232,7 +238,13 @@ function Subject({ report }: { report: Report }) {
           </PageLink>
           {now !== person.name && <span className="text-muted-foreground"> (now {now})</span>}
         </p>
-        {person.bio ? <p className="wrap-anywhere whitespace-pre-wrap">{person.bio}</p> : <p className={NOTE}>No bio</p>}
+        {person.accountDeleted ? (
+          <p className={NOTE}>{DELETED_WITH_ACCOUNT.person}</p>
+        ) : person.bio ? (
+          <p className="wrap-anywhere whitespace-pre-wrap">{person.bio}</p>
+        ) : (
+          <p className={NOTE}>No bio</p>
+        )}
       </div>
     );
   }
@@ -252,12 +264,13 @@ function Subject({ report }: { report: Report }) {
 
 /**
  * A reported message as it was, as its room showed it, with its file by name, and a bot's cards, whose
- * buttons that act are disabled here.
+ * buttons that act are disabled here, or what's left of it once whoever wrote it deleted their account.
  */
 function MessageText({ message }: { message: ReportedMessage }) {
   const shown = useMemo(() => shownBody(message.body, message.plainText), [message.body, message.plainText]);
   return (
     <>
+      {message.accountDeleted && <p className={NOTE}>{DELETED_WITH_ACCOUNT.message}</p>}
       {message.body !== "" && (shown ? <MessageBody nodes={shown} mentions={message.mentions} /> : <p className="wrap-anywhere whitespace-pre-wrap">{message.plainText}</p>)}
       {message.attachment && <p className={NOTE}>File: {message.attachment.name}</p>}
       {message.cards && <BotCards cards={message.cards} />}
