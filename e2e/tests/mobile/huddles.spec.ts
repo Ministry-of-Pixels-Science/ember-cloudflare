@@ -218,13 +218,65 @@ async function offerScreens(count: number): Promise<{ sdp: string; mids: string[
   return { sdp: connection.localDescription!.sdp, mids: sent.map(({ mid }) => mid!) };
 }
 
+// TEMPORARY, to come out again: ways the stand-in could send its screens, for runs that compare them in CI's WebKit.
+type OfferedWay = "as it is" | "closing" | "closing and steady";
+interface Trial {
+  way: OfferedWay;
+  width: number;
+  height: number;
+}
+type TrialWindow = SentScreens & { screensPictured?: MediaStream; screensSentBefore?: RTCPeerConnection[]; sizesSeen?: Set<string>; sizesWatched?: number };
+
+/**
+ * TEMPORARY: `offerScreens` as it is, which leaves the connection it made before open and takes a camera each
+ * time; "closing", which stops and closes that connection and keeps one camera throughout; and "closing and
+ * steady", which also sends its pictures as a screen's are sent, at their own size however busy the sender.
+ */
+async function offerScreensEachWay({ count, way, width, height }: Trial & { count: number }): Promise<{ sdp: string; mids: string[] }> {
+  const standIn = window as TrialWindow;
+  if (way === "as it is") {
+    if (standIn.screensSent) (standIn.screensSentBefore ??= []).push(standIn.screensSent);
+  } else {
+    standIn.screensSent?.getSenders().forEach((sender) => sender.track?.stop());
+    standIn.screensSent?.close();
+  }
+  const camera = () => navigator.mediaDevices.getUserMedia({ video: { width, height } });
+  const picture = way === "as it is" ? await camera() : (standIn.screensPictured ??= await camera());
+  const connection = new RTCPeerConnection();
+  const sent = Array.from({ length: count }, () => {
+    const screen = picture.getVideoTracks()[0]!.clone();
+    if (way === "closing and steady") screen.contentHint = "detail";
+    return connection.addTransceiver(screen, { direction: "sendonly" });
+  });
+  await connection.setLocalDescription(await connection.createOffer());
+  if (!connection.localDescription!.sdp.includes("a=candidate:")) await new Promise((resolve) => connection.addEventListener("icecandidate", resolve, { once: true }));
+  standIn.screensSent = connection;
+  return { sdp: connection.localDescription!.sdp, mids: sent.map(({ mid }) => mid!) };
+}
+
+/** TEMPORARY: the sizes the stand-in sends now and what limits them, the states of the connections it made before, and the sizes the huddle's pictures have had since last asked. */
+async function whatScreensDo(): Promise<{ sent: string[]; limited: string[]; before: string[]; sizes: string[] }> {
+  const standIn = window as TrialWindow;
+  const sent: string[] = [];
+  const limited: string[] = [];
+  (await standIn.screensSent?.getStats())?.forEach((stat: Record<string, unknown>) => {
+    if (stat.type !== "outbound-rtp") return;
+    sent.push(`${String(stat.frameWidth)}x${String(stat.frameHeight)}`);
+    limited.push(String(stat.qualityLimitationReason));
+  });
+  const sizes = [...(standIn.sizesSeen ?? [])];
+  standIn.sizesSeen = new Set();
+  standIn.sizesWatched ??= window.setInterval(() => document.querySelectorAll<HTMLVideoElement>("#huddle video").forEach((video) => standIn.sizesSeen!.add(`${video.videoWidth}x${video.videoHeight}`)), 50);
+  return { sent, limited, before: (standIn.screensSentBefore ?? []).map((connection) => connection.connectionState), sizes };
+}
+
 /**
  * Has the huddle the page joins welcome its person, `you`, after `sharing`, each of whom shares a
  * screen, and `others`, who share none. It offers the page the screens when it asks to watch them on a
  * connection it has yet to make, as it does once it shows the huddle opened, and whenever it shows it
  * opened again.
  */
-async function standInHuddleWithScreens(page: Page, you: User, sharing: User[], others: User[] = []): Promise<void> {
+async function standInHuddleWithScreens(page: Page, you: User, sharing: User[], others: User[] = [], trial?: Trial): Promise<void> {
   const people = [...sharing.map((user) => ({ user, screen: true })), ...[...others, you].map((user) => ({ user, screen: false }))].map((person) => ({ ...person, muted: false, audio: false, video: false }));
   await page.routeWebSocket(HUDDLE_SOCKET, (ws) => {
     const say = (frame: HuddleServerFrame) => ws.send(JSON.stringify(frame));
@@ -232,7 +284,7 @@ async function standInHuddleWithScreens(page: Page, you: User, sharing: User[], 
     ws.onMessage(async (message) => {
       const frame = JSON.parse(String(message)) as HuddleClientFrame;
       if (frame.type === "huddle.listen" && frame.kind === "screen" && frame.fresh && frame.watch?.length === sharing.length) {
-        const { sdp, mids } = await page.evaluate(offerScreens, sharing.length);
+        const { sdp, mids } = trial ? await page.evaluate(offerScreensEachWay, { ...trial, count: sharing.length }) : await page.evaluate(offerScreens, sharing.length);
         say({ type: "huddle.offer", kind: "screen", sdp, tracks: sharing.map(({ id }, index) => ({ mid: mids[index]!, kind: "screen", userId: id })) });
       } else if (frame.type === "huddle.answer" && frame.kind === "screen") {
         await page.evaluate((sdp) => (window as SentScreens).screensSent!.setRemoteDescription({ type: "answer", sdp }), frame.sdp);
@@ -839,6 +891,63 @@ test("the screens people share in the huddle you're in fit the phone, one large 
   await expect.poll(() => shows("Ada's screen"), { timeout: 15_000 }).toBe(true);
   await expect(tiles).toHaveCount(4);
 });
+
+for (const way of ["as it is", "closing", "closing and steady"] satisfies OfferedWay[]) {
+  for (const [width, height] of [
+    [640, 360],
+    [1280, 720],
+  ] as const) {
+    // TEMPORARY, to come out again: the huddle opened five times over, noting each time whether its screens play, and what's sent.
+    test(`[trial] screens ${width} wide, sent ${way}, in a huddle opened again and again`, async ({ page, room, session, participant }, testInfo) => {
+      test.setTimeout(240_000);
+      const sharing = await Promise.all(["Ada", "Grace"].map(async (name) => (await participant(name)).session.user));
+      await standInHuddleWithScreens(page, session.user, sharing, [], { way, width, height });
+      await openRoomWithHuddlesOn(page, room);
+      await header(page).getByRole("button", { name: "Start huddle", exact: true }).tap();
+      await page.getByRole("dialog", { name: `Start a huddle in ${room.name}` }).getByRole("button", { name: "Start Huddle" }).tap();
+      const opened = page.locator("#huddle");
+      const bar = page.getByRole("region", { name: `Huddle in ${room.name}` });
+      /** How far a screen's picture has played, as the test above asks whether it shows: nothing while it's paused or has no size. */
+      const time = (label: string) =>
+        opened
+          .getByLabel(label, { exact: true })
+          .evaluate((video: HTMLVideoElement) => (!video.paused && video.videoWidth > 0 ? video.currentTime : 0))
+          .catch(() => 0);
+      const times = () => Promise.all(["Ada's screen", "Grace's screen"].map(time));
+      const seen = { played: "", ms: [] as number[], sizes: new Set<string>(), sent: new Set<string>(), limited: new Set<string>(), before: [] as string[], failed: "" };
+      try {
+        await page.evaluate(whatScreensDo);
+        for (let round = 0; round < 5; round++) {
+          const began = Date.now();
+          const played = await expect
+            .poll(async () => (await times()).every((at) => at > 0), { timeout: 10_000 })
+            .toBe(true)
+            .then(
+              () => true,
+              () => false,
+            );
+          seen.ms.push(Date.now() - began);
+          // Whether they go on playing: each one's time a second and a half on.
+          const then = await times();
+          await page.waitForTimeout(1500);
+          const going = (await times()).every((at, index) => at > then[index]!);
+          seen.played += !played ? "0" : going ? "1" : "s";
+          const doing = await page.evaluate(whatScreensDo);
+          for (const size of doing.sizes) seen.sizes.add(size);
+          for (const size of doing.sent) seen.sent.add(size);
+          for (const reason of doing.limited) seen.limited.add(reason);
+          seen.before = doing.before;
+          await opened.getByRole("button", { name: "Minimize huddle" }).tap();
+          await expect(bar).toContainText("Ada and Grace are sharing screens");
+          await bar.getByTitle("Open huddle").first().tap();
+        }
+      } catch (error) {
+        seen.failed = String(error).slice(0, 200);
+      }
+      console.log(`[trial] ${JSON.stringify({ way, width, project: testInfo.project.name, repeat: testInfo.repeatEachIndex, ...seen, sizes: [...seen.sizes], sent: [...seen.sent], limited: [...seen.limited] })}`);
+    });
+  }
+}
 
 test("a huddle with more people in it than the phone shows beside a shared screen, or under it, scrolls its tiles by themselves", async ({ page, room, session, participant, screenIsFine }) => {
   const ada = (await participant("Ada")).session.user;
