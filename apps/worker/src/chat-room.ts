@@ -66,7 +66,7 @@ import {
 } from "./apps/tools";
 import { CALL_WAITS_MS, fits, WaitingCalls, type WaitingCall } from "./apps/waiting-calls";
 import { JobQueue } from "./at-once";
-import { isFresh, keptBlockedWords, NO_BLOCKED_WORDS, type KeptBlockedWords } from "./blocked-words";
+import { isFresh, keptBlockedWords, NO_BLOCKED_WORDS, outdated, type KeptBlockedWords } from "./blocked-words";
 import { actingButton, clickPayload } from "./bots/clicks";
 import { payloadOf, slackMessage, type SlackMessage, type SlackPayload } from "./bots/slack";
 import { postClick, postWebhook, WebhookError, webhookPayload, type ClickAnswer, type Reply } from "./bots/webhooks";
@@ -135,6 +135,21 @@ const LOGS_DUE = "logsDue";
 
 /** What an error frame adds for a message refused for `why`: that its writer is to change it, when it's for a word Blocked words keeps out. */
 const rewriting = (why: string) => (why === BLOCKED_WORDS_REFUSED ? { rewrite: true as const } : {});
+
+/**
+ * What the writer of `body` wrote of it, which Blocked words checks: its plain text with each mention of
+ * someone `named` names read as "@" alone, since their name isn't the writer's words, nor part of a word
+ * the writer wrote beside it.
+ */
+function writtenText(body: PreparedBody, named: (sgid: string) => User | undefined): string {
+  if (body.mentions.length === 0) return body.plainText;
+  const unnamed = (sgid: string) => {
+    const person = named(sgid);
+    return person && { ...person, name: "" };
+  };
+  // Its html prepares as it did, so this reads all of it but the names, or failing that, all of it.
+  return prepareBody(body.html, unnamed)?.plainText ?? body.plainText;
+}
 
 /** Why the room keeps nothing of a message: it couldn't show it, or there's nothing in it. `MESSAGE_TOO_LONG` says when there's too much. */
 const UNREADABLE = "That message couldn't be saved.";
@@ -247,6 +262,12 @@ const answererGone = (botId: UserId) => (botId === ASSISTANT_ID ? ASSISTANT_GONE
 
 /** Who answers as the bot `botId`, as the room's logs name them: Ember AI, as @ember, or an agent, by its id. */
 const answererOf = (botId: UserId) => (botId === ASSISTANT_ID ? "Ember AI" : `Agent ${botId}`);
+
+/**
+ * What the room keeps of what an answerer says in place of an answer with a blocked word. They're Ember's
+ * words, so they're not checked, and the answerer always says why it didn't answer.
+ */
+const blockedAnswerBody = (): PreparedBody | string => prepareBody(answerOf(BLOCKED_ANSWER).markup, () => undefined) ?? UNREADABLE;
 
 /**
  * What @ember or an agent says to a question: its model's answer, or the note saying why it has none, the
@@ -1323,35 +1344,45 @@ export class ChatRoom extends DurableObject<Env> {
 
   /**
    * What the room keeps of a body a client sent, naming the people it mentions as they are now, or
-   * why it keeps nothing, which is `BLOCKED_WORDS_REFUSED` when what it says has a blocked word. The
-   * names of the people it mentions aren't its writer's words, so they're not checked.
+   * why it keeps nothing, which is `BLOCKED_WORDS_REFUSED` when what its writer wrote has a blocked word.
    */
   private async prepare(markup: string): Promise<PreparedBody | string> {
+    const read = await this.readBody(markup);
+    if (typeof read === "string") return read;
+    return (await this.hasBlockedWord(read.written)) ? BLOCKED_WORDS_REFUSED : read.body;
+  }
+
+  /**
+   * A body a client sent as the room keeps it, naming the people it mentions as they are now, with what
+   * its writer wrote (`writtenText`), not yet checked for blocked words, or why the room can't keep it.
+   */
+  private async readBody(markup: string): Promise<{ body: PreparedBody; written: string } | string> {
     const ids = userIdsIn(markup);
     const people = new Map<UserId, User>(ids.length === 0 ? [] : (await workspace(this.env).mentionedPeople(ids)).map((person) => [person.id, person]));
-    const body = prepareBody(markup, (sgid) => people.get(userIdFromSgid(sgid) ?? ""));
+    const named = (sgid: string) => people.get(userIdFromSgid(sgid) ?? "");
+    const body = prepareBody(markup, named);
     if (body === null) return UNREADABLE;
     if (body.blank) return EMPTY;
     if (isMessageTooLong(body.plainText)) return MESSAGE_TOO_LONG;
-    const written = body.mentions.reduce((text, { name }) => text.replaceAll(`@${name}`, " "), body.plainText);
-    return (await this.hasBlockedWord(written)) ? BLOCKED_WORDS_REFUSED : body;
+    return { body, written: writtenText(body, named) };
   }
 
   /**
    * What the room keeps of a bot's message with `cards`: its text, as `prepare` keeps a body, though it may
    * be empty once the room keeps a card, and the cards, as `keptCards` keeps them, whose plain text
-   * follows the text's, together no longer than a message's, or why it keeps nothing.
+   * follows the text's, together no longer than a message's, or why it keeps nothing. The text and the
+   * cards are checked for blocked words together, so that a phrase split between them is found.
    */
   private async prepareWithCards(markup: string, cards: Card[]): Promise<StoredBody | string> {
     const kept = cards.length === 0 ? null : keptCards(cards);
     if (!kept || kept.cards.length === 0) return this.prepare(markup);
     if (JSON.stringify(kept.cards).length > MAX_MESSAGE_HTML_LENGTH) return MESSAGE_TOO_LONG;
-    const body = await this.prepare(markup);
-    if (typeof body === "string" && body !== EMPTY) return body;
-    const text = typeof body === "string" ? { html: "", plainText: "", mentions: [] } : body;
+    const read = await this.readBody(markup);
+    if (typeof read === "string" && read !== EMPTY) return read;
+    const { body: text, written } = typeof read === "string" ? { body: { html: "", plainText: "", mentions: [] }, written: "" } : read;
     const plainText = [text.plainText, kept.plainText].filter((line) => line !== "").join("\n");
     if (isMessageTooLong(plainText)) return MESSAGE_TOO_LONG;
-    return (await this.hasBlockedWord(kept.plainText)) ? BLOCKED_WORDS_REFUSED : { ...text, plainText, cards: kept.cards };
+    return (await this.hasBlockedWord(`${written}\n${kept.plainText}`)) ? BLOCKED_WORDS_REFUSED : { ...text, plainText, cards: kept.cards };
   }
 
   /**
@@ -1455,7 +1486,7 @@ export class ChatRoom extends DurableObject<Env> {
     const events = logged.map((event) => (event.threadOnly && event.message?.parentId !== undefined ? { ...event, viewerIds: viewingThread(event.message.parentId) } : seeing(event)));
     const { pushes, webhooks, asks, blockedWords } = await workspace(this.env).applyRoomEvents(roomId, events, viewers);
     // Blocked words that have changed since the room heard of them are asked for again before the next check.
-    if (this.blockedWords && this.blockedWords.version !== blockedWords) this.blockedWords = null;
+    if (this.blockedWords && this.blockedWords.version !== blockedWords) this.blockedWords = outdated(this.blockedWords);
     // The Workspace answers a message's pushes, webhooks and question for @ember once, so they're sent
     // whatever happens next, and the log's next call doesn't wait on push services, bots or models.
     if (pushes.length > 0) this.ctx.waitUntil(this.push(pushes));
@@ -2055,7 +2086,7 @@ export class ChatRoom extends DurableObject<Env> {
       if (inThread === null) return THREAD_GONE;
       const answered = await this.answerBody(answer, preview);
       // An answer with a blocked word isn't posted: the answerer says why it can't answer instead.
-      const body = answered === BLOCKED_WORDS_REFUSED ? await this.answerBody(answerOf(BLOCKED_ANSWER), null) : answered;
+      const body = answered === BLOCKED_WORDS_REFUSED ? blockedAnswerBody() : answered;
       if (typeof body === "string") return body;
       await this.create(store, access.bot, crypto.randomUUID(), body, new Date().toISOString(), { kind: "reply", inThread });
       return null;

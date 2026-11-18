@@ -21,6 +21,8 @@ describe("wordsOf", () => {
 
   it("reads letters drawn another way as the letters they are, and sees past what's invisible", () => {
     expect(wordsOf("ＦＵＤＧＥ 𝐟𝐮𝐝𝐠𝐞 Ⓕⓤⓓⓖⓔ")).toEqual(["fudge", "fudge", "fudge"]);
+    // Capitals with no lowercase of their own, as mathematical and squared ones are, too.
+    expect(wordsOf("𝐅𝐔𝐃𝐆𝐄 f𝐔dge 🄵🅄🄳🄶🄴 ℌ")).toEqual(["fudge", "fudge", "fudge", "h"]);
     expect(wordsOf("fu​dge fu­dge")).toEqual(["fudge", "fudge"]);
   });
 

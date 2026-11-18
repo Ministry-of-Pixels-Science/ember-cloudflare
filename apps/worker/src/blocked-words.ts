@@ -33,3 +33,9 @@ export const isFresh = (kept: KeptBlockedWords | null, now: number): kept is Kep
 
 /** What a room keeps of `given`, heard of at `now`. */
 export const keptBlockedWords = ({ version, words }: BlockedWords, now: number): KeptBlockedWords => ({ version, check: blockedWordsCheck(words), heardAt: now });
+
+/**
+ * `kept`, once the room has heard it's changed: to be asked for again at the next check, as if heard of
+ * long ago, but still the list to go by if the Workspace can't be reached then.
+ */
+export const outdated = (kept: KeptBlockedWords): KeptBlockedWords => ({ ...kept, heardAt: -Infinity });

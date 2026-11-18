@@ -579,7 +579,8 @@ describe("@ember", () => {
 
   it("says it can't answer there in place of an answer with a word Blocked words keeps out", async () => {
     const { ada, general } = await setUp();
-    const blocked = await api("/api/account", { method: "PATCH", headers: { Cookie: ada.cookie }, body: JSON.stringify({ blockedWords: ["fudge"] }) });
+    // What it says in its place is Ember's words, which are posted even with one of them blocked.
+    const blocked = await api("/api/account", { method: "PATCH", headers: { Cookie: ada.cookie }, body: JSON.stringify({ blockedWords: ["fudge", "community"] }) });
     expect(blocked.status).toBe(200);
     internet(() => chatAnswer("Oh **fudge**, it moved to Friday."));
     const client = await connect(general, ada);

@@ -44,7 +44,8 @@ const WORD = new RegExp(String.raw`${OWN_WORD}\p{M}*|(?:(?!${OWN_WORD})[\p{L}\p{
  * such as fullwidth or mathematical letters, read as their letters, and with nothing invisible.
  */
 export function wordsOf(text: string): string[] {
-  const folded = text.toLowerCase().normalize("NFKD").replace(IGNORED_MARKS, "").replace(INVISIBLE, "").normalize("NFC");
+  // Lowercased once read as letters, since a mathematical or squared capital has no lowercase of its own.
+  const folded = text.normalize("NFKD").toLowerCase().replace(IGNORED_MARKS, "").replace(INVISIBLE, "").normalize("NFC");
   return folded.match(WORD) ?? [];
 }
 

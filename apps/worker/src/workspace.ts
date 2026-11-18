@@ -2746,8 +2746,8 @@ export class Workspace extends DurableObject<Env> {
    * token opens: as the person their Memberful account is linked to, whether Memberful is on or not, or
    * else, while it's on, as someone new, a member in every open room, linked to it, as joining adds
    * someone, called by the first of their names that isn't an agent's and has no word Blocked words keeps
-   * out, else "Member" (`namelessMember`), with a username made from it (`firstFreeUsername`), which
-   * answers "joined".
+   * out, else "Member" (`namelessMember`), which Blocked words doesn't keep out, as it's Ember's word, with
+   * a username made from it (`firstFreeUsername`), which answers "joined".
    * Accounts are linked by the site and the member's id there, never matched by email address.
    * What Memberful said of their membership, as of `readAt`, is gone by as a check's is
    * (`settleMembership`), unless the Workspace has gone by a newer read: a member whose membership has
@@ -2779,8 +2779,10 @@ export class Workspace extends DurableObject<Env> {
       if (!member.subscribed) return "membership";
       // Nobody can take an agent's name, which Memberful knows nothing of, nor one with a blocked word.
       const [agents, { check: blocks }] = await Promise.all([this.store.agentEntries(), this.blockedWordsNow()]);
-      const free = (name: string) => !agents.some((agent) => sameName(agent.name, name)) && !blocks(name);
-      const name = member.names.find(free) ?? namelessMember(free);
+      const unlikeAgents = (name: string) => !agents.some((agent) => sameName(agent.name, name));
+      const free = (name: string) => unlikeAgents(name) && !blocks(name);
+      // "Member" is Ember's word, not theirs, so blocking it can't leave them nameless.
+      const name = member.names.find(free) ?? namelessMember(unlikeAgents);
       const session: StoredSession = { id: sortableId(), user: { id: sortableId(), name }, administrator: false, guest: false, lastActiveAt: Date.now() };
       const person = { ...session.user, username: await this.firstFreeUsername(name, free), emailAddress: member.emailAddress };
       let welcomed: DirectRoom[];

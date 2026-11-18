@@ -135,12 +135,17 @@ describe("messages", () => {
     const kept = await post(client, `<p>Thanks, ${mention(fudge.user)}!</p>`);
     expect(kept.mentions).toEqual([shown(fudge.user)]);
     expect((await refused(client, `<p>${mention(fudge.user)} loves fudge</p>`)).error.message).toBe(BLOCKED_WORDS_REFUSED);
+    // Only the mentions are passed over: not their names written out, nor a word that starts as a name does.
+    const fu = await signIn("Fu");
+    for (const body of [`<p>${mention(fudge.user)} @Fudge Smith</p>`, `<p>${mention(fu.user)} @Fudge</p>`]) {
+      expect((await refused(client, body)).error.message).toBe(BLOCKED_WORDS_REFUSED);
+    }
   });
 
-  it("refuses a bot's message or reaction with a blocked word", async () => {
+  it("refuses a bot's message or reaction with a blocked word, or a phrase split between its text and a card", async () => {
     const { ada, general } = await setUp();
     const bot = await addBot(ada, "Build Bot");
-    await block(ada, "fudge");
+    await block(ada, "fudge", "darn it");
 
     const message = await api(`/rooms/${general}/${bot.key}/messages`, { method: "POST", body: "Build fudged", headers: FORM_TYPE });
     expect(message.status).toBe(201);
@@ -151,6 +156,12 @@ describe("messages", () => {
     const boosted = await api(`/rooms/${general}/${bot.key}/messages/${id}/boosts`, { method: "POST", body: "fudge", headers: FORM_TYPE });
     expect(boosted.status).toBe(422);
     expect(await boosted.json()).toEqual({ error: BLOCKED_WORDS_REFUSED });
+
+    // A card is checked with the text it's under, as one message.
+    const sent = (payload: unknown) => api(`/rooms/${general}/${bot.key}/slack`, { method: "POST", body: JSON.stringify(payload), headers: { "Content-Type": "application/json" } });
+    expect((await sent({ text: "Darn", attachments: [{ text: "The build broke" }] })).status).toBe(200);
+    const split = await sent({ text: "Darn", attachments: [{ text: "it broke the build" }] });
+    expect([split.status, await split.text()]).toEqual([400, "invalid_payload"]);
   });
 });
 
@@ -213,6 +224,23 @@ describe("rooms", () => {
     expect((await post(elsewhere, "<p>Fudge!</p>")).plainText).toBe("Fudge!");
     expect(errors).toHaveBeenCalledWith("Could not ask for the blocked words; going by those the room had", expect.any(Error));
     for (const again of reconnect) await again();
+  });
+
+  it("go by the list they had while the Workspace can't be reached just after they hear it's changed", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { ada, general } = await setUp();
+    await block(ada, "fudge");
+    const client = await connect(general, ada);
+    await post(client, "<p>Hello</p>");
+    await allApplied(general);
+
+    await block(ada, "fudge", "heck");
+    await post(client, "<p>Hello again</p>");
+    await allApplied(general);
+    const reconnect = await cutOff(general);
+    expect((await refused(client, "<p>Fudge!</p>")).error.message).toBe(BLOCKED_WORDS_REFUSED);
+    expect(errors).toHaveBeenCalledWith("Could not ask for the blocked words; going by those the room had", expect.any(Error));
+    await reconnect();
   });
 });
 

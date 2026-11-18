@@ -826,6 +826,19 @@ describe("Sign in with Memberful", () => {
       expect(await workspaceSql("SELECT username FROM users WHERE id = ?", unnamed.id)).toEqual([{ username: "member22" }]);
     });
 
+    it("passes over a name with a blocked word, but calls someone new Member even with that blocked", async () => {
+      const administrator = await setUpWithMemberful();
+      const blocked = await api("/api/account", { method: "PATCH", headers: as(administrator), body: JSON.stringify({ blockedWords: ["johnson", "member"] }) });
+      expect(blocked.status).toBe(200);
+      const site = fakeMemberful();
+      expect((await signedInAs(await signInWithMemberful())).name).toBe("katherine");
+      // "Member" is Ember's word, not theirs, so blocking it can't leave them nameless, though their username passes over it.
+      site.member = { ...katherine, id: "4243", email: null };
+      const unnamed = await signedInAs(await signInWithMemberful());
+      expect(unnamed.name).toBe("Member");
+      expect(await workspaceSql("SELECT username FROM users WHERE id = ?", unnamed.id)).toEqual([{ username: "member2" }]);
+    });
+
     it("signs nobody in with a state this browser didn't start with, or without a code, and asks Memberful nothing", async () => {
       await setUpWithMemberful();
       const site = fakeMemberful();
