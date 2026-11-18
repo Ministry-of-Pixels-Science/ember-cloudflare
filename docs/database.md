@@ -269,6 +269,18 @@ Objects, D1 or speed call for something else.
   each purge still waiting, and the room then deletes only what they wrote by then. What they write
   once they're back stays however late a room answers, and what a socket of theirs sent before the
   room closed it still goes.
+- **Deleting your account purges as a ban does, and keeps the row.** Apple asks that deleting an
+  account delete what it shared, so the batch that deletes someone's account ends their sessions,
+  queues closing their sockets by their person tag, which also turns away an AI app's message
+  already on its way, queues a purge in every room they could have written in, as a ban does, takes
+  them out of every shared room, forgets their stars, recent searches, push subscriptions, sign-ins
+  and connected apps, queues deleting their photo, and empties their row: named "Deleted person",
+  with no email address, password, bio or photo, deactivated, and `users.deleted_at` (workspace
+  migration 0068) saying why, which no ban or lifted ban can change. The row stays, since what's
+  left in rooms keeps their id, such as a thread's first message, kept for its replies. Their purge
+  deletes all their messages, 100 at a time, then their boosts on others' messages, through
+  `index_boosts_on_room_id_and_booster_id` (room migration 0069), then renames them on what's left
+  in one `UPDATE` through the index by creator.
 - **Granting rooms is one statement.** Campfire's `grant_to` binds the ids of everyone a room takes
   in, which our bound-value limit would cut to a few dozen rows a statement, and reading them first
   would cost D1 a round trip of its own, so each grant selects from `users` or `rooms` inside its
