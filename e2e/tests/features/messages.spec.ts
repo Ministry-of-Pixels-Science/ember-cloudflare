@@ -927,6 +927,9 @@ test.describe("Edit a message", () => {
     // Escape closes Link's dialog, leaving the edit open.
     await ada.editor().press("ControlOrMeta+k");
     await expect(ada.page.getByRole("dialog", { name: "Edit link" }).or(ada.page.getByRole("dialog", { name: "Add link" }))).toBeVisible();
+    // The click shut the tooltip that named Bold as the pointer reached it, which takes Escape until it has faded,
+    // hidden under the dialog as it is.
+    await expect(ada.page.getByRole("tooltip", { includeHidden: true })).toHaveCount(0);
     await ada.page.keyboard.press("Escape");
     await expect(ada.page.getByRole("dialog")).toBeHidden();
     await expect(ada.editor()).toBeFocused();

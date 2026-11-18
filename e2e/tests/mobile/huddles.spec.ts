@@ -199,22 +199,35 @@ async function letScreenBeKeptAwake(page: Page): Promise<void> {
   await cdp.send("Browser.grantPermissions", { permissions: ["wakeLockScreen", "audioCapture", "videoCapture"], browserContextId: targetInfo.browserContextId });
 }
 
-/** Where a page keeps the connection that stands in for the SFU's, which sends it the screens it watches. */
-type SentScreens = Window & { screensSent?: RTCPeerConnection };
+/** Where a page keeps the connection that stands in for the SFU's, which sends it the screens it watches, and the made-up camera they're pictures of. */
+type SentScreens = Window & { screensSent?: RTCPeerConnection; screensPictured?: MediaStream };
 
 /**
  * In the page: a connection of its own that sends it `count` screens, as the SFU's would, each the
- * picture of its made-up camera, as wide as a screen is. Answers its offer of them, which names an
- * address of its own, as the SFU's does, and the media section each is on.
+ * picture of its made-up camera. Answers its offer of them, which names an address of its own, as the
+ * SFU's does, and the media section each is on. Asked again, as when the huddle is opened again, it
+ * stops sending on the connection it made before, as the SFU does on one the page has closed.
+ *
+ * It sends them the way that CI's WebKit on Linux, busy with both ends of them, went on playing. The
+ * camera is asked for a size it has: asked for 640 by 360, WebKit's gave the sender half the frames,
+ * and fewer each time the huddle was opened. Each is sent as a screen's picture is, at one size however
+ * busy the sender: sent as a camera's, which a busy sender makes smaller and larger again, 1280 by 720
+ * crashed the page that showed it. And at half the camera's size, which asks the least of that page.
  */
 async function offerScreens(count: number): Promise<{ sdp: string; mids: string[] }> {
-  // Smaller than a laptop's screen: CI's WebKit on Linux, sending two at 1280 by 720 and showing them, froze in about half its runs.
-  const picture = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 360 } });
+  const standIn = window as SentScreens;
+  standIn.screensSent?.getSenders().forEach((sender) => sender.track?.stop());
+  standIn.screensSent?.close();
+  const camera = (standIn.screensPictured ??= await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } }));
   const connection = new RTCPeerConnection();
-  const sent = Array.from({ length: count }, () => connection.addTransceiver(picture.getVideoTracks()[0]!.clone(), { direction: "sendonly" }));
+  const sent = Array.from({ length: count }, () => {
+    const screen = camera.getVideoTracks()[0]!.clone();
+    screen.contentHint = "detail";
+    return connection.addTransceiver(screen, { direction: "sendonly", sendEncodings: [{ scaleResolutionDownBy: 2 }] });
+  });
   await connection.setLocalDescription(await connection.createOffer());
   if (!connection.localDescription!.sdp.includes("a=candidate:")) await new Promise((resolve) => connection.addEventListener("icecandidate", resolve, { once: true }));
-  (window as SentScreens).screensSent = connection;
+  standIn.screensSent = connection;
   return { sdp: connection.localDescription!.sdp, mids: sent.map(({ mid }) => mid!) };
 }
 

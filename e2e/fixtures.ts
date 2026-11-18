@@ -535,6 +535,24 @@ const watchPolicy = (context: BrowserContext) =>
 /** Says the test means to see the policy refuse something under `directive`, which otherwise fails it. */
 export const expectsPolicyViolation = (directive: string) => test.info().annotations.push({ type: EXPECTED_VIOLATION, description: directive });
 
+/** The methods an `APIRequestContext` sends a request with. */
+const SENDS = ["delete", "fetch", "get", "head", "patch", "post", "put"] as const;
+
+/**
+ * Has `request` send a request again, once, should its connection be reset. Playwright keeps a
+ * connection open for the next request, and the test server closes one that has been idle for five
+ * seconds, so a request sent at that moment is lost before the server reads any of it, which
+ * Playwright calls a socket hang up.
+ */
+function sendAgainWhenReset(request: APIRequestContext): APIRequestContext {
+  for (const method of SENDS) {
+    const send = request[method].bind(request) as APIRequestContext["fetch"];
+    const again: APIRequestContext["fetch"] = (target, options) => send(target, { maxRetries: 1, ...options });
+    request[method] = again;
+  }
+  return request;
+}
+
 export const test = base.extend<AppFixtures>({
   // The Worker's policy applies to every page a test opens, in its own context or one it makes for
   // someone else, so every context the browser opens reports what the policy got in the way of,
@@ -545,6 +563,8 @@ export const test = base.extend<AppFixtures>({
       browser.newContext = async (...options) => {
         const context = await newContext(...options);
         watchPolicy(context);
+        // Its requests, a page's among them, are sent again when their connection is reset, as the test's own are.
+        sendAgainWhenReset(context.request);
         return context;
       };
       await use(browser);
@@ -562,6 +582,9 @@ export const test = base.extend<AppFixtures>({
     },
     { auto: true },
   ],
+  request: async ({ request }, use) => {
+    await use(sendAgainWhenReset(request));
+  },
   session: async ({ request }, use) => {
     await use(await createSession(request, "Test Person"));
   },
