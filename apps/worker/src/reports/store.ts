@@ -210,6 +210,11 @@ export class ReportStore {
     const [closed, open] = (await this.db.batch([closing, statement(OPEN_REPORTS_BY_ADMINISTRATOR)])) as [ReportRow[], Array<{ user_id: UserId; open: number }>];
     return { closed: closed.map(reportOf), open: open.map(openOf) };
   }
+
+  /** Each active administrator's open reports, which leave out the reports of them. */
+  async openByAdministrator(): Promise<OpenReports[]> {
+    return (await this.db.all<{ user_id: UserId; open: number }>(OPEN_REPORTS_BY_ADMINISTRATOR)).map(openOf);
+  }
 }
 
 const openOf = ({ user_id, open }: { user_id: UserId; open: number }): OpenReports => ({ userId: user_id, open });

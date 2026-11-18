@@ -23,6 +23,7 @@ import {
   REPORT_PUSHES,
 } from "../src/reports/store";
 import { PUSHES_AT_ONCE } from "../src/at-once";
+import { MIGRATIONS } from "../src/migrations";
 import { CLEAR_REPORTS_OF, OPEN_REPORTS_OF_ADMINISTRATOR } from "../src/workspace-store";
 import { api, connect, createRoom, direct, freshDeploy, openWorkspaceSocket, post, pushBrowser, roomSql, signIn, upload, workspaceSql, type PushBrowser, type Session, type WorkspaceSocket } from "./support";
 
@@ -357,6 +358,43 @@ describe("Reports of someone who deletes their account", () => {
     expect((await reportMessage(linus, general.id, joans.id)).status).toBe(404);
     expect((await reportPerson(linus, joan.user.id)).status).toBe(404);
     expect(await workspaceSql("SELECT count(*) AS n FROM reports")).toEqual([{ n: 0 }]);
+  });
+
+  it("tell every active administrator's tabs how many are open, as many as before, for an open Reports list to show them again", async () => {
+    const [ada, grace, linus, joan] = await people("Ada", "Grace", "Linus", "Joan");
+    await administrators(ada);
+    await reported(reportPerson(linus, grace.user.id));
+    const tab = await openWorkspaceSocket(ada);
+
+    // Nothing to show again when no report is of whoever deletes their account.
+    await deleteAccountOf(joan);
+    await heardNoCount(tab);
+    await deleteAccountOf(grace);
+    expect(await nextOpenReports(tab)).toBe(1);
+  });
+
+  it("are cleared by migration 0077 as deleting it clears them now, when it was deleted before, as 0.5 beta 8 deleted accounts", async () => {
+    const [grace, linus] = await people("Grace", "Linus");
+    await workspaceSql("UPDATE users SET bio = ? WHERE id = ?", "Buy my course", grace.user.id);
+    const general = await createRoom("general");
+    const watches = await written(grace, general.id, `<p>Cheap watches, ask ${mention(linus)}</p>`);
+    const prices = await upload(grace, general.id, "prices.pdf", new TextEncoder().encode("Price list"), "application/pdf");
+    const linuss = await written(linus, general.id, "Not again");
+    for (const { id } of [watches, prices]) await reported(reportMessage(linus, general.id, id));
+    await reported(reportPerson(linus, grace.user.id));
+    await reported(reportMessage(grace, general.id, linuss.id));
+    // As beta 8 left her deleted account, with the reports of her as they were.
+    await workspaceSql("UPDATE users SET deleted_at = ? WHERE id = ?", new Date().toISOString(), grace.user.id);
+    const subjects = async () => (await workspaceSql("SELECT id, subject FROM reports ORDER BY id")) as Array<{ id: string; subject: string }>;
+    const kept = await subjects();
+
+    await workspaceSql(MIGRATIONS.find(({ name }) => name === "0077_cleared_reports.sql")!.sql);
+    const cleared = await subjects();
+    for (const { id, subject } of kept) await workspaceSql("UPDATE reports SET subject = ? WHERE id = ?", subject, id);
+    await workspaceSql(CLEAR_REPORTS_OF, DELETED_PERSON_NAME, grace.user.id);
+    expect(cleared).toEqual(await subjects());
+    // The three reports of her, and not the one she made.
+    expect(cleared.filter(({ subject }, i) => subject !== kept[i]!.subject)).toHaveLength(3);
   });
 });
 

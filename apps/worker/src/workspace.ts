@@ -3814,8 +3814,9 @@ export class Workspace extends DurableObject<Env> {
    * (`deactivate`), and their name, email address, password, bio and avatar go, as do the rooms they
    * starred and the accounts elsewhere they connected. Their row stays, named as deleted accounts are,
    * since their DMs name them. The outbox has every room they can have written in delete their messages
-   * and boosts, and R2 their avatar. Everyone's workspace sockets hear of it, and the tabs of whoever had
-   * blocked them whom they've blocked now.
+   * and boosts, and R2 their avatar. Everyone's workspace sockets hear of it, the tabs of whoever had
+   * blocked them whom they've blocked now, and, when any report was of them, which keeps nothing of them
+   * now, every active administrator's tabs how many reports are open.
    */
   async deleteAccount(
     credentials: Credentials,
@@ -3839,7 +3840,7 @@ export class Workspace extends DurableObject<Env> {
         if (tooSoon) return tooSoon;
         const deletedAt = new Date(now).toISOString();
         // As when removing someone, until the database says it queued nothing.
-        let deletion: DeletedAccount = { queued: true, blockers: [] };
+        let deletion: DeletedAccount = { queued: true, blockers: [], reportsCleared: false };
         try {
           deletion = await this.sessions.change(
             (session) => session.user.id === person.id,
@@ -3854,6 +3855,8 @@ export class Workspace extends DurableObject<Env> {
         for (const { userId, blocks } of deletion.blockers) this.tell([userId], { type: "blocks.changed", blocks });
         const deleted = { id: person.id, name: DELETED_PERSON_NAME, username: null, bio: null, role: "member", status: "deactivated", updatedAt: deletedAt, agent: false, keptFor: null } as const;
         this.broadcast({ type: "user.updated", user: await this.directoryUser(deleted) });
+        // As many reports are open as before, but a Reports list loads them again on hearing so.
+        if (deletion.reportsCleared) this.tellOpenReports(await this.reports.openByAdministrator());
         return "deleted";
       }),
     );
