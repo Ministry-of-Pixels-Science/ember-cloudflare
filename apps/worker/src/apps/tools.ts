@@ -11,12 +11,13 @@ import { appConnector } from "./connector";
 // (Workspace.pickAgentTools), the room gives them to the model beside Ember's own (tool-calls.ts), and
 // every call asks first, on a card in the room, which whoever asked, or an administrator, allows or not,
 // unless the administrator has that agent's calls of the tool always allowed: those are made at once,
-// each shown on a card in the room as it is, in a room open to everyone, but never in a DM or a private
-// room, where nothing said goes to an app unless someone there allows it. A tool that answers with a card of its own, in Slack's
-// Block Kit, has the room shown it, and a click on a button of that card calls the tool it names, for
-// whoever clicked (cards.ts). In someone's direct conversation with an agent, a call of a tool of an
-// app they've signed in to themselves goes as them, with their sign-in, and always asks them first.
-// The model never has an app's address or its token: it names a tool, and Ember calls it.
+// with nothing posted, as the room's typing line says which tool the agent is using, in a room open to
+// everyone, but never in a DM or a private room, where nothing said goes to an app unless someone there
+// allows it. A tool that answers with a card of its own, in Slack's Block Kit, has the room shown it,
+// and a click on a button of that card calls the tool it names, for whoever clicked (cards.ts). In
+// someone's direct conversation with an agent, a call of a tool of an app they've signed in to
+// themselves goes as them, with their sign-in, and always asks them first. The model never has an
+// app's address or its token: it names a tool, and Ember calls it.
 
 /**
  * A connected app's tool picked for an agent: its app, by its id and name, and the tool as its server
@@ -64,13 +65,13 @@ export function givenTools(picked: readonly PickedTool[]): Array<PickedTool & Gi
   });
 }
 
-/** What a model reads of an app's tool: whose it is, that each call waits to be allowed, or is shown to the room, or goes as whoever asked, and the app's own words for it, which are the app's. */
+/** What a model reads of an app's tool: whose it is, that each call waits to be allowed, or is made at once, or goes as whoever asked, and the app's own words for it, which are the app's. */
 const describedAs = ({ appName, title, description, alwaysAllowed, own }: PickedTool) =>
   [
     own
       ? `A tool of ${appName}, an app this workspace's administrators connected, which the person you're answering has signed in to themselves: here, a call of it is made as them. Each call waits until they allow it, so call it only when they asked for what it does, with what they'd expect.`
       : alwaysAllowed
-        ? `A tool of ${appName}, an app this workspace's administrators connected. Each call is made at once and shown to everyone in the room, so call it only when the person you're answering asked for what it does, with what they'd expect.`
+        ? `A tool of ${appName}, an app this workspace's administrators connected. Each call is made at once, with nobody asked, so call it only when the person you're answering asked for what it does, with what they'd expect.`
         : `A tool of ${appName}, an app this workspace's administrators connected. Each call waits until the person you're answering allows it, so call it only when they asked for what it does, with what they'd expect.`,
     title === null ? "" : `${appName} calls it: ${title}`,
     description === "" ? "" : `${appName} describes it: ${description}`,
@@ -78,16 +79,12 @@ const describedAs = ({ appName, title, description, alwaysAllowed, own }: Picked
     .filter((line) => line !== "")
     .join("\n");
 
-/** Why a call the room was shown wasn't made after all: its server has changed the tool, couldn't be asked for it, or refused it as more than Ember's sign-in allows. */
-export type Unmade = "changed" | "unasked" | "refused";
-
-/** A call the room was shown, which it's told wasn't made after all, and why, with `unmade`. */
-export interface ShownCall {
-  unmade(why: Unmade): Promise<void>;
-}
-
-/** Shows the room a call that's made without asking first, with what it's called with, answering why it couldn't, if it couldn't. */
-export type ShowsCall = (input: Record<string, unknown>) => Promise<string | ShownCall>;
+/**
+ * Whether the room still allows a call made without asking first, as it's about to be made: why not, if
+ * it doesn't, as once the agent's calls of the tool ask first there, as they do once it's private, or the
+ * agent, the question or its thread is gone.
+ */
+export type AllowsCall = () => Promise<string | null>;
 
 /** Shows the room the card a tool answered a call with, as a Slack payload, answering why it couldn't, if it couldn't. */
 export type ShowsCard = (card: SlackPayload) => Promise<string | null>;
@@ -95,22 +92,18 @@ export type ShowsCard = (card: SlackPayload) => Promise<string | null>;
 /**
  * The tool `given` for `agentId`'s model, answering whoever `asked`: with its description and what it
  * takes for a question, `described`, or without them going on from a call, whose request lists them
- * already. It asks first, unless the agent's calls of it are always allowed, which `shown` being there
- * says: such a call is made once the room is shown it, and not when it can't be. The room is shown the
- * card a call is answered with, if it is with one, through `cards`.
+ * already. It asks first, unless the agent's calls of it are always allowed, which `allows` being there
+ * says: such a call is made at once, while the room `allows` it. The room is shown the card a call is
+ * answered with, if it is with one, through `cards`.
  */
-export function appTool(env: Env, agentId: UserId, given: GivenTool, asked: AskedBy, { described, shown, cards }: { described?: PickedTool; shown?: ShowsCall; cards?: ShowsCard } = {}): EmberTool {
+export function appTool(env: Env, agentId: UserId, given: GivenTool, asked: AskedBy, { described, allows, cards }: { described?: PickedTool; allows?: AllowsCall; cards?: ShowsCard } = {}): EmberTool {
   const unshowable = (input: Record<string, unknown>) => (written(input).length > MAX_SHOWN_INPUT_LENGTH ? TOO_LONG_TO_SHOW : null);
   return {
     name: given.as,
     description: described ? describedAs(described) : "",
     takes: described ? (JSON.parse(described.takes) as Record<string, unknown>) : { type: "object" },
-    ...(!shown && { asksFirst: true as const, unaskable: unshowable }),
-    run: async (input) => {
-      const tooLong = shown ? unshowable(input) : null;
-      if (tooLong !== null) throw new ToolError(tooLong);
-      return called(env, agentId, given, input, asked, shown, cards);
-    },
+    ...(!allows && { asksFirst: true as const, unaskable: unshowable }),
+    run: (input) => called(env, agentId, given, input, asked, allows, cards),
   };
 }
 
@@ -134,8 +127,8 @@ export const ownWantsMoreAccess = (appName: string) =>
 /** Why a call isn't made of a tool that isn't its agent's to call any more. */
 export class ToolGone extends ToolError {}
 
-/** What a model is told of a call made without asking first that the room couldn't be shown. */
-export const CALL_NOT_SHOWN = "Not run: the room couldn't be shown this call, and a call nobody is shown isn't made.";
+/** What a model is told of a call made without asking first that the room doesn't allow any more. */
+export const CALL_NOT_ALLOWED_NOW = "Not run: this conversation doesn't allow calls of it without asking first any more.";
 
 /** What a model is told, after what a call answered, once the room has been shown the card its tool answered with. */
 export const shownAsCard = (appName: string) => `(The room has been shown this on a card from ${appName}, so there's no need to write it out again, or to make a card of it.)`;
@@ -145,8 +138,8 @@ export const shownAsCard = (appName: string) => `(The room has been shown this o
  * shown the card the call was answered with, if it was with one, through `cards`, which the model is
  * then told.
  */
-async function called(env: Env, agentId: UserId, tool: GivenTool, input: Record<string, unknown>, asked: AskedBy, shown?: ShowsCall, cards?: ShowsCard): Promise<string> {
-  const { text, blocks } = await answered(env, agentId, tool, input, asked, shown);
+async function called(env: Env, agentId: UserId, tool: GivenTool, input: Record<string, unknown>, asked: AskedBy, allows?: AllowsCall, cards?: ShowsCard): Promise<string> {
+  const { text, blocks } = await answered(env, agentId, tool, input, asked, allows);
   return blocks !== undefined && cards && (await carded(tool, blocks, cards)) ? `${text}\n\n${shownAsCard(tool.appName)}` : text;
 }
 
@@ -162,29 +155,30 @@ export async function calledFromCard(env: Env, agentId: UserId, tool: GivenTool,
 }
 
 /**
- * What calling `tool` with `input` for `agentId` comes to, once someone allowed it, or once the room
- * is `shown` it, as the agent's calls of it are always allowed: what its app answered, its text and
- * the Block Kit blocks beside it, if any, or why not, thrown, in words for a model. The Workspace says
- * where it goes, as it finds the tool then: one no longer picked for the agent, changed since, or,
- * with nobody asked, no longer always allowed, isn't called, and neither is one the room can't be
- * shown, or one of an app whose sign-in has ended. A call shown that then isn't made, as its tool is
- * found changed, its server can't be asked, or its server refuses it as more than Ember's sign-in
- * allows, has the room told so, and why. One refused so has the Workspace keep what its server asked
- * for, for an administrator to sign in again with. A tool that's whoever `asked`'s own is called as
- * them, with the sign-in they made to its app themselves, or not at all once that has ended: what its
- * server asks for beyond it is kept for them, and what it lists to them isn't read as the app's tools.
+ * What calling `tool` with `input` for `agentId` comes to, once someone allowed it, or at once, while
+ * the room `allows` it, as the agent's calls of it are always allowed: what its app answered, its text
+ * and the Block Kit blocks beside it, if any, or why not, thrown, in words for a model. The Workspace
+ * says where it goes, as it finds the tool then: one no longer picked for the agent, changed since, or,
+ * with nobody asked, no longer always allowed, isn't called, and neither is one the room doesn't allow
+ * any more, or one of an app whose sign-in has ended. A call made with nobody asked is logged, by its
+ * tool, as nothing in the room keeps it. One its server refuses as more than Ember's sign-in allows has
+ * the Workspace keep what its server asked for, for an administrator to sign in again with. A tool
+ * that's whoever `asked`'s own is called as them, with the sign-in they made to its app themselves, or
+ * not at all once that has ended: what its server asks for beyond it is kept for them, and what it
+ * lists to them isn't read as the app's tools.
  */
-async function answered(env: Env, agentId: UserId, tool: GivenTool, input: Record<string, unknown>, asked: AskedBy, shown?: ShowsCall): Promise<{ text: string; blocks?: string }> {
-  const access = await workspace(env).appToolCall(agentId, tool, shown !== undefined, tool.own ? asked : undefined);
-  if (!access) throw new ToolGone(`Not run: ${tool.as} isn't one of your tools any more${shown ? ", or each call of it has to be allowed now" : ""}.`);
+async function answered(env: Env, agentId: UserId, tool: GivenTool, input: Record<string, unknown>, asked: AskedBy, allows?: AllowsCall): Promise<{ text: string; blocks?: string }> {
+  const access = await workspace(env).appToolCall(agentId, tool, allows !== undefined, tool.own ? asked : undefined);
+  if (!access) throw new ToolGone(`Not run: ${tool.as} isn't one of your tools any more${allows ? ", or each call of it has to be allowed now" : ""}.`);
   if (hasEnded(access)) throw new ToolError(`Not run: ${(access.own ? ownSignInEnded : signInEnded)(tool.appName)}`);
-  const shownCall = await shown?.(input);
-  if (typeof shownCall === "string") {
-    console.error(`A call of the tool ${tool.name} of app ${tool.appId} wasn't made, as the room couldn't be shown it: ${shownCall}`);
-    throw new ToolError(CALL_NOT_SHOWN);
+  const refused = allows ? await allows() : null;
+  if (refused !== null) {
+    console.error(`A call of the tool ${tool.name} of app ${tool.appId} wasn't made without asking first: ${refused}`);
+    throw new ToolError(CALL_NOT_ALLOWED_NOW);
   }
-  const { text, failed, unmade, changed, scope, blocks } = await appConnector(env).call(access.url, access.key, { name: tool.name, fingerprint: tool.fingerprint }, input);
-  await Promise.all([changed && !access.own && readAgain(env, tool, access), scope !== undefined && wantsScope(env, tool, scope, access), unmade && shownCall?.unmade(changed ? "changed" : scope !== undefined ? "refused" : "unasked")]);
+  if (allows) console.log(`${agentId} called the tool ${tool.name} of app ${tool.appId} without asking first`);
+  const { text, failed, changed, scope, blocks } = await appConnector(env).call(access.url, access.key, { name: tool.name, fingerprint: tool.fingerprint }, input);
+  await Promise.all([changed && !access.own && readAgain(env, tool, access), scope !== undefined && wantsScope(env, tool, scope, access)]);
   if (scope !== undefined) throw new ToolError(`Not run: ${(access.own ? ownWantsMoreAccess : wantsMoreAccess)(tool.appName)}`);
   if (failed) throw new ToolError(text);
   return { text, ...(blocks !== undefined && { blocks }) };
@@ -236,9 +230,8 @@ async function wantsScope(env: Env, tool: GivenTool, scope: string, access: AppC
 const CALL_BLOCK = "ember.call";
 
 /**
- * The most characters of what a tool is called with that its card shows, as JSON: a call with more is
- * never asked for, or made, so that nobody allows what they couldn't read, and the room is shown all
- * that an app is sent.
+ * The most characters of what a tool is called with that the card of a call that waits shows, as JSON:
+ * a call with more is never asked for, so that nobody allows what they couldn't read.
  */
 export const MAX_SHOWN_INPUT_LENGTH = 3_000;
 
@@ -287,27 +280,6 @@ export function callCard(botName: string, askerName: string, tool: GivenTool, in
       ...(outcome === undefined ? [{ type: "actions", block_id: CALL_BLOCK, elements: [button("allow", "Allow once", "primary"), button("deny", "Deny")] }] : []),
     ],
   };
-}
-
-/** What the card of a call made without asking first says of why it was. */
-export const alwaysAllowedFor = (botName: string) => `An administrator always allows ${botName} this tool, so nobody was asked first.`;
-
-/** What the card of a call made without asking first says once the call wasn't made after all: it found its tool changed, couldn't ask its server for it, or was refused for want of access. */
-export const unmadeFor = (botName: string, appName: string, why: Unmade = "changed") =>
-  why === "changed"
-    ? `Not run: ${appName} has changed this tool since an administrator picked it for ${botName}, who is without it until one picks it again.`
-    : why === "refused"
-      ? `Not run: ${wantsMoreAccess(appName)}`
-      : `Not run: Ember couldn't get through to ${appName} to make this call.`;
-
-/**
- * The card a room posts for a call made without asking first, as the agent's calls of the tool are
- * always allowed, as a Slack payload: who used which app, the tool and what it was called with, or,
- * once the call wasn't made after all, `unmade`, that it wasn't, and why.
- */
-export function usedCard(botName: string, tool: GivenTool, input: Record<string, unknown>, unmade?: Unmade): SlackPayload {
-  const header = unmade ? `${botName} didn't use ${tool.appName}` : `${botName} used ${tool.appName}`;
-  return { blocks: callBlocks(header, tool, input, unmade ? unmadeFor(botName, tool.appName, unmade) : alwaysAllowedFor(botName)) };
 }
 
 /** What the button `action` answers a call that waits with, or undefined for any other button. */

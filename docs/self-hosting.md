@@ -937,7 +937,7 @@ and OpenAI's [web search](https://platform.openai.com/docs/guides/tools-web-sear
 Workers AI's models search with a tool of Ember's own, which the Worker runs with Cloudflare's
 [Web Search API](https://developers.cloudflare.com/web-search/) through the same gateway: each search
 finds 5 pages, and the model reads what the search says of each, up to 2,000 characters, though not the
-pages themselves. Grok's searches count among the 5 calls an answer makes of Ember's tools, with its
+pages themselves. Grok's searches count among the 20 calls an answer makes of Ember's tools, with its
 searches of the room. A model kept from before in Chat Completions,
 as Google's are, has no such tools, which the page says, its switch opening Set up Ember AI to choose
 another model. Turning it on asks the model that answers everyone a question it has to search the web
@@ -1142,7 +1142,10 @@ nothing said there goes to an app unless someone in it allows it.
   which agent wants to use which app, the tool, and everything it would be called with, as JSON.
   **Allow once** runs that call and no other, and **Deny** tells the model it wasn't allowed; either
   is for whoever asked the agent or an administrator, and the card then says who answered. The answer
-  goes on from there, and waits again at the next call, up to five calls an answer. A model whose
+  goes on from there, and waits again at the next call, up to 20 calls an answer, all within the
+  time and tokens its levels give it. While a call runs, the room's typing line names it after the
+  agent's name, as in "Recap is using Linear: list_issues", or "Recap is searching this room" while
+  it searches the room; nothing of that is kept. A model whose
   provider then won't go on from a call is asked once more without the tools, told what each call came
   to, so that its answer still says what a call did. A call nobody
   answers in 15 minutes isn't run: its card says so in place of its buttons, and Ember forgets the
@@ -1174,12 +1177,12 @@ nothing said there goes to an app unless someone in it allows it.
   the agent's Tools card. That agent's calls of that tool in rooms open to everyone are then made at
   once, with nobody asked, for anyone who can ask the agent, so keep it for tools that only read, or
   whose every use you'd allow. In a DM or a private room each call asks first all the same, and one
-  the agent was about to make when its room was made private isn't made. The room still sees each
-  call: Ember posts a card saying which agent used which app, the tool, and what it was called with,
-  before it makes the call, and makes none it can't show, whether the room wouldn't take the card or
-  there are more than 3,000 characters to show. A call that then
-  isn't made after all, as Ember finds its server has changed the tool or can't get through to it, has its card changed to say so. Uncheck the box
-  and the tool asks first again, from the next call. It ends by itself when the tool is taken from
+  the agent was about to make when its room was made private isn't made, nor one for a question
+  deleted meanwhile. Nothing is posted for such a call: the room sees only the typing line say which
+  app and tool the agent is using while it runs, and then the answer, and the tool's card, if it
+  answers with one. The Worker's log keeps a line for each, with the agent's and the app's ids and
+  the tool's name, not what it was called with. Uncheck the box and the tool asks first again, from
+  the next call. It ends by itself when the tool is taken from
   the agent, or when Ember finds its server has changed it: from then on the tool asks first, even
   once the server describes it as it did, until you check the box again.
 

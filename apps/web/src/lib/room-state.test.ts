@@ -447,6 +447,14 @@ describe("Typing indicator", () => {
     expect(roomReducer(typing, { type: "expire-typing", before: 1_000 })).toBe(typing);
   });
 
+  it("keeps what an answerer says it's doing as it types, until it says it's only typing again", () => {
+    const ember = { id: "ember", name: "Ember" };
+    let state = frame(initialRoomState, { type: "frame", frame: { type: "typing", user: ember, typing: true, doing: "is using Tracker: create_issue" }, now: 1_000 });
+    expect(state.typing).toEqual({ ember: { user: ember, at: 1_000, doing: "is using Tracker: create_issue" } });
+    state = frame(state, { type: "frame", frame: { type: "typing", user: ember, typing: true }, now: 2_000 });
+    expect(state.typing).toEqual({ ember: { user: ember, at: 2_000 } });
+  });
+
   it("stops showing someone as typing when their message arrives or they leave", () => {
     let state = frame(initialRoomState, { type: "frame", frame: { type: "typing", user: ada, typing: true }, now: 0 });
     state = frame(state, { type: "frame", frame: { type: "typing", user: grace, typing: true }, now: 0 });

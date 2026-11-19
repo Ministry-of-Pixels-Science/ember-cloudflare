@@ -435,7 +435,7 @@ test.describe("Apps", () => {
     await expect(page.getByRole("article").filter({ hasText: `${FILED} Not run: the person you're answering was asked to allow this call, and didn't.` })).toBeVisible();
     expect(mcp.calls).toHaveLength(1);
   });
-  test("the administrator always allows @ember a tool, whose calls are then made at once and shown on a card, until its app changes it, which the app's row and page say", async ({ page, request }) => {
+  test("the administrator always allows @ember a tool, whose calls are then made at once, named beside its typing, until its app changes it, which the app's row and page say", async ({ page, request }) => {
     mcp.tools.splice(0, mcp.tools.length, ...TOOLS.map((tool) => ({ ...tool })));
     mcp.calls.length = 0;
     const headers = await asAdministrator(request);
@@ -459,16 +459,23 @@ test.describe("Apps", () => {
     await page.reload();
     await expect(always).toBeChecked();
 
-    // Its call is made at once, with nobody asked, and the room is shown what it was called with.
+    // Its call is made at once, with nobody asked: while it runs, the typing line above the composer
+    // names it, and the room is posted nothing for it but the answer.
     await page.goto(`/rooms/${room.id}`);
     await expect(page.getByRole("heading", { level: 1 })).toHaveText(room.name);
     const title = `Login fails ${crypto.randomUUID().slice(0, 8)}`;
-    await askEmber(page, `${FILE_QUESTION} ${title}`);
-    const used = page.getByRole("article", { name: "Ember used Tracker" }).filter({ hasText: title });
-    await expect(used).toContainText("create_issue, with:");
-    await expect(used).toContainText("An administrator always allows Ember this tool, so nobody was asked first.");
-    await expect(used.getByRole("button")).toHaveCount(0);
+    let goOn = () => {};
+    mcp.held = new Promise((resolve) => (goOn = resolve));
+    try {
+      await askEmber(page, `${FILE_QUESTION} ${title}`);
+      await expect(page.getByText("Ember is using Tracker: create_issue", { exact: true })).toBeVisible();
+    } finally {
+      goOn();
+      mcp.held = null;
+    }
     await expect(page.getByRole("article").filter({ hasText: FILED })).toContainText(`${FILED} ${calledWith("create_issue", { title })}`);
+    await expect(page.getByText("Ember is using Tracker: create_issue", { exact: true })).toBeHidden();
+    await expect(page.getByRole("article", { name: "Ember used Tracker" })).toHaveCount(0);
     expect(mcp.calls).toEqual([{ name: "create_issue", arguments: { title } }]);
 
     // Its app describes the tool another way, which Ember finds as it goes to call it: the call isn't made.

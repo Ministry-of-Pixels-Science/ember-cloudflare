@@ -17,10 +17,12 @@ const railAt = (current: RailPage, activity = activityOff, me = ada, onNewDirect
 afterEach(() => history.replaceState(null, "", "/"));
 
 describe("Rail", () => {
-  it("puts Home, DMs, Activity, Search, Workspace, appearance and your profile on the rail", () => {
+  it("puts Back and Forward, Home, DMs, Activity, Search, Workspace, appearance and your profile on the rail", () => {
     render(railAt("home"));
     const rail = screen.getByRole("navigation", { name: "Workspace" });
     expect([...rail.querySelectorAll("a, button")].map((item) => item.getAttribute("aria-label") ?? item.textContent)).toEqual([
+      "Back",
+      "Forward",
       "Ember home",
       "Home",
       "DMs",
@@ -36,6 +38,14 @@ describe("Rail", () => {
     expect(within(rail).getByRole("link", { name: "Search" })).toHaveAttribute("href", "/searches");
     expect(within(rail).getByRole("link", { name: "Workspace" })).toHaveAttribute("href", "/account/edit");
     expect(within(rail).getByRole("link", { name: "Your profile" })).toHaveAttribute("href", "/users/me/profile");
+  });
+
+  it("puts Back and Forward at its top for a pointer, leaving them out for fingers, which have their own way back", () => {
+    render(railAt("room"));
+    const arrows = screen.getByRole("button", { name: "Back" }).parentElement!;
+    expect(arrows).toContainElement(screen.getByRole("button", { name: "Forward" }));
+    expect(arrows).toHaveClass("touch:hidden");
+    expect(screen.getByRole("navigation", { name: "Workspace" }).firstElementChild).toBe(arrows);
   });
 
   it("links your avatar to your profile, titled with your name", async () => {
@@ -124,6 +134,8 @@ describe("Rail", () => {
       [...rail.querySelectorAll("a, button")].map((item) => [item.getAttribute("aria-label") ?? item.textContent, item.querySelector("svg")?.classList[0]]),
     );
     expect(icons).toEqual({
+      Back: "iconoir-arrow-left",
+      Forward: "iconoir-arrow-right",
       "Ember home": undefined,
       Home: "iconoir-home",
       DMs: "iconoir-multi-bubble",

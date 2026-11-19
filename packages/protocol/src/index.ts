@@ -1829,9 +1829,11 @@ export type ServerFrame =
   | { type: "presence.left"; userId: UserId }
   /**
    * Someone started or stopped typing: in the room's composer, or, with `threadId`, in that thread, where
-   * only @ember types, as it answers there.
+   * only @ember types, as it answers there. @ember or an agent that's typing as it answers says, with
+   * `doing`, what it's doing meanwhile, if it's more than writing, in words that follow its name, as
+   * "is using Digg: digg_get_feed" does. Only the room says it.
    */
-  | { type: "typing"; user: User; typing: boolean; threadId?: string }
+  | { type: "typing"; user: User; typing: boolean; threadId?: string; doing?: string }
   /** Answers history.before: the page before `before`, oldest first, and whether there are older ones still. */
   | { type: "history"; before: string; messages: Message[]; hasMore: boolean }
   /** Answers history.after: the page after `after`, oldest first, and whether there are newer ones still. */
