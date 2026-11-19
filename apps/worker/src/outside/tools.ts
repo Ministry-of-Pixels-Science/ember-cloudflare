@@ -1,7 +1,7 @@
 import { fromJsonSchema, type McpServer } from "@modelcontextprotocol/server";
 import { hasWords, HISTORY_PAGE_SIZE, MAX_MESSAGE_HTML_LENGTH, MAX_SEARCH_LENGTH, MESSAGE_TOO_LONG, sanitizeSearch, searchTerms, type Message, type Room, type SidebarRoom, type UserId } from "@ember/protocol";
 import type { OutsideScope } from "@ember/protocol/outside";
-import { markdownHtml } from "../bots/markdown";
+import { markdownHtml, markdownTooLong } from "../bots/markdown";
 import type { Env } from "../env";
 import { searchIndex } from "../search-index";
 import { matchesOf } from "../searches";
@@ -152,14 +152,18 @@ async function searchMessages(env: Env, access: OutsideAccess, { words, room_id:
 async function sendMessage(env: Env, access: OutsideAccess, { room_id: roomId, text, thread_id: threadId }: Record<string, unknown>): Promise<unknown> {
   if (typeof text !== "string" || text.trim() === "") throw new Refused("Give the message to send, as `text`.");
   // The room measures only a message's text, a client's markup being measured in its frame, so this
-  // measures the Markdown and then the markup it reads as, which can be several times as long.
-  if (text.length > MAX_MESSAGE_HTML_LENGTH) throw new Refused(MESSAGE_TOO_LONG);
-  const markup = markdownHtml(text);
-  if (markup.length > MAX_MESSAGE_HTML_LENGTH) throw new Refused(MESSAGE_TOO_LONG);
+  // weighs the Markdown and the markup it reads as, which can be several times as long. Its width is
+  // weighed from the Markdown first, before the markup is built, since a short text that names one long
+  // address many times would otherwise grow into hundreds of megabytes of markup before it's measured.
+  if (text.length > MAX_MESSAGE_HTML_LENGTH || markdownTooLong(text, MAX_MESSAGE_HTML_LENGTH)) throw new Refused(MESSAGE_TOO_LONG);
   if (threadId !== undefined && typeof threadId !== "string") throw new Refused("Give `thread_id` as the id of the message the thread is under.");
   const room = await roomOf(env, access, roomId);
   const sender = await workspace(env).outsideSender(access, room.id);
   if (sender === "limited") throw new Refused(SENDING_TOO_FAST);
+  // Only now, once the room's reached and the sender's within their limit, is the markup built and its
+  // exact width checked, so a message turned away for its room or rate never renders.
+  const markup = markdownHtml(text);
+  if (markup.length > MAX_MESSAGE_HTML_LENGTH) throw new Refused(MESSAGE_TOO_LONG);
   const sent = sender && (await env.CHAT_ROOM.getByName(room.id).createOutsideMessage(room.id, sender, markup, threadId));
   if (!sent) throw new Refused(NO_ROOM);
   if (typeof sent === "string") throw new Refused(sent);

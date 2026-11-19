@@ -85,3 +85,43 @@ export function markdownHtml(text: string): string {
   const html = markdown.parse(text, { async: false });
   return html.replace(/>\n+(?=<)/g, ">").trim();
 }
+
+/** `<a href="">` and `</a>`, the markup an address wears once it's a link. */
+const ANCHOR = 15;
+
+/** How wide `escapeText` and the anchor's quote-escaping leave `text`, counted without rewriting it: each `&`, `"`, `<` and `>` grows to an entity. */
+function escapedWidth(text: string): number {
+  let width = text.length;
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code === 38) width += 4; // & -> &amp;
+    else if (code === 34) width += 5; // " -> &quot;
+    else if (code === 60 || code === 62) width += 3; // < or > -> &lt; or &gt;
+  }
+  return width;
+}
+
+/**
+ * Whether `text`'s Markdown reads as more than `limit` characters of markup, weighed from the Markdown
+ * without building the markup, so that a short text naming one long address many times — which marked
+ * would grow into the hundreds of megabytes `markdownHtml` must never be handed — is turned away before
+ * it's built. Each link's and image's address counts an anchor wide, every repeat of one address weighed
+ * but once more, and code, HTML and plain runs count their own escaped width; the handful of characters
+ * of tags left around them, `markdownHtml`'s own measure of what it built then catches.
+ */
+export function markdownTooLong(text: string, limit: number): boolean {
+  const addressWidth = new Map<string, number>();
+  let total = 0;
+  markdown.walkTokens(markdown.lexer(text), (token) => {
+    if (token.type === "link" || token.type === "image") {
+      let width = addressWidth.get(token.href);
+      if (width === undefined) addressWidth.set(token.href, (width = escapedWidth(token.href) + ANCHOR));
+      total += width;
+    } else if (token.type === "code" || token.type === "codespan" || token.type === "html" || token.type === "escape") {
+      total += escapedWidth(token.text);
+    } else if (token.type === "text" && !token.tokens) {
+      total += escapedWidth(token.text);
+    }
+  });
+  return total > limit;
+}

@@ -912,6 +912,8 @@ describe("What a connected AI app sends", () => {
     expect(await refusal(token, "send_message", { room_id: general, text: "w".repeat(MAX_MESSAGE_LENGTH + 1) })).toBe(MESSAGE_TOO_LONG);
     // Text a message holds, as more markup than it holds, each `&` being `&amp;`.
     expect(await refusal(token, "send_message", { room_id: general, text: "&".repeat(MAX_MESSAGE_HTML_LENGTH / 4) })).toBe(MESSAGE_TOO_LONG);
+    // A short text naming one long address over and over: megabytes of markup from kilobytes of Markdown, turned away before it's built.
+    expect(await refusal(token, "send_message", { room_id: general, text: `[r]: https://example.com/${"a".repeat(1_000)}\n\n${"[x][r] ".repeat(2_000)}` })).toBe(MESSAGE_TOO_LONG);
     expect(await refusal(token, "send_message", { room_id: secret.id, text: "Hello" })).toBe(NO_ROOM);
     expect(await refusal(token, "send_message", { room_id: general, text: "Hello", thread_id: "no-such-message" })).toBe("That message no longer exists");
     // A reply has no thread of its own.
