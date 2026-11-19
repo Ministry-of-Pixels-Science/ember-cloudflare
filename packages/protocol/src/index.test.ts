@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { BLOCKED_WORDS_NOT_A_LIST, blockedWordUnmatchable } from "./blocked-words";
 import {
   ASSISTANT_NAME,
   canBeCustomDomain,
@@ -48,6 +49,7 @@ import {
   MAX_TAGLINE_LENGTH,
   MAX_TURNSTILE_TOKEN_LENGTH,
   MAX_USER_NAME_LENGTH,
+  MAX_USERNAME_LENGTH,
   memberfulProblemOf,
   memberfulSignInPath,
   MIN_PASSWORD_LENGTH,
@@ -61,6 +63,7 @@ import {
   onlyAddressesAt,
   othersAfterMove,
   parseAccountChanges,
+  parseAccountDeletion,
   parseClientFrame,
   parseCustomDomainCheck,
   parseCustomStyles,
@@ -76,6 +79,9 @@ import {
   parsePasswordResetWithCode,
   parseMemberfulDisconnection,
   parseProfileChanges,
+  usernameFrom,
+  usernameOf,
+  USERNAME_REFUSED,
   parseResendApiKey,
   parseRoleChange,
   parseRoomChanges,
@@ -151,6 +157,32 @@ describe("Send a message", () => {
     expect(read({ visible: "1", protocol: String(ROOM_PROTOCOL) })).toEqual({ visible: true, protocol: ROOM_PROTOCOL });
     expect(read({ visible: "1" })).toEqual({ visible: true, protocol: 1 });
     expect(read({ protocol: "two" })).toEqual({ visible: true, protocol: 1 });
+  });
+});
+
+describe("Link previews after sending", () => {
+  const preview = { title: "Digg", url: "https://digg.com/tech/1", image: null, description: "News" };
+
+  it("sends the preview of a link in a message the tab sent, by the id it gave the message", () => {
+    expect(parse({ type: "message.preview", clientMessageId: "c1", preview })).toEqual({ type: "message.preview", clientMessageId: "c1", preview });
+    const pictured = { ...preview, image: "https://digg.com/card.png", description: "" };
+    expect(parse({ type: "message.preview", clientMessageId: "c1", preview: { ...pictured, extra: 1 } })).toEqual({ type: "message.preview", clientMessageId: "c1", preview: pictured });
+  });
+
+  it("refuses a preview without a title or an address, with fields that aren't text, or longer than a message's markup", () => {
+    for (const bad of [
+      null,
+      "Digg",
+      { ...preview, title: " " },
+      { ...preview, url: "" },
+      { ...preview, image: undefined },
+      { ...preview, image: 7 },
+      { ...preview, description: null },
+      { ...preview, description: "x".repeat(MAX_MESSAGE_HTML_LENGTH + 1) },
+    ]) {
+      expect(parse({ type: "message.preview", clientMessageId: "c1", preview: bad }), JSON.stringify(bad)).toBeNull();
+    }
+    expect(parse({ type: "message.preview", clientMessageId: "", preview })).toBeNull();
   });
 });
 
@@ -295,15 +327,27 @@ describe("Presence", () => {
 });
 
 describe("One live connection per tab outside the open room", () => {
-  it("takes pings on the workspace socket, and whether its tab is shown, as a boolean, and nothing else", () => {
+  it("takes pings on the workspace socket, whether its tab is in use and whether it's shown, as booleans, and nothing else", () => {
     expect(parseWorkspaceClientFrame('{"type":"ping"}')).toEqual({ type: "ping" });
     expect(parseWorkspaceClientFrame('{"type":"ping","nonce":"n1"}')).toEqual({ type: "ping" });
+    expect(parseWorkspaceClientFrame('{"type":"presence.active","active":false}')).toEqual({ type: "presence.active", active: false });
+    expect(parseWorkspaceClientFrame('{"type":"presence.active","active":true,"userId":"u2"}')).toEqual({ type: "presence.active", active: true });
     expect(parseWorkspaceClientFrame('{"type":"presence.visible","visible":false}')).toEqual({ type: "presence.visible", visible: false });
     expect(parseWorkspaceClientFrame('{"type":"presence.visible","visible":true,"extra":1}')).toEqual({ type: "presence.visible", visible: true });
-    for (const visible of [undefined, null, 1, "true", "visible"]) {
-      expect(parseWorkspaceClientFrame(JSON.stringify({ type: "presence.visible", visible })), String(visible)).toBeNull();
+    for (const value of [undefined, null, 1, "true", "yes"]) {
+      expect(parseWorkspaceClientFrame(JSON.stringify({ type: "presence.active", active: value })), String(value)).toBeNull();
+      expect(parseWorkspaceClientFrame(JSON.stringify({ type: "presence.visible", visible: value })), String(value)).toBeNull();
     }
-    for (const raw of ['{"type":"typing.start"}', '{"type":"message.create","clientMessageId":"c1","body":"hi"}', "[]", "null", "{"]) {
+    for (const raw of [
+      '{"type":"typing.start"}',
+      '{"type":"message.create","clientMessageId":"c1","body":"hi"}',
+      '{"type":"presence","active":true}',
+      '{"type":"presence.active","visible":true}',
+      '{"type":"presence.visible","active":true}',
+      "[]",
+      "null",
+      "{",
+    ]) {
       expect(parseWorkspaceClientFrame(raw), raw).toBeNull();
     }
   });
@@ -322,7 +366,7 @@ describe("One live connection per tab outside the open room", () => {
     const welcome: WorkspaceServerFrame = {
       type: "welcome",
       you: { id: "u1", name: "Ada", administrator: true },
-      account: { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true },
+      account: { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, ssoJoin: false, ssoSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true },
     };
     expect(parseServerFrame<WorkspaceServerFrame>(JSON.stringify(welcome))).toEqual(welcome);
     expect(parseServerFrame<WorkspaceServerFrame>('{"type":7}')).toBeNull();
@@ -421,6 +465,25 @@ describe("Room settings page", () => {
     ["a kind that isn't one", { name: "Design", kind: "secret" }, 'Kind must be "open" or "closed"'],
   ])("refuses %s and says why", (_, body, error) => {
     expect(parseRoomChanges(body)).toBe(error);
+  });
+});
+
+describe("Allow huddles in a room", () => {
+  it("takes whether huddles are allowed in the room, alone or with its other changes, or nothing to change", () => {
+    expect(parseRoomChanges({ huddles: false })).toEqual({ huddles: false });
+    expect(parseRoomChanges({ kind: "open", huddles: true })).toEqual({ kind: "open", huddles: true });
+    expect(parseRoomChanges({ name: "Leads", kind: "closed", memberIds: ["u1"], huddles: false })).toEqual({ name: "Leads", kind: "closed", memberIds: ["u1"], huddles: false });
+    expect(parseRoomChanges({ name: "Design" })).toHaveProperty("huddles", undefined);
+  });
+
+  it("refuses anything but true or false", () => {
+    for (const huddles of [null, 0, 1, "", "false", "off", [], {}]) {
+      expect(parseRoomChanges({ name: "Design", huddles }), JSON.stringify(huddles)).toBe("Huddles must be true or false");
+    }
+  });
+
+  it("takes nothing of huddles for a new room, which starts with them allowed", () => {
+    expect(parseNewRoom({ kind: "open", name: "Design", huddles: false })).not.toHaveProperty("huddles");
   });
 });
 
@@ -739,16 +802,23 @@ describe("Ways to join", () => {
     expect(parseAccountChanges({ settings: { openSignUp: null } })).toBe("Open must be true or false");
   });
 
-  it("lets people in with the join link while its switch is on, but never while Memberful is members only", () => {
-    expect(joinsWithLink({ joinLink: true, memberfulSignIn: false })).toBe(true);
-    expect(joinsWithLink({ joinLink: false, memberfulSignIn: false })).toBe(false);
-    expect(joinsWithLink({ joinLink: true, memberfulSignIn: true })).toBe(false);
+  it("lets people in with the join link while its switch is on, but never while Memberful is members only or single sign-on is the only way in", () => {
+    expect(joinsWithLink({ joinLink: true, memberfulSignIn: false, ssoSignIn: false })).toBe(true);
+    expect(joinsWithLink({ joinLink: false, memberfulSignIn: false, ssoSignIn: false })).toBe(false);
+    expect(joinsWithLink({ joinLink: true, memberfulSignIn: true, ssoSignIn: false })).toBe(false);
+    expect(joinsWithLink({ joinLink: true, memberfulSignIn: false, ssoSignIn: true })).toBe(false);
   });
 
-  it("lets anyone sign up while Open is on, but never while Memberful is members only", () => {
-    expect(signsUpOpenly({ openSignUp: true, memberfulSignIn: false })).toBe(true);
-    expect(signsUpOpenly({ openSignUp: false, memberfulSignIn: false })).toBe(false);
-    expect(signsUpOpenly({ openSignUp: true, memberfulSignIn: true })).toBe(false);
+  it("lets anyone sign up while Open is on, but never while Memberful is members only or single sign-on is the only way in", () => {
+    expect(signsUpOpenly({ openSignUp: true, memberfulSignIn: false, ssoSignIn: false })).toBe(true);
+    expect(signsUpOpenly({ openSignUp: false, memberfulSignIn: false, ssoSignIn: false })).toBe(false);
+    expect(signsUpOpenly({ openSignUp: true, memberfulSignIn: true, ssoSignIn: false })).toBe(false);
+    expect(signsUpOpenly({ openSignUp: true, memberfulSignIn: false, ssoSignIn: true })).toBe(false);
+  });
+
+  it("takes single sign-on's switches as true or false, beside the other settings", () => {
+    expect(parseAccountChanges({ settings: { ssoJoin: true, ssoSignIn: false } })).toEqual({ settings: { ssoJoin: true, ssoSignIn: false } });
+    expect(parseAccountChanges({ settings: { ssoSignIn: "yes" } })).toBe("SSO only must be true or false");
   });
 
   it("names why joining went to sign in in the sign-in page's address, and reads only the reasons it knows", () => {
@@ -862,11 +932,12 @@ describe("Join with an email domain", () => {
   });
 
   it("lets people in at the email domains while Email domain is on with a domain, but never while Memberful is members only", () => {
-    const on = { emailDomainSignUp: true, emailDomains: ["example.org"], memberfulSignIn: false };
+    const on = { emailDomainSignUp: true, emailDomains: ["example.org"], memberfulSignIn: false, ssoSignIn: false };
     expect(signsUpWithEmailDomain(on)).toBe(true);
     expect(signsUpWithEmailDomain({ ...on, emailDomainSignUp: false })).toBe(false);
     expect(signsUpWithEmailDomain({ ...on, emailDomains: [] })).toBe(false);
     expect(signsUpWithEmailDomain({ ...on, memberfulSignIn: true })).toBe(false);
+    expect(signsUpWithEmailDomain({ ...on, ssoSignIn: true })).toBe(false);
   });
 
   it.each([
@@ -920,6 +991,13 @@ describe("Join with an email domain", () => {
     ["more than 100", Array.from({ length: 101 }, (_, n) => `team${n}.example`)],
   ])("refuses %s for Email domain's domains", (_, emailDomains) => {
     expect(parseAccountChanges({ name: "Ember", emailDomains })).toBe(EMAIL_DOMAINS_REFUSED);
+  });
+
+  it("takes the words and phrases Blocked words keeps out, as it keeps them, or says why it can't", () => {
+    expect(parseAccountChanges({ blockedWords: [" fudge", "Darn  it", "FUDGE"] })).toEqual({ blockedWords: ["fudge", "Darn it"] });
+    expect(parseAccountChanges({ blockedWords: [] })).toEqual({ blockedWords: [] });
+    expect(parseAccountChanges({ name: "Ember", blockedWords: "fudge" })).toBe(BLOCKED_WORDS_NOT_A_LIST);
+    expect(parseAccountChanges({ name: "Ember", blockedWords: ["..."] })).toBe(blockedWordUnmatchable("..."));
   });
 
   it("names the domains in words", () => {
@@ -1096,8 +1174,39 @@ describe("Edit your profile", () => {
     ["a current password that isn't text", { currentPassword: 12345678 }, "Current password must be text"],
     ["an endpoint that isn't text", { pushSubscriptionEndpoint: {} }, "Push subscription endpoint must be text"],
     ["an endpoint longer than a subscription's", { pushSubscriptionEndpoint: "x".repeat(MAX_PUSH_ENDPOINT_LENGTH + 1) }, "Endpoint can't be longer than 2048 characters"],
+    ["a username that isn't text", { username: 7 }, "Username must be text"],
+    ["a username that starts with a period", { username: ".ada" }, USERNAME_REFUSED],
+    ["a username with a letter that isn't ASCII's", { username: "adá" }, USERNAME_REFUSED],
+    ["a username with a comma", { username: "ada,grace" }, USERNAME_REFUSED],
+    ["a username longer than one can be", { username: "a".repeat(MAX_USERNAME_LENGTH + 1) }, USERNAME_REFUSED],
   ])("refuses %s and says why", (_, body, error) => {
     expect(parseProfileChanges(body)).toBe(error);
+  });
+
+  it("keeps a username in lowercase, without spaces or the @ before it, in ASCII for fullwidth letters, and a blank one as none", () => {
+    expect(parseProfileChanges({ username: " @Ada.Lovelace_1815 " })).toEqual({ username: "ada.lovelace_1815" });
+    expect(parseProfileChanges({ username: "@@ａｄａ" })).toEqual({ username: "ada" });
+    expect(parseProfileChanges({ username: "ada love-lace" })).toEqual({ username: "adalove-lace" });
+    expect(parseProfileChanges({ username: " " })).toEqual({ username: "" });
+    expect(parseProfileChanges({ username: "a".repeat(MAX_USERNAME_LENGTH) })).toEqual({ username: "a".repeat(MAX_USERNAME_LENGTH) });
+  });
+});
+
+describe("Usernames", () => {
+  it("keep what's typed as Ember keeps a username", () => {
+    expect(usernameOf("@Grace Hopper")).toBe("gracehopper");
+    expect(usernameOf("GRACE\t\n")).toBe("grace");
+    expect(usernameOf("grace@navy")).toBe("grace@navy");
+  });
+
+  it("start from a name's letters and numbers, without accents, in lowercase, with room for four digits, or as member without any", () => {
+    expect(usernameFrom("Katherine Johnson")).toBe("katherinejohnson");
+    expect(usernameFrom("Ada Lovelace (1815)")).toBe("adalovelace1815");
+    expect(usernameFrom("Émilie du Châtelet")).toBe("emilieduchatelet");
+    expect(usernameFrom("Maximiliana Wolfeschlegelsteinhausen")).toBe("maximilianawolfes");
+    expect(usernameFrom("Maximiliana Wolfeschlegelsteinhausen")).toHaveLength(MAX_USERNAME_LENGTH - 4);
+    expect(usernameFrom("李白")).toBe("member");
+    expect(usernameFrom(" ")).toBe("member");
   });
 });
 
@@ -1117,6 +1226,24 @@ describe("Disconnect Memberful", () => {
     ["an endpoint longer than a subscription's", { pushSubscriptionEndpoint: "x".repeat(MAX_PUSH_ENDPOINT_LENGTH + 1) }, "Endpoint can't be longer than 2048 characters"],
   ])("refuses %s and says why", (_, body, error) => {
     expect(parseMemberfulDisconnection(body)).toBe(error);
+  });
+});
+
+describe("Delete my account", () => {
+  it("takes your password or your name as typed, leaving out what isn't sent", () => {
+    expect(parseAccountDeletion({ currentPassword: " compiler " })).toEqual({ currentPassword: " compiler " });
+    expect(parseAccountDeletion({ name: "Grace Hopper", pushSubscriptionEndpoint: "https://push.example" })).toEqual({ name: "Grace Hopper" });
+    expect(parseAccountDeletion({})).toEqual({});
+  });
+
+  it.each([
+    ["no body", null, "Expected a JSON object"],
+    ["a list", [{ name: "Grace Hopper" }], "Expected a JSON object"],
+    ["a password that isn't text", { currentPassword: 12345678 }, "Current password must be text"],
+    ["a name that isn't text", { name: ["Grace"] }, "Name must be text"],
+    ["a name longer than anyone's", { name: "x".repeat(MAX_USER_NAME_LENGTH + 1) }, "Name must be at most 100 characters"],
+  ])("refuses %s and says why", (_, body, error) => {
+    expect(parseAccountDeletion(body)).toBe(error);
   });
 });
 

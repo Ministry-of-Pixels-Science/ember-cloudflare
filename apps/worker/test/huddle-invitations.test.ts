@@ -11,6 +11,7 @@ import { HUDDLE_INVITEES, INVITATION_PUSHES, type InvitationPush } from "../src/
 import { huddlesOn, joinHuddle, reached, welcomed, type HuddleSocket } from "./huddle-support";
 import {
   api,
+  connect,
   createRoom,
   direct,
   freshDeploy,
@@ -83,6 +84,7 @@ async function invitingBy(room: RoomId, inviteToHuddle: (real: (...invitation: I
     const real = workspace(huddle.env);
     const standIn = {
       huddleApp: () => real.huddleApp(),
+      huddlesIn: (roomId: RoomId) => real.huddlesIn(roomId),
       reportHuddle: (...report: Parameters<typeof real.reportHuddle>) => real.reportHuddle(...report),
       inviteToHuddle: (...invitation: Invitation) => inviteToHuddle((...given) => real.inviteToHuddle(...given), ...invitation),
     };
@@ -92,6 +94,21 @@ async function invitingBy(room: RoomId, inviteToHuddle: (real: (...invitation: I
 
 /** Has room `room`'s invitations fail to reach the Workspace, as while the Workspace restarts. */
 const uninvitable = (room: RoomId) => invitingBy(room, () => Promise.reject(new Error("The Workspace is unreachable")));
+
+/**
+ * Has room `room`'s invitations reach the Workspace only once `answer` is called, waiting in the room's
+ * own I/O context, where a promise of the test's can't be awaited, and `asked` waits until the room
+ * has one to give it.
+ */
+async function waitingWorkspace(room: RoomId) {
+  let [asked, answering] = [false, false];
+  await invitingBy(room, async (real, ...invitation) => {
+    asked = true;
+    while (!answering) await new Promise((resolve) => setTimeout(resolve, 10));
+    return real(...invitation);
+  });
+  return { asked: () => vi.waitFor(() => expect(asked).toBe(true)), answer: () => (answering = true) };
+}
 
 /** How many rows the Workspace's database reads to answer `query`. */
 async function rowsRead(query: string, ...params: Array<string | number>): Promise<number> {
@@ -209,12 +226,12 @@ describe("Inviting people into a huddle", () => {
     const grace = await signIn("Grace");
     const dm = (await direct(ada, grace)).id;
     const named = JSON.stringify([grace.user.id]);
-    expect(await workspaceSql(HUDDLE_INVITEES, dm, named)).toEqual([{ user_id: grace.user.id }]);
+    expect(await workspaceSql(HUDDLE_INVITEES, dm, named, ada.user.id)).toEqual([{ user_id: grace.user.id }]);
 
     // Banning her closes her tabs, so nothing the Workspace sends shows it: only who it would tell does.
     expect((await api(`/api/users/${grace.user.id}/ban`, { method: "POST", headers: { Cookie: ada.cookie } })).status).toBe(200);
     expect(await workspaceSql(`SELECT user_id FROM memberships WHERE room_id = ? AND user_id = ?`, dm, grace.user.id)).toHaveLength(1);
-    expect(await workspaceSql(HUDDLE_INVITEES, dm, named)).toEqual([]);
+    expect(await workspaceSql(HUDDLE_INVITEES, dm, named, ada.user.id)).toEqual([]);
   });
 
   it("leaves out whoever is in the huddle already, and asks the Workspace nothing when that's everyone named", async () => {
@@ -247,6 +264,25 @@ describe("Inviting people into a huddle", () => {
     expect(await adas.next("error")).toEqual({ type: "error", message: NOBODY_INVITED, failed: "huddle.invite" });
     expect(warned).toHaveBeenCalledWith("Inviting people into a huddle failed:", "Error");
     await heardOfNone(gracesTab);
+  });
+
+  it("leaves the huddle's message for whoever is invited, though nobody joins, and whoever invites them has left before the Workspace tells them", async () => {
+    const { ada } = await huddlesOn();
+    const grace = await signIn("Grace");
+    const dm = (await direct(ada, grace)).id;
+    const [gracesTab, gracesRoom] = [await openWorkspaceSocket(grace), await connect(dm, grace)];
+    const adas = await welcomed(dm, ada);
+    const { message } = await gracesRoom.next("message.created");
+    const waiting = await waitingWorkspace(dm);
+
+    invite(adas, grace);
+    await waiting.asked();
+    adas.leave();
+    await adas.closed;
+    expect((await gracesRoom.next("message.updated")).message).toMatchObject({ id: message.id, huddle: { people: [ada.user] } });
+    await heardOfNone(gracesTab);
+    waiting.answer();
+    expect(await nextOfAnInvitation(gracesTab)).toEqual(invited(dm, ada));
   });
 
   it("invites nobody more for a tab that has invited people as often as one may in a minute, until the minute is over", async () => {
@@ -296,7 +332,7 @@ describe("Inviting people into a huddle", () => {
     expect(members).toBeGreaterThanOrEqual(7);
     expect(await workspaceStub().inviteToHuddle(room, ada.user.id, [grace.user.id])).toEqual([]);
     // Her membership and herself, and the list she's named in, which counts for two.
-    expect(await rowsRead(HUDDLE_INVITEES, room, JSON.stringify([grace.user.id]))).toBeLessThanOrEqual(4);
+    expect(await rowsRead(HUDDLE_INVITEES, room, JSON.stringify([grace.user.id]), ada.user.id)).toBeLessThanOrEqual(4);
   });
 });
 

@@ -338,7 +338,7 @@ describe("Welcome and invite card", () => {
 
 describe("Sign in with Memberful", () => {
   it("shows no welcome card while Memberful is members only, since its join link is off", () => {
-    const account = { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: true, memberfulSignIn: true, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true };
+    const account = { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: true, memberfulSignIn: true, ssoJoin: false, ssoSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true };
     render(<AccountContext value={account}>{list({ messages: [], paged: false }, vi.fn(), { roomId: "general", joinCode: "aB3d-Ef5h-iJ7k" })}</AccountContext>);
     expect(screen.queryByRole("heading", { name: "Welcome to Ember" })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Welcome to #general" })).toBeInTheDocument();
@@ -347,12 +347,46 @@ describe("Sign in with Memberful", () => {
 
 describe("Ways to join", () => {
   it("shows no welcome card while the join link is off, but shows it again once it's on", () => {
-    const account = { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: false, openSignUp: true, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true };
+    const account = { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: false, openSignUp: true, memberfulJoin: false, memberfulSignIn: false, ssoJoin: false, ssoSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true };
     const welcome = (joinLink: boolean) => <AccountContext value={{ ...account, joinLink }}>{list({ messages: [], paged: false }, vi.fn(), { roomId: "general", joinCode: "aB3d-Ef5h-iJ7k" })}</AccountContext>;
     const { rerender } = render(welcome(false));
     expect(screen.queryByRole("heading", { name: "Welcome to Ember" })).not.toBeInTheDocument();
     rerender(welcome(true));
     expect(screen.getByRole("heading", { name: "Welcome to Ember" })).toBeInTheDocument();
+  });
+});
+
+describe("Welcome someone who joins", () => {
+  const grace = { id: "u2", name: "Grace" };
+  const joined = { user: grace, at: "2026-10-12T09:30:00" };
+  /** Ada's DM with Grace, started as Grace joined, with `messages`, as far back as the room has said it goes. */
+  const withGrace = (messages: Message[], state: Partial<RoomState> = {}) => list({ messages, paged: false, ...state }, vi.fn(), null, { direct: true, roomName: "Grace", joined });
+  const days = () => screen.getAllByRole("heading", { level: 2 }).flatMap((heading) => (heading.querySelector("time") ? [heading.textContent] : []));
+
+  it("opens a DM started as someone joined with their having joined the workspace, under the day they did", () => {
+    render(withGrace([]));
+    expect(screen.getByText("This is the very beginning of your direct messages.")).toBeInTheDocument();
+    const line = screen.getByText("joined Ember");
+    expect(line).toHaveClass("text-message-muted");
+    const said = line.closest("article")!;
+    expect(within(said).getByRole("heading", { level: 3 })).toHaveTextContent("Grace");
+    expect(said.querySelector("h3 time")).toHaveAttribute("datetime", joined.at);
+    expect(days()).toEqual(["October 12, 2026"]);
+  });
+
+  it("dates the day once when the first message came on it, and the next day the first came on", () => {
+    const { rerender } = render(withGrace([message("m1", "2026-10-12T10:00:00")]));
+    expect(days()).toEqual(["October 12, 2026"]);
+    expect(screen.getByText("joined Ember").closest("[data-row]")!.nextElementSibling).toHaveAttribute("data-message-id", "m1");
+    rerender(withGrace([message("m1", "2026-10-13T10:00:00")]));
+    expect(days()).toEqual(["October 12, 2026", "October 13, 2026"]);
+  });
+
+  it("waits for the room to say its timeline reaches back that far", () => {
+    const { rerender } = render(withGrace([], { status: "connecting", paged: null }));
+    expect(screen.queryByText("joined Ember")).not.toBeInTheDocument();
+    rerender(withGrace(messages(1, 3), { hasMore: true }));
+    expect(screen.queryByText("joined Ember")).not.toBeInTheDocument();
   });
 });
 

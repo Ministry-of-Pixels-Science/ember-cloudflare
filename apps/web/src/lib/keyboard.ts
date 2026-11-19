@@ -83,6 +83,14 @@ export const huddleShortcut = (apple = appleKeyboard()): Shortcut =>
 export const muteShortcut = (apple = appleKeyboard()): Shortcut =>
   apple ? { keys: ["⌘", "⇧", "Space"], aria: "Meta+Shift+Space" } : { keys: ["Ctrl", "Shift", "Space"], aria: "Control+Shift+Space" };
 
+/** The keys browsers go Back by on this keyboard, as the rail's Back does: Cmd+[ on a Mac, iPad or iPhone, Alt+← elsewhere. */
+export const backShortcut = (apple = appleKeyboard()): Shortcut =>
+  apple ? { keys: ["⌘", "["], aria: "Meta+[" } : { keys: ["Alt", "←"], aria: "Alt+ArrowLeft" };
+
+/** The keys browsers go Forward by on this keyboard, as the rail's Forward does. */
+export const forwardShortcut = (apple = appleKeyboard()): Shortcut =>
+  apple ? { keys: ["⌘", "]"], aria: "Meta+]" } : { keys: ["Alt", "→"], aria: "Alt+ArrowRight" };
+
 /**
  * Whether a keypress in a message's editor should send it, as Campfire's composer_controller.js decides:
  * Enter sends and Shift+Enter starts a new line, except on touch screens, where Enter has to start the
@@ -189,12 +197,14 @@ export function formattingKeys(action: FormattingKey, apple = appleKeyboard()): 
 
 /**
  * What the keyboard shortcuts dialog lists, a group at a time: each key the matchers here take, so a
- * shortcut added to them is listed beside them.
+ * shortcut added to them is listed beside them, and the browser's own keys for Back and Forward.
  */
 export const SHORTCUTS: { group: string; rows: ShortcutRow[] }[] = [
   {
     group: "Navigate",
     rows: [
+      { action: "Go back", keys: (apple) => backShortcut(apple).keys },
+      { action: "Go forward", keys: (apple) => forwardShortcut(apple).keys },
       { action: "Search", keys: (apple) => [command(apple), "F"] },
       { action: "Move a starred room up or down", keys: (apple) => [option(apple), "↑ ↓"] },
       { action: "Show keyboard shortcuts", keys: (apple) => [command(apple), "/"] },

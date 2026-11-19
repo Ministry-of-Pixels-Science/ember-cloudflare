@@ -5,7 +5,7 @@
 // service, which relays what the browser sends and receives, by a TURN key in the same account, whose
 // ID and API token administrators give in Set up the relay, through `/api/account/huddles/relay`.
 
-import type { User, UserId } from "./index.ts";
+import type { RoomId, User, UserId } from "./index.ts";
 import { MAX_ID_LENGTH } from "./pages.ts";
 
 /**
@@ -147,6 +147,17 @@ export const MAX_HUDDLE_SCREENS = 2;
 /** The most people one `huddle.invite` invites: as many as a huddle takes. */
 export const MAX_HUDDLE_INVITED = MAX_HUDDLE_PEOPLE;
 
+/**
+ * The stickers someone in a huddle can show, as Slack's are: a raised hand, that they'll be right back,
+ * yes, by a thumb up, no, by a thumb down, or that they're done. Someone shows one at a time, until
+ * they take it off.
+ */
+export const HUDDLE_STICKERS = ["hand", "brb", "thumbs-up", "thumbs-down", "done"] as const;
+export type HuddleSticker = (typeof HUDDLE_STICKERS)[number];
+
+/** The most characters a reaction's emoji has, as a string counts them: the longest there is, two people kissing, each with a skin tone, has 15. */
+export const MAX_REACTION_LENGTH = 16;
+
 /** What a huddle closes a socket with, besides the codes a room closes one with (`CloseCode`). None is one to connect again after. */
 export const HuddleCloseCode = {
   /** The huddle has as many people as one takes. */
@@ -213,6 +224,8 @@ export interface HuddlePerson {
   video: boolean;
   /** Whether their screen can be watched: they share it, and their tab has connected to the SFU with it. */
   screen: boolean;
+  /** The sticker they show, while they show one. */
+  sticker?: HuddleSticker;
 }
 
 /**
@@ -235,6 +248,76 @@ export interface MessageHuddle {
   startedAt: string;
   endedAt?: string;
   people?: User[];
+}
+
+/**
+ * A huddle that's over, as the Huddles page lists it for everyone in its room: the room, the huddle's
+ * message there, whose thread is the huddle's, when it started and ended, everyone who was in it, by
+ * their ids in the order they first joined, and how many replies its thread has. One that nobody else
+ * joined is listed only while its thread has a reply, as Slack lists none it kept no message of.
+ */
+export interface PastHuddle {
+  roomId: RoomId;
+  messageId: string;
+  startedAt: string;
+  endedAt: string;
+  userIds: UserId[];
+  replies: number;
+}
+
+/** How many huddles the Huddles page lists at most: the latest to have started in someone's rooms. */
+export const PAST_HUDDLES_LISTED = 50;
+
+/** What `GET /api/huddles` answers: the huddles that are over in the rooms someone is in and hasn't hidden from their sidebar, the latest to have started first. */
+export interface PastHuddles {
+  huddles: PastHuddle[];
+}
+
+/**
+ * A huddle's own sounds, which each person chooses whether to hear, on their profile: the `music` that
+ * plays to whoever is the only one in a huddle, the `chimes`, one as someone joins a huddle and another
+ * as someone leaves it, and the `ring` of an invitation into one.
+ */
+export const HUDDLE_SOUNDS = ["music", "chimes", "ring"] as const;
+export type HuddleSound = (typeof HUDDLE_SOUNDS)[number];
+
+/**
+ * Which of a huddle's sounds someone hears, wherever they're signed in: each of them until they turn it
+ * off, as Slack's preferences turn off its huddles' music and their notification sound.
+ */
+export type HuddleSounds = Record<HuddleSound, boolean>;
+
+/** A huddle's sounds as someone hears them until they turn one off: all of them. */
+export const ALL_HUDDLE_SOUNDS: HuddleSounds = { music: true, chimes: true, ring: true };
+
+/** Whether `sounds` are all of a huddle's. */
+export const hearsAllHuddleSounds = (sounds: HuddleSounds) => HUDDLE_SOUNDS.every((sound) => sounds[sound]);
+
+/** The sounds `PATCH /api/users/me/huddle-sounds` turns on or off for whoever asks, the rest staying as they are. */
+export type HuddleSoundChanges = Partial<HuddleSounds>;
+
+/** What `PATCH /api/users/me/huddle-sounds` answers: the sounds whoever asked hears now. */
+export interface HuddleSoundsChanged {
+  sounds: HuddleSounds;
+}
+
+/** Why a change to someone's huddle sounds is refused when it turns one neither on nor off. */
+export const HUDDLE_SOUNDS_REFUSED = "Each of music, chimes and ring must be true or false";
+
+/**
+ * Parses an untrusted change to someone's huddle sounds. Returns why it's refused instead of the change.
+ * A sound it doesn't name stays as it is, and it takes nothing else.
+ */
+export function parseHuddleSoundChanges(data: unknown): HuddleSoundChanges | string {
+  if (typeof data !== "object" || data === null || Array.isArray(data)) return "Expected a JSON object";
+  const changes: HuddleSoundChanges = {};
+  for (const sound of HUDDLE_SOUNDS) {
+    const on = (data as Record<string, unknown>)[sound];
+    if (on === undefined) continue;
+    if (typeof on !== "boolean") return HUDDLE_SOUNDS_REFUSED;
+    changes[sound] = on;
+  }
+  return changes;
 }
 
 /** What a tab sends on its huddle's socket. Leaving the huddle is closing the socket. */
@@ -273,6 +356,14 @@ export type HuddleClientFrame =
    * room they aren't in.
    */
   | { type: "huddle.invite"; userIds: UserId[] }
+  /** The person shows a sticker, in place of any they showed, or with null, takes theirs off. */
+  | { type: "huddle.sticker"; sticker: HuddleSticker | null }
+  /**
+   * The person reacts with an emoji, which everyone in the huddle sees for a moment, as `huddle.reacted`
+   * tells them, their own tab included. The room tells of only so many of a tab's in a while, and says
+   * nothing of the rest.
+   */
+  | { type: "huddle.react"; emoji: string }
   | { type: "ping" };
 
 /** What a tab hears on its huddle's socket. */
@@ -288,13 +379,15 @@ export type HuddleServerFrame =
   | { type: "huddle.welcome"; you: User; people: HuddlePerson[]; startedAt: string; messageId?: string; iceServers?: HuddleIceServer[] }
   | { type: "huddle.joined"; person: HuddlePerson }
   /**
-   * Someone muted or unmuted, can be listened to or watched now, or can't be: they've turned their camera
-   * off or stopped sharing their screen, their tab is publishing again, or they've joined from another
-   * one. A tab asks to hear whoever it can listen to and doesn't, and to see whoever it's to watch and
-   * doesn't.
+   * Someone muted or unmuted, shows a sticker or took theirs off, can be listened to or watched now, or
+   * can't be: they've turned their camera off or stopped sharing their screen, their tab is publishing
+   * again, or they've joined from another one. A tab asks to hear whoever it can listen to and doesn't,
+   * and to see whoever it's to watch and doesn't.
    */
   | { type: "huddle.changed"; person: HuddlePerson }
   | { type: "huddle.left"; userId: UserId }
+  /** Someone in the huddle reacted with an emoji, which shows over the people in it for a moment. */
+  | { type: "huddle.reacted"; userId: UserId; emoji: string }
   /** The SFU's answer to the offer the tab published its `kind` with. */
   | { type: "huddle.published"; kind: HuddleTrackKind; sdp: string }
   /**
@@ -404,6 +497,20 @@ function invitedOf(value: unknown): UserId[] | null {
   return new Set(value).size === value.length ? value : null;
 }
 
+/** The sticker a `huddle.sticker` shows, null for none, or undefined when it can't be either. */
+const stickerOf = (value: unknown): HuddleSticker | null | undefined => (value === null ? null : HUDDLE_STICKERS.find((sticker) => sticker === value));
+
+/**
+ * One emoji and nothing else, as an emoji picker writes them: a flag, or one letter of one; a keycap; a
+ * skin tone by itself; the flag of part of a country; or pictographs joined into one, each with its skin
+ * tone or the mark that has it shown as a picture.
+ */
+const ONE_EMOJI =
+  /^(?:\p{Regional_Indicator}{1,2}|[#*0-9]\uFE0F?\u20E3|\p{Emoji_Modifier}|\u{1F3F4}[\u{E0020}-\u{E007E}]+\u{E007F}|\p{Extended_Pictographic}[\p{Emoji_Modifier}\uFE0F]?(?:\u200D\p{Extended_Pictographic}[\p{Emoji_Modifier}\uFE0F]?)*)$/u;
+
+/** The emoji a `huddle.react` reacts with, or null when it isn't one emoji. */
+const reactionOf = (value: unknown): string | null => (typeof value === "string" && value.length <= MAX_REACTION_LENGTH && ONE_EMOJI.test(value) ? value : null);
+
 /** Whether `value` is something a frame says only when it's so: `true`, or left out. */
 const isSaidOrNot = (value: unknown): value is true | undefined => value === undefined || value === true;
 
@@ -475,6 +582,14 @@ export function parseHuddleClientFrame(raw: string): HuddleClientFrame | null {
     case "huddle.invite": {
       const userIds = invitedOf(frame.userIds);
       return userIds !== null ? { type: "huddle.invite", userIds } : null;
+    }
+    case "huddle.sticker": {
+      const sticker = stickerOf(frame.sticker);
+      return sticker !== undefined ? { type: "huddle.sticker", sticker } : null;
+    }
+    case "huddle.react": {
+      const emoji = reactionOf(frame.emoji);
+      return emoji !== null ? { type: "huddle.react", emoji } : null;
     }
     case "ping":
       return { type: "ping" };

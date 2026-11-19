@@ -53,7 +53,7 @@ export async function joinMany(server: Server, room: string, count: number, { co
   return { clients, connectMs };
 }
 
-export function closeAll(clients: RoomClient[]): void {
+export function closeAll(clients: Array<{ close(): void }>): void {
   for (const client of clients) client.close();
 }
 

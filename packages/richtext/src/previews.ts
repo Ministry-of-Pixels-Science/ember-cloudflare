@@ -33,6 +33,11 @@ export function unfurledLinks(root: Fragment | Element): Element[] {
   return attachmentNodes(root).filter((node) => getAttr(node, "content-type") === OPENGRAPH_EMBED_CONTENT_TYPE);
 }
 
+/** Whether the body `markup` has a link's preview, as the composer adds one below a link. */
+export function hasPreview(parse: HtmlParser, markup: string): boolean {
+  return unfurledLinks(parse(markup)).length > 0;
+}
+
 /**
  * Ember's own limit on the markup the copies of a preview come to, in characters, which Campfire
  * doesn't have. Every div of a body that's only a link gets a copy, so 100 KB of empty divs and a

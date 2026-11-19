@@ -11,7 +11,7 @@ import { isMessages, isObject, isResponses } from "./formats";
 // Ember's own for searching the web among them, while it may search (gateway.ts).
 
 /** The most calls of Ember's tools one answer makes, as the model reads the conversation again after each round of them. */
-export const TOOL_CALLS_PER_ANSWER = 5;
+export const TOOL_CALLS_PER_ANSWER = 20;
 
 /** What a model is told of a call an answer has no calls left for. */
 export const NO_CALLS_LEFT = "Not run: this answer has made all the tool calls it may. Answer with what you have.";

@@ -5,6 +5,7 @@ import { MENTION_CONTENT_TYPE, mentionSgid, OPENGRAPH_EMBED_CONTENT_TYPE, prepar
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   answerOf,
+  BLOCKED_ANSWER,
   NOTES,
   previewAttachment,
   questionFor,
@@ -192,8 +193,8 @@ async function addBot(administrator: Session, name: string): Promise<BotSettings
   return ((await response.json()) as BotAnswer).bot;
 }
 
-/** 350 steps of a numbered list, each numbered 1 in its Markdown, which shows them counting up, longer than a message. */
-const STEPS = Array.from({ length: 350 }, (_, index) => `1. step-${String(index).padStart(18, "0")}`).join("\n");
+/** 1,450 steps of a numbered list, each numbered 1 in its Markdown, which shows them counting up, longer than a message. */
+const STEPS = Array.from({ length: 1_450 }, (_, index) => `1. step-${String(index).padStart(18, "0")}`).join("\n");
 
 /** Waits until `room` has sent the Workspace every event it logged, whose answer says whom each message goes to. */
 const allApplied = (room: RoomId) => vi.waitFor(async () => expect(await roomSql(room, "SELECT count(*) AS n FROM room_events")).toEqual([{ n: 0 }]));
@@ -573,6 +574,19 @@ describe("@ember", () => {
     const question = await post(client, `<p>${mention(EMBER)} hello?</p>`);
     expect(await nextAnswer(client)).toMatchObject({ creator: EMBER, plainText: NOTES.credits });
     expect(errors).toHaveBeenCalledWith(expect.stringMatching(new RegExp(`^Ember AI's model ${MODEL.replaceAll(".", "\\.")} didn't answer message ${question.id}: .*Insufficient credits`)));
+    client.close();
+  });
+
+  it("says it can't answer there in place of an answer with a word Blocked words keeps out", async () => {
+    const { ada, general } = await setUp();
+    // What it says in its place is Ember's words, which are posted even with one of them blocked.
+    const blocked = await api("/api/account", { method: "PATCH", headers: { Cookie: ada.cookie }, body: JSON.stringify({ blockedWords: ["fudge", "community"] }) });
+    expect(blocked.status).toBe(200);
+    internet(() => chatAnswer("Oh **fudge**, it moved to Friday."));
+    const client = await connect(general, ada);
+
+    await post(client, `<p>${mention(EMBER)} when's the launch?</p>`);
+    expect(await nextAnswer(client)).toMatchObject({ creator: EMBER, plainText: BLOCKED_ANSWER });
     client.close();
   });
 
@@ -983,7 +997,7 @@ describe("@ember's answer", () => {
 
   it("keeps as many of its cards as fit, each whole, beside as much of its text as fits, counting the cards' text as the room does", () => {
     const paragraph = `${"word ".repeat(199)}word`;
-    const prose = Array.from({ length: 20 }, () => paragraph).join("\n\n");
+    const prose = Array.from({ length: 50 }, () => paragraph).join("\n\n");
     const notes = { blocks: [{ type: "section", text: { type: "mrkdwn", text: `Notes: ${"n".repeat(1_500)}` } }] };
     const cut = answerOf(`${prose}\n\n${slackBlock(notes)}`);
     expect(cut.cards).toEqual([{ source: "blocks", parts: [{ kind: "section", html: `<p>Notes: ${"n".repeat(1_500)}</p>` }] }]);
@@ -994,9 +1008,9 @@ describe("@ember's answer", () => {
     expect(prepareBody(answerOf(prose).markup, () => undefined)!.plainText.length).toBeGreaterThan(plainText.length + 900);
 
     // When not all of them fit beside an ellipsis, the first that do, and the text whole if it fits beside them.
-    const note = (n: number) => ({ blocks: [{ type: "section", text: { type: "mrkdwn", text: `Note ${n}: ${"x".repeat(4_000)}` } }] });
+    const note = (n: number) => ({ blocks: [{ type: "section", text: { type: "mrkdwn", text: `Note ${n}: ${"x".repeat(16_000)}` } }] });
     const three = answerOf(["Three notes:", ...[1, 2, 3].map((n) => slackBlock(note(n))), "That's all."].join("\n\n"));
-    expect(three.cards.map(({ parts }) => parts[0])).toEqual([1, 2].map((n) => ({ kind: "section", html: `<p>Note ${n}: ${"x".repeat(4_000)}</p>` })));
+    expect(three.cards.map(({ parts }) => parts[0])).toEqual([1, 2].map((n) => ({ kind: "section", html: `<p>Note ${n}: ${"x".repeat(16_000)}</p>` })));
     expect(prepareBody(three.markup, () => undefined)!.plainText).toBe("Three notes:\n\nThat's all.");
   });
 
@@ -1035,14 +1049,14 @@ describe("@ember's answer", () => {
 
   it("is cut, a line at a time, to what a message holds", () => {
     const paragraph = `${"word ".repeat(199)}word`;
-    const { markup } = answerOf(Array.from({ length: 20 }, () => paragraph).join("\n\n"));
+    const { markup } = answerOf(Array.from({ length: 50 }, () => paragraph).join("\n\n"));
     const body = prepareBody(markup, () => undefined)!;
     expect(body.plainText.length).toBeLessThanOrEqual(MAX_MESSAGE_LENGTH);
     expect(body.plainText.endsWith(`${paragraph}\n\n…`)).toBe(true);
   });
 
   it("is measured as it shows, as a numbered list counts up, or a picture's address shows for each reference to it", () => {
-    const pictures = `${Array(6).fill("![][flame]").join(" ")}\n\n[flame]: https://images.example.com/${"f".repeat(1_988)}.png`;
+    const pictures = `${Array(21).fill("![][flame]").join(" ")}\n\n[flame]: https://images.example.com/${"f".repeat(1_988)}.png`;
     for (const text of [STEPS, pictures]) {
       expect(text.length).toBeLessThan(MAX_MESSAGE_LENGTH);
       expect(prepareBody(markdownHtml(text), () => undefined)!.plainText.length).toBeGreaterThan(MAX_MESSAGE_LENGTH);
@@ -1053,7 +1067,7 @@ describe("@ember's answer", () => {
   });
 
   it("is cut within its first line when even that is longer than a message", () => {
-    const { markup } = answerOf(`${"word ".repeat(2_400)}word`);
+    const { markup } = answerOf(`${"word ".repeat(9_600)}word`);
     const { plainText } = prepareBody(markup, () => undefined)!;
     expect(plainText.length).toBeLessThanOrEqual(MAX_MESSAGE_LENGTH);
     expect(plainText.length).toBeGreaterThan(MAX_MESSAGE_LENGTH - 10);

@@ -17,10 +17,12 @@ const railAt = (current: RailPage, activity = activityOff, me = ada, onNewDirect
 afterEach(() => history.replaceState(null, "", "/"));
 
 describe("Rail", () => {
-  it("puts Home, DMs, Activity, Search, Workspace, appearance and your profile on the rail", () => {
+  it("puts Back and Forward, Home, DMs, Activity, Search, Workspace, appearance and your profile on the rail", () => {
     render(railAt("home"));
     const rail = screen.getByRole("navigation", { name: "Workspace" });
     expect([...rail.querySelectorAll("a, button")].map((item) => item.getAttribute("aria-label") ?? item.textContent)).toEqual([
+      "Back",
+      "Forward",
       "Ember home",
       "Home",
       "DMs",
@@ -36,6 +38,14 @@ describe("Rail", () => {
     expect(within(rail).getByRole("link", { name: "Search" })).toHaveAttribute("href", "/searches");
     expect(within(rail).getByRole("link", { name: "Workspace" })).toHaveAttribute("href", "/account/edit");
     expect(within(rail).getByRole("link", { name: "Your profile" })).toHaveAttribute("href", "/users/me/profile");
+  });
+
+  it("puts Back and Forward at its top for a pointer, leaving them out for fingers, which have their own way back", () => {
+    render(railAt("room"));
+    const arrows = screen.getByRole("button", { name: "Back" }).parentElement!;
+    expect(arrows).toContainElement(screen.getByRole("button", { name: "Forward" }));
+    expect(arrows).toHaveClass("touch:hidden");
+    expect(screen.getByRole("navigation", { name: "Workspace" }).firstElementChild).toBe(arrows);
   });
 
   it("links your avatar to your profile, titled with your name", async () => {
@@ -68,6 +78,21 @@ describe("Rail", () => {
     rerender(railAt("home", activityOff, grace));
     expect(admin).not.toHaveAccessibleDescription();
     expect(admin.lastElementChild).toHaveTextContent("Admin");
+  });
+
+  it("marks Admin with a dot while reports are open too, saying how many", () => {
+    const grace = { ...ada, administrator: true };
+    const rail = (openReports: number, newRelease: string | null = null) => (
+      <Rail me={grace} workspaceName="Analytical Engines" current="home" activity={activityOff} newRelease={newRelease} openReports={openReports} onNewDirect={() => {}} />
+    );
+    const { rerender } = render(rail(1));
+    const admin = screen.getByRole("link", { name: "Admin" });
+    expect(admin).toHaveAccessibleDescription("1 open report");
+    expect(admin.lastElementChild).toHaveClass("absolute", "rounded-full", "bg-foreground");
+    rerender(rail(3, "0.2"));
+    expect(admin).toHaveAccessibleDescription("Ember 0.2 is available. 3 open reports");
+    rerender(rail(0));
+    expect(admin).not.toHaveAccessibleDescription();
   });
 
   it("titles the logo with the workspace's name", () => {
@@ -109,6 +134,8 @@ describe("Rail", () => {
       [...rail.querySelectorAll("a, button")].map((item) => [item.getAttribute("aria-label") ?? item.textContent, item.querySelector("svg")?.classList[0]]),
     );
     expect(icons).toEqual({
+      Back: "iconoir-arrow-left",
+      Forward: "iconoir-arrow-right",
       "Ember home": undefined,
       Home: "iconoir-home",
       DMs: "iconoir-multi-bubble",
@@ -201,7 +228,7 @@ describe("Initials avatars", () => {
 
 describe("Workspace logo", () => {
   it("shows Ember's flame, or the workspace's logo, filling a 56px square with rounded corners", () => {
-    const account = { name: "Analytical Engines", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true };
+    const account = { name: "Analytical Engines", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, ssoJoin: false, ssoSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true };
     const { rerender } = render(<AccountContext value={account}>{railAt("home")}</AccountContext>);
     const brand = screen.getByRole("link", { name: "Ember home" });
     expect(brand.querySelector("img")).toHaveAttribute("src", "/ember-icon.png");
@@ -231,6 +258,8 @@ describe("Navigation icons", () => {
       openSignUp: false,
       memberfulJoin: false,
       memberfulSignIn: false,
+      ssoJoin: false,
+      ssoSignIn: false,
       emailDomainSignUp: false,
       emailDomains: [],
       navigationIcons: { home: "coffee", search: "iconoir:solid:heart" },

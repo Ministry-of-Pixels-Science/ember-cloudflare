@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { botMessagesPath, botSlackPath, MAX_WEBHOOK_URL_LENGTH, parseBotChanges, parseNewBot } from "./bots";
-import { MAX_USER_NAME_LENGTH, NAME_RESERVED } from "./index";
+import { BOT_ROOMS_REFUSED, botMessagesPath, botSlackPath, MAX_WEBHOOK_URL_LENGTH, parseBotChanges, parseNewBot } from "./bots";
+import { MAX_SHARED_ORDER, MAX_USER_NAME_LENGTH, NAME_RESERVED } from "./index";
+
+/** Two rooms' IDs, as the Workspace makes them. */
+const ROOMS = ["0mgk3x2a9b4c5a", "0mgk3x2a9b4c5b"];
 
 describe("Add and edit a bot", () => {
   it("takes the name as typed and the webhook URL trimmed, leaving out what isn't sent", () => {
@@ -13,6 +16,13 @@ describe("Add and edit a bot", () => {
   it("takes a new bot with a name, with or without a webhook URL", () => {
     expect(parseNewBot({ name: "Build Bot" })).toEqual({ name: "Build Bot" });
     expect(parseNewBot({ name: "Build Bot", webhookUrl: "" })).toEqual({ name: "Build Bot", webhookUrl: "" });
+  });
+
+  it("takes the open rooms a bot's kept to, none among them, or null for every open room", () => {
+    expect(parseNewBot({ name: "Build Bot", rooms: ROOMS })).toEqual({ name: "Build Bot", rooms: ROOMS });
+    expect(parseNewBot({ name: "Build Bot", rooms: null })).toEqual({ name: "Build Bot", rooms: null });
+    expect(parseBotChanges({ rooms: [] })).toEqual({ rooms: [] });
+    expect(parseBotChanges({ rooms: null })).toEqual({ rooms: null });
   });
 
   it("takes a webhook URL as long as the server keeps", () => {
@@ -28,6 +38,10 @@ describe("Add and edit a bot", () => {
     ["a blank name", { name: " \t" }, "Name can't be blank"],
     ["a name longer than a person's can be", { name: "x".repeat(MAX_USER_NAME_LENGTH + 1) }, "Name can't be longer than 100 characters"],
     ["a webhook URL that isn't text", { name: "Build Bot", webhookUrl: null }, "Webhook URL must be text"],
+    ["rooms that aren't a list", { name: "Build Bot", rooms: ROOMS[0] }, BOT_ROOMS_REFUSED],
+    ["a room twice", { name: "Build Bot", rooms: [ROOMS[0], ROOMS[0]] }, BOT_ROOMS_REFUSED],
+    ["something that can't be a room", { name: "Build Bot", rooms: [ROOMS[0], "Launch!"] }, BOT_ROOMS_REFUSED],
+    ["more rooms than there can be", { name: "Build Bot", rooms: Array.from({ length: MAX_SHARED_ORDER + 1 }, (_, n) => `room-${n}`) }, BOT_ROOMS_REFUSED],
   ])("refuses %s and says why", (_, body, error) => {
     expect(parseBotChanges(body)).toBe(error);
     expect(parseNewBot(body)).toBe(error);

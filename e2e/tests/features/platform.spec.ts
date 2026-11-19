@@ -19,7 +19,8 @@ interface Manifest {
 }
 
 test.describe("Web app manifest", () => {
-  test("Chrome reads the manifest the page links without errors, and can install Ember", async ({ playwright, baseURL }) => {
+  test("Chrome reads the manifest the page links without errors, and can install Ember", async ({ playwright, baseURL, browserName }) => {
+    test.skip(browserName !== "chromium", "Chrome's own reading of the manifest, which the Chromium run checks");
     // Chrome installs nothing from an incognito window, which every context Playwright opens is, so
     // this opens a profile of its own.
     const context = await playwright.chromium.launchPersistentContext("", { baseURL, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined });

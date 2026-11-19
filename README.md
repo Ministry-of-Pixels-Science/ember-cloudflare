@@ -117,8 +117,9 @@ signal send once you're back online. To sign in on your phone, scan the QR code 
 Give Ember your community's name, logo and tagline, pick icons for rooms and the navigation, restyle it
 with custom CSS, and serve it at your own domain, which Ember walks you through setting up. Then choose
 who gets in: anyone with the join link or its QR code, the people you invite by email, anyone with an
-address at your company's domain, the members of your [Memberful](https://memberful.com) site, or
-everyone, with [Cloudflare Turnstile](https://www.cloudflare.com/application-services/products/turnstile/)
+address at your company's domain, the members of your [Memberful](https://memberful.com) site, the
+people of your identity provider, such as Zitadel, Okta or Google, with single sign-on, or everyone,
+with [Cloudflare Turnstile](https://www.cloudflare.com/application-services/products/turnstile/)
 keeping bots out.
 
 <p align="center">
@@ -159,14 +160,14 @@ it's yours. Slack's plans are as [slack.com/pricing](https://slack.com/pricing) 
 | **Incoming webhooks** | ✅ Slack-compatible, with attachments and Block Kit | ✅ |
 | **Bots that answer** | ✅ through a webhook per bot | ✅ through Slack apps |
 | **Ways to join** | Join link and QR code, email invitations, email domains, open sign-up with Turnstile, Memberful | Invitations, invite links and approved email domains |
-| **Single sign-on** | Memberful, for membership communities | Google on every plan, and SAML SSO with SCIM on Business+ |
+| **Single sign-on** | OpenID Connect with any provider (Zitadel, Keycloak, Okta, Entra ID, Google), with group rules and back-channel logout, and Memberful, for membership communities | Google on every plan, and SAML SSO with SCIM on Business+ |
 
 ### Where Slack does more
 
 | | Ember | Slack |
 |---|---|---|
 | **Apps and workflows** | — | ✅ a directory of 2,600+ apps (Free: 10 of them) and Workflow Builder |
-| **Voice and video calls** | Huddles in any room or DM, by voice, camera and shared screen, for up to 50 people; one in a DM rings the others in it, Invite people rings whoever else in the room you pick, and whoever doesn't have Ember in view gets the invitation as a push notification; each has a message in its room to join it from, with a thread of its own, which the huddle shows beside the people in it | ✅ huddles (Free: one-on-one only) |
+| **Voice and video calls** | Huddles in any room or DM, by voice, camera and shared screen, with raised hands, stickers and emoji reactions, for up to 50 people; one in a DM rings the others in it, Invite people rings whoever else in the room you pick, and whoever doesn't have Ember in view gets the invitation as a push notification; each has a message in its room to join it from, with a thread of its own, which the huddle shows beside the people in it; Huddles, in the sidebar, lists the ones going on, to join, and the recent ones, with their threads; an administrator can turn huddles off in a room, in its settings, and each person chooses which of a huddle's sounds they hear | ✅ huddles (Free: one-on-one only) |
 | **AI** | @ember and agents of your own answer when you mention or DM them, each on the model you choose | ✅ summaries, recaps and AI search on every plan, more on Business+ |
 | **Canvases, lists and clips** | — | ✅ |
 | **Channels shared with other companies** | — | ✅ Slack Connect |
@@ -241,7 +242,7 @@ From then on, every push to your copy deploys again, and each new release of Emb
 as a pull request that deploys it once you merge it, while Ember's admin settings say it's out, with a
 button that opens the workflow on GitHub to run it sooner. The
 [self-hosting guide](docs/self-hosting.md) covers updating, deploying from your own machine, a custom
-domain, email, push notifications, Memberful and more.
+domain, email, push notifications, Memberful, single sign-on and more.
 
 ### Try it on your computer
 

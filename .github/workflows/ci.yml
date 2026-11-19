@@ -71,3 +71,31 @@ jobs:
           name: playwright-report
           path: e2e/playwright-report/
           retention-days: 14
+
+  # The same browser tests in Safari's engine, which every browser on an iPhone or iPad shows pages
+  # with, as Ember's apps will: the first run, the feature suite and two iPhones (e2e/projects/webkit.ts).
+  e2e-webkit:
+    if: github.repository == 'NYLLON-SOFTWARE/ember-cloudflare'
+    runs-on: ubuntu-latest
+    env:
+      E2E_BROWSER: webkit
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @ember/e2e exec playwright install --with-deps webkit
+      # GitHub's machine hands the memory of a process that crashes to a program that writes it to the
+      # disk. A crashed page's 600 to 800 MB kept the disk busy for about 16 seconds, and for 34 to 71
+      # where two crashed close together, and the tests that waited on it meanwhile timed out. So no
+      # core dump is written, and a crash costs the tests beside it nothing.
+      - run: ulimit -c 0 && pnpm test:e2e
+      - uses: actions/upload-artifact@v6
+        if: failure()
+        with:
+          name: playwright-report-webkit
+          path: e2e/playwright-report/
+          retention-days: 14

@@ -1,6 +1,6 @@
 import type { Room, Sidebar, WorkspaceServerFrame } from "@ember/protocol";
 import type { APIRequestContext, BrowserContext, Page, WebSocketRoute } from "@playwright/test";
-import { administratorSession, connectWorkspace, cookieHeader, createRoom, invitation, keepOtherRoomsOut, listing, makeAdministrator, rowsWithStars, signInAs, WORKSPACE_SOCKET } from "../../fixtures";
+import { administratorSession, allowClipboard, answerChanged, connectWorkspace, cookieHeader, createRoom, downloadName, invitation, keepOtherRoomsOut, listing, makeAdministrator, rowsWithStars, signInAs, WORKSPACE_SOCKET } from "../../fixtures";
 import { expect, test, unique, type Member } from "./fixtures";
 
 /**
@@ -11,12 +11,7 @@ import { expect, test, unique, type Member } from "./fixtures";
  */
 async function showRoomsPicked(context: BrowserContext, shows: (room: Room) => boolean): Promise<void> {
   const picked = (room: Room) => room.kind === "direct" || shows(room);
-  await context.route("**/api/sidebar", async (route) => {
-    const response = await route.fetch();
-    if (!response.ok()) return route.fulfill({ response });
-    const list = (await response.json()) as Sidebar;
-    await route.fulfill({ response, json: { ...list, rooms: list.rooms.filter(picked) } });
-  });
+  await context.route("**/api/sidebar", (route) => answerChanged<Sidebar>(route, (list) => ({ ...list, rooms: list.rooms.filter(picked) })));
   await context.routeWebSocket(WORKSPACE_SOCKET, (ws) => void connectWorkspace(ws, (frame) => frame.type !== "room.saved" || picked(frame.room)));
 }
 
@@ -331,7 +326,7 @@ test.describe("Go back to the last room", () => {
 
   test("shows someone in no rooms a picture of an empty room, with their name for screen readers", async ({ page, session }) => {
     await signInAs(page, session);
-    await page.route("**/api/sidebar", (route) => route.fulfill({ json: { rooms: [], favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: {} } satisfies Sidebar }));
+    await page.route("**/api/sidebar", (route) => route.fulfill({ json: { rooms: [], favorites: { rooms: [], version: 0 }, sharedOrder: [], invitation: null, huddles: {}, blocks: { userIds: [], version: 0 } } satisfies Sidebar }));
     await keepOtherRoomsOut(page, []);
     await page.goto("/");
     await expect(page).toHaveTitle("No rooms yet");
@@ -435,8 +430,8 @@ test.describe("Welcome card for administrators, until they dismiss it", () => {
 test.describe("Join link", () => {
   test("copies the join link", async ({ baseURL, members, request, session }) => {
     const { roomId, joinCode } = await invitation(request, session);
-    const context = { permissions: ["clipboard-read", "clipboard-write"] };
-    const ada = await members.signIn("Ada", { path: `/rooms/${roomId}`, serverRooms: true, administrator: true, context });
+    const ada = await members.signIn("Ada", { path: `/rooms/${roomId}`, serverRooms: true, administrator: true });
+    await allowClipboard(ada.page.context());
     const copy = ada.page.getByRole("button", { name: "Copy join link" });
     await copy.click();
     await expect(copy).toHaveClass(/animate-success/);
@@ -508,7 +503,7 @@ test.describe("QR codes for links", () => {
     // It saves the code and stays open.
     const download = ada.page.waitForEvent("download");
     await viewer.getByRole("link", { name: "Download file" }).click();
-    expect((await download).suggestedFilename()).toBe("QR code.svg");
+    expect(downloadName(await download)).toBe("QR code.svg");
     await expect(viewer).toBeVisible();
     expect(new URL(ada.page.url()).pathname).toBe(`/rooms/${roomId}`);
 

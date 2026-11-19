@@ -3,8 +3,11 @@ import {
   CURRENT_PASSWORD_NEEDED,
   CURRENT_PASSWORD_WRONG,
   MAX_BIO_LENGTH,
+  MAX_USERNAME_LENGTH,
   PASSWORD_TOO_SHORT,
   SIGN_IN_LIMITED,
+  USERNAME_REFUSED,
+  USERNAME_TAKEN,
   type Directory,
   type DirectoryUser,
   type NewWorkspace,
@@ -124,9 +127,9 @@ describe("Edit your profile", () => {
     const response = await api("/api/users/me/profile", { headers: as(administrator) });
     expect(response.status).toBe(200);
     expect(response.headers.get("Cache-Control")).toBe("no-store");
-    const profile = { name: "Ada Lovelace", emailAddress: "ada@example.com", bio: null, ...(await initialsOf(administrator)), password: true, membershipNeeded: false, memberful: null, assistant: null, apps: [], outsideAi: null };
+    const profile = { name: "Ada Lovelace", username: null, emailAddress: "ada@example.com", bio: null, ...(await initialsOf(administrator)), password: true, membershipNeeded: false, memberful: null, sso: null, assistant: null, apps: [], outsideAi: null };
     expect(await response.json()).toEqual({ profile, transferId: expect.any(String) } satisfies ProfileAnswer);
-    expect(await profileOf(grace)).toEqual({ name: "Grace Hopper", emailAddress: null, bio: "Rear admiral", ...(await initialsOf(grace)), password: false, membershipNeeded: true, memberful: null, assistant: null, apps: [], outsideAi: null } satisfies Profile);
+    expect(await profileOf(grace)).toEqual({ name: "Grace Hopper", username: null, emailAddress: null, bio: "Rear admiral", ...(await initialsOf(grace)), password: false, membershipNeeded: true, memberful: null, sso: null, assistant: null, apps: [], outsideAi: null } satisfies Profile);
   });
 
   it("saves your name, email address and bio, answering your profile as it is then", async () => {
@@ -136,7 +139,7 @@ describe("Edit your profile", () => {
 
     const response = await save(grace, changed);
     expect(response.status).toBe(200);
-    const profile: Profile = { ...changed, ...(await initialsOf(grace)), password: false, membershipNeeded: true, memberful: null, assistant: null, apps: [], outsideAi: null };
+    const profile: Profile = { ...changed, username: null, ...(await initialsOf(grace)), password: false, membershipNeeded: true, memberful: null, sso: null, assistant: null, apps: [], outsideAi: null };
     expect(await response.json()).toEqual({ profile, transferId: expect.any(String) } satisfies ProfileAnswer);
     expect(await profileOf(grace)).toEqual(profile);
     expect(await (await me(grace)).json()).toEqual({ user: { id: grace.user.id, name: "Grace Brewster Hopper", administrator: false } });
@@ -151,14 +154,14 @@ describe("Edit your profile", () => {
     for (const body of [{}, { name: "Grace Hopper" }, { bio: "Rear admiral", password: "" }]) {
       const response = await save(grace, body);
       expect(response.status, JSON.stringify(body)).toBe(200);
-      expect(await response.json()).toEqual({ profile: { name: "Grace Hopper", emailAddress: null, bio: "Rear admiral", ...initials, password: false, membershipNeeded: true, memberful: null, assistant: null, apps: [], outsideAi: null }, transferId: expect.any(String) });
+      expect(await response.json()).toEqual({ profile: { name: "Grace Hopper", username: null, emailAddress: null, bio: "Rear admiral", ...initials, password: false, membershipNeeded: true, memberful: null, sso: null, assistant: null, apps: [], outsideAi: null }, transferId: expect.any(String) });
       expect((await stored(grace.user.id)).updated_at).toBe(LONG_AGO);
     }
 
     const answer = await (await save(grace, { bio: "Admiral" })).json();
     expect((await stored(grace.user.id)).updated_at > LONG_AGO).toBe(true);
     // The avatar's address changes with it, as it's versioned by when they last changed.
-    expect(answer).toEqual({ profile: { name: "Grace Hopper", emailAddress: null, bio: "Admiral", ...(await initialsOf(grace)), password: false, membershipNeeded: true, memberful: null, assistant: null, apps: [], outsideAi: null }, transferId: expect.any(String) });
+    expect(answer).toEqual({ profile: { name: "Grace Hopper", username: null, emailAddress: null, bio: "Admiral", ...(await initialsOf(grace)), password: false, membershipNeeded: true, memberful: null, sso: null, assistant: null, apps: [], outsideAi: null }, transferId: expect.any(String) });
     expect((await initialsOf(grace)).avatarUrl).not.toBe(initials.avatarUrl);
   });
 
@@ -433,5 +436,75 @@ describe("Edit your profile", () => {
     }
     expect((await api(`/api/users/${grace.user.id}/profile`, { headers: as(grace) })).status).toBe(404);
     expect((await stored(grace.user.id)).name).toBe("Grace Hopper");
+  });
+});
+
+describe("Usernames", () => {
+  /** Makes an agent called `name`, as making one leaves it once Ember AI is turned off. */
+  async function agentCalled(name: string, createdBy: UserId): Promise<void> {
+    await workspaceSql("INSERT INTO users (id, name, role, status, created_at, updated_at) VALUES ('0agent', ?, 2, 1, ?2, ?2)", name, LONG_AGO);
+    await workspaceSql(
+      `INSERT INTO agents (user_id, description, instructions, model, model_name, format, thinking, answer_length, every_open_room, created_by, updated_by, created_at, updated_at)
+        VALUES ('0agent', 'Sums up threads', 'Sum up.', 'anthropic/claude-haiku-5.5', 'Claude Haiku 5.5', 'messages', 'off', 'short', 1, ?1, ?1, ?2, ?2)`,
+      createdBy,
+      LONG_AGO,
+    );
+  }
+
+  it("saves yours as Ember keeps one, in lowercase without spaces or an @, which the directory lists and everyone's workspace sockets hear of", async () => {
+    const administrator = await setUp();
+    const grace = await signIn("Grace Hopper");
+    const workspace = await openWorkspaceSocket(administrator);
+
+    const response = await save(grace, { username: " @Amazing.Grace " });
+    expect(response.status, await response.clone().text()).toBe(200);
+    expect(((await response.json()) as ProfileAnswer).profile.username).toBe("amazing.grace");
+    expect(await profileOf(grace)).toMatchObject({ name: "Grace Hopper", username: "amazing.grace" });
+    const listing = await listed(administrator, grace.user.id);
+    expect(listing).toMatchObject({ name: "Grace Hopper", username: "amazing.grace" });
+    expect(await workspace.next()).toEqual({ type: "user.updated", user: listing });
+  });
+
+  it("leaves it out of the directory for someone without one, and takes yours away when it's blank", async () => {
+    const administrator = await setUp();
+    expect(await profileOf(administrator)).toMatchObject({ username: null });
+    expect(await listed(administrator, administrator.user.id)).not.toHaveProperty("username");
+    expect((await save(administrator, { username: "ada" })).status).toBe(200);
+
+    const response = await save(administrator, { username: " " });
+    expect(((await response.json()) as ProfileAnswer).profile.username).toBeNull();
+    expect(await listed(administrator, administrator.user.id)).not.toHaveProperty("username");
+    expect(await workspaceSql("SELECT username FROM users WHERE id = ?", administrator.user.id)).toEqual([{ username: null }]);
+  });
+
+  it.each([
+    ["that starts with a period", ".grace"],
+    ["with a letter a username can't have", "grâce"],
+    ["longer than a username can be", "g".repeat(MAX_USERNAME_LENGTH + 1)],
+  ])("refuses one %s, saving nothing", async (_, username) => {
+    const grace = await signIn("Grace Hopper");
+    const response = await save(grace, { name: "Amazing Grace", username });
+    expect(response.status).toBe(422);
+    expect(await response.json()).toEqual({ error: USERNAME_REFUSED });
+    expect((await stored(grace.user.id)).name).toBe("Grace Hopper");
+  });
+
+  it("refuses one someone else has, in any capitals, even once they've been removed, and @ember's or an agent's name, saving nothing", async () => {
+    const administrator = await setUp();
+    const [grace, alan] = [await signIn("Grace Hopper"), await signIn("Alan Turing")];
+    await agentCalled("Scout", administrator.user.id);
+    expect((await save(administrator, { username: "ada" })).status).toBe(200);
+    expect((await save(alan, { username: "alan" })).status).toBe(200);
+    await workspaceSql("UPDATE users SET status = 1 WHERE id = ?", alan.user.id);
+
+    for (const username of ["ada", "ADA", "alan", "ember", "Scout"]) {
+      const response = await save(grace, { bio: "Rear admiral", username });
+      expect(response.status, username).toBe(422);
+      expect(await response.json()).toEqual({ error: USERNAME_TAKEN });
+    }
+    expect(await stored(grace.user.id)).toMatchObject({ bio: null });
+    // Your own is yours to keep as you change the rest.
+    expect((await save(administrator, { username: "ada", bio: "Countess" })).status).toBe(200);
+    expect(await stored(administrator.user.id)).toMatchObject({ bio: "Countess" });
   });
 });

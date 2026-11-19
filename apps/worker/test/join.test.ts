@@ -17,7 +17,22 @@ import { evictDurableObject } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import { verifyPassword } from "../src/passwords";
 import { ORIGINAL_ROOM } from "../src/workspace-store";
-import { api, apiWith, builtPages, cookieOf, createRoom, freshDeploy, openWorkspaceSocket, origin, signIn, workspaceSql, workspaceStub, type Session } from "./support";
+import {
+  api,
+  apiWith,
+  builtPages,
+  cookieOf,
+  createRoom,
+  deactivatedPerson,
+  freshDeploy,
+  openWorkspaceSocket,
+  origin,
+  shown,
+  signIn,
+  workspaceSql,
+  workspaceStub,
+  type Session,
+} from "./support";
 
 const ada = { name: "Ada Lovelace", emailAddress: "ada@example.com", password: "analytical engine" };
 const grace = { name: "Grace Hopper", emailAddress: "grace@example.com", password: "compiler" };
@@ -87,8 +102,9 @@ describe("Sign up with the join link", () => {
 
     const cookie = cookieOf(response);
     expect(await (await api("/api/me", { headers: { Cookie: cookie } })).json()).toEqual({ user });
-    const rooms = (await roomList(cookie)).rooms;
-    expect(rooms.map((room) => room.kind !== "direct" && room.name)).toEqual(["general", "random", "Design"]);
+    // The DM that welcomes them comes after the rooms (see "Welcome someone who joins").
+    const rooms = (await roomList(cookie)).rooms.filter((room) => room.kind !== "direct");
+    expect(rooms.map((room) => room.name)).toEqual(["general", "random", "Design"]);
     expect(rooms[0]!.id).toBe(administrator.general.id);
     expect(rooms[2]!.id).toBe(design.id);
     expect(rooms.map((room) => room.id)).not.toContain(leads.id);
@@ -186,6 +202,60 @@ describe("Sign up with the join link", () => {
     const code = await joinCode();
     expect(JSON.stringify(await ((await api("/api/bootstrap")).json() as Promise<Bootstrap>))).not.toContain(code);
     expect((await api("/api/sidebar")).status).toBe(401);
+  });
+});
+
+describe("Welcome someone who joins", () => {
+  /** The DMs a sidebar lists. */
+  const directsIn = ({ rooms }: Sidebar) => rooms.filter((room) => room.kind === "direct");
+
+  it("starts a DM between someone who joins and each person here, which says they joined, telling each of their tabs at once", async () => {
+    const administrator = await setUp();
+    const [laptop, phone] = [await openWorkspaceSocket(administrator), await openWorkspaceSocket(administrator)];
+
+    const response = await join(await joinCode(), grace);
+    const { user } = (await response.json()) as { user: User };
+    const [welcome] = directsIn(await roomList(administrator.cookie));
+    const members = [shown(administrator.user), shown(user)].sort((a, b) => (a.id < b.id ? -1 : 1));
+    expect(welcome).toEqual({ id: expect.any(String), kind: "direct", members, activeAt: expect.any(String), joined: { userId: user.id, at: welcome!.activeAt }, unread: false, involvement: "everything" });
+    const { unread: _, involvement: __, ...room } = welcome!;
+    for (const tab of [laptop, phone]) {
+      expect(await tab.next()).toMatchObject({ type: "user.updated", user: { id: user.id } });
+      expect(await tab.next()).toEqual({ type: "room.saved", room });
+    }
+    // Their own sidebar lists it too, as the app leaves it out until someone writes in it.
+    expect(directsIn(await roomList(cookieOf(response)))).toEqual([welcome]);
+
+    // Someone who joins next is welcomed by both of them.
+    const katherine = (await ((await join(await joinCode(), { ...grace, name: "Katherine Johnson", emailAddress: "katherine@example.com" })).json())) as { user: User };
+    const welcomed = await workspaceSql("SELECT direct_key FROM rooms WHERE newcomer_id = ? ORDER BY direct_key", katherine.user.id);
+    expect(welcomed).toEqual([administrator.user.id, user.id].map((id) => ({ direct_key: JSON.stringify([id, katherine.user.id].sort()) })).sort((a, b) => (a.direct_key < b.direct_key ? -1 : 1)));
+    expect(directsIn(await roomList(administrator.cookie))).toHaveLength(2);
+  });
+
+  it("welcomes them to nobody but the active people here: no bot, guest or anyone gone, and a guest is welcomed by nobody", async () => {
+    const administrator = await setUp();
+    await signIn("Guest");
+    await deactivatedPerson("Former");
+    await workspaceSql("INSERT INTO users (id, name, role, created_at, updated_at) VALUES ('build-bot', 'Build Bot', 2, 'now', 'now')");
+    expect(await count("rooms WHERE kind = 'direct'")).toBe(0);
+
+    const { user } = (await (await join(await joinCode(), grace)).json()) as { user: User };
+    expect(await workspaceSql("SELECT direct_key, creator_id, newcomer_id FROM rooms WHERE kind = 'direct'")).toEqual([
+      { direct_key: JSON.stringify([administrator.user.id, user.id].sort()), creator_id: user.id, newcomer_id: user.id },
+    ]);
+  });
+
+  it("starts them all in the batch that adds the member, binding one list however many people are here", async () => {
+    const administrator = await setUp();
+    // As many people as a statement can bind values, and then some.
+    const ids = Array.from({ length: 150 }, (_, n) => `member-${String(n).padStart(3, "0")}`);
+    await workspaceSql("INSERT INTO users (id, name, created_at, updated_at) SELECT value, value, 'now', 'now' FROM json_each(?)", JSON.stringify(ids));
+
+    const { user } = (await (await join(await joinCode(), grace)).json()) as { user: User };
+    expect(await count("rooms WHERE kind = 'direct'")).toBe(151);
+    expect(await count(`memberships JOIN rooms ON rooms.id = memberships.room_id WHERE rooms.newcomer_id = '${user.id}'`)).toBe(302);
+    expect(directsIn(await roomList(administrator.cookie))).toHaveLength(1);
   });
 });
 

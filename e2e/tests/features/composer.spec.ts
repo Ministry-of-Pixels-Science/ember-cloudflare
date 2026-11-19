@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { MAX_MESSAGE_LENGTH } from "@ember/protocol";
 import type { Locator } from "@playwright/test";
 import { ROOM_SOCKET } from "../../fixtures";
 import { expect, paste, test, type Member } from "./fixtures";
@@ -71,10 +72,14 @@ const pressAsSelectionMoves = (member: Member, alter: "extend" | "move", letters
 /** Tells the editor the page's selection moved, as the page does a moment after the text under it's redrawn, though not always before the next key. */
 const pageTellsTheEditor = (member: Member) => member.page.evaluate(() => document.dispatchEvent(new Event("selectionchange")));
 
-/** Moves the cursor to the line's start, as Home does, and focus to the formatting row's Bold, before the page has told the editor the cursor moved. */
+/**
+ * Moves the cursor to the line's start, as Home does, then presses Shift and Tab, which takes focus to the formatting
+ * row's Bold, before the page has told the editor the cursor moved.
+ */
 const homeThenToTheRow = (member: Member) =>
-  member.composer().evaluate(() => {
+  member.composer().evaluate((text) => {
     getSelection()!.modify("move", "backward", "lineboundary");
+    text.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", code: "Tab", shiftKey: true, bubbles: true, cancelable: true }));
     document.querySelector<HTMLButtonElement>("form.composer [role=toolbar] button[aria-label=Bold]")!.focus();
   });
 
@@ -459,6 +464,9 @@ test.describe("Formatting row", () => {
     await ada.composer().pressSequentially("See ");
     await ada.composer().press("ControlOrMeta+Shift+U");
     await expect(linkDialog(ada).getByLabel("Text")).toBeFocused();
+    // The click shut the tooltip that named Show formatting as the pointer reached it, which takes Escape until it
+    // has faded, hidden under the dialog as it is.
+    await expect(ada.page.getByRole("tooltip", { includeHidden: true })).toHaveCount(0);
     await ada.page.keyboard.press("Escape");
     await expect(linkDialog(ada)).toBeHidden();
     await expect(ada.composer()).toBeFocused();
@@ -1028,12 +1036,12 @@ test.describe("Send from the keyboard", () => {
     await expect(formattingRow(ada)).toBeVisible();
   });
 
-  test("says a message over 10,000 characters is too long instead of sending it, keeping it to be cut down", async ({ members }) => {
+  test("says a message over 40,000 characters is too long instead of sending it, keeping it to be cut down", async ({ members }) => {
     const ada = await members.signIn("Ada");
-    await write(ada, `<p>${"x".repeat(10_001)}</p>`);
+    await write(ada, `<p>${"x".repeat(MAX_MESSAGE_LENGTH + 1)}</p>`);
     await ada.composer().press("Enter");
-    await expect(ada.page.getByRole("alert")).toHaveText("Messages can be up to 10,000 characters.");
-    await expect(ada.composer()).toHaveText("x".repeat(10_001));
+    await expect(ada.page.getByRole("alert")).toHaveText("Messages can be up to 40,000 characters.");
+    await expect(ada.composer()).toHaveText("x".repeat(MAX_MESSAGE_LENGTH + 1));
     await expect(ada.page.getByRole("article")).toHaveCount(0);
   });
 

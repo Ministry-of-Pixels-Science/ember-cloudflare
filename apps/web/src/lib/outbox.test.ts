@@ -285,6 +285,15 @@ describe("Take back what was left unsent", () => {
     expect(takeBack("general", ada)).toEqual([sent("Sent"), { ...sent("Refused"), failed: true }]);
   });
 
+  it("hands one refused for what it says back with why, for the composer of the view taking it back to give back", async () => {
+    handOver("general", [waiting("Fudge")]);
+    await effectsRun();
+    socket().open();
+    socket().receive(welcome());
+    socket().receive({ type: "error", message: "This community doesn't allow one of these words.", clientMessageId: "Fudge", failed: "message.create", rewrite: true });
+    expect(takeBack("general", ada)).toEqual([{ ...sent("Fudge"), failed: true, rewrite: "This community doesn't allow one of these words." }]);
+  });
+
   it("connects once every view going has handed over, and not at all when the view opening takes it all back", async () => {
     handOver("general", [waiting("In the room")]);
     handOver("general", [waiting("In the thread", { parentId: "m1" })]);

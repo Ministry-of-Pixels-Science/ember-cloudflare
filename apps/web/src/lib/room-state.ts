@@ -19,6 +19,11 @@ export interface PendingMessage extends Message {
   sentOver?: number;
   /** A file on its way to becoming a message of its own, which its card shows in the message's place. */
   upload?: PendingUpload;
+  /**
+   * Why the room wouldn't take it for what it says, as with a word Blocked words keeps out, while it waits
+   * to go back to the composer, for its writer to change.
+   */
+  rewrite?: string;
 }
 
 /** A file being uploaded, as its card shows it. */
@@ -42,6 +47,15 @@ export interface Focus {
 /** What a message that couldn't go says, as the room's own refusals do. */
 const NOT_SENT = "Not connected. Your message wasn't sent.";
 
+/**
+ * Someone the room says is typing, and, for @ember or an agent answering, what it's doing meanwhile, if
+ * it's more than writing, in words that follow its name, as "is using Digg: digg_get_feed" does.
+ */
+export interface Typist {
+  user: User;
+  doing?: string;
+}
+
 export interface RoomState {
   status: ConnectionStatus;
   /** Whether the room has been without a connection for 5 seconds, which stops sending until it's back. */
@@ -50,7 +64,7 @@ export interface RoomState {
   messages: Array<Message | PendingMessage>;
   present: User[];
   /** Who is typing, with when we last heard so stale entries can expire. */
-  typing: Record<string, { user: User; at: number }>;
+  typing: Record<string, Typist & { at: number }>;
   /** Whether the room has messages older than the timeline holds. */
   hasMore: boolean;
   /**
@@ -119,7 +133,12 @@ export type RoomAction =
   | { type: "expire-typing"; before: number }
   /** Says why something written didn't go, as the room says why it refused something. */
   | { type: "warn"; message: string }
-  | { type: "dismiss-notice" };
+  | { type: "dismiss-notice" }
+  /**
+   * A message the room wouldn't take for what it says, `taken` back by the composer, which says why in the
+   * notice's place, or else left showing as not sent.
+   */
+  | { type: "given-back"; clientMessageId: string; taken: boolean };
 
 export const initialRoomState: RoomState = {
   status: "connecting",
@@ -143,6 +162,9 @@ export const initialRoomState: RoomState = {
 };
 
 export const isPending = (m: Message | PendingMessage): m is PendingMessage => "pending" in m;
+
+/** Whether `m` waits to go back to the composer, as the room wouldn't take it for what it says. */
+export const isToRewrite = (m: Message | PendingMessage): m is PendingMessage & { rewrite: string } => isPending(m) && m.rewrite !== undefined;
 
 /**
  * Whether `stored` is the room's copy of the optimistic message `m`. Anyone can send a
@@ -271,9 +293,9 @@ function withoutTyping(typing: RoomState["typing"], userId: string) {
   return rest;
 }
 
-/** Who is typing once the room has said that `frame`'s user started or stopped, heard at `now`. */
-export function typed(typing: RoomState["typing"], { user, typing: started }: Extract<ServerFrame, { type: "typing" }>, now: number): RoomState["typing"] {
-  return started ? { ...typing, [user.id]: { user, at: now } } : withoutTyping(typing, user.id);
+/** Who is typing once the room has said that `frame`'s user started or stopped, and what they're doing meanwhile, heard at `now`. */
+export function typed(typing: RoomState["typing"], { user, typing: started, doing }: Extract<ServerFrame, { type: "typing" }>, now: number): RoomState["typing"] {
+  return started ? { ...typing, [user.id]: { user, at: now, ...(doing !== undefined && { doing }) } } : withoutTyping(typing, user.id);
 }
 
 /**
@@ -385,6 +407,13 @@ export function roomReducer(state: RoomState, action: RoomAction): RoomState {
       return { ...state, notice: action.message };
     case "dismiss-notice":
       return { ...state, notice: null };
+    case "given-back": {
+      const given = state.messages.find((m): m is PendingMessage => isPending(m) && m.clientMessageId === action.clientMessageId);
+      if (!given?.rewrite) return state;
+      // One the outbox kept comes back without the room's notice, which says why it's not sent.
+      if (!action.taken) return { ...state, messages: state.messages.map((m) => (m === given ? { ...given, rewrite: undefined } : m)), notice: state.notice ?? given.rewrite };
+      return { ...state, messages: state.messages.filter((m) => m !== given), notice: state.notice === given.rewrite ? null : state.notice };
+    }
     case "expire-typing": {
       const fresh = Object.entries(state.typing).filter(([, t]) => t.at >= action.before);
       // This comes every second, so a room where nothing expired keeps its state and doesn't re-render.
@@ -456,15 +485,18 @@ function applyFrame(state: RoomState, frame: ServerFrame, now: number): RoomStat
     case "history.around":
       return { ...state, ...showing(state, frame), loadingPage: false };
     case "error": {
-      // A message the room refused shows as not sent, as do the ones it couldn't check. An error about no
+      // A message the room refused shows as not sent, as do the ones it couldn't check, unless it's refused
+      // for what it says, when the composer it came from takes it back if it can. An error about no
       // message keeps the same list: the timeline takes a new one for a change, and would ask again for a
       // page that just failed. One about a thread, or about messages the timeline isn't sending, as
-      // replies in a thread, is the thread's to show.
+      // replies in a thread, is the thread's to show, and one about a link's preview, which the tab sent
+      // of its own accord, isn't shown.
       const notSent = frame.clientMessageIds ?? (frame.clientMessageId === undefined ? [] : [frame.clientMessageId]);
-      if (frame.failed === "thread.open" || frame.failed === "thread.before") return state;
+      if (frame.failed === "thread.open" || frame.failed === "thread.before" || frame.failed === "message.preview") return state;
       if (notSent.length > 0 && !state.messages.some((m) => isPending(m) && notSent.includes(m.clientMessageId))) return state;
+      const refused = frame.rewrite ? { failed: true, rewrite: frame.message } : { failed: true };
       const messages = notSent.length
-        ? state.messages.map((m) => (isPending(m) && notSent.includes(m.clientMessageId) ? { ...m, failed: true } : m))
+        ? state.messages.map((m) => (isPending(m) && notSent.includes(m.clientMessageId) ? { ...m, ...refused } : m))
         : state.messages;
       // A failed history request leaves nothing in flight, so paging can be tried again.
       return {

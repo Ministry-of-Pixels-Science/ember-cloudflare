@@ -17,7 +17,7 @@ import {
 // Worker too: a small typed router over the History API rather than a library. A page with changes to
 // lose can hold the app on it by guarding against leaving.
 
-export { BOTS_PATH, CUSTOM_STYLES_PATH, huddlePath, NEW_AGENT_PATH, NEW_APP_PATH, NEW_BOT_PATH, NEW_DIRECT_PATH, PROFILE_PATH, SEARCHES_PATH, threadPath, WORKSPACE_SETTINGS_PATH } from "@ember/protocol";
+export { BOTS_PATH, CUSTOM_STYLES_PATH, huddlePath, HUDDLES_PATH, NEW_AGENT_PATH, NEW_APP_PATH, NEW_BOT_PATH, NEW_DIRECT_PATH, PROFILE_PATH, SEARCHES_PATH, threadPath, WORKSPACE_SETTINGS_PATH } from "@ember/protocol";
 
 /** Whether a room's form makes it open to everyone or private, as the form's address says. */
 export type Access = RoomAccess;
@@ -108,10 +108,16 @@ function openedFrom(state: unknown): string | null {
   return typeof from === "string" ? from : null;
 }
 
+/** Whether the app went on from a history entry to one it added after it, which Forward goes back to. */
+const wentOnFrom = (state: unknown) => (state as { ahead?: unknown } | null)?.ahead === true;
+
 // Each entry the app adds to this tab's history is numbered one past the entry it follows, so the
 // distance Back or Forward went is known, and the guard can go back by it. The browser keeps the numbers
-// through a reload.
+// through a reload. An entry numbered past 0 has the one the app added it after behind it, and one the
+// app went on from has the one it went on to ahead of it, so the app's own Back and Forward go only to
+// its own pages.
 let position = positionOf(history.state) ?? 0;
+let ahead = wentOnFrom(history.state);
 history.replaceState({ ...history.state, position }, "");
 
 /** The address the browser shows, but for any fragment: its path and query string, which together name a page. */
@@ -165,6 +171,11 @@ window.addEventListener("popstate", (event) => {
   }
   proceeding = false;
   if (next !== null) position = next;
+  // Going back leaves the page it went from ahead. An entry an earlier version of the app added doesn't
+  // say so, though a reload keeps it in this page's history, so it's told, for Forward to know after
+  // going further back and on again, or a reload.
+  ahead = distance < 0 || wentOnFrom(event.state);
+  if (ahead && !wentOnFrom(event.state)) history.replaceState({ ...history.state, ahead }, "");
   followUp = null;
   notify();
 });
@@ -184,9 +195,15 @@ export function navigate(path: string, { replace = false } = {}): void {
     return;
   }
   const go = () => {
-    // A page that takes another's place was opened from where that one was, as a redirect keeps the referrer.
-    if (replace) history.replaceState({ position, from: openedFrom(history.state) }, "", path);
-    else history.pushState({ position: ++position, from: shownAddress() + location.hash }, "", path);
+    // A page that takes another's place was opened from where that one was, as a redirect keeps the referrer,
+    // and keeps the pages ahead of it. One added after the page shown takes the place of those ahead of it,
+    // which the entry it leaves says, so Forward comes back to it after a reload too.
+    if (replace) history.replaceState({ position, ahead, from: openedFrom(history.state) }, "", path);
+    else {
+      history.replaceState({ ...history.state, ahead: true }, "");
+      history.pushState({ position: ++position, from: shownAddress() + location.hash }, "", path);
+      ahead = false;
+    }
     gone = navigation;
     if (navigation === asked) {
       followUp?.();
@@ -227,6 +244,19 @@ export function useBackPath(): string {
   const from = useSyncExternalStore(subscribe, () => openedFrom(history.state));
   const here = useSyncExternalStore(subscribe, shownAddress);
   return from !== null && from.split("#", 1)[0] !== here ? from : "/";
+}
+
+/**
+ * Whether Back has a page of the app's to go to: one it went on from to the page shown, rather than
+ * whatever this tab showed before Ember.
+ */
+export function useCanGoBack(): boolean {
+  return useSyncExternalStore(subscribe, () => position > 0);
+}
+
+/** Whether Forward has a page of the app's to go to: one it went on to from the page shown before going Back. */
+export function useCanGoForward(): boolean {
+  return useSyncExternalStore(subscribe, () => ahead);
 }
 
 /** How many times the app has gone to a page, re-rendering each time, even when it's the page shown. */

@@ -1,5 +1,5 @@
 import { fromJsonSchema, type McpServer } from "@modelcontextprotocol/server";
-import { hasWords, HISTORY_PAGE_SIZE, MAX_SEARCH_LENGTH, MESSAGE_TOO_LONG, sanitizeSearch, searchTerms, type Message, type Room, type SidebarRoom, type UserId } from "@ember/protocol";
+import { hasWords, HISTORY_PAGE_SIZE, MAX_MESSAGE_HTML_LENGTH, MAX_SEARCH_LENGTH, MESSAGE_TOO_LONG, sanitizeSearch, searchTerms, type Message, type Room, type SidebarRoom, type UserId } from "@ember/protocol";
 import type { OutsideScope } from "@ember/protocol/outside";
 import { markdownHtml, MAX_MARKDOWN_LENGTH } from "../bots/markdown";
 import type { Env } from "../env";
@@ -27,6 +27,9 @@ const NO_ROOM = "No room this connection reaches has that id. list_rooms lists t
 
 /** What a send past the most a person's apps may make in a minute is told. */
 export const SENDING_TOO_FAST = "That's more messages than an app may send as them in a minute. Wait a minute before sending another.";
+
+/** What a send of more Markdown than a Slack payload's blocks may hold is told. */
+export const TOO_MUCH_MARKDOWN = `That's more Markdown than a message takes. Keep it to ${MAX_MARKDOWN_LENGTH.toLocaleString()} characters.`;
 
 /** A room as an app is told of it: a direct message goes by the names of the others in it. */
 interface ShownRoom {
@@ -151,12 +154,18 @@ async function searchMessages(env: Env, access: OutsideAccess, { words, room_id:
  */
 async function sendMessage(env: Env, access: OutsideAccess, { room_id: roomId, text, thread_id: threadId }: Record<string, unknown>): Promise<unknown> {
   if (typeof text !== "string" || text.trim() === "") throw new Refused("Give the message to send, as `text`.");
-  if (text.length > MAX_MARKDOWN_LENGTH) throw new Refused(MESSAGE_TOO_LONG);
+  // The tool takes as much Markdown as a Slack payload's blocks hold, as the bot API takes a bot's body;
+  // the room, which measures a message's text, then says whether the markup it reads as is too long.
+  if (text.length > MAX_MARKDOWN_LENGTH) throw new Refused(TOO_MUCH_MARKDOWN);
   if (threadId !== undefined && typeof threadId !== "string") throw new Refused("Give `thread_id` as the id of the message the thread is under.");
   const room = await roomOf(env, access, roomId);
   const sender = await workspace(env).outsideSender(access, room.id);
   if (sender === "limited") throw new Refused(SENDING_TOO_FAST);
-  const sent = sender && (await env.CHAT_ROOM.getByName(room.id).createOutsideMessage(room.id, sender, markdownHtml(text), threadId));
+  // Only now, once the room's reached and the sender's within their limit, is the markup built and its
+  // length checked, so a message turned away for its room or rate never renders.
+  const markup = markdownHtml(text);
+  if (markup.length > MAX_MESSAGE_HTML_LENGTH) throw new Refused(MESSAGE_TOO_LONG);
+  const sent = sender && (await env.CHAT_ROOM.getByName(room.id).createOutsideMessage(room.id, sender, markup, threadId));
   if (!sent) throw new Refused(NO_ROOM);
   if (typeof sent === "string") throw new Refused(sent);
   return { room: shownRoom(room, access.userId), message: shownMessage(sent) };

@@ -1,11 +1,12 @@
 import { Suspense, useEffect, useEffectEvent, useImperativeHandle, useLayoutEffect, useRef, useState, type Ref } from "react";
-import { MAX_FILE_SIZE, type User } from "@ember/protocol";
-import { OPENGRAPH_EMBED_CONTENT_TYPE, previewContent } from "@ember/richtext/dom";
+import { MAX_FILE_SIZE, type LinkPreview } from "@ember/protocol";
+import { hasPreview, linkedUrls, OPENGRAPH_EMBED_CONTENT_TYPE, previewContent, writtenBody } from "@ember/richtext/dom";
 import { AtSign, Page, Send, TextSquare, XmarkCircle } from "@/components/icons/iconoir";
 import { useNameOf } from "@/hooks/use-directory";
 import { fetchLinkPreview, mentionPromptSrc } from "@/lib/api";
 import { dropTarget } from "@/lib/drop-target";
 import { breaksLine, hasTouchKeyboard, pressedAlone, sendsMessage, uploadsFiles, writesSnippet } from "@/lib/keyboard";
+import type { Typist } from "@/lib/room-state";
 import { tooLargeToAttach } from "@/lib/uploads";
 import { cn } from "@/lib/utils";
 import { AttachMenu } from "./attach-menu";
@@ -17,13 +18,17 @@ import { SnippetDialog } from "./snippet-dialog";
 
 /**
  * The typing indicator (Campfire's typing_tracker.js and composer.css): the names of whoever is typing,
- * sorted and comma-separated after a three-dot spinner, fading in above the composer. It isn't a live
- * region: announced on every change, a bare list of names would mean nothing out of context. Names that
- * don't fit end in an ellipsis, rather than wrapping down over the message box.
+ * sorted and comma-separated after a three-dot spinner, fading in above the composer, each followed by
+ * what it's doing meanwhile, if an answerer said, as in "Ember is using Digg: digg_get_feed". It isn't a
+ * live region: announced on every change, a bare list of names would mean nothing out of context. Names
+ * that don't fit end in an ellipsis, rather than wrapping down over the message box.
  */
-function TypingIndicator({ typists }: { typists: User[] }) {
+function TypingIndicator({ typists }: { typists: Typist[] }) {
   const nameOf = useNameOf();
-  const names = typists.map(nameOf).sort().join(", ");
+  const names = typists
+    .map(({ user, doing }) => (doing === undefined ? nameOf(user) : `${nameOf(user)} ${doing}`))
+    .sort()
+    .join(", ");
   return (
     <div
       className={cn(
@@ -164,23 +169,84 @@ function useEditorShown(deferred: boolean): boolean {
   return shown;
 }
 
+/** Adds the preview of a link in a message that has gone, which came after it did. */
+export type AddPreview = (preview: LinkPreview) => void;
+
+/** The preview asked for of a pasted link: the link, and how to stop asking for it. */
+interface Asking {
+  /** The link's address, as `linkedUrls` finds it in what's written. */
+  url: string;
+  request: AbortController;
+  preview: Promise<LinkPreview | null>;
+  /** Set once the message with the link has gone, which the preview goes after, rather than below the link. */
+  sent?: boolean;
+}
+
+/** What the composer knows of the previews of what's written. */
+interface DraftPreviews {
+  /** The preview asked for of the link pasted last. */
+  asking: Asking | null;
+  /** The links whose previews it has asked for, as `linkedUrls` finds them. */
+  asked: Set<string>;
+  /** Whether it has added a preview, so that one taken out of what's written stays out. */
+  added: boolean;
+}
+
+const noPreviews = (): DraftPreviews => ({ asking: null, asked: new Set(), added: false });
+
 /**
  * A link pasted in the composer gets the preview of the page it goes to below its paragraph, when the
  * page has one, unless another link is pasted first, or the editor it was pasted in goes: with the
  * composer, or as the editor opens again, which `opening` counts. Previews that can't be had are left
- * out without a word.
+ * out without a word. As Slack adds a link's preview a moment after its message, the preview of a pasted
+ * link still on its way as the message goes is added to the message once it comes, if the link went
+ * with it as pasted, or else that of its first link whose preview wasn't asked for, as one typed rather
+ * than pasted, unless a preview was added to what was written, or taken out of it.
  */
-function useLinkPreviews(opening: number): (link: PastedLink) => Promise<void> {
-  const pending = useRef<AbortController>(null);
-  useEffect(() => () => pending.current?.abort(), [opening]);
-  return async ({ url, insertBelowLink }) => {
-    pending.current?.abort();
-    const request = (pending.current = new AbortController());
-    const preview = await fetchLinkPreview(url, request.signal).catch(() => null);
-    if (!preview || request.signal.aborted) return;
+function useLinkPreviews(opening: number) {
+  const draft = useRef(noPreviews());
+  useEffect(
+    () => () => {
+      draft.current.asking?.request.abort();
+      draft.current = noPreviews();
+    },
+    [opening],
+  );
+
+  const pasted = async ({ url, insertBelowLink }: PastedLink) => {
+    const previews = draft.current;
+    previews.asking?.request.abort();
+    const request = new AbortController();
+    const asking: Asking = { url: linkedUrls(url)[0] ?? url, request, preview: fetchLinkPreview(url, request.signal).catch(() => null) };
+    previews.asking = asking;
+    previews.asked.add(asking.url);
+    const preview = await asking.preview;
+    if (!preview || request.signal.aborted || asking.sent) return;
+    previews.added = true;
     const content = previewContent({ href: preview.url, url: preview.image ?? undefined, filename: preview.title, description: preview.description });
     insertBelowLink(content, { attachment: { contentType: OPENGRAPH_EMBED_CONTENT_TYPE } });
   };
+
+  /** Has `addPreview` add the preview that's to go after the message `body`, which has just gone, once it comes. */
+  const sent = (body: string, addPreview: AddPreview) => {
+    const { asking, asked, added } = draft.current;
+    draft.current = noPreviews();
+    // Whole addresses, so that a link changed after it was pasted doesn't take the preview of the one pasted.
+    const links = added || hasPreview(body) ? null : linkedUrls(writtenBody(body).plainText);
+    if (asking && links?.includes(asking.url)) asking.sent = true;
+    else asking?.request.abort();
+    if (!links) return;
+    const pastedPreview = asking?.sent ? asking.preview : Promise.resolve(null);
+    void pastedPreview.then((found) => found ?? typedLinkPreview(links, asked)).then((found) => found && addPreview(found));
+  };
+
+  return { pasted, sent };
+}
+
+/** The preview of the first of a message's `links` to a web page whose preview wasn't `asked` for as it was pasted. */
+async function typedLinkPreview(links: string[], asked: Set<string>): Promise<LinkPreview | null> {
+  const typed = links.find((url) => /^https?:\/\//i.test(url) && !asked.has(url));
+  return typed === undefined ? null : fetchLinkPreview(typed).catch(() => null);
 }
 
 /** A file picked to send, keyed, since two can share a name. */
@@ -282,7 +348,8 @@ interface Props {
   direct?: boolean;
   /** Who's writing, whose drafts are their own. */
   userId: string;
-  typing: User[];
+  /** Who's typing here, but whoever's writing, and what each is doing meanwhile, if an answerer said. */
+  typing: Typist[];
   disabled: boolean;
   /**
    * Holds back the editor's code while the room's first messages are on their way, and until they're
@@ -295,8 +362,11 @@ interface Props {
    * to the room is ticked for that, until they've gone.
    */
   threadId?: string;
-  /** Sends a message, its body markup, answering whether it went: one that didn't stays to be changed. */
-  onSend: (body: string, alsoSend: boolean) => boolean;
+  /**
+   * Sends a message, its body markup, answering how to add the preview of a link in it that comes once
+   * it has gone, or null when it didn't go: then it stays to be changed.
+   */
+  onSend: (body: string, alsoSend: boolean) => AddPreview | null;
   /** Sends files, each as a message of its own, before the message written with them. */
   onSendFiles: (files: File[], alsoSend: boolean) => void;
   onTyping: (active: boolean) => void;
@@ -315,6 +385,12 @@ export interface ComposerHandle {
   replace(markup: string): void;
   /** Adds files to send with the next message, as dropping them on the room's messages does. */
   addFiles(files: Iterable<File>): void;
+  /**
+   * Writes `markup` back, a message the room wouldn't take for what it says, with `why` above the card,
+   * and Also send to the room ticked again if `alsoSend`, unless something's been written since. Answers
+   * whether it did.
+   */
+  giveBack(markup: string, why: string, alsoSend: boolean): boolean;
 }
 
 /**
@@ -323,7 +399,8 @@ export interface ComposerHandle {
  * Mention someone, and a round Send button, grey until there's something to send. @ offers the room's
  * people to mention. Files picked, pasted or dropped, and snippets, wait above the card to go with the
  * next message. What's written is kept as a draft until it's sent. A thread's has Also send to the room
- * before Send.
+ * before Send. A message the room won't take for what it says, as one with a word Blocked words keeps
+ * out, comes back to be changed, saying why above the card.
  */
 export function Composer({ roomId, roomName, direct = false, userId, typing, disabled, deferEditor = false, threadId, onSend, onSendFiles, onTyping, onEditLastMessage, autoFocus = true, mentionsAbove = false, ref }: Props) {
   const editor = useRef<RichTextEditorHandle>(null);
@@ -343,7 +420,7 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
   // focus elsewhere, where it's left.
   const [focusAtOpen] = useState(() => document.activeElement);
   const editorShown = useEditorShown(deferEditor);
-  const previewLink = useLinkPreviews(reopened);
+  const linkPreviews = useLinkPreviews(reopened);
   const picked = usePickedFiles();
   // Whether nothing's written, which, with no files picked, leaves Send grey, as Slack's is.
   const [blank, setBlank] = useState(!draft);
@@ -356,6 +433,8 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
   const wasBlank = useRef(!draft);
   // Whether Quote wrote what the editor opens with, before it showed, so it takes focus as Quote has it do.
   const replied = useRef(false);
+  // Why the room wouldn't take what's written here, which went back to be changed, until something's sent.
+  const [refusal, setRefusal] = useState<{ key: string; why: string } | null>(null);
   const placeholder = threadId !== undefined ? "Reply…" : `Message ${direct ? "" : "#"}${roomName}`;
 
   const keep = (body: string | null) => {
@@ -396,6 +475,14 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
       wrote(markup);
     },
     addFiles: picked.add,
+    giveBack: (markup, why, alsoSend) => {
+      const written = editor.current;
+      if (!written?.isBlank()) return false;
+      written.replace(markup);
+      setRefusal({ key, why });
+      if (alsoSend) setAlsoSend(true);
+      return true;
+    },
   }));
 
   // Up Arrow, with nothing written, edits your newest message. It's taken only from the composer or the
@@ -423,6 +510,7 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
   // unticks it.
   const submit = () => {
     if (disabled) return;
+    setRefusal(null);
     if (picked.files.length > 0) {
       onSendFiles(picked.files.map(({ file }) => file), alsoSend);
       picked.clear();
@@ -431,8 +519,11 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
     const written = editor.current;
     if (!written) return;
     if (!written.isBlank()) {
+      const body = written.value();
       // One the room won't take, as when it's too long, stays to be cut down.
-      if (!onSend(written.value(), alsoSend)) return;
+      const addPreview = onSend(body, alsoSend);
+      if (!addPreview) return;
+      linkPreviews.sent(body, addPreview);
       // Everyone else stops showing you as typing when your message arrives.
       wasBlank.current = true;
       written.clear();
@@ -497,6 +588,11 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
             </p>
           )}
         </div>
+        {refusal?.key === key && (
+          <p role="alert" className="px-3 pb-2 text-[13px] leading-normal text-negative wrap-anywhere">
+            {refusal.why}
+          </p>
+        )}
         <div className="@container flex min-h-[108px] min-w-0 flex-col rounded-[12px] border bg-surface p-3 max-md:min-h-[100px] max-md:p-2.5">
           {formattingShown && (
             <FormattingToolbar
@@ -526,7 +622,7 @@ export function Composer({ roomId, roomName, direct = false, userId, typing, dis
                   onChange={changed}
                   onFormatChange={formatting.setFormat}
                   onKeyDown={keyDown}
-                  onLinkPasted={previewLink}
+                  onLinkPasted={linkPreviews.pasted}
                   onReady={() => setEditorReady(true)}
                 />
               ) : (

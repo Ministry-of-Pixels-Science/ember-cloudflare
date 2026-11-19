@@ -262,7 +262,7 @@ export async function countAddressesToEmail(): Promise<{ told: (n: number) => Pr
 export const searchIndexStub = () => searchIndex(env as unknown as Env);
 
 /** The calls the Workspace makes on a room, as a test answers them in every room's stead. */
-export type RoomStandIn = Partial<Pick<ChatRoom, "revoke" | "removeMessagesBy" | "reindex" | "authors">>;
+export type RoomStandIn = Partial<Pick<ChatRoom, "revoke" | "removeMessagesBy" | "removeEverythingBy" | "reindex" | "authors">>;
 
 /** Has `rooms` answer the Workspace's calls to rooms until the function it answers with is called, which gives the rooms back. */
 export async function standInForRooms(rooms: RoomStandIn): Promise<() => Promise<void>> {

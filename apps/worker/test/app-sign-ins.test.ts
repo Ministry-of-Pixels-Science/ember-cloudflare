@@ -21,7 +21,7 @@ import { ASSISTANT_OFF } from "@ember/protocol/assistant";
 import { env } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { scopesOf, scopesWith } from "../src/apps/scopes";
-import { appTool, ownSignInEnded, ownWantsMoreAccess, signInEnded, unmadeFor, wantsMoreAccess, type GivenTool, type Unmade } from "../src/apps/tools";
+import { appTool, ownSignInEnded, ownWantsMoreAccess, signInEnded, wantsMoreAccess, type GivenTool } from "../src/apps/tools";
 import { toBase64url } from "../src/encoding";
 import type { Env } from "../src/env";
 import { api, cookieOf, freshDeploy, origin, shown, startDirect, workspaceSql, workspaceStub, type Session } from "./support";
@@ -934,22 +934,24 @@ describe("An app whose server asks for more than Ember's sign-in to it allows", 
     expect(await workspaceSql("SELECT scope_wanted FROM apps")).toEqual([{ scope_wanted: "issues:write projects:read labels:write" }]);
   });
 
-  it("tells the room that a call it was shown, made without asking first, wasn't made for want of access", async () => {
+  it("tells the model that a call made without asking first, once the room allowed it, wasn't made for want of access", async () => {
     const administrator = await setUp();
     vi.spyOn(console, "error").mockImplementation(() => {});
     const app = await signIn(administrator);
     const { name, fingerprint } = (await offered(administrator))[0]!.tools[0]!;
     const always = { tools: [{ appId: app.id, name, fingerprint, alwaysAllowed: true }] };
     expect((await api(`/api/account/agents/${ASSISTANT_ID}/tools`, { method: "PUT", headers: as(administrator), body: JSON.stringify(always) })).status).toBe(200);
-    const told: Unmade[] = [];
-    const shown = async () => ({ unmade: async (why: Unmade) => void told.push(why) });
-    const tool = appTool(env as unknown as Env, ASSISTANT_ID, { appId: app.id, appName: app.name, name, fingerprint, as: name }, NOWHERE, { shown });
+    let allowed = 0;
+    const allows = async () => {
+      allowed++;
+      return null;
+    };
+    const tool = appTool(env as unknown as Env, ASSISTANT_ID, { appId: app.id, appName: app.name, name, fingerprint, as: name }, NOWHERE, { allows });
 
     expect(await tool.run({})).toBe("Done.");
     auth.needs = { method: "tools/call", scope: "issues:write" };
     await expect(tool.run({})).rejects.toThrow(`Not run: ${wantsMoreAccess("Tracker")}`);
-    expect(told).toEqual(["refused"]);
-    expect(unmadeFor("Ember", "Tracker", "refused")).toBe(`Not run: ${wantsMoreAccess("Tracker")}`);
+    expect(allowed).toBe(2);
   });
 
   it("keeps what reading its tools again was refused for want of, which says to sign in again", async () => {
@@ -1218,8 +1220,8 @@ describe("A sign-in someone makes to an app themselves", () => {
     expect((await api(`/api/account/agents/${ASSISTANT_ID}/tools`, { method: "PUT", headers: as(administrator), body: JSON.stringify(always) })).status).toBe(200);
     expect(await toolsIn(general, member)).toEqual([{ name: tool.name, own: undefined, alwaysAllowed: true }]);
     expect(await toolsIn(dm, member)).toEqual([{ name: tool.name, own: true, alwaysAllowed: false }]);
-    const shown = async () => ({ unmade: async () => {} });
-    await expect(appTool(env as unknown as Env, ASSISTANT_ID, own, asGrace, { shown }).run({})).rejects.toThrow("each call of it has to be allowed now");
+    const allows = async () => null;
+    await expect(appTool(env as unknown as Env, ASSISTANT_ID, own, asGrace, { allows }).run({})).rejects.toThrow("each call of it has to be allowed now");
     expect(callTokens()).toHaveLength(2);
   });
 

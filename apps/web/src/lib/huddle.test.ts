@@ -20,6 +20,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { audioEngine } from "@/test-audio-engine";
 import { ANSWER_TIMEOUT_MS, CAMERA_BITRATE, joinHuddle, LISTEN_AGAIN_MS, PUBLISH_AGAIN_MS, SCREEN_BITRATE, SMALL_CAMERA_BITRATE } from "./huddle";
 import { CAMERA_WENT_OFF, NO_CAMERA, NO_OTHER_CAMERA, NO_OTHER_MICROPHONE, NO_OTHER_SPEAKER, NO_SCREEN, STILL_NO_MICROPHONE } from "./huddle-devices";
+import { NO_REACTIONS, REACTION_SHOWS_MS } from "./huddle-reactions";
 import { MUSIC_AFTER_MS } from "./huddle-sounds";
 import { MEASURED_EVERY_MS, SPEAKING_LEVEL } from "./huddle-speaking";
 import {
@@ -31,12 +32,16 @@ import {
   leaveHuddle,
   muteHuddle,
   openHuddle,
+  reactInHuddle,
   shareHuddleScreen,
   showHuddleCamera,
+  showHuddleSticker,
   showHuddleThread,
+  shownReactions,
   switchHuddleCamera,
   takeCamerasSmall,
   watchHuddle,
+  watchReactions,
   watchSpeaking,
 } from "./huddle-store";
 
@@ -452,7 +457,7 @@ describe("Joining a huddle", () => {
     joinHuddle({ roomId: "general", muted: false, microphone: microphone as unknown as MediaStream, camera: null, speakerId: "" });
 
     expect(socket().url).toBe("ws://localhost:3000/api/rooms/general/huddle");
-    const joining = { roomId: "general", connected: false, you: null, people: [], muted: false, microphone: true, microphoneId: "built-in", speakerId: "", camera: null, watched: new Map(), screen: null, screens: new Map(), open: true, thread: true };
+    const joining = { roomId: "general", connected: false, you: null, people: [], muted: false, sticker: null, microphone: true, microphoneId: "built-in", speakerId: "", camera: null, watched: new Map(), screen: null, screens: new Map(), open: true, thread: true };
     expect(joinedHuddle()).toEqual(joining);
     expect(shown).toHaveBeenCalledTimes(1);
     // Nothing is asked of the room before it has said who the tab is.
@@ -3341,6 +3346,220 @@ describe("Whoever someone in a huddle invites", () => {
     room.take();
     expect(inviteToHuddle([linus.id])).toBe(false);
     expect(room.take()).toEqual([]);
+  });
+});
+
+describe("The sticker someone shows in a huddle", () => {
+  it("shows on the tab's own person at once, in place of any they showed, and is told to the room, which hears nothing of one that's shown already", async () => {
+    const room = await joined([person(grace)]);
+    room.take();
+
+    showHuddleSticker("hand");
+    expect(room.take()).toEqual([{ type: "huddle.sticker", sticker: "hand" }]);
+    expect(joinedHuddle()).toMatchObject({ sticker: "hand", people: [person(grace), person(ada, { audio: false, sticker: "hand" })] });
+    showHuddleSticker("hand");
+    expect(room.take()).toEqual([]);
+
+    showHuddleSticker("brb");
+    expect(room.take()).toEqual([{ type: "huddle.sticker", sticker: "brb" }]);
+    expect(joinedHuddle()).toMatchObject({ sticker: "brb", people: [person(grace), person(ada, { audio: false, sticker: "brb" })] });
+
+    // Taken off, their person names none, as the room's names none.
+    showHuddleSticker(null);
+    expect(room.take()).toEqual([{ type: "huddle.sticker", sticker: null }]);
+    expect(joinedHuddle()!.sticker).toBeNull();
+    expect(joinedHuddle()!.people).toStrictEqual([person(grace), person(ada, { audio: false })]);
+    showHuddleSticker(null);
+    expect(room.take()).toEqual([]);
+  });
+
+  it("is someone else's as the room tells of it, until the room tells of them without one", async () => {
+    const room = await joined([person(grace)]);
+    room.receive({ type: "huddle.changed", person: person(grace, { sticker: "done" }) });
+    expect(joinedHuddle()).toMatchObject({ sticker: null, people: [person(grace, { sticker: "done" }), person(ada, { audio: false })] });
+    room.receive({ type: "huddle.changed", person: person(grace) });
+    expect(joinedHuddle()!.people).toStrictEqual([person(grace), person(ada, { audio: false })]);
+  });
+
+  it("is the tab's own as the tab has it, whatever the room says of its person meanwhile", async () => {
+    const room = await joined();
+    showHuddleSticker("hand");
+    // The room tells of the camera before it has heard of the sticker.
+    room.receive({ type: "huddle.changed", person: person(ada, { video: true }) });
+    expect(joinedHuddle()!.people).toStrictEqual([person(ada, { video: true, sticker: "hand" })]);
+
+    showHuddleSticker(null);
+    // And of them again before it has heard that the sticker's off.
+    room.receive({ type: "huddle.changed", person: person(ada, { video: true, sticker: "hand" }) });
+    expect(joinedHuddle()!.people).toStrictEqual([person(ada, { video: true })]);
+  });
+
+  it("is told to the room again as it lets the tab back in, which is how the room hears of one shown or taken off meanwhile", async () => {
+    const room = await joined();
+    showHuddleSticker("hand");
+    room.drop();
+    await wait(500);
+    socket().open();
+    // The room has a tab that joins again as showing none.
+    expect((await welcomed()).take()[0]).toEqual({ type: "huddle.sticker", sticker: "hand" });
+    expect(joinedHuddle()).toMatchObject({ connected: true, sticker: "hand", people: [person(ada, { audio: false, sticker: "hand" })] });
+
+    // Shown while the socket is down, it shows on the tab's person all the same.
+    socket().drop();
+    showHuddleSticker("done");
+    expect(joinedHuddle()).toMatchObject({ connected: false, sticker: "done", people: [person(ada, { audio: false, sticker: "done" })] });
+    await wait(500);
+    socket().open();
+    expect((await welcomed()).take()[0]).toEqual({ type: "huddle.sticker", sticker: "done" });
+
+    // And one the room still has, were it to, is taken off.
+    socket().drop();
+    showHuddleSticker(null);
+    await wait(500);
+    socket().open();
+    expect((await welcomed([], { sticker: "done" })).take()[0]).toEqual({ type: "huddle.sticker", sticker: null });
+    expect(joinedHuddle()!.people).toStrictEqual([person(ada, { audio: false })]);
+  });
+
+  it("is told after how the tab is muted, when both changed while it connected", async () => {
+    const room = await joined();
+    room.drop();
+    await wait(500);
+    muteHuddle(true);
+    showHuddleSticker("brb");
+    socket().open();
+    expect((await welcomed([], { muted: false })).take().slice(0, 2)).toEqual([
+      { type: "huddle.mute", muted: true },
+      { type: "huddle.sticker", sticker: "brb" },
+    ]);
+  });
+
+  it("is shown by no tab that's in no huddle", async () => {
+    showHuddleSticker("hand");
+    const room = await joined();
+    leaveHuddle();
+    room.take();
+    showHuddleSticker("hand");
+    expect(room.take()).toEqual([]);
+    expect(joinedHuddle()).toBeNull();
+  });
+});
+
+describe("A reaction in a huddle", () => {
+  /** The reactions that rise, the oldest first, each by which of the huddle's it is, whose, and its emoji. */
+  const rising = () => shownReactions().rising.map(({ nth, userId, emoji }) => [nth, userId, emoji]);
+
+  it("is sent to the room, and rises only once the room tells of it, as everyone's does, for a moment, which only what shows reactions hears of", async () => {
+    const [shown, reacted] = [vi.fn(), vi.fn()];
+    const stops = [watchHuddle(shown), watchReactions(reacted)];
+    const room = await joined([person(grace)]);
+    room.take();
+    shown.mockClear();
+
+    reactInHuddle("🎉");
+    expect(room.take()).toEqual([{ type: "huddle.react", emoji: "🎉" }]);
+    expect(shownReactions()).toEqual(NO_REACTIONS);
+    room.receive({ type: "huddle.reacted", userId: ada.id, emoji: "🎉" });
+    expect(rising()).toEqual([[1, ada.id, "🎉"]]);
+    expect(shownReactions().runs).toEqual([{ emoji: "🎉", first: ada.id, more: 0 }]);
+    await wait(1_000);
+    room.receive({ type: "huddle.reacted", userId: grace.id, emoji: "👍" });
+    expect(rising()).toEqual([
+      [1, ada.id, "🎉"],
+      [2, grace.id, "👍"],
+    ]);
+    expect(shownReactions().runs).toEqual([
+      { emoji: "🎉", first: ada.id, more: 0 },
+      { emoji: "👍", first: grace.id, more: 0 },
+    ]);
+    // What shows is the same until it changes, as what reads it over and over needs.
+    expect(shownReactions()).toBe(shownReactions());
+    expect(reacted).toHaveBeenCalledTimes(2);
+
+    await wait(REACTION_SHOWS_MS - 1_000);
+    expect(rising()).toEqual([[2, grace.id, "👍"]]);
+    expect(shownReactions().runs).toEqual([{ emoji: "👍", first: grace.id, more: 0 }]);
+    await wait(1_000);
+    expect(shownReactions()).toEqual(NO_REACTIONS);
+    expect(reacted).toHaveBeenCalledTimes(4);
+    expect(shown).not.toHaveBeenCalled();
+    expect(room.take()).toEqual([]);
+    for (const stop of stops) stop();
+  });
+
+  it("rises beside its person's last, the same emoji again as another, which is counted after the first", async () => {
+    const room = await joined();
+    room.receive({ type: "huddle.reacted", userId: ada.id, emoji: "🎉" });
+    await wait(REACTION_SHOWS_MS - 1);
+    room.receive({ type: "huddle.reacted", userId: ada.id, emoji: "🎉" });
+    expect(rising()).toEqual([
+      [1, ada.id, "🎉"],
+      [2, ada.id, "🎉"],
+    ]);
+    expect(shownReactions().runs).toEqual([{ emoji: "🎉", first: ada.id, more: 1 }]);
+    await wait(1);
+    expect(rising()).toEqual([[2, ada.id, "🎉"]]);
+    expect(shownReactions().runs).toEqual([{ emoji: "🎉", first: ada.id, more: 1 }]);
+    await wait(REACTION_SHOWS_MS - 2);
+    expect(rising()).toEqual([[2, ada.id, "🎉"]]);
+    await wait(1);
+    expect(shownReactions()).toEqual(NO_REACTIONS);
+  });
+
+  it("shows nothing of someone the room hasn't said is in the huddle, nor any more of someone who leaves it, whose emoji is whoever's still rises", async () => {
+    const reacted = vi.fn();
+    const stop = watchReactions(reacted);
+    const room = await joined([person(grace)]);
+    room.receive({ type: "huddle.reacted", userId: linus.id, emoji: "👍" });
+    expect(shownReactions()).toEqual(NO_REACTIONS);
+    expect(reacted).not.toHaveBeenCalled();
+
+    room.receive({ type: "huddle.reacted", userId: grace.id, emoji: "👍" });
+    room.receive({ type: "huddle.reacted", userId: grace.id, emoji: "🎉" });
+    room.receive({ type: "huddle.reacted", userId: ada.id, emoji: "👍" });
+    room.receive({ type: "huddle.left", userId: grace.id });
+    expect(rising()).toEqual([[3, ada.id, "👍"]]);
+    expect(shownReactions().runs).toEqual([{ emoji: "👍", first: ada.id, more: 1 }]);
+    expect(reacted).toHaveBeenCalledTimes(4);
+    // Nor is one of theirs left to go.
+    await wait(REACTION_SHOWS_MS);
+    expect(shownReactions()).toEqual(NO_REACTIONS);
+    expect(reacted).toHaveBeenCalledTimes(5);
+    stop();
+  });
+
+  it("shows nothing more of someone who left while the tab's connection to the room was down, whose emoji is whoever's still rises", async () => {
+    const room = await joined([person(grace), person(linus)]);
+    room.receive({ type: "huddle.reacted", userId: grace.id, emoji: "🎉" });
+    room.receive({ type: "huddle.reacted", userId: linus.id, emoji: "🎉" });
+    room.drop();
+    await wait(500);
+    socket().open();
+    await welcomed([person(linus)]);
+    expect(rising()).toEqual([[2, linus.id, "🎉"]]);
+    expect(shownReactions().runs).toEqual([{ emoji: "🎉", first: linus.id, more: 1 }]);
+  });
+
+  it("shows no more once the tab leaves, and is sent by no tab that's in no huddle", async () => {
+    reactInHuddle("🎉");
+    const room = await joined();
+    room.receive({ type: "huddle.reacted", userId: ada.id, emoji: "🎉" });
+    expect(rising()).toEqual([[1, ada.id, "🎉"]]);
+    leaveHuddle();
+    expect(shownReactions()).toEqual(NO_REACTIONS);
+    room.take();
+    reactInHuddle("🎉");
+    expect(room.take()).toEqual([]);
+  });
+
+  it("isn't sent while the huddle's socket is down, nor once the room lets the tab back in", async () => {
+    const room = await joined();
+    room.drop();
+    reactInHuddle("🎉");
+    await wait(500);
+    socket().open();
+    expect((await welcomed()).take().map(({ type }) => type)).not.toContain("huddle.react");
+    expect(shownReactions()).toEqual(NO_REACTIONS);
   });
 });
 

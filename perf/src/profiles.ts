@@ -1,6 +1,7 @@
 import type { ConnectionsOptions } from "./scenarios/connections.ts";
 import type { FanoutOptions } from "./scenarios/fanout.ts";
 import type { HistoryOptions } from "./scenarios/history.ts";
+import type { HuddleOptions } from "./scenarios/huddle.ts";
 import type { LatencyOptions } from "./scenarios/latency.ts";
 import type { SearchOptions } from "./scenarios/search.ts";
 import type { TabsOptions } from "./scenarios/tabs.ts";
@@ -18,6 +19,7 @@ export interface Profile {
   unread: UnreadOptions;
   history: HistoryOptions;
   search: SearchOptions;
+  huddle: HuddleOptions;
   web: {
     /** Lighthouse runs per page and form factor; the median is reported. */
     lighthouseRuns: number;
@@ -42,6 +44,7 @@ export const PROFILES: Record<"full" | "quick", Profile> = {
     unread: { sizes: [100, 500, 1000], messages: 100, rate: 10, concurrency: 16 },
     history: { messages: 2000, boostEvery: 10, welcomes: 30, passes: 3 },
     search: { rooms: 20, messages: 250, searches: 50, newMessages: 30 },
+    huddle: { sizes: [10, 25, 50], reactions: 100, rate: 10 },
     web: { lighthouseRuns: 3, backlog: 1050, burst: { messages: 100, rate: 20 }, timelineSizes: [40, 300], cpuSlowdowns: [1, 4] },
   },
   quick: {
@@ -53,6 +56,7 @@ export const PROFILES: Record<"full" | "quick", Profile> = {
     unread: { sizes: [100], messages: 50, rate: 10, concurrency: 16 },
     history: { messages: 500, boostEvery: 10, welcomes: 10, passes: 1 },
     search: { rooms: 10, messages: 100, searches: 20, newMessages: 10 },
+    huddle: { sizes: [10, 25], reactions: 40, rate: 10 },
     web: { lighthouseRuns: 1, backlog: 250, burst: { messages: 40, rate: 20 }, timelineSizes: [40, 200], cpuSlowdowns: [1] },
   },
 };

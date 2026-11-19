@@ -64,10 +64,13 @@ works, and [`docs/database.md`](database.md) compares the schema with Campfire's
 
 ## Browser tests
 
-`e2e/` drives the production build in Chromium, against `wrangler dev` on :8788 with its own
-state in `e2e/.wrangler`. Every suite shares `e2e/playwright.config.ts` and `e2e/fixtures.ts`
+`e2e/` drives the production build in Chromium, and in Safari's engine, WebKit, against
+`wrangler dev` on :8788 with its own state in `e2e/.wrangler`. Every suite shares `e2e/playwright.config.ts` and `e2e/fixtures.ts`
 (sign in, an isolated room, other participants over a real WebSocket); each adds its projects
-from `e2e/projects/` and its specs under `e2e/tests/<suite>/`.
+from `e2e/projects/` and its specs under `e2e/tests/<suite>/`. The fixtures have Playwright send a
+test's request again, once, should its connection be reset: `wrangler dev` closes a connection that
+has been idle for five seconds, and a request sent at that moment, on one Playwright kept open, is
+lost before the server reads it.
 
 ```sh
 pnpm --filter @ember/e2e exec playwright install chromium   # once
@@ -75,7 +78,29 @@ pnpm test:e2e       # every suite
 pnpm test:features  # just the feature-by-feature suite, on a desktop browser
 pnpm test:mobile    # just the phones
 pnpm screenshots    # remakes the web app manifest's screenshots
+
+pnpm --filter @ember/e2e exec playwright install webkit   # once
+E2E_BROWSER=webkit pnpm test:e2e   # the first run, the features and two iPhones, in WebKit
 ```
+
+`E2E_BROWSER=webkit` swaps the projects for those in `e2e/projects/webkit.ts`, under the same
+names, so `E2E_BROWSER=webkit pnpm test:features` runs just the features. Every browser on an iPhone
+or iPad is WebKit, as an iPhone app of Ember's would be, and CI runs these beside the Chromium ones.
+WebKit can't be told about a notch, so its iPhones report no safe-area insets, and the few tests
+that drive Chromium's DevTools run in Chromium alone. Playwright can't hand WebKit a 304, so a route
+that changes the server's answer goes through `answerChanged` in `e2e/fixtures.ts`, which asks the
+server for the whole answer. WebKit can let go of what a script sets on an object such as
+`navigator.mediaDevices` once nothing else holds it, handing the page a fresh one, so a stand-in for
+part of the browser goes on its prototype. WebKit on Linux names a download with an underscore for
+each space, which `downloadName` reads past, and Playwright's WebKit sends no click after a tap whose
+pointerdown the page cancelled, as the emoji picker's emoji do, though Safari on an iPhone does.
+WebKit's phones have no mouse wheel, nor notifications and push, which Safari on an iPhone has only
+for Ember on the Home Screen, and a page has WebKit's camera and microphone only once it's granted
+them. On a Mac, WebKit's Tab skips links and buttons unless Option is held, and a click focuses
+neither, as in Safari, End and Home scroll rather than move the cursor, and its iPhones draw a
+`<select>` 23px tall, too small a target for the phones' audit, so the tests that press those keys,
+expect a clicked link to have focus, or show a select on a phone fail there; CI runs WebKit on Linux,
+where they pass.
 
 Before the other suites start, the `first-run` project sets up the test server through the Set up
 Ember page, as its first visitor would. The `workspace-settings` suites, which change the whole
@@ -138,6 +163,6 @@ them apart by their tags and know no other kind.
 ## Performance
 
 `pnpm perf` load-tests the Worker under `wrangler dev` on both storage backends (latency,
-throughput, fan-out, room size, history paging, search) and measures how the web app loads and renders a
-busy room. `perf/README.md` explains the scenarios and how to compare two runs; the numbers the
+throughput, fan-out, room size, history paging, search, huddles) and measures how the web app loads
+and renders a busy room. `perf/README.md` explains the scenarios and how to compare two runs; the numbers the
 suite started with are in `perf/baseline/report.md`.

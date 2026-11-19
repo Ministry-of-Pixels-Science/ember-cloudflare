@@ -71,7 +71,7 @@ interface Props {
   invitations: HuddleInvitation[];
   /** This person's rooms, or none until they've come. */
   rooms: Room[];
-  /** Whether they show without a sound, as they do for someone in a huddle already. */
+  /** Whether they show without a sound, as they do for someone in a huddle already, and for someone who has turned the ring off. */
   quiet: boolean;
   /** Called to join the huddle an invitation is into, by its room. */
   onJoin: (roomId: RoomId) => void;

@@ -31,6 +31,7 @@ const huddleWith = (...others: User[]): JoinedHuddle => ({
   you: ada,
   people: [ada, ...others].map(inHuddle),
   muted: false,
+  sticker: null,
   microphone: true,
   microphoneId: "",
   speakerId: "",
@@ -46,6 +47,7 @@ const huddleWith = (...others: User[]): JoinedHuddle => ({
 const settingsWith = (members: User[], others: User[] = []): RoomSettings => ({
   room: general,
   canAdminister: false,
+  canChangeHuddles: false,
   people: [...members.map((person) => ({ ...person, member: true })), ...others.map((person) => ({ ...person, member: false }))],
 });
 /** Answers a room's settings with `settings`, or refuses them. */
@@ -86,7 +88,7 @@ function Page({ joined, room, people, onClose, onFailed }: PageProps) {
 /** Invite people, opened from its button in the huddle Ada is in, with what the huddle was asked. */
 async function openInvite(room: Room = general, joined: JoinedHuddle = huddleWith(sam), people: People = PEOPLE) {
   const invite = vi.fn((_userIds: string[]) => true);
-  const controls = { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setThread: vi.fn(), setDevice: vi.fn(), setSmall: vi.fn(), switchCamera: vi.fn(), invite };
+  const controls = { leave: vi.fn(), setMuted: vi.fn(), setCamera: vi.fn(), setScreen: vi.fn(), setOpen: vi.fn(), setThread: vi.fn(), setDevice: vi.fn(), setSmall: vi.fn(), switchCamera: vi.fn(), invite, setSticker: vi.fn(), react: vi.fn() };
   act(() => showHuddle(joined, controls));
   const [onClose, onFailed] = [vi.fn(), vi.fn()];
   const user = userEvent.setup();

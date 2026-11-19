@@ -18,6 +18,8 @@ const EMBER: Account = {
   openSignUp: false,
   memberfulJoin: false,
   memberfulSignIn: false,
+  ssoJoin: false,
+  ssoSignIn: false,
   emailDomainSignUp: false,
   emailDomains: [],
   navigationIcons: {},

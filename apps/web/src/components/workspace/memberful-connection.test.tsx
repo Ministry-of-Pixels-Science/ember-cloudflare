@@ -24,6 +24,7 @@ const grace: MemberfulAccount = { name: "Grace Hopper", emailAddress: "grace@exa
 const DISCONNECTED: ProfileAnswer = {
   profile: {
     name: "Grace Hopper",
+    username: null,
     emailAddress: "grace@example.com",
     bio: null,
     avatarUrl: "/users/t0k3n/avatar?v=1",
@@ -31,6 +32,7 @@ const DISCONNECTED: ProfileAnswer = {
     password: true,
     membershipNeeded: true,
     memberful: { membersOnly: true, connected: null },
+    sso: null,
     assistant: null,
     apps: [],
     outsideAi: null,
@@ -84,21 +86,21 @@ afterEach(() => {
 describe("Connect Memberful", () => {
   it("asks a member to connect their Memberful account with their password, to keep signing in as themselves", () => {
     showSection();
-    expect(section()).toHaveTextContent("Members sign in with Memberful. Connect your Memberful account to keep signing in as yourself.");
+    expect(section()).toHaveTextContent("Members sign in with Memberful. Connect your Memberful account to keep signing in.");
     const password = screen.getByLabelText("Password");
     expect(password).toHaveAttribute("type", "password");
     expect(password).toHaveAttribute("autocomplete", "current-password");
     expect(password).toHaveAttribute("placeholder", "Enter your password");
     expect(password).toHaveAttribute("maxlength", String(MAX_PASSWORD_LENGTH));
     expect(password).toBeRequired();
-    expect(password).toHaveAccessibleDescription("Members sign in with Memberful. Connect your Memberful account to keep signing in as yourself.");
+    expect(password).toHaveAccessibleDescription("Members sign in with Memberful. Connect your Memberful account to keep signing in.");
     expect(connectButton()).toBeEnabled();
     expect(screen.queryByRole("button", { name: "Disconnect Memberful" })).not.toBeInTheDocument();
   });
 
   it("tells an administrator, or someone they invited, who needs no membership, that they can sign in with it too", () => {
     showSection({ membershipNeeded: false });
-    expect(section()).toHaveTextContent("Members sign in with Memberful. Connect your Memberful account to sign in with it too.");
+    expect(section()).toHaveTextContent("Connect your Memberful account to sign in with it.");
   });
 
   it("goes to sign in at the Memberful site once your password checks out, staying busy meanwhile", async () => {
@@ -136,33 +138,33 @@ describe("Connect Memberful", () => {
 describe("Disconnect Memberful", () => {
   it("names the account you've connected, and offers to disconnect it with your password", () => {
     showSection({ connected: grace });
-    expect(section()).toHaveTextContent("Connected to Memberful as Grace Hopper (grace@example.com), so you sign in with it.");
-    expect(section()).toHaveTextContent("Disconnecting ends your other sessions. Signing in with your password then asks you to connect one again.");
+    expect(section()).toHaveTextContent("Connected as Grace Hopper (grace@example.com). You sign in with Memberful.");
+    expect(section()).toHaveTextContent("Disconnecting signs you out everywhere else. You'll be asked to connect again the next time you sign in.");
     expect(screen.queryByRole("button", { name: "Connect Memberful" })).not.toBeInTheDocument();
     const password = screen.getByLabelText("Password");
     expect(password).toHaveAttribute("type", "password");
     expect(password).toHaveAttribute("autocomplete", "current-password");
     expect(password).toBeRequired();
-    expect(password).toHaveAccessibleDescription("Disconnecting ends your other sessions. Signing in with your password then asks you to connect one again.");
+    expect(password).toHaveAccessibleDescription("Disconnecting signs you out everywhere else. You'll be asked to connect again the next time you sign in.");
     expect(disconnectButton()).toBeEnabled();
   });
 
   it("tells someone who needs no membership, and has connected one, that they can sign in with it too", () => {
     showSection({ connected: grace, membershipNeeded: false });
-    expect(section()).toHaveTextContent("Connected to Memberful as Grace Hopper (grace@example.com), so you can sign in with it too.");
-    expect(section()).toHaveTextContent("Disconnecting ends your other sessions, as a new password does.");
+    expect(section()).toHaveTextContent("Connected as Grace Hopper (grace@example.com). You can sign in with Memberful or your password.");
+    expect(section()).toHaveTextContent("Disconnecting signs you out everywhere else.");
   });
 
   it("tells a member the same while Memberful isn't members only, since their password signs them in", () => {
     showSection({ connected: grace, membersOnly: false });
-    expect(section()).toHaveTextContent("Connected to Memberful as Grace Hopper (grace@example.com), so you can sign in with it too.");
-    expect(section()).toHaveTextContent("Disconnecting ends your other sessions, as a new password does.");
+    expect(section()).toHaveTextContent("Connected as Grace Hopper (grace@example.com). You can sign in with Memberful or your password.");
+    expect(section()).toHaveTextContent("Disconnecting signs you out everywhere else.");
   });
 
   it.each([
-    [{ name: "Grace Hopper", emailAddress: null }, "Connected to Memberful as Grace Hopper, so you sign in with it."],
-    [{ name: null, emailAddress: "grace@example.com" }, "Connected to Memberful as grace@example.com, so you sign in with it."],
-    [{ name: null, emailAddress: null }, "Your Memberful account is connected, so you sign in with it."],
+    [{ name: "Grace Hopper", emailAddress: null }, "Connected as Grace Hopper. You sign in with Memberful."],
+    [{ name: null, emailAddress: "grace@example.com" }, "Connected as grace@example.com. You sign in with Memberful."],
+    [{ name: null, emailAddress: null }, "Your Memberful account is connected. You sign in with Memberful."],
   ])("names the account by what Memberful said of it: %j", (connected, text) => {
     showSection({ connected });
     expect(section()).toHaveTextContent(text);
@@ -210,7 +212,7 @@ describe("Disconnect Memberful", () => {
     ["even while it isn't, since nothing else signs them in", { membersOnly: false, membershipNeeded: false }],
   ])("offers someone without a password nothing to disconnect, Memberful being how they sign in, %s", (_, settings) => {
     showSection({ connected: grace, hasPassword: false, ...settings });
-    expect(section()).toHaveTextContent("Connected to Memberful as Grace Hopper (grace@example.com), so you sign in with it.");
+    expect(section()).toHaveTextContent("Connected as Grace Hopper (grace@example.com). You sign in with Memberful.");
     // Nothing asks them for a password, which they're given none of, nor offers to disconnect it.
     expect(section()).not.toHaveTextContent(/password|disconnect/i);
     expect(screen.queryByRole("button", { name: "Disconnect Memberful" })).not.toBeInTheDocument();
@@ -219,8 +221,8 @@ describe("Disconnect Memberful", () => {
 
   it("asks someone with a password but no email address to add one first, since signing in with a password takes one", () => {
     showSection({ connected: grace, hasEmailAddress: false, membersOnly: false, membershipNeeded: false });
-    expect(section()).toHaveTextContent("Connected to Memberful as Grace Hopper (grace@example.com), so you sign in with it.");
-    expect(section()).toHaveTextContent("Add your email address above to disconnect it, so that you can still sign in with your password.");
+    expect(section()).toHaveTextContent("Connected as Grace Hopper (grace@example.com). You sign in with Memberful.");
+    expect(section()).toHaveTextContent("To disconnect, add an email address above so you can still sign in with your password.");
     expect(screen.queryByRole("button", { name: "Disconnect Memberful" })).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
   });

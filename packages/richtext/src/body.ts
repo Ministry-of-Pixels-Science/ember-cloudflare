@@ -8,6 +8,7 @@ import { displayBody } from "./display";
 import { forOneReading, ParseLimitError, type HtmlParser } from "./markup";
 import { editableBody, mentionedUsers, userIdFromSgid, userIdsIn, usersAttached, writtenMentions, type MentionCard } from "./mentions";
 import { plainParagraphLines } from "./plain-paragraph";
+import { hasPreview } from "./previews";
 import { canonicalize } from "./render";
 import { chompNewlines, isBlank } from "./ruby";
 import { toHtml } from "./serialize";
@@ -110,5 +111,6 @@ export function withParser(parse: HtmlParser) {
     editableBody: (stored: string, card: (userId: string) => MentionCard | undefined, host: string) => editableBody(parse, stored, card, host),
     autoLink: (html: string) => autoLink(parse, html),
     displayBody: (html: string, plainText: string, host: string) => displayBody(parse, html, plainText, host),
+    hasPreview: (markup: string) => hasPreview(parse, markup),
   };
 }

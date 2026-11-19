@@ -37,6 +37,10 @@ interface Props {
   membersOnlySaving?: boolean;
   /** Why the switch can't be moved while another way to join is on, said in place of what it does, or null. */
   setAside?: string | null;
+  /** What's said in place of Members only's switch while SSO only is on, when the switch turns both on and off, or null. */
+  beside?: string | null;
+  /** What's said in place of what it does while SSO only closes it, or null. */
+  closed?: string | null;
 }
 
 /**
@@ -57,6 +61,8 @@ export function MemberfulSettings({
   memberfulSaving = false,
   membersOnlySaving = false,
   setAside = null,
+  beside = null,
+  closed = null,
 }: Props) {
   const { redirectUrl, webhookUrl } = useMemberfulAddresses();
   // Without the keys, which the server would refuse it for, turning it on sets it up first.
@@ -76,12 +82,17 @@ export function MemberfulSettings({
               "It's on, but Ember no longer has your Memberful site's keys, so nobody can sign in with Memberful until it's set up again."
             ) : setAside !== null ? (
               setAside
+            ) : closed !== null && site !== null ? (
+              closed
             ) : site === null ? (
               "Members of a Memberful site join and sign in with their Memberful account. Turning this on sets up Memberful first."
             ) : (
               <>
-                Members of <strong className="wrap-anywhere">{site}</strong> join and sign in with their Memberful account. Turned off, it lets nobody new
-                join, but those who did keep signing in with it.
+                Members of <strong className="wrap-anywhere">{site}</strong> join and sign in with their Memberful account.
+                {/* Beside SSO only, turning it off turns Members only off too, which closes it. */}
+                {beside === null
+                  ? " Turned off, it lets nobody new join, but those who did keep signing in with it."
+                  : " Turned off, it lets nobody in while SSO only is on, not even those who joined with it."}
                 {webhooks && " A member whose membership lapses is signed out until it's renewed."}
               </>
             )}
@@ -90,12 +101,14 @@ export function MemberfulSettings({
         <Switch
           checked={checked}
           onCheckedChange={switchTo}
-          disabled={setAside !== null || membersOnlySaving}
+          // Beside SSO only, it saves Members only's setting or its own, so it waits for either's move.
+          disabled={setAside !== null || membersOnlySaving || (beside !== null && memberfulSaving)}
           aria-labelledby="memberful-heading"
           aria-describedby="memberful-description"
         />
       </div>
-      {shown && site !== null && (
+      {shown && site !== null && beside !== null && <p className={cn(NOTE, "border-t pt-3")}>{beside}</p>}
+      {shown && site !== null && beside === null && (
         <div className="flex items-center gap-x-[1ch] gap-y-4 border-t pt-3">
           <div className="min-w-0 flex-1">
             <div id="members-only-heading">Members only</div>

@@ -1,10 +1,10 @@
-import { CloseCode, ROOM_PROTOCOL, type Me, type RoomId, type ServerFrame } from "@ember/protocol";
+import { CloseCode, ROOM_PROTOCOL, type Me, type RoomId, type ServerFrame, type Sidebar } from "@ember/protocol";
 import { CAMERAS_FULL, CAMERAS_OFF, HUDDLE_FAILED, HuddleCloseCode, MAX_HUDDLE_CAMERAS, MAX_HUDDLE_PEOPLE, SCREENS_FULL, SCREENS_OFF, type HuddlePerson, type HuddleTrackKind } from "@ember/protocol/huddles";
 import { evictDurableObject, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HUDDLE_HEADER, type ChatRoom } from "../src/chat-room";
 import type { Env } from "../src/env";
-import { HUDDLE_CHECK_MS, HUDDLE_SILENT_MS, HUDDLE_TAG, NO_OFFER, PUBLICATION_SETTLES_MS, TOO_FAST, type Huddle, type HuddleAttachment } from "../src/huddles/room";
+import { APP_KEPT_MS, HUDDLE_CHECK_MS, HUDDLE_SILENT_MS, HUDDLE_TAG, NO_OFFER, PUBLICATION_SETTLES_MS, REACTIONS_IN_TEN_SECONDS, TOO_FAST, type Huddle, type HuddleAttachment } from "../src/huddles/room";
 import { REVOCATIONS_KEPT_MS, sessionTag } from "../src/revocations";
 import { MAX_ROOM_FRAME_SIZE } from "../src/sockets";
 import { viewersOf } from "../src/viewing";
@@ -76,8 +76,20 @@ const remembered = (room: RoomId) =>
       .sort((a, b) => a.joinedAt - b.joinedAt),
   );
 
+/** Changes a room as its settings do, as `session`. */
+const change = (room: RoomId, session: Session, changes: unknown) => api(`/api/rooms/${room}`, { method: "PATCH", headers: { Cookie: session.cookie }, body: JSON.stringify(changes) });
+
 /** Has the room check its huddle, as its alarm does, as if at `now`. */
 const checkAt = (room: RoomId, now: number) => runInDurableObject(roomStub(room), (instance: ChatRoom) => (instance as unknown as { huddle: Huddle }).huddle.check(now));
+
+/** Has `room`'s huddle ask `answers` what it asks the Workspace of huddles, from now. The Workspace still hears its reports. */
+const answerForWorkspace = (room: RoomId, answers: { huddleApp: () => Promise<unknown>; huddlesIn: () => Promise<unknown> }) =>
+  runInDurableObject(roomStub(room), (instance: ChatRoom) => {
+    const huddle = (instance as unknown as { huddle: { env: Env } }).huddle;
+    const reached = workspace(huddle.env);
+    const standIn = { ...answers, reportHuddle: (...report: Parameters<typeof reached.reportHuddle>) => reached.reportHuddle(...report) };
+    huddle.env = { ...huddle.env, WORKSPACE: { getByName: () => standIn } as unknown as Env["WORKSPACE"] };
+  });
 
 /** Who the room counts as viewing it. */
 const viewers = (room: RoomId) => runInDurableObject(roomStub(room), (_room, state: DurableObjectState) => viewersOf(state).sort());
@@ -179,10 +191,12 @@ describe("A room's huddle", () => {
     const grace = await signIn("Grace");
     const phone = await welcomed(room, ada);
     const onPhone = await publishing(sfu, phone);
+    phone.send({ type: "huddle.sticker", sticker: "hand" });
+    await reached(phone);
     const graces = await welcomed(room, grace);
 
     const laptop = await joinHuddle(room, ada, { muted: true });
-    // In her place still, ahead of Grace, with nothing published from this tab yet.
+    // In her place still, ahead of Grace, with nothing published from this tab yet, nor the sticker the other showed.
     expect((await laptop.next("huddle.welcome")).people).toEqual([person(ada, { muted: true }), person(grace)]);
     expect(await phone.closed).toMatchObject({ code: HuddleCloseCode.Moved, reason: "Moved" });
     expect(await graces.next("huddle.changed")).toEqual({ type: "huddle.changed", person: person(ada, { muted: true }) });
@@ -253,6 +267,45 @@ describe("A room's huddle", () => {
     expect(await alarmOf(room)).toBeNull();
   });
 
+  it("closes the socket of whoever joins in a room whose settings don't allow huddles, with the same code, and lets them in once they do", async () => {
+    const { ada } = await huddlesOn();
+    const [room, annex] = [await freshRoom("not-here"), await freshRoom("annex")];
+    expect((await change(room, ada, { huddles: false })).status).toBe(200);
+
+    expect(await (await joinHuddle(room, ada)).closed).toMatchObject({ code: HuddleCloseCode.Off, reason: "Off" });
+    expect(await remembered(room)).toEqual([]);
+    expect(await alarmOf(room)).toBeNull();
+    // Huddles are as they were in every other room.
+    expect((await (await joinHuddle(annex, ada)).next("huddle.welcome")).people).toEqual([person(ada)]);
+
+    expect((await change(room, ada, { huddles: true })).status).toBe(200);
+    expect((await (await joinHuddle(room, ada)).next("huddle.welcome")).people).toEqual([person(ada)]);
+  });
+
+  it("lets someone in by what the Workspace last said of huddles in the room, for half a minute, when it doesn't answer as they join, and asks it again once that's older", async () => {
+    const { ada } = await huddlesOn();
+    const room = await freshRoom("unanswered");
+    const [grace, linus] = [await signIn("Grace"), await signIn("Linus")];
+    const start = Date.now();
+    vi.useFakeTimers({ toFake: ["Date"], now: start });
+    await welcomed(room, ada);
+    // The Workspace answers neither of the next two tabs as they join, and then that the room's settings don't allow huddles.
+    let unanswered = 2;
+    await answerForWorkspace(room, {
+      huddleApp: async () => APP,
+      huddlesIn: async () => {
+        if (unanswered-- > 0) throw new Error("The Workspace didn't answer");
+        return { app: APP, allowed: false };
+      },
+    });
+
+    vi.setSystemTime(start + APP_KEPT_MS - 1);
+    expect((await (await joinHuddle(room, grace)).next("huddle.welcome")).people).toEqual([person(ada), person(grace)]);
+    vi.setSystemTime(start + APP_KEPT_MS);
+    expect(await (await joinHuddle(room, linus)).closed).toMatchObject({ code: HuddleCloseCode.Off, reason: "Off" });
+    expect((await remembered(room)).map(({ user }) => user.id)).toEqual([ada.user.id, grace.user.id]);
+  });
+
   it("tells the others when someone mutes their microphone, or unmutes it", async () => {
     const { ada } = await huddlesOn();
     const room = await freshRoom("muting");
@@ -275,6 +328,78 @@ describe("A room's huddle", () => {
     expect((await linuses.next("huddle.welcome")).people).toMatchObject([{ muted: false }, { muted: true }, { muted: false }]);
   });
 
+  it("tells the others when someone shows a sticker, shows another in its place, or takes theirs off, and welcomes whoever joins with the ones shown", async () => {
+    const { ada } = await huddlesOn();
+    const room = await freshRoom("stickers");
+    const [grace, linus] = [await signIn("Grace"), await signIn("Linus")];
+    const adas = await welcomed(room, ada);
+    const graces = await welcomed(room, grace, true);
+
+    adas.send({ type: "huddle.sticker", sticker: "hand" });
+    expect(await graces.next("huddle.changed")).toEqual({ type: "huddle.changed", person: person(ada, { sticker: "hand" }) });
+    // Shown again, it's nothing new, and neither is taking off a sticker that isn't shown.
+    adas.send({ type: "huddle.sticker", sticker: "hand" });
+    graces.send({ type: "huddle.sticker", sticker: null });
+    await reached(adas, graces);
+    expect([adas.pending("huddle.changed"), graces.pending("huddle.changed")]).toEqual([[], []]);
+
+    adas.send({ type: "huddle.sticker", sticker: "brb" });
+    expect(await graces.next("huddle.changed")).toEqual({ type: "huddle.changed", person: person(ada, { sticker: "brb" }) });
+    // Whatever else of someone changes, their sticker stays.
+    graces.send({ type: "huddle.sticker", sticker: "done" });
+    expect(await adas.next("huddle.changed")).toEqual({ type: "huddle.changed", person: person(grace, { muted: true, sticker: "done" }) });
+    graces.send({ type: "huddle.mute", muted: false });
+    expect(await adas.next("huddle.changed")).toEqual({ type: "huddle.changed", person: person(grace, { sticker: "done" }) });
+
+    // The room keeps them while it hibernates, and welcomes whoever joins with them.
+    await evictDurableObject(roomStub(room));
+    const linuses = await joinHuddle(room, linus);
+    expect((await linuses.next("huddle.welcome")).people).toEqual([person(ada, { sticker: "brb" }), person(grace, { sticker: "done" }), person(linus)]);
+
+    adas.send({ type: "huddle.sticker", sticker: null });
+    expect([await graces.next("huddle.changed"), await linuses.next("huddle.changed")]).toEqual([
+      { type: "huddle.changed", person: person(ada) },
+      { type: "huddle.changed", person: person(ada) },
+    ]);
+    await reached(adas);
+    // Their own tab hears of none of it: it shows what it sent.
+    expect(adas.log.map(({ type }) => type)).toEqual(["huddle.welcome", "huddle.joined", "pong", "huddle.changed", "huddle.changed", "huddle.joined", "pong"]);
+    expect((await remembered(room)).map(({ sticker }) => sticker)).toEqual([undefined, "done", undefined]);
+  });
+
+  it("tells everyone in a huddle when someone reacts with an emoji, their own tab too, and of only so many of one tab's in ten seconds", async () => {
+    const { ada } = await huddlesOn();
+    const room = await freshRoom("reactions");
+    const grace = await signIn("Grace");
+    const adas = await welcomed(room, ada);
+    const graces = await welcomed(room, grace);
+    const reacted = ({ user }: Session, emoji: string) => ({ type: "huddle.reacted", userId: user.id, emoji });
+    /** What both of them next hear that someone reacted with. */
+    const bothHear = async () => [await adas.next("huddle.reacted"), await graces.next("huddle.reacted")];
+    const start = Date.now();
+    vi.useFakeTimers({ toFake: ["Date"], now: start });
+
+    adas.send({ type: "huddle.react", emoji: "\u{1F389}" });
+    expect(await bothHear()).toEqual([reacted(ada, "\u{1F389}"), reacted(ada, "\u{1F389}")]);
+    for (let nth = 1; nth < REACTIONS_IN_TEN_SECONDS; nth++) adas.send({ type: "huddle.react", emoji: "\u{1F44D}\u{1F3FD}" });
+    for (let nth = 1; nth < REACTIONS_IN_TEN_SECONDS; nth++) expect(await bothHear()).toEqual([reacted(ada, "\u{1F44D}\u{1F3FD}"), reacted(ada, "\u{1F44D}\u{1F3FD}")]);
+
+    // The next goes unheard, by her own tab too, which is told nothing of it, while Grace's are heard as ever.
+    adas.send({ type: "huddle.react", emoji: "\u{1F389}" });
+    vi.setSystemTime(start + 9_999);
+    adas.send({ type: "huddle.react", emoji: "\u{1F389}" });
+    await reached(adas);
+    graces.send({ type: "huddle.react", emoji: "\u2764\uFE0F" });
+    expect(await bothHear()).toEqual([reacted(grace, "\u2764\uFE0F"), reacted(grace, "\u2764\uFE0F")]);
+    expect([adas.pending("huddle.reacted"), adas.pending("error"), graces.pending("huddle.reacted")]).toEqual([[], [], []]);
+
+    // Once its ten seconds are over, the tab has as many again. A reaction changes nothing of anyone.
+    vi.setSystemTime(start + 10_000);
+    adas.send({ type: "huddle.react", emoji: "\u{1F389}" });
+    expect(await bothHear()).toEqual([reacted(ada, "\u{1F389}"), reacted(ada, "\u{1F389}")]);
+    expect([adas.pending("huddle.changed"), graces.pending("huddle.changed")]).toEqual([[], []]);
+  });
+
   it("refuses a frame it can't read, and closes a socket that sends one larger than a room takes", async () => {
     const { ada, sfu } = await huddlesOn();
     const room = await freshRoom("frames");
@@ -293,6 +418,11 @@ describe("A room's huddle", () => {
       { type: "huddle.listen", kind: "screen", watch: ["u1", "u2", "u3"] },
       { type: "huddle.unpublish", kind: "slides" },
       { type: "huddle.answer" },
+      { type: "huddle.sticker" },
+      { type: "huddle.sticker", sticker: "wave" },
+      { type: "huddle.react" },
+      { type: "huddle.react", emoji: "hello" },
+      { type: "huddle.react", emoji: "\u{1F389}\u{1F389}" },
       { type: "message.create", clientMessageId: "c1", body: "Hello" },
     ];
     for (const frame of unreadable) {
@@ -987,12 +1117,7 @@ describe("Cameras in a huddle", () => {
     const { ada, sfu } = await huddlesOn();
     const room = await freshRoom("cameras-unsaid");
     const adas = await welcomed(room, ada);
-    await runInDurableObject(roomStub(room), (instance: ChatRoom) => {
-      const huddle = (instance as unknown as { huddle: { env: Env } }).huddle;
-      const reached = workspace(huddle.env);
-      const older = { huddleApp: async () => APP, reportHuddle: (...report: Parameters<typeof reached.reportHuddle>) => reached.reportHuddle(...report) };
-      huddle.env = { ...huddle.env, WORKSPACE: { getByName: () => older } as unknown as Env["WORKSPACE"] };
-    });
+    await answerForWorkspace(room, { huddleApp: async () => APP, huddlesIn: async () => ({ app: APP, allowed: true }) });
     await ring(room);
     await showing(sfu, adas);
     await sharing(sfu, adas);
@@ -2311,6 +2436,93 @@ describe("The room's check of its huddle", () => {
     await ring(room);
     expect(await graces.closed).toMatchObject({ code: HuddleCloseCode.Off, reason: "Off" });
     expect(await (await joinHuddle(room, grace)).closed).toMatchObject({ code: HuddleCloseCode.Off });
+    expect(await alarmOf(room)).toBeNull();
+  });
+
+  it("ends a huddle once its room's settings turn huddles off, having the SFU close what its tabs sent, and no huddle in another room", async () => {
+    const { ada, sfu } = await huddlesOn();
+    const [room, annex] = [await freshRoom("turned-off-here"), await freshRoom("annex")];
+    const [grace, linus] = [await signIn("Grace"), await signIn("Linus")];
+    const adas = await welcomed(room, ada);
+    const fromAda = await publishing(sfu, adas);
+    const graces = await welcomed(room, grace);
+    const linuss = await welcomed(annex, linus);
+
+    // The huddle goes on until the room next checks it.
+    expect((await change(room, ada, { huddles: false })).status).toBe(200);
+    await reached(adas, graces);
+    await ring(room);
+    for (const socket of [adas, graces]) expect(await socket.closed).toMatchObject({ code: HuddleCloseCode.Off, reason: "Off" });
+    // Huddles still run through the app, so the room has the SFU close what the tabs left open.
+    await vi.waitFor(() => expect(closedOn(sfu, fromAda)).toEqual(["0"]));
+    expect(await (await joinHuddle(room, grace)).closed).toMatchObject({ code: HuddleCloseCode.Off });
+    expect(await alarmOf(room)).toBeNull();
+
+    await ring(annex);
+    await reached(linuss);
+    // The Workspace has heard that the one is over, and the other goes on.
+    const { huddles } = (await (await api("/api/sidebar", { headers: { Cookie: ada.cookie } })).json()) as Sidebar;
+    expect(huddles).toEqual({ [annex]: { startedAt: expect.any(String) as string, userIds: [linus.user.id] } });
+  });
+
+  it("has the SFU close what a tab published while the Workspace was saying that its room's settings turn huddles off", async () => {
+    const { ada, sfu } = await huddlesOn();
+    const room = await freshRoom("published-meanwhile");
+    const grace = await signIn("Grace");
+    const adas = await welcomed(room, ada);
+    const fromAda = await publishing(sfu, adas);
+    const graces = await welcomed(room, grace);
+
+    // The Workspace takes its time over the room's check, and Grace's tab publishes her microphone meanwhile.
+    let asked = false;
+    let answer!: () => void;
+    const answered = new Promise<void>((resolve) => (answer = resolve));
+    await answerForWorkspace(room, { huddleApp: async () => APP, huddlesIn: async () => ((asked = true), await answered, { app: APP, allowed: false }) });
+    const checked = checkAt(room, Date.now());
+    await vi.waitFor(() => expect(asked).toBe(true));
+    const fromGrace = await publishing(sfu, graces);
+    answer();
+    await checked;
+
+    for (const socket of [adas, graces]) expect(await socket.closed).toMatchObject({ code: HuddleCloseCode.Off, reason: "Off" });
+    await vi.waitFor(() => expect([fromAda, fromGrace].map((id) => closedOn(sfu, id))).toEqual([["0"], ["0"]]));
+    expect(await kept(room, "huddleUnclosed")).toBeUndefined();
+  });
+
+  it("asks the SFU no more than an event may as it ends a full huddle that its room's settings turn off: to close forty microphones beside the tracks it asks about again, and the rest from its next alarm", async () => {
+    const { ada, sfu } = await huddlesOn();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const room = await freshRoom("crowded-and-off");
+    const sockets = await crowd(room, MAX_HUDDLE_PEOPLE);
+    const microphones: string[] = [];
+    for (const socket of sockets) microphones.push(await publishing(sfu, socket));
+    // Ten cameras the SFU didn't close as they went off, which the room asks it about again at its next check.
+    const cameras: string[] = [];
+    for (const socket of sockets.slice(0, 10)) {
+      cameras.push(await showing(sfu, socket));
+      sfu.refuse(/tracks\/close$/);
+      socket.send({ type: "huddle.unpublish", kind: "video" });
+      await vi.waitFor(async () => expect(await kept(room, "huddleUnclosed")).toHaveLength(cameras.length));
+    }
+    expect((await change(room, ada, { huddles: false })).status).toBe(200);
+    const asked = sfu.asked.length;
+
+    // Fifty requests, as many as an event may make: for forty of the microphones, and for the ten cameras again.
+    await ring(room);
+    await vi.waitFor(() => expect(sfu.asked.length - asked).toBe(50));
+    await sleep(20);
+    expect(
+      sfu.asked
+        .slice(asked)
+        .map(({ sessionId }) => sessionId)
+        .sort(),
+    ).toEqual([...microphones.slice(0, 40), ...cameras].sort());
+    // The last ten microphones wait for the room's alarm, which comes within a check for them.
+    await vi.waitFor(async () => expect(await kept(room, "huddleUnclosed")).toMatchObject(microphones.slice(40).map((sessionId) => ({ appId: APP.appId, sessionId, mids: ["0"] }))));
+    await vi.waitFor(async () => expect(await alarmOf(room)).toBeLessThanOrEqual(Date.now() + HUDDLE_CHECK_MS));
+    await ring(room);
+    expect([...microphones, ...cameras].map((id) => closedOn(sfu, id))).toEqual([...microphones, ...cameras].map(() => ["0"]));
+    expect(await kept(room, "huddleUnclosed")).toBeUndefined();
     expect(await alarmOf(room)).toBeNull();
   });
 
