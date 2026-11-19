@@ -81,15 +81,22 @@ describe("Send a message", () => {
       expect(await ada.next("error"), body).toEqual({ type: "error", message: "Your message is empty.", clientMessageId, failed: "message.create" });
     }
     ada.send({ type: "message.create", clientMessageId: "long", body: bodyFromPlainText("x".repeat(MAX_MESSAGE_LENGTH + 1)) });
-    expect(await ada.next("error")).toMatchObject({ message: "Messages can be up to 10,000 characters.", clientMessageId: "long" });
+    expect(await ada.next("error")).toMatchObject({ message: "Messages can be up to 40,000 characters.", clientMessageId: "long" });
     ada.send({ type: "message.create", clientMessageId: "huge", body: "x".repeat(MAX_MESSAGE_HTML_LENGTH + 1) });
     expect((await ada.next("error")).message).toBe("Unrecognized frame");
 
     // Its markup can be longer, as long as its text isn't.
-    const formatted = await post(ada, `<p>${"<b>x</b>".repeat(MAX_MESSAGE_LENGTH)}</p>`);
+    const formatted = await post(ada, `<p>${"<b>xxxxxxxx</b>".repeat(MAX_MESSAGE_LENGTH / 8)}</p>`);
     expect(formatted.plainText).toHaveLength(MAX_MESSAGE_LENGTH);
     const later = await connect(room, "Grace");
     expect(later.welcome.messages).toEqual([formatted]);
+  });
+
+  it("indents every item of nested lists in its text, as Action Text does, in a message as long as a message can be", async () => {
+    const ada = await connect(await freshRoom("indented"), "Ada");
+    // Items 51 lists deep take 100 spaces each, so 120 of them take 12,000 in all
+    const sent = await post(ada, `${"<ul>".repeat(51)}${"<li>x</li>".repeat(120)}`);
+    expect(sent.plainText.split("\n").filter((line) => line === `${" ".repeat(100)}• x`)).toHaveLength(120);
   });
 
   it("refuses a message it couldn't show, saying which", async () => {
@@ -326,7 +333,7 @@ describe("Edit a message", () => {
     expect((await ada.next("error")).message).toBe("You can only edit your own messages");
     for (const [body, message] of [
       ["   ", "Your message is empty."],
-      [bodyFromPlainText("x".repeat(MAX_MESSAGE_LENGTH + 1)), "Messages can be up to 10,000 characters."],
+      [bodyFromPlainText("x".repeat(MAX_MESSAGE_LENGTH + 1)), "Messages can be up to 40,000 characters."],
       ["<b>".repeat(401), "That message couldn't be saved."],
     ]) {
       ada.send({ type: "message.update", messageId: original.id, body });
