@@ -61,7 +61,11 @@ function showSection({ connected = null as SsoAccount | null, ssoOnly = true, me
 
 const section = () => screen.getByRole("region", { name: "Single sign-on" });
 
-beforeEach(() => serve());
+// Braced, since vitest calls a function the hook returns after each test, as it would fetch's spy,
+// which hangs there while a test holds fetch's answer.
+beforeEach(() => {
+  serve();
+});
 
 afterEach(() => {
   vi.restoreAllMocks();
