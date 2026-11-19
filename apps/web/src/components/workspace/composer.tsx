@@ -1,11 +1,12 @@
 import { Suspense, useEffect, useEffectEvent, useImperativeHandle, useLayoutEffect, useRef, useState, type Ref } from "react";
-import { MAX_FILE_SIZE, type LinkPreview, type User } from "@ember/protocol";
+import { MAX_FILE_SIZE, type LinkPreview } from "@ember/protocol";
 import { hasPreview, linkedUrls, OPENGRAPH_EMBED_CONTENT_TYPE, previewContent, writtenBody } from "@ember/richtext/dom";
 import { AtSign, Page, Send, TextSquare, XmarkCircle } from "@/components/icons/iconoir";
 import { useNameOf } from "@/hooks/use-directory";
 import { fetchLinkPreview, mentionPromptSrc } from "@/lib/api";
 import { dropTarget } from "@/lib/drop-target";
 import { breaksLine, hasTouchKeyboard, pressedAlone, sendsMessage, uploadsFiles, writesSnippet } from "@/lib/keyboard";
+import type { Typist } from "@/lib/room-state";
 import { tooLargeToAttach } from "@/lib/uploads";
 import { cn } from "@/lib/utils";
 import { AttachMenu } from "./attach-menu";
@@ -17,13 +18,17 @@ import { SnippetDialog } from "./snippet-dialog";
 
 /**
  * The typing indicator (Campfire's typing_tracker.js and composer.css): the names of whoever is typing,
- * sorted and comma-separated after a three-dot spinner, fading in above the composer. It isn't a live
- * region: announced on every change, a bare list of names would mean nothing out of context. Names that
- * don't fit end in an ellipsis, rather than wrapping down over the message box.
+ * sorted and comma-separated after a three-dot spinner, fading in above the composer, each followed by
+ * what it's doing meanwhile, if an answerer said, as in "Ember is using Digg: digg_get_feed". It isn't a
+ * live region: announced on every change, a bare list of names would mean nothing out of context. Names
+ * that don't fit end in an ellipsis, rather than wrapping down over the message box.
  */
-function TypingIndicator({ typists }: { typists: User[] }) {
+function TypingIndicator({ typists }: { typists: Typist[] }) {
   const nameOf = useNameOf();
-  const names = typists.map(nameOf).sort().join(", ");
+  const names = typists
+    .map(({ user, doing }) => (doing === undefined ? nameOf(user) : `${nameOf(user)} ${doing}`))
+    .sort()
+    .join(", ");
   return (
     <div
       className={cn(
@@ -343,7 +348,8 @@ interface Props {
   direct?: boolean;
   /** Who's writing, whose drafts are their own. */
   userId: string;
-  typing: User[];
+  /** Who's typing here, but whoever's writing, and what each is doing meanwhile, if an answerer said. */
+  typing: Typist[];
   disabled: boolean;
   /**
    * Holds back the editor's code while the room's first messages are on their way, and until they're

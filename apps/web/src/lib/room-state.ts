@@ -47,6 +47,15 @@ export interface Focus {
 /** What a message that couldn't go says, as the room's own refusals do. */
 const NOT_SENT = "Not connected. Your message wasn't sent.";
 
+/**
+ * Someone the room says is typing, and, for @ember or an agent answering, what it's doing meanwhile, if
+ * it's more than writing, in words that follow its name, as "is using Digg: digg_get_feed" does.
+ */
+export interface Typist {
+  user: User;
+  doing?: string;
+}
+
 export interface RoomState {
   status: ConnectionStatus;
   /** Whether the room has been without a connection for 5 seconds, which stops sending until it's back. */
@@ -55,7 +64,7 @@ export interface RoomState {
   messages: Array<Message | PendingMessage>;
   present: User[];
   /** Who is typing, with when we last heard so stale entries can expire. */
-  typing: Record<string, { user: User; at: number }>;
+  typing: Record<string, Typist & { at: number }>;
   /** Whether the room has messages older than the timeline holds. */
   hasMore: boolean;
   /**
@@ -284,9 +293,9 @@ function withoutTyping(typing: RoomState["typing"], userId: string) {
   return rest;
 }
 
-/** Who is typing once the room has said that `frame`'s user started or stopped, heard at `now`. */
-export function typed(typing: RoomState["typing"], { user, typing: started }: Extract<ServerFrame, { type: "typing" }>, now: number): RoomState["typing"] {
-  return started ? { ...typing, [user.id]: { user, at: now } } : withoutTyping(typing, user.id);
+/** Who is typing once the room has said that `frame`'s user started or stopped, and what they're doing meanwhile, heard at `now`. */
+export function typed(typing: RoomState["typing"], { user, typing: started, doing }: Extract<ServerFrame, { type: "typing" }>, now: number): RoomState["typing"] {
+  return started ? { ...typing, [user.id]: { user, at: now, ...(doing !== undefined && { doing }) } } : withoutTyping(typing, user.id);
 }
 
 /**

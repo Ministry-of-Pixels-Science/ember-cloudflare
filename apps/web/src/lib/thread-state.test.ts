@@ -119,6 +119,9 @@ describe("Follow a thread as it changes", () => {
     expect(frame(typing, { type: "typing", user: ember, typing: false, threadId: "m1" }).replies.typing).toEqual({});
     expect(threadReducer(typing, { type: "expire-typing", before: 1_000 })).toBe(typing);
     expect(threadReducer(typing, { type: "expire-typing", before: 2_000 }).replies.typing).toEqual({});
+    // What it says it's doing meanwhile goes with it.
+    const using = threadReducer(state, { type: "frame", frame: { type: "typing", user: ember, typing: true, threadId: "m1", doing: "is searching this room" }, now: 1_000 });
+    expect(using.replies.typing).toEqual({ ember: { user: ember, at: 1_000, doing: "is searching this room" } });
   });
 
   it("adds new replies, and changes or takes away those that change or go", () => {
