@@ -1330,7 +1330,7 @@ with Ember as the authorization server:
   gives `write` unless it's cleared and `private` only if it's ticked. An app that asks for `private`
   alone is asked to read with it.
 - An app names itself by the address of a Client ID Metadata Document, which Ember reads from a
-  public address only, or registers itself at `/oauth/register`, 10 times an hour from one address at
+  public address only, or registers itself at `/oauth/register`, 10 times an hour from one network at
   most. Either way it's a public client, with no secret, and proves itself with PKCE (S256).
 - The browser goes back only to an `https` address the app gave, or to `http` on the person's own
   computer, at any port, for an app that runs there. An app that's opened by a scheme of its own,
@@ -1649,7 +1649,8 @@ minutes, 5 tries and only until a newer one is sent, and with it they choose a n
 signs them in and ends their other sessions. The page says the same whether or not the address has an
 account. Ember emails an address at most 3 times an hour, counting Email domain's links, and until
 Ember has Turnstile's keys, each network can ask for 10 codes an hour. Each try of a code counts
-against sign-in's limit, 10 tries from a network in 3 minutes.
+against sign-in's limit, 10 tries from a network in 3 minutes. A network is an IPv4 address, or an
+IPv6 address's /64, since whoever has one address in a /64 has them all.
 
 Otherwise, someone who can't sign in gets a new password from `apps/worker/scripts/reset-password.ts`.
 The Worker takes recovery requests only while its `EMBER_RECOVERY_TOKEN` secret is set, and the

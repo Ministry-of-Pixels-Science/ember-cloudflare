@@ -1280,9 +1280,6 @@ export const EMAIL_LINKS_LIMITED = "Too many links asked for from your network. 
 /** Why `/join/email` sends no link while Ember can't send email. */
 export const CANT_EMAIL_LINKS = "Ember can't email links right now. Try again later, or ask an administrator to invite you.";
 
-/** Why `/join/email` sent no link when the email provider refused to send it. */
-export const EMAIL_LINK_UNSENT = "Ember couldn't email you just now. Try again later.";
-
 /**
  * Whose password to reset, and to what, as `POST /api/recovery/reset-password` takes it from
  * apps/worker/scripts/reset-password.ts.
@@ -1579,14 +1576,14 @@ export const signInSaying = (problem: JoiningProblem) => `/session/new?${JOINING
 
 /**
  * Open sign-up's limits, which stand in for Turnstile's check while Ember lacks its keys: how many
- * people may sign up from an IP address in an hour, and how many new people in the workspace in the last
+ * people may sign up from a network in an hour, and how many new people in the workspace in the last
  * hour, however they joined, stop it, so that a flood can't use up the rows a Workers Free account
  * writes in a day.
  */
 export const SIGN_UPS_PER_ADDRESS = 5;
 export const SIGN_UPS_PER_HOUR = 50;
 
-/** Why open sign-up refuses someone from an IP address that has signed up as many times as it may in an hour. */
+/** Why open sign-up refuses someone from a network that has signed up as many times as it may in an hour. */
 export const SIGN_UP_LIMITED = "Too many sign-ups from your network. Try again in an hour.";
 
 /** Why open sign-up refuses anyone once the workspace has let in as many new people as it does in an hour. */

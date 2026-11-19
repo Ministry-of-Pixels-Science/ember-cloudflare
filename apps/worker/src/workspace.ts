@@ -156,7 +156,7 @@ import { Presence } from "./presence";
 import { sendPushes } from "./push/delivery";
 import { webPush } from "./push/keys";
 import { reportPayload } from "./push/payload";
-import { FixedWindowLimit } from "./rate-limit";
+import { AddressLimit, FixedWindowLimit } from "./rate-limit";
 import { urlOf } from "./request-url";
 import { OPEN_ROOMS_ONLY, sessionTag } from "./revocations";
 import type { HuddleChange, RoomEvent } from "./room-log";
@@ -233,7 +233,11 @@ export const SESSION_REFRESH_MS = 60 * 60 * 1000;
 export const SESSION_IDLE_MS = 400 * 24 * 60 * 60 * 1000;
 /** How many sessions the Workspace keeps in memory: a few devices each for a large team. */
 const CACHED_SESSIONS = 10_000;
-/** Campfire's sign-in limit: 10 attempts from an IP address in a fixed 3-minute window (sessions_controller.rb). */
+/**
+ * Campfire's sign-in limit: 10 attempts from an IP address in a fixed 3-minute window
+ * (sessions_controller.rb). Unlike Campfire's, it counts an IPv6 address as its /64, as every limit on
+ * attempts from an address here does (`AddressLimit`).
+ */
 const SIGN_IN_ATTEMPTS = 10;
 const SIGN_IN_WINDOW_MS = 3 * 60 * 1000;
 /**
@@ -247,13 +251,13 @@ const SETUP_TRY_WINDOW = "setupTryWindow";
 const KEPT_MODELS_FILE = "keptModelsFile";
 const KEPT_WORKERS_AI_MODELS = "keptWorkersAiModels";
 /**
- * Open sign-up's limits' hour: the sign-ups from an IP address are counted in a fixed one, before the
+ * Open sign-up's limits' hour: the sign-ups from a network are counted in a fixed one, before the
  * password is hashed, which takes more CPU than the rest of a request, and the new people in the
  * workspace in the last one, counted from the people kept, whatever the Workspace's memory forgets.
  */
 const SIGN_UP_WINDOW_MS = 60 * 60 * 1000;
 
-/** How many times an hour one IP address can register an AI app, which nothing signs in to do. */
+/** How many times an hour one network can register an AI app, which nothing signs in to do. */
 const OUTSIDE_REGISTRATIONS_PER_ADDRESS = 10;
 const OUTSIDE_REGISTRATION_WINDOW_MS = 60 * 60 * 1000;
 /** The most AI apps Ember keeps that registered themselves, and how long one nobody has connected is kept once there are that many. */
@@ -308,10 +312,16 @@ const shownConnection = ({ id, clientName, redirectUri, scope, createdAt, usedAt
 });
 /**
  * The hour of the limits on asking Ember to email someone, a link to join at the email domains or a code
- * to reset a password: the asks from an IP address are counted in a fixed one, and the times an address
+ * to reset a password: the asks from a network are counted in a fixed one, and the times an address
  * is emailed in one that starts as it's first asked for, which the Workspace keeps.
  */
 const EMAIL_ASK_WINDOW_MS = 60 * 60 * 1000;
+/**
+ * An email address as the Workspace's storage compares one: SQLite's `lower` changes only the letters A
+ * to Z, so that's all this does, and two addresses it makes the same are counted, and their links kept,
+ * as one's.
+ */
+const asStored = (emailAddress: string) => emailAddress.replace(/[A-Z]+/g, (letters) => letters.toLowerCase());
 /** How long a link someone asks for to join with their address at the email domains works: an hour, as its email and page say. */
 const EMAIL_DOMAIN_LINK_MS = 60 * 60 * 1000;
 /** How long a code someone asks for to reset their password works, as its email and page say. */
@@ -838,10 +848,10 @@ export type AccountRefusal = "conflict" | "sso conflict" | "no email domains" | 
 
 /**
  * What asking for a link to join with an address at the email domains came to: "asked", whatever Ember
- * emailed, if anything, "off" while Email domain doesn't let the address's domain in, "limited" past the
- * network's limit, "unsendable" while Ember can't send email, and "unsent" when the provider refused to.
+ * goes on to email, if anything, "off" while Email domain doesn't let the address's domain in, "limited"
+ * past the network's limit, and "unsendable" while Ember can't send email.
  */
-export type EmailLinkAsk = "asked" | "off" | "limited" | "unsendable" | "unsent";
+export type EmailLinkAsk = "asked" | "off" | "limited" | "unsendable";
 
 /**
  * What asking for a code to reset a password came to: "asked", whatever Ember goes on to email, if
@@ -1126,12 +1136,12 @@ export class Workspace extends DurableObject<Env> {
   private knownBannedAddresses: Set<string> | null = null;
   /** Counts the starts and ends of bans and lifted bans, so a read of the banned addresses that overlapped one isn't kept. */
   private banChanges = 0;
-  private readonly signInAttempts = new FixedWindowLimit(SIGN_IN_ATTEMPTS, SIGN_IN_WINDOW_MS);
-  private readonly signUps = new FixedWindowLimit(SIGN_UPS_PER_ADDRESS, SIGN_UP_WINDOW_MS);
-  private readonly emailLinkAsks = new FixedWindowLimit(EMAIL_LINKS_PER_NETWORK, EMAIL_ASK_WINDOW_MS);
-  private readonly passwordResetAsks = new FixedWindowLimit(PASSWORD_RESETS_PER_NETWORK, EMAIL_ASK_WINDOW_MS);
+  private readonly signInAttempts = new AddressLimit(SIGN_IN_ATTEMPTS, SIGN_IN_WINDOW_MS);
+  private readonly signUps = new AddressLimit(SIGN_UPS_PER_ADDRESS, SIGN_UP_WINDOW_MS);
+  private readonly emailLinkAsks = new AddressLimit(EMAIL_LINKS_PER_NETWORK, EMAIL_ASK_WINDOW_MS);
+  private readonly passwordResetAsks = new AddressLimit(PASSWORD_RESETS_PER_NETWORK, EMAIL_ASK_WINDOW_MS);
   private readonly unfurls = new FixedWindowLimit(UNFURLS, UNFURL_WINDOW_MS);
-  private readonly outsideRegistrations = new FixedWindowLimit(OUTSIDE_REGISTRATIONS_PER_ADDRESS, OUTSIDE_REGISTRATION_WINDOW_MS);
+  private readonly outsideRegistrations = new AddressLimit(OUTSIDE_REGISTRATIONS_PER_ADDRESS, OUTSIDE_REGISTRATION_WINDOW_MS);
   private readonly outsideSends = new FixedWindowLimit(OUTSIDE_SENDS_PER_MINUTE, 60_000);
   /** The probes custom domain checks send, each with its answer and when it's no longer waited for (see `expectProbe`). */
   private readonly probes = new Map<string, { answer: string; until: number }>();
@@ -1154,6 +1164,13 @@ export class Workspace extends DurableObject<Env> {
    * and kept, in the order they were asked for (see `askForPasswordReset`).
    */
   private lastResetCode: Promise<unknown> = Promise.resolve();
+  /**
+   * The links to join with on their way to each address, by the address as storage compares it
+   * (`asStored`): how many, and the last of them, which the next one for that address waits for, so that
+   * an address's links are emailed, and kept, in the order the Workspace was asked for them, while another
+   * address's never wait for them (see `emailJoinLink`). An address is forgotten once its last link has gone.
+   */
+  private readonly emailingLinks = new Map<string, { asked: number; last: Promise<unknown> }>();
   /** The last report being handled, which the next one waits for (see `handleReport`). */
   private lastReportHandling: Promise<unknown> = Promise.resolve();
   /** How many changes have queued revocations, which `afterQueuing` compares to see whether its change did. */
@@ -2709,26 +2726,62 @@ export class Workspace extends DurableObject<Env> {
   }
 
   /**
-   * Emails `emailAddress` a link to join with it, the one `link`'s secret makes, at `origin`, while Email
-   * domain lets in `domain`, its domain, which takes the place of any it was sent before once the
-   * provider has the email, unless they've joined since, or, if someone has an account with it already,
-   * whatever its case, an email saying so, with a link to sign in. Asks from `ip` count against its limit
-   * while they're `limited`, as they are while Ember lacks Turnstile's keys. Once the address has been
-   * emailed as often as it is in an hour, an ask sends nothing, though it answers "asked", as it does for
-   * an address with an account, so that the answer never says who has one, and the link sent last still
-   * works. An email the provider refuses reaches nobody, so it isn't counted, and changes no link.
+   * Whether someone at `ip` may ask, now, for a link to join with an address at `domain`: "asked" while
+   * Email domain lets `domain` in and Ember can send email. Asks from `ip` count against its network's
+   * limit while they're `limited`, as they are while Ember lacks Turnstile's keys. It isn't told the
+   * address, which the Worker gives only once it has this answer (`emailJoinLink`), so that neither the
+   * answer nor how soon it comes can say whether the address has an account, or has been emailed as often
+   * as it is in an hour, which a password reset for an account's address counts towards.
    */
-  async askForEmailLink(ip: string, emailAddress: string, domain: string, link: NewEmailLink, origin: string, limited: boolean): Promise<EmailLinkAsk> {
+  async askForEmailLink(ip: string, domain: string, limited: boolean): Promise<EmailLinkAsk> {
     const account = await this.joinableAccount();
     if (account === null || !letsInEmailDomain(account, domain)) return "off";
-    const sending = await this.emailSender(account);
-    if (sending === null) return "unsendable";
+    if ((await this.emailSender(account)) === null) return "unsendable";
     if (limited && !this.emailLinkAsks.attempt(ip)) return "limited";
+    return "asked";
+  }
+
+  /**
+   * Emails `emailAddress` a link to join with it, the one `link`'s secret makes, at `origin`, for an ask
+   * the Worker has answered already (`askForEmailLink`), or, if someone has an account with it already,
+   * whatever its case, an email saying so, with a link to sign in (`sendJoinLink`). It goes in turn with
+   * the others asked for the same address, and without waiting for another address's, as none did when
+   * each ask waited for its own, and whatever comes of it is only logged. No more are on their way to an
+   * address at once than it's emailed in an hour, since no more of them could be sent: an ask past that
+   * is dropped, so that asks for an address the provider is slow with, or refuses, can't pile up.
+   */
+  emailJoinLink(emailAddress: string, domain: string, link: NewEmailLink, origin: string): void {
+    const address = asStored(emailAddress);
+    const line = this.emailingLinks.get(address) ?? { asked: 0, last: Promise.resolve() };
+    if (line.asked >= EMAILS_PER_ADDRESS) return;
+    line.asked++;
+    line.last = line.last
+      .then(() => this.sendJoinLink(emailAddress, domain, link, origin))
+      .catch((error: unknown) => console.error("Could not email a link to join", error))
+      .finally(() => {
+        if (--line.asked === 0) this.emailingLinks.delete(address);
+      });
+    this.emailingLinks.set(address, line);
+    this.ctx.waitUntil(line.last);
+  }
+
+  /**
+   * Emails `emailAddress` the link to join that `link`'s secret makes, at `origin`, while Email domain
+   * still lets in `domain` and Ember can still send email, which takes the place of any it was sent
+   * before once the provider has the email, unless they've joined since, or, if someone has an account
+   * with it already, the email saying so. Once the address has been emailed as often as it is in an hour,
+   * whoever asked, it sends nothing, and the link sent last still works. An email the provider refuses
+   * reaches nobody, so it isn't counted, and changes no link.
+   */
+  private async sendJoinLink(emailAddress: string, domain: string, link: NewEmailLink, origin: string): Promise<void> {
+    const account = await this.joinableAccount();
+    const sending = account && (await this.emailSender(account));
+    if (!sending) return;
     const now = Date.now();
     // Counted one at a time, as people join, but sent afterwards, so that sending never holds up a join.
     const asked = await this.oneAtATime(async () => {
-      const current = (await this.joinableAccount())!;
-      if (!letsInEmailDomain(current, domain)) return "off";
+      const current = await this.joinableAccount();
+      if (current === null || !letsInEmailDomain(current, domain)) return "off";
       const { count, countedSince } = await this.store.countEmailRequest(emailAddress, new Date(now).toISOString(), new Date(now - EMAIL_ASK_WINDOW_MS).toISOString());
       if (count > EMAILS_PER_ADDRESS) {
         // The count is of the emails sent, or being sent, so that one the provider refuses frees a place.
@@ -2737,22 +2790,17 @@ export class Workspace extends DurableObject<Env> {
       }
       return { name: current.name, member: (await this.store.takenEmailAddresses([emailAddress])).size > 0, countedSince };
     });
-    if (asked === "off") return "off";
-    if (asked === "enough") return "asked";
+    if (asked === "off" || asked === "enough") return;
     const email = asked.member
       ? alreadyAMemberEmail(emailAddress, asked.name, `${origin}/session/new?${new URLSearchParams({ email_address: emailAddress })}`)
       : emailDomainLinkEmail(emailAddress, asked.name, `${origin}${emailSignUpLink(link.token)}`);
-    if ((await sendEmail(sending.sender, sending.from, email)) !== null) {
-      await this.store.uncountEmailRequest(emailAddress, asked.countedSince);
-      return "unsent";
-    }
-    if (asked.member) return "asked";
+    if ((await sendEmail(sending.sender, sending.from, email)) !== null) return this.store.uncountEmailRequest(emailAddress, asked.countedSince);
+    if (asked.member) return;
     // Saved one at a time, as people join, so that someone who joined as it was sent gets no link to join with again.
     await this.oneAtATime(async () => {
       if ((await this.store.takenEmailAddresses([emailAddress])).size > 0) return;
       await this.store.saveEmailDomainLink(sortableId(), emailAddress, link.digest, new Date(now).toISOString(), new Date(now + EMAIL_DOMAIN_LINK_MS).toISOString());
     });
-    return "asked";
   }
 
   /**
@@ -2832,7 +2880,7 @@ export class Workspace extends DurableObject<Env> {
   /**
    * Counts a try at the deployment's setup password against its limit before it's checked: false past
    * the limit. A right guess would make whoever made it the administrator, so unlike sign-in's limit,
-   * which is per IP address and kept in memory, this one is the whole deployment's and stored: neither
+   * which is per network and kept in memory, this one is the whole deployment's and stored: neither
    * another address nor a Workspace that starts over starts the count over.
    */
   async trySetupPassword(): Promise<boolean> {

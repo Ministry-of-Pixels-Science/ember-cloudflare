@@ -4,7 +4,6 @@ import {
   EMAIL_DOMAIN_NEEDS_EMAIL,
   EMAIL_DOMAINS_REFUSED,
   EMAIL_LINK_GONE,
-  EMAIL_LINK_UNSENT,
   EMAIL_LINKS_LIMITED,
   EMAILS_PER_ADDRESS,
   EMAIL_LINKS_PER_NETWORK,
@@ -21,10 +20,12 @@ import {
   type Sidebar,
   type WorkspaceSettings,
 } from "@ember/protocol";
+import { runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../src/env";
 import { verifyPassword } from "../src/passwords";
-import { api, apiWith, builtPages, cookieOf, createRoom, freshDeploy, origin, shown, signIn, withWorkspaceEnv, workspaceSql, type Session } from "./support";
+import type { Workspace } from "../src/workspace";
+import { api, apiWith, builtPages, cookieOf, countAddressesToEmail, createRoom, freshDeploy, origin, shown, signIn, withWorkspaceEnv, workspaceSql, workspaceStub, type Session } from "./support";
 
 const ada = { name: "Ada Lovelace", emailAddress: "ada@example.com", password: "analytical engine" };
 const hal = { name: "Hal", password: "heuristically" };
@@ -69,20 +70,39 @@ async function setUpEmailDomain(domains: string[] = ["example.org"]): Promise<Se
 const bootstrap = async () => (await (await api("/api/bootstrap")).json()) as Bootstrap;
 const settings = async (session: Session) => (await (await api("/api/account", { headers: as(session) })).json()) as WorkspaceSettings;
 
-/** Asks for a link to join with `emailAddress`, as `/join/email`'s form does, from a browser at `ip`, to a Worker whose bindings differ from this suite's by `changes`. */
-const ask = (emailAddress: unknown, { ip = "203.0.113.40", session, changes = {}, turnstileToken }: { ip?: string; session?: Session; changes?: Partial<Env>; turnstileToken?: string } = {}) =>
-  apiWith(changes, "/api/email_links", {
+/** How a test waits for the Workspace to have been told the addresses asked for, or keeps it from taking them (`countAddressesToEmail`). */
+let workspace: Awaited<ReturnType<typeof countAddressesToEmail>>;
+/** How many asks the test has had answered as asked, of each of which the Worker tells the Workspace the address. */
+let answered = 0;
+
+/**
+ * Asks for a link to join with `emailAddress`, as `/join/email`'s form does, from a browser at `ip`, to
+ * a Worker whose bindings differ from this suite's by `changes`, answering once the Workspace has been
+ * told the address, if the ask was answered as asked.
+ */
+async function ask(
+  emailAddress: unknown,
+  { ip = "203.0.113.40", session, changes = {}, turnstileToken }: { ip?: string; session?: Session; changes?: Partial<Env>; turnstileToken?: string } = {},
+): Promise<Response> {
+  const response = await apiWith(changes, "/api/email_links", {
     method: "POST",
     headers: { "CF-Connecting-IP": ip, ...as(session) },
     body: JSON.stringify({ emailAddress, ...(turnstileToken !== undefined && { turnstileToken }) }),
   });
+  if (response.status === 202) await workspace.told(++answered);
+  return response;
+}
 
-/** Stands in for Cloudflare Email Service's binding, keeping what it's asked to send, and throwing what `refusal` gives, if anything. */
-function fakeBinding(refusal: () => unknown = () => undefined) {
+/**
+ * Stands in for Cloudflare Email Service's binding, keeping what it's asked to send, which it takes once
+ * `held` ends, if that's given, and throwing what `refusal` gives, if anything.
+ */
+function fakeBinding(refusal: () => unknown = () => undefined, held?: Promise<void>) {
   const sent: EmailMessageBuilder[] = [];
   const binding = {
     send: async (message: EmailMessageBuilder) => {
       sent.push(message);
+      await held;
       const refused = refusal();
       if (refused !== undefined) throw refused;
       return { messageId: `<${crypto.randomUUID()}@example.com>` };
@@ -91,10 +111,22 @@ function fakeBinding(refusal: () => unknown = () => undefined) {
   return { binding, sent };
 }
 
-/** Runs `run` with the Workspace sending email through a fake binding, answering what it was asked to send. */
+/** The links to join with on their way to each address: how many, and the last of them, which that address's next waits for. */
+type EmailsLinks = { emailingLinks: Map<string, { asked: number; last: Promise<unknown> }> };
+
+/** Waits for the links the Workspace is emailing, which it emails once it has answered. */
+const emailed = () =>
+  runInDurableObject(workspaceStub(), async (instance: Workspace) => {
+    await Promise.all(Array.from((instance as unknown as EmailsLinks).emailingLinks.values(), ({ last }) => last));
+  });
+
+/** Runs `run` with the Workspace sending email through a fake binding, answering what it was asked to send once it has sent it. */
 async function emailing(run: () => Promise<void>, refusal?: () => unknown): Promise<EmailMessageBuilder[]> {
   const { binding, sent } = fakeBinding(refusal);
-  await withWorkspaceEnv({ EMAIL: binding }, run);
+  await withWorkspaceEnv({ EMAIL: binding }, async () => {
+    await run();
+    await emailed();
+  });
   return sent;
 }
 
@@ -156,6 +188,11 @@ function fakeSiteverify(answer: () => Response = () => Response.json({ success: 
 }
 
 beforeEach(freshDeploy);
+beforeEach(async () => {
+  answered = 0;
+  workspace = await countAddressesToEmail();
+  return workspace.stop;
+});
 afterEach(() => vi.restoreAllMocks());
 
 describe("Join with an email domain", () => {
@@ -343,7 +380,7 @@ describe("Join with an email domain", () => {
       const sent = await linkFor("hal@example.org");
       for (let n = 1; n <= EMAILS_PER_ADDRESS; n++) {
         const refused = await emailing(
-          async () => expect((await ask("hal@example.org")).status).toBe(502),
+          async () => expect((await ask("hal@example.org")).status).toBe(202),
           () => new Error("the provider is down"),
         );
         expect(refused).toHaveLength(1);
@@ -372,7 +409,10 @@ describe("Join with an email domain", () => {
           return { messageId: `<${crypto.randomUUID()}@example.com>` };
         },
       } as unknown as SendEmail;
-      await withWorkspaceEnv({ EMAIL: binding }, async () => expect((await ask("hal@example.org")).status).toBe(202));
+      await withWorkspaceEnv({ EMAIL: binding }, async () => {
+        expect((await ask("hal@example.org")).status).toBe(202);
+        await emailed();
+      });
       expect(joined).toBe(201);
       await expectGone(await lookUp(tokenIn(linkIn(sent[0]!))));
       expect(await count("email_links")).toBe(0);
@@ -413,13 +453,109 @@ describe("Join with an email domain", () => {
       expect(await response.json()).toEqual({ error: JOINING_PROBLEMS.email_off, redirect: "/session/new?joining=email_off" });
     });
 
-    it("says so when Ember can't send email, or the provider doesn't send it", async () => {
+    it("answers before the Workspace is told the address, so how soon it answers says nothing of the address", async () => {
+      await setUpEmailDomain();
+      // The Workspace takes no address to email until the test lets it.
+      let letGo!: () => void;
+      workspace.holdUntil(new Promise<void>((resolve) => (letGo = resolve)));
+      const { binding, sent } = fakeBinding();
+      await withWorkspaceEnv({ EMAIL: binding }, async () => {
+        const response = await ask("hal@example.org");
+        expect(response.status).toBe(202);
+        expect(await response.json()).toEqual({});
+        expect(sent).toHaveLength(0);
+        expect(await count("email_link_requests")).toBe(0);
+        expect(await count("email_links")).toBe(0);
+
+        letGo();
+        await vi.waitFor(() => expect(sent).toHaveLength(1));
+        await emailed();
+      });
+      expect(await workspaceSql("SELECT email_address, count FROM email_link_requests")).toEqual([{ email_address: "hal@example.org", count: 1 }]);
+      expect(await count("email_links")).toBe(1);
+    });
+
+    it("says whether a link can be asked for without the address, changing nothing it counts emails or keeps links in, whether or not one is being sent", async () => {
+      await setUpEmailDomain();
+      await workspaceSql("CREATE TABLE changes_made (id INTEGER PRIMARY KEY)");
+      for (const table of ["email_link_requests", "email_links"]) {
+        for (const change of ["INSERT", "UPDATE", "DELETE"]) {
+          await workspaceSql(`CREATE TRIGGER count_${table}_${change} AFTER ${change} ON ${table} BEGIN INSERT INTO changes_made (id) VALUES (NULL); END`);
+        }
+      }
+      // The provider keeps Hal's email until the test lets it go.
+      let letGo!: () => void;
+      const { binding, sent } = fakeBinding(undefined, new Promise<void>((resolve) => (letGo = resolve)));
+      await withWorkspaceEnv({ EMAIL: binding }, async () => {
+        for (const sending of [false, true]) {
+          const before = await count("changes_made");
+          expect(await workspaceStub().askForEmailLink("203.0.113.40", "example.org", true), `sending: ${sending}`).toBe("asked");
+          expect(await count("changes_made"), `sending: ${sending}`).toBe(before);
+          if (sending) break;
+          expect((await ask("hal@example.org")).status).toBe(202);
+          await vi.waitFor(() => expect(sent).toHaveLength(1));
+        }
+        letGo();
+        await emailed();
+      });
+      expect(await count("email_links")).toBe(1);
+    });
+
+    it("emails an address's links in the order they were asked for, without waiting for another address's", async () => {
+      await setUpEmailDomain();
+      // The provider keeps Ann's first email until the test lets it go.
+      let letGo!: () => void;
+      const held = new Promise<void>((resolve) => (letGo = resolve));
+      const sent: EmailMessageBuilder[] = [];
+      const binding = {
+        send: async (message: EmailMessageBuilder) => {
+          sent.push(message);
+          if (message.to === "ann@example.org") await held;
+          return { messageId: `<${crypto.randomUUID()}@example.com>` };
+        },
+      } as unknown as SendEmail;
+      await withWorkspaceEnv({ EMAIL: binding }, async () => {
+        for (const emailAddress of ["ann@example.org", "ANN@example.org", "hal@example.org"]) expect((await ask(emailAddress)).status).toBe(202);
+        // Hal's goes while the provider still has Ann's first, which her second waits for.
+        await vi.waitFor(() => expect(sent.map(({ to }) => to)).toEqual(["ann@example.org", "hal@example.org"]));
+        letGo();
+        await emailed();
+      });
+      expect(sent.map(({ to }) => to)).toEqual(["ann@example.org", "hal@example.org", "ANN@example.org"]);
+      // The link Ann asked for last is the one that works.
+      await expectGone(await lookUp(tokenIn(linkIn(sent[0]!))));
+      expect(await (await lookUp(tokenIn(linkIn(sent[2]!)))).json()).toEqual({ kind: "email_domain", emailAddress: "ANN@example.org" });
+      expect(await runInDurableObject(workspaceStub(), (instance: Workspace) => (instance as unknown as EmailsLinks).emailingLinks.size)).toBe(0);
+    });
+
+    it("has no more on their way to an address at once than it's emailed in an hour, however many are asked for", async () => {
+      await setUpEmailDomain();
+      // The provider keeps each email until the test lets them go, then refuses it, so none counts towards the hour's.
+      let letGo!: () => void;
+      const { binding, sent } = fakeBinding(() => new Error("the provider is down"), new Promise<void>((resolve) => (letGo = resolve)));
+      await withWorkspaceEnv({ EMAIL: binding }, async () => {
+        for (let n = 1; n <= EMAILS_PER_ADDRESS + 2; n++) expect((await ask(n % 2 ? "hal@example.org" : "HAL@example.org")).status).toBe(202);
+        await vi.waitFor(() => expect(sent).toHaveLength(1));
+        expect(await runInDurableObject(workspaceStub(), (instance: Workspace) => (instance as unknown as EmailsLinks).emailingLinks.get("hal@example.org")?.asked)).toBe(EMAILS_PER_ADDRESS);
+        // Another address's is on its way all the same.
+        expect((await ask("ann@example.org")).status).toBe(202);
+        await vi.waitFor(() => expect(sent.map(({ to }) => to)).toEqual(["hal@example.org", "ann@example.org"]));
+        letGo();
+        await emailed();
+      });
+      expect(sent.filter(({ to }) => to !== "ann@example.org")).toHaveLength(EMAILS_PER_ADDRESS);
+      expect(await count("email_links")).toBe(0);
+      // With those gone, the address can be asked for again.
+      expect(await asked("hal@example.org")).toHaveLength(1);
+    });
+
+    it("says so when Ember can't send email, and answers as asked when the provider doesn't send it, which is only logged", async () => {
       const administrator = await setUpEmailDomain();
       const refused = await emailing(
         async () => {
           const response = await ask("hal@example.org");
-          expect(response.status).toBe(502);
-          expect(await response.json()).toEqual({ error: EMAIL_LINK_UNSENT });
+          expect(response.status).toBe(202);
+          expect(await response.json()).toEqual({});
         },
         () => new Error("destination address is not a verified address"),
       );
@@ -439,6 +575,10 @@ describe("Join with an email domain", () => {
       expect(limited.status).toBe(429);
       expect(await limited.json()).toEqual({ error: EMAIL_LINKS_LIMITED });
       await asked("one.more@example.org", { ip: "203.0.113.51" });
+      // An IPv6 network is a /64, whichever of its addresses asks.
+      for (let n = 1; n <= EMAIL_LINKS_PER_NETWORK; n++) await asked(`someone${n}@example.org`, { ip: `2001:db8:1:2::${n.toString(16)}` });
+      expect((await ask("someone.more@example.org", { ip: "2001:db8:1:2:ffff::1" })).status).toBe(429);
+      await asked("someone.more@example.org", { ip: "2001:db8:1:3::1" });
 
       const checks = fakeSiteverify();
       const unchecked = await ask("another@example.org", { ip: "203.0.113.50", changes: TURNSTILE_KEYS });

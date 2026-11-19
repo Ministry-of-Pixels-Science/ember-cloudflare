@@ -240,7 +240,7 @@ async function signIn(request: Request, env: Env): Promise<Response> {
 }
 
 /**
- * The sign-in: every attempt counts against its IP address's limit before anything is checked, and an
+ * The sign-in: every attempt counts against its network's limit before anything is checked, and an
  * unknown email address costs a password check too, so the answer's timing doesn't say who has an
  * account. While Memberful is members only, only an administrator signs in with a password. Anyone else
  * whose password checks out goes on to connect their Memberful account, as 202 says, to come back to

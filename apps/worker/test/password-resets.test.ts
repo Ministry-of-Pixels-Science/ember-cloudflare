@@ -22,12 +22,12 @@ import {
   type ProfileChanges,
 } from "@ember/protocol";
 import { runInDurableObject } from "cloudflare:test";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { Env } from "../src/env";
 import { verifyPassword } from "../src/passwords";
 import { RECOVERY_PATH } from "../src/recovery";
 import type { Workspace } from "../src/workspace";
-import { api, apiWith, builtPages, cookieOf, freshDeploy, shown, withWorkspaceEnv, workspaceSql, workspaceStub, type Session } from "./support";
+import { api, apiWith, builtPages, cookieOf, countAddressesToEmail, freshDeploy, shown, withWorkspaceEnv, workspaceSql, workspaceStub, type Session } from "./support";
 
 const ada = { name: "Ada Lovelace", emailAddress: "ada@example.com", password: "analytical engine" };
 const grace = { name: "Grace Hopper", emailAddress: "grace@example.com", password: "compiler design" };
@@ -114,8 +114,12 @@ function fakeBinding(refusal: () => unknown = () => undefined, held?: Promise<vo
   return { binding, sent };
 }
 
-/** Waits for the codes the Workspace is emailing, which it emails once it has answered. */
-const emailed = () => runInDurableObject(workspaceStub(), (instance: Workspace) => (instance as unknown as { lastResetCode: Promise<unknown> }).lastResetCode);
+/** Waits for the codes, and the links to join with, that the Workspace is emailing, which it emails once it has answered. */
+const emailed = () =>
+  runInDurableObject(workspaceStub(), async (instance: Workspace) => {
+    const { lastResetCode, emailingLinks } = instance as unknown as { lastResetCode: Promise<unknown>; emailingLinks: Map<string, { last: Promise<unknown> }> };
+    await Promise.all([lastResetCode, ...Array.from(emailingLinks.values(), ({ last }) => last)]);
+  });
 
 /** Runs `run` with the Workspace sending email through a fake binding, answering what it was asked to send once it has sent it. */
 async function emailing(run: () => Promise<void>, refusal?: () => unknown): Promise<EmailMessageBuilder[]> {
@@ -330,9 +334,13 @@ describe("Reset a forgotten password with an emailed code", () => {
       const administrator = await setUp();
       // Asking to join with Ada's address at the email domains emails her where to sign in.
       await change(administrator, { emailDomains: ["example.com"], settings: { emailDomainSignUp: true } });
+      const workspace = await countAddressesToEmail();
+      onTestFinished(workspace.stop);
       const joining = await emailing(async () => {
         const response = await api("/api/email_links", { method: "POST", headers: { "CF-Connecting-IP": nextAddress() }, body: JSON.stringify({ emailAddress: "ada@example.com" }) });
         expect(response.status).toBe(202);
+        // The Worker tells the Workspace the address once it has answered, without waiting for it.
+        await workspace.told(1);
       });
       expect(joining).toMatchObject([{ subject: "You already have an account at Ember" }]);
 
@@ -386,6 +394,10 @@ describe("Reset a forgotten password with an emailed code", () => {
         expect(limited.status).toBe(429);
         expect(await limited.json()).toEqual({ error: PASSWORD_RESETS_LIMITED });
         expect((await ask("ada@example.com", { ip: "203.0.113.51" })).status).toBe(202);
+        // An IPv6 network is a /64, whichever of its addresses asks.
+        for (let n = 1; n <= PASSWORD_RESETS_PER_NETWORK; n++) expect((await ask(`someone${n}@example.com`, { ip: `2001:db8:1:2::${n.toString(16)}` })).status).toBe(202);
+        expect((await ask("someone@example.com", { ip: "2001:db8:1:2:ffff::1" })).status).toBe(429);
+        expect((await ask("someone@example.com", { ip: "2001:db8:1:3::1" })).status).toBe(202);
 
         const checks = fakeSiteverify();
         const unchecked = await ask("ada@example.com", { ip: "203.0.113.50", changes: TURNSTILE_KEYS });

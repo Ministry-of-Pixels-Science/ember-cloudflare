@@ -498,6 +498,11 @@ describe("Sign up without a link", () => {
       expect(await count("users")).toBe(5);
 
       expect((await signUp(newcomer(5), { ip: "198.51.100.4" })).status).toBe(201);
+
+      // An IPv6 address counts as its /64, whichever of its addresses signs up.
+      for (let n = 6; n <= 10; n++) expect((await signUp(newcomer(n), { ip: `2001:db8:1:2::${n}` })).status, `sign-up ${n}`).toBe(201);
+      expect((await signUp(newcomer(11), { ip: "2001:db8:1:2:ffff::1" })).status).toBe(429);
+      expect((await signUp(newcomer(11), { ip: "2001:db8:1:3::1" })).status).toBe(201);
     });
 
     it("starts counting an address's sign-ups again an hour after its first", async () => {

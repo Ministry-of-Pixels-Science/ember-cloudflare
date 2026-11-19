@@ -1,7 +1,6 @@
 import {
   CANT_EMAIL_LINKS,
   EMAIL_LINK_GONE,
-  EMAIL_LINK_UNSENT,
   EMAIL_LINKS_LIMITED,
   INVITATION_GONE,
   isPasswordTooLong,
@@ -27,6 +26,7 @@ import {
 } from "@ember/protocol";
 import { agentsName } from "@ember/protocol/agents";
 import { BLOCKED_WORDS_REFUSED } from "@ember/protocol/blocked-words";
+import { waitUntil } from "cloudflare:workers";
 import { authenticate, clientOf, newSessionToken, sessionCookie, tokenDigest } from "./auth";
 import { userFormOf, userFormPhoto } from "./avatars";
 import { jsonBodyOf } from "./bodies";
@@ -235,8 +235,9 @@ export async function joinWithEmailLink(request: Request, env: Env, kind: EmailL
  * which it's emailed about instead, so that the answer never says who has one. While Email domain is off
  * it answers 403 before the body is read, sending them to sign in, and an address at another domain is
  * refused on its field. Turnstile's check comes next, while Ember has a widget's keys, and else the
- * network's limit, which stands in for it. It answers 503 while Ember can't send email, and 502 when the
- * provider refuses the email.
+ * network's limit, which stands in for it. It answers 503 while Ember can't send email, and otherwise
+ * before the Workspace is told which address to email, so that how soon it answers says nothing of the
+ * address either, and an email the provider then refuses is only logged.
  */
 export async function askForEmailLink(request: Request, env: Env): Promise<Response> {
   const [session, account] = await Promise.all([authenticate(request, env), workspace(env).account()]);
@@ -253,11 +254,17 @@ export async function askForEmailLink(request: Request, env: Env): Promise<Respo
   const link = await newEmailLink(env);
   const origin = originFor(request, account.customDomain);
   // Turnstile's check stops the scripts the network's limit guards against, so it holds only without its keys.
-  const outcome = await workspace(env).askForEmailLink(client.ip ?? "unknown", asked.emailAddress, asked.domain, link, origin, turnstile === null);
+  const outcome = await workspace(env).askForEmailLink(client.ip ?? "unknown", asked.domain, turnstile === null);
   if (outcome === "off") return formAnswer(signInInsteadOf("email_off"), 403);
   if (outcome === "limited") return formAnswer({ error: EMAIL_LINKS_LIMITED }, 429);
   if (outcome === "unsendable") return formAnswer({ error: CANT_EMAIL_LINKS }, 503);
-  if (outcome === "unsent") return formAnswer({ error: EMAIL_LINK_UNSENT }, 502);
+  // The Workspace is told the address only now, with the answer decided, and isn't waited for, so nothing
+  // it finds out about the address, or does for it, can hold the answer back.
+  waitUntil(
+    workspace(env)
+      .emailJoinLink(asked.emailAddress, asked.domain, link, origin)
+      .catch((error: unknown) => console.error("Could not have a link to join emailed", error)),
+  );
   return formAnswer({}, 202);
 }
 

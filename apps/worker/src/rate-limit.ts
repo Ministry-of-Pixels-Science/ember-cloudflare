@@ -1,3 +1,5 @@
+import { mappedV4, parseIp } from "./bans";
+
 /**
  * Counts attempts by key in fixed windows that start with each key's first attempt, as Rails'
  * `rate_limit` does on a cache that sets an entry's expiry only when it's created. The sign-in limit is
@@ -23,5 +25,26 @@ export class FixedWindowLimit {
     window.count++;
     this.windows.set(key, window);
     return window.count <= this.limit;
+  }
+}
+
+/**
+ * What an address counts as where attempts are limited by address: an IPv6 address as its /64, since
+ * whoever is given one address there is given them all, and a count kept for each would never fill; an
+ * IPv6 address that maps an IPv4 one as that; and any other text, an IPv4 address among them, as itself.
+ */
+export function networkOf(ipAddress: string): string {
+  const ip = parseIp(ipAddress);
+  if (!ip?.v6) return ipAddress;
+  const mapped = mappedV4(ip);
+  if (mapped !== null) return [24n, 16n, 8n, 0n].map((shift) => (mapped >> shift) & 0xffn).join(".");
+  const groups = [112n, 96n, 80n, 64n].map((shift) => ((ip.bits >> shift) & 0xffffn).toString(16));
+  return `${groups.join(":")}::/64`;
+}
+
+/** A `FixedWindowLimit` on attempts from an address, which counts each by its network (`networkOf`). */
+export class AddressLimit extends FixedWindowLimit {
+  override attempt(ipAddress: string, now = Date.now()): boolean {
+    return super.attempt(networkOf(ipAddress), now);
   }
 }

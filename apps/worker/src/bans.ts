@@ -4,7 +4,7 @@
 // `IPAddr` decides.
 
 /** An address as a number: 32 bits for IPv4, 128 for IPv6. */
-interface IpAddress {
+export interface IpAddress {
   v6: boolean;
   bits: bigint;
 }
@@ -38,7 +38,7 @@ function parseIpAddress(text: string): IpAddress | null {
 }
 
 /** Rust's `IpAddr` parse: IPv4 if the text starts as one, else IPv6, and nothing after. */
-function parseIp(text: string): IpAddress | null {
+export function parseIp(text: string): IpAddress | null {
   const v4 = readIpv4(text, 0);
   if (v4) return v4[1] === text.length ? { v6: false, bits: BigInt(v4[0]) } : null;
   const v6 = readIpv6(text, 0);
@@ -125,7 +125,7 @@ const bitsOf = (groups: number[]) => groups.reduce((bits, group) => (bits << 16n
 // and a ban that can't block one of someone's addresses doesn't ban them.
 
 /** The IPv4 address an IPv6 one maps, which only one in ::ffff:0:0/96 does, or null. */
-const mappedV4 = ({ v6, bits }: IpAddress) => (v6 && bits >> 32n === 0xffffn ? bits & 0xffff_ffffn : null);
+export const mappedV4 = ({ v6, bits }: IpAddress) => (v6 && bits >> 32n === 0xffffn ? bits & 0xffff_ffffn : null);
 
 /** Whether an IPv4 address is in 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 or 169.254.0.0/16. */
 const isLoopbackV4 = (bits: bigint) => (bits & 0xff00_0000n) === 0x7f00_0000n;

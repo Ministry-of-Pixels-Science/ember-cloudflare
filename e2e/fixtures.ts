@@ -68,10 +68,13 @@ export async function makeAdministrator(request: APIRequestContext, session: Ses
   expect(response.status(), await response.text()).toBe(200);
 }
 
-/** An IP address no other test uses, from the range set aside for documentation. */
+/**
+ * An IP address no other test uses, in a /64 of its own, since the limits by address count an IPv6
+ * address as its /64, from the range set aside for documentation.
+ */
 export function newAddress(): string {
-  const groups = Array.from(crypto.getRandomValues(new Uint16Array(4)), (group) => group.toString(16));
-  return `2001:db8::${groups.join(":")}`;
+  const [network, subnet, ...host] = Array.from(crypto.getRandomValues(new Uint16Array(4)), (group) => group.toString(16));
+  return `2001:db8:${network}:${subnet}::${host.join(":")}`;
 }
 
 /**
