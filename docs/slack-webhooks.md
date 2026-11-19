@@ -19,6 +19,15 @@ keeps its [buttons that act](#buttons-that-act) too; menus, and whatever else on
 answer, are left out. Mentions of Slack's people and channels show as text and notify nobody, and a
 payload can't change the bot's name, avatar or room.
 
+Status pages on Atlassian Statuspage, such as githubstatus.com, can post there too: give the address
+as the webhook in the page's Subscribe to updates dialog. Their webhooks send Statuspage's own JSON
+rather than Slack's, which the address recognizes. An incident shows as a card of its name, linked to
+the incident, its latest update, with its line breaks and a postmortem's Markdown as the status page
+shows them, its status, impact and affected components, with a bar the color of its impact that turns
+green once it's resolved, and a component's change of status shows as a line.
+A maintenance shows in blue, with its window. Cloudflare's status page sends the same JSON from its
+generic webhook, which shows the same way.
+
 ![Alerts from a monitoring bot, firing and resolved, in a room](screenshots/bots.png)
 
 @ember and the [AI agents](self-hosting.md#ai-agents) post these cards too, as what Ember tells them
