@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ProfileAnswer } from "@ember/protocol";
@@ -76,6 +76,19 @@ describe("Connect single sign-on", () => {
     await user.click(screen.getByRole("button", { name: "Connect Acme" }));
     await waitFor(() => expect(openPage).toHaveBeenCalledWith(SSO_AUTHORIZE));
     expect(sent("POST")).toEqual([{ currentPassword: "correct horse" }]);
+  });
+
+  it("stays on the page you went to while connecting was under way", async () => {
+    let answer = (_: Response) => {};
+    vi.mocked(fetch).mockImplementation(() => new Promise((resolve) => (answer = resolve)));
+    const { user } = showSection();
+    await user.type(screen.getByLabelText("Password"), "correct horse");
+    await user.click(screen.getByRole("button", { name: "Connect Acme" }));
+    expect(sent("POST")).toEqual([{ currentPassword: "correct horse" }]);
+    cleanup();
+    await act(async () => answer(Response.json({ ssoConnection: SSO_AUTHORIZE }, { status: 202 })));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(openPage).not.toHaveBeenCalled();
   });
 });
 

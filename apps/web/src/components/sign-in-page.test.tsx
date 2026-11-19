@@ -524,6 +524,16 @@ describe("Sign in with single sign-on", () => {
       expect(screen.getByRole("link", { name: "Sign in with Memberful" })).toBeInTheDocument();
     });
 
+    it("offers single sign-on alone while Memberful signs nobody in, as without its site's keys", async () => {
+      const user = userEvent.setup();
+      render(<SignInPage workspace={{ ...eitherOnly, signInWithMemberful: false }} onSignedIn={vi.fn()} />, { wrapper: FlashProvider });
+      expect(screen.getByRole("link", { name: "Sign in with Acme" })).toBeInTheDocument();
+      expect(screen.queryByRole("link", { name: "Sign in with Memberful" })).not.toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Sign in with a password" }));
+      expect(screen.getByRole("button", { name: "Sign in with Acme" })).toBeInTheDocument();
+      expect(screen.queryByText(/Memberful/)).not.toBeInTheDocument();
+    });
+
     it("asks a member whose password checks out to connect their account at either", async () => {
       respond(202, { memberfulConnection: MEMBERFUL_AUTHORIZE, ssoConnection: SSO_AUTHORIZE });
       render(<SignInPage workspace={eitherOnly} onSignedIn={vi.fn()} />, { wrapper: FlashProvider });

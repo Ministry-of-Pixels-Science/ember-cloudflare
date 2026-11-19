@@ -169,7 +169,11 @@ export function SsoSetup({ sso, onSaved, onClose, onFailed }: Props) {
               Let people sign in with Okta, Entra ID, Google Workspace, or any other OpenID Connect provider.
             </DialogDescription>
             <ol aria-label="Steps to set up your provider" className="mb-4 flex list-decimal flex-col gap-2 ps-5">
-              <li>In your provider, create a web app that uses the authorization code flow with PKCE.</li>
+              <li>
+                In your provider, create a web app that uses the authorization code flow with PKCE. Let it give refresh tokens, often called the refresh
+                token grant or <code>offline_access</code>, so that Ember checks every hour that each person may still sign in. Without them, it checks
+                only as people sign in.
+              </li>
               <li>
                 Set its redirect URI to <strong className="wrap-anywhere">{`${origin}${SSO_CALLBACK_PATH}`}</strong>.
               </li>
@@ -231,7 +235,7 @@ export function SsoSetup({ sso, onSaved, onClose, onFailed }: Props) {
                 id="sso_groups_claim"
                 label="Groups claim"
                 placeholder={DEFAULT_GROUPS_CLAIM}
-                help="The ID token claim that lists each person's groups or roles."
+                help="The claim that lists each person's groups or roles, in the ID token or the userinfo endpoint's answer. Where both give it, the userinfo endpoint's counts."
                 {...fieldProps}
               />
               <TextField
@@ -260,7 +264,8 @@ export function SsoSetup({ sso, onSaved, onClose, onFailed }: Props) {
                   Link accounts by verified email
                   <span id="sso_links_verified_emails_help" className={cn(NOTE, "block")}>
                     The first time someone signs in, match them to the member with the same verified email. Administrators are never matched. When
-                    this is off, members connect their accounts from their profiles.
+                    this is off, members connect their accounts from their profiles. Only check it if your provider verifies addresses and doesn't let
+                    people change their own, since whoever has an address there gets the account here.
                   </span>
                 </span>
               </label>
@@ -273,7 +278,8 @@ export function SsoSetup({ sso, onSaved, onClose, onFailed }: Props) {
         ) : (
           <>
             <DialogDescription className="mb-4 leading-[1.65]">
-              People can sign in with your provider once <em>Single sign-on</em> is on.
+              Ember found your provider, but it first uses the Client ID and secret as someone signs in. Once <em>Single sign-on</em> is on, sign in
+              with your provider in a private window to check them.
             </DialogDescription>
             <Actions back={null} next={close} nextLabel="Done" />
           </>

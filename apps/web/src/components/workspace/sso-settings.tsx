@@ -110,7 +110,11 @@ export function SingleSignOnSettings({
             ) : (
               <>
                 People sign in at <strong className="wrap-anywhere">{sso.issuer}</strong> using the <em>Sign in with {sso.name}</em> button.
-                {sso.allowedGroups.length > 0 && " Only allowed groups have access."} When this is off, new people can't join, but members can still sign in.
+                {sso.allowedGroups.length > 0 && " Only allowed groups have access."}
+                {/* Beside Members only, turning it off turns SSO only off too, which closes it. */}
+                {beside === null
+                  ? " When this is off, new people can't join, but members can still sign in."
+                  : " When this is off, nobody signs in with it while Memberful is members only, not even those who joined with it."}
               </>
             )}
           </p>

@@ -88,8 +88,11 @@ export function MemberfulSettings({
               "Members of a Memberful site join and sign in with their Memberful account. Turning this on sets up Memberful first."
             ) : (
               <>
-                Members of <strong className="wrap-anywhere">{site}</strong> join and sign in with their Memberful account. Turned off, it lets nobody new
-                join, but those who did keep signing in with it.
+                Members of <strong className="wrap-anywhere">{site}</strong> join and sign in with their Memberful account.
+                {/* Beside SSO only, turning it off turns Members only off too, which closes it. */}
+                {beside === null
+                  ? " Turned off, it lets nobody new join, but those who did keep signing in with it."
+                  : " Turned off, it lets nobody in while SSO only is on, not even those who joined with it."}
                 {webhooks && " A member whose membership lapses is signed out until it's renewed."}
               </>
             )}

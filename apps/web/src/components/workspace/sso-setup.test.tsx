@@ -56,6 +56,10 @@ describe("Set up single sign-on", () => {
     expect(within(setup).getByRole("heading", { name: "Set up single sign-on" })).toHaveFocus();
     const [create, redirect, logout, enter] = within(screen.getByRole("list", { name: "Steps to set up your provider" })).getAllByRole("listitem");
     expect(create).toHaveTextContent("create a web app that uses the authorization code flow with PKCE.");
+    // Without refresh tokens, Ember can't check that people may still sign in.
+    expect(create).toHaveTextContent(
+      "Let it give refresh tokens, often called the refresh token grant or offline_access, so that Ember checks every hour that each person may still sign in. Without them, it checks only as people sign in.",
+    );
     expect(redirect).toHaveTextContent(`Set its redirect URI to ${location.origin}/auth/sso/callback.`);
     expect(logout).toHaveTextContent(`set its back-channel logout URI to ${location.origin}/auth/sso/backchannel_logout.`);
     expect(enter).toHaveTextContent("Enter the app's details below.");
@@ -63,9 +67,16 @@ describe("Set up single sign-on", () => {
     expect(field("Issuer URL")).toHaveValue("");
     expect(field("Button name")).toHaveAttribute("placeholder", "SSO");
     expect(field("Groups claim")).toHaveAttribute("placeholder", "groups");
+    expect(field("Groups claim")).toHaveAccessibleDescription(
+      "The claim that lists each person's groups or roles, in the ID token or the userinfo endpoint's answer. Where both give it, the userinfo endpoint's counts.",
+    );
     expect(field("Allowed groups").tagName).toBe("TEXTAREA");
     expect(field("Allowed groups")).toHaveAccessibleDescription(/urn:zitadel:iam:org:project:roles/);
     expect(screen.getByRole("checkbox", { name: /Link accounts by verified email/ })).not.toBeChecked();
+    // Whoever has an address at the provider gets the account here that has it.
+    expect(screen.getByRole("checkbox", { name: /Link accounts by verified email/ })).toHaveAccessibleDescription(
+      /Only check it if your provider verifies addresses and doesn't let people change their own, since whoever has an address there gets the account here\.$/,
+    );
     expect(button("Save")).toBeDisabled();
   });
 
@@ -96,7 +107,10 @@ describe("Set up single sign-on", () => {
     await user.type(field("Allowed groups"), "staff{Enter}contractors{Enter}");
     await user.click(screen.getByRole("checkbox", { name: /Link accounts by verified email/ }));
     await user.click(button("Save"));
-    expect(await dialog("Single sign-on is ready")).toBeInTheDocument();
+    // Saving checks the provider's discovery document, but not the Client ID and secret, which only a sign-in does.
+    expect(await dialog("Single sign-on is ready")).toHaveAccessibleDescription(
+      "Ember found your provider, but it first uses the Client ID and secret as someone signs in. Once Single sign-on is on, sign in with your provider in a private window to check them.",
+    );
     expect(sent()).toEqual([
       {
         issuer: ISSUER,

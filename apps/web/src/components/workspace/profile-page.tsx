@@ -24,6 +24,7 @@ import { useFlash } from "@/components/flash";
 import { LogOut } from "@/components/icons/iconoir";
 import { Input } from "@/components/ui/input";
 import { UsernameField } from "@/components/username-field";
+import { useAccount } from "@/hooks/use-account";
 import { PeopleContext } from "@/hooks/use-directory";
 import { useMounted } from "@/hooks/use-mounted";
 import { usePush } from "@/hooks/use-push";
@@ -177,6 +178,7 @@ export function ProfilePage({ me, rooms, askForRoom, huddleSounds, askForHuddleS
   const disconnectedMemberful = useRef(false);
   /** Likewise for your account at the single sign-on provider. */
   const disconnectedSso = useRef(false);
+  const account = useAccount();
   const people = useContext(PeopleContext);
   const back = useBackPath();
   const flash = useFlash();
@@ -317,6 +319,10 @@ export function ProfilePage({ me, rooms, askForRoom, huddleSounds, askForHuddleS
   const avatarUrl = picture && avatarVersionOf(picture.avatarUrl) >= avatarVersionOf(listed) ? picture.avatarUrl : listed;
   // Someone Memberful or single sign-on signs in who has no password is given none, as the Worker refuses one: it's their way in.
   const signsInElsewhereAlone = !hasPassword && Boolean(memberful?.connected || sso?.connected);
+  // A way in signs nobody in while the other is the only way in without it, as the Worker has it (`rulesOf`).
+  const ssoName = sso?.name ?? "single sign-on";
+  const memberfulClosed = account.ssoSignIn && !account.memberfulSignIn ? `Signing in with Memberful is off while members sign in with ${ssoName}.` : undefined;
+  const ssoClosed = account.memberfulSignIn && !account.ssoSignIn ? `Signing in with ${ssoName} is off while members sign in with Memberful.` : undefined;
 
   const logOut = (
     <button type="button" onClick={() => leave(onSignOut)} className={HEADER_TEXT_BUTTON}>
@@ -435,6 +441,7 @@ export function ProfilePage({ me, rooms, askForRoom, huddleSounds, askForHuddleS
             hasEmailAddress={hasEmailAddress}
             membershipNeeded={membershipNeeded}
             signsInOtherwise={!hasPassword && sso?.connected ? MEMBERFUL_WITH_SSO : undefined}
+            closed={memberfulClosed}
             onDisconnected={disconnected}
             onFailed={onFailed}
           />
@@ -448,6 +455,7 @@ export function ProfilePage({ me, rooms, askForRoom, huddleSounds, askForHuddleS
             hasEmailAddress={hasEmailAddress}
             membershipNeeded={membershipNeeded}
             signsInOtherwise={!hasPassword && memberful?.connected ? SSO_WITH_MEMBERFUL : undefined}
+            closed={ssoClosed}
             onDisconnected={disconnectedFromSso}
             onFailed={onFailed}
           />

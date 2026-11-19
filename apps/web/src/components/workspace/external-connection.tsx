@@ -31,6 +31,8 @@ export interface ConnectionProps {
    * refuses one then: holding your session would be all there was to check before adding a way in.
    */
   signsInOtherwise?: string;
+  /** Why it signs nobody in, while the other way is the only way in without it, said in place of how you sign in. */
+  closed?: string;
   /** Shows your profile as disconnecting answered it. */
   onDisconnected: (answer: ProfileAnswer) => void;
   /** Says why connecting didn't start, or disconnecting didn't work, as the workspace's alerts do. */
@@ -73,6 +75,7 @@ export function ExternalConnection({
   hasEmailAddress,
   membershipNeeded,
   signsInOtherwise,
+  closed,
   onDisconnected,
   onFailed,
 }: Props) {
@@ -90,11 +93,17 @@ export function ExternalConnection({
     event.preventDefault();
     if (busy) return;
     setBusy(true);
-    connect(hasPassword ? (passwordInput.current?.value ?? "") : undefined).then(openPage, (error: unknown) => {
-      if (!mounted.current && !isSignedOut(error)) return;
-      settle();
-      onFailed(error);
-    });
+    connect(hasPassword ? (passwordInput.current?.value ?? "") : undefined).then(
+      (page) => {
+        // Unless you've gone to another page meanwhile, where the browser stays.
+        if (mounted.current) openPage(page);
+      },
+      (error: unknown) => {
+        if (!mounted.current && !isSignedOut(error)) return;
+        settle();
+        onFailed(error);
+      },
+    );
   };
 
   const startDisconnecting = (event: FormEvent) => {
@@ -152,7 +161,7 @@ export function ExternalConnection({
         <>
           <p>
             {who ? `Connected as ${who}.` : `Your ${name} account is connected.`}
-            {signsYouIn ? ` You sign in with ${name}.` : ` You can sign in with ${name} or your password.`}
+            {closed ? ` ${closed}` : signsYouIn ? ` You sign in with ${name}.` : ` You can sign in with ${name} or your password.`}
           </p>
           {signsInWithPassword ? (
             <form onSubmit={startDisconnecting} className={AUTH_FORM}>

@@ -829,6 +829,24 @@ describe("Connect single sign-on", () => {
     expect(passwordHelp()).toHaveTextContent("Leave blank to keep your current password. Changing it disconnects single sign-on.");
   });
 
+  it("says single sign-on signs nobody in while members sign in with Memberful, rather than that you can sign in with it", async () => {
+    serve({ loaded: () => Response.json({ profile: { ...profile, memberful: CONNECTED, sso: { ...SSO_CONNECTED, ssoOnly: false } }, transferId: LOADED_LINK } satisfies ProfileAnswer) });
+    showPage({ ...account, memberfulJoin: true, memberfulSignIn: true, ssoJoin: true });
+    await loaded();
+    expect(sso()).toHaveTextContent("Connected as Ada Lovelace (ada@example.com). Signing in with Acme is off while members sign in with Memberful.");
+    expect(screen.getByRole("region", { name: "Memberful" })).toHaveTextContent("Connected as Ada Lovelace (ada@example.com). You sign in with Memberful.");
+  });
+
+  it("says Memberful signs nobody in while members sign in with the provider", async () => {
+    serve({
+      loaded: () => Response.json({ profile: { ...profile, memberful: { membersOnly: false, connected: ADAS_ACCOUNT }, sso: SSO_CONNECTED }, transferId: LOADED_LINK } satisfies ProfileAnswer),
+    });
+    showPage({ ...account, memberfulJoin: true, ssoJoin: true, ssoSignIn: true });
+    await loaded();
+    expect(screen.getByRole("region", { name: "Memberful" })).toHaveTextContent("Connected as Ada Lovelace (ada@example.com). Signing in with Memberful is off while members sign in with Acme.");
+    expect(sso()).toHaveTextContent("Connected as Ada Lovelace (ada@example.com). You sign in with Acme.");
+  });
+
   it("says a new password disconnects both accounts while both are connected", async () => {
     serve({ loaded: () => Response.json({ profile: { ...profile, memberful: CONNECTED, sso: SSO_CONNECTED }, transferId: LOADED_LINK } satisfies ProfileAnswer) });
     showPage();

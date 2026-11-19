@@ -230,6 +230,22 @@ export function WorkspaceSettingsPage({
     );
   }, [memberfulOn, memberfulUnknown, mounted, onFailed]);
 
+  // Single sign-on turned on elsewhere, by an administrator who set its provider up there, likewise: the
+  // provider is loaded again, for administrators, whom alone the settings tell of it, rather than the card
+  // saying none is set up.
+  const ssoOn = account.ssoJoin;
+  const ssoWasOn = useRef(ssoOn);
+  const ssoUnknown = settings?.canAdminister === true && settings.sso === null;
+  useEffect(() => {
+    const turnedOn = ssoOn && !ssoWasOn.current;
+    ssoWasOn.current = ssoOn;
+    if (!turnedOn || !ssoUnknown) return;
+    fetchWorkspaceSettings().then(
+      ({ sso }) => mounted.current && setSettings((settings) => settings && { ...settings, sso }),
+      (error: unknown) => (mounted.current || isSignedOut(error)) && onFailed(error),
+    );
+  }, [ssoOn, ssoUnknown, mounted, onFailed]);
+
   // The name, the tagline and, if it was moved, the translation buttons' switch, sent together.
   const save = (event: FormEvent) => {
     event.preventDefault();

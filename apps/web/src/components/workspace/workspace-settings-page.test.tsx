@@ -1525,6 +1525,13 @@ describe("Sign in with Memberful", () => {
     expect(screen.queryByText("Only the people administrators invite can join.")).not.toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "Memberful" })).not.toBeInTheDocument();
   });
+
+  it("tells members that the provider's people join too while single sign-on lets them in beside Memberful", async () => {
+    const memberful = withMemberful(withKeys);
+    serve({ ...memberful, canAdminister: false, account: { ...memberful.account, joinLink: false, ssoJoin: true } });
+    showPage(asLinus);
+    expect(await screen.findByText(/join by signing in with Memberful/)).toHaveTextContent(`Members of ${SITE} join by signing in with Memberful, and others with single sign-on.`);
+  });
 });
 
 describe("Ways to join", () => {
@@ -3480,6 +3487,63 @@ describe("Single sign-on", () => {
     await user.click(memberful);
     expect(memberful).toBeChecked();
     expect(saved()).toEqual([{ settings: { memberfulJoin: false } }, { settings: { memberfulSignIn: true } }]);
+  });
+
+  it("waits for SSO only's move to be saved before Memberful's switch turns Members only on beside it, which asks nothing only because SSO only is on", async () => {
+    let answer = (_: Response) => {};
+    const ways = { ssoJoin: true, memberfulJoin: true };
+    serve(withAccount({ ...withSso, memberfulSite: "https://example.memberful.com" }, ways), { saved: () => new Promise((resolve) => (answer = resolve)) });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const { user } = showPage();
+    await user.click(await way("SSO only"));
+    const memberful = await way("Memberful");
+    expect(memberful).not.toBeChecked();
+    expect(memberful).toBeDisabled();
+    // Were SSO only refused, Members only alone would close single sign-on without asking.
+    await user.click(memberful);
+    expect(saved()).toEqual([{ settings: { ssoSignIn: true } }]);
+
+    await act(async () => answer(Response.json({ account: { ...withSso.account, ...ways, ssoSignIn: true } })));
+    expect(memberful).toBeEnabled();
+    await user.click(memberful);
+    expect(saved()).toEqual([{ settings: { ssoSignIn: true } }, { settings: { memberfulSignIn: true } }]);
+    expect(confirm).toHaveBeenCalledOnce();
+  });
+
+  it("warns, as SSO only is turned on, that it closes Memberful to the members who joined with it, though Memberful lets nobody new join", async () => {
+    serve(withAccount({ ...withSso, memberfulSite: "https://example.memberful.com" }, { ssoJoin: true }));
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const { user } = showPage();
+    await user.click(await way("SSO only"));
+    expect(confirm).toHaveBeenCalledWith(`${CONFIRM_SSO_ONLY}${CLOSES_MEMBERFUL}`);
+    expect(saved()).toEqual([]);
+  });
+
+  it("says that turning either off while both are the only ways in lets nobody in with it, not even those who joined with it", async () => {
+    serve(withAccount({ ...withSso, memberfulSite: "https://example.memberful.com" }, { ssoJoin: true, ssoSignIn: true, memberfulJoin: true, memberfulSignIn: true }));
+    showPage();
+    expect(await way("Memberful")).toHaveAccessibleDescription(
+      "Members of https://example.memberful.com join and sign in with their Memberful account. Turned off, it lets nobody in while SSO only is on, not even those who joined with it.",
+    );
+    expect(await way("Single sign-on")).toHaveAccessibleDescription(
+      "People sign in at https://example.zitadel.cloud using the Sign in with Acme button. When this is off, nobody signs in with it while Memberful is members only, not even those who joined with it.",
+    );
+    expect(screen.getByRole("region", { name: "Memberful" })).toHaveTextContent("Nobody else can join but the people you invite, and only they and administrators sign in with a password.");
+  });
+
+  it("hears of the provider set up in another tab as single sign-on is turned on there, rather than saying none is set up", async () => {
+    showPage();
+    const on = await way("Single sign-on");
+    const loads = () => vi.mocked(fetch).mock.calls.filter(([input, init]) => `${init?.method ?? "GET"} ${String(input)}` === "GET /api/account").length;
+    expect(loads()).toBe(1);
+
+    serve(withSso);
+    act(() => workspaceSays({ ...asAdministrator.account, ssoJoin: true }));
+    expect(on).toBeChecked();
+    await waitFor(() => expect(on).toHaveAccessibleDescription(/^People sign in at https:\/\/example\.zitadel\.cloud using the Sign in with Acme button\./));
+    expect(screen.getByRole("button", { name: "Change settings" })).toBeInTheDocument();
+    expect(loads()).toBe(2);
+    expect(saved()).toEqual([]);
   });
 
   it("is set aside while Open lets anyone join, as Memberful is", async () => {

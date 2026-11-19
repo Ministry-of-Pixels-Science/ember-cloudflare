@@ -73,7 +73,8 @@ const connectionsOf = (answer: ElsewhereConnection, ssoName: string): Connection
 export function SignInPage({ workspace, onSignedIn }: { workspace: SignedOutWorkspace; onSignedIn: (me: Me) => void }) {
   const { memberfulSignIn: membersOnly, ssoSignIn: ssoOnly } = workspace.account;
   const ssoName = workspace.signInWithSso ?? DEFAULT_SSO_NAME;
-  const eitherOnly = membersOnly && ssoOnly;
+  // While both are the only ways in, Memberful's link goes beside single sign-on's, unless it signs nobody in, as without its site's keys.
+  const eitherOnly = membersOnly && ssoOnly && workspace.signInWithMemberful;
   const [arrival] = useState(problemOnArrival);
   const [asGuest, setAsGuest] = useState(false);
   // Someone whose email address elsewhere is someone's here is asked for that someone's password.
