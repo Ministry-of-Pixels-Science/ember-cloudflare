@@ -84,6 +84,17 @@ export interface Env {
   /** The secret Memberful signs its webhooks to `/webhooks/memberful` with, which its Webhooks settings show. */
   MEMBERFUL_WEBHOOK_SECRET?: string;
   /**
+   * The issuer of an OpenID Connect provider whose people may join and sign in once an administrator
+   * turns single sign-on on (sso.ts), such as https://example.zitadel.cloud, and the client ID and secret
+   * of the app registered there for Ember. All three together take the place of any an administrator
+   * gives on the Single sign-on card, which still sets what the sign-in page calls the provider, and
+   * whom it lets in.
+   */
+  SSO_ISSUER?: string;
+  SSO_CLIENT_ID?: string;
+  /** That app's client secret, which never leaves the Worker and the Workspace. */
+  SSO_CLIENT_SECRET?: string;
+  /**
    * The site key of a Cloudflare Turnstile widget, whose check the open sign-up form shows, and the forms
    * that ask Ember to email a link to join or a code to reset a password, to check that whoever fills
    * them in is a person (turnstile.ts). With the secret key below, it takes the place of the keys an

@@ -228,7 +228,7 @@ describe("Initials avatars", () => {
 
 describe("Workspace logo", () => {
   it("shows Ember's flame, or the workspace's logo, filling a 56px square with rounded corners", () => {
-    const account = { name: "Analytical Engines", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true };
+    const account = { name: "Analytical Engines", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, ssoJoin: false, ssoSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true };
     const { rerender } = render(<AccountContext value={account}>{railAt("home")}</AccountContext>);
     const brand = screen.getByRole("link", { name: "Ember home" });
     expect(brand.querySelector("img")).toHaveAttribute("src", "/ember-icon.png");
@@ -258,6 +258,8 @@ describe("Navigation icons", () => {
       openSignUp: false,
       memberfulJoin: false,
       memberfulSignIn: false,
+      ssoJoin: false,
+      ssoSignIn: false,
       emailDomainSignUp: false,
       emailDomains: [],
       navigationIcons: { home: "coffee", search: "iconoir:solid:heart" },

@@ -8,6 +8,7 @@ import {
   signInSaying,
   type Bootstrap,
 } from "@ember/protocol";
+import { SSO_SIGN_IN_NEEDED, SSO_SIGN_IN_PROBLEMS } from "@ember/protocol/sso";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -23,9 +24,10 @@ const workspace: Omit<Bootstrap, "user"> = {
   setupPlaceholders: { name: "Kevin Rose", emailAddress: "kevin@kevinrose.com" },
   guestSignIn: false,
   signInWithMemberful: false,
+  signInWithSso: null,
   turnstileSiteKey: null,
   passwordResetCodes: false,
-  account: { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true },
+  account: { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, ssoJoin: false, ssoSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true },
   version: "0.1",
   vapidPublicKey: null,
   platform: CHROME_MAC,
@@ -403,7 +405,7 @@ describe("Connect Memberful", () => {
 
     const credentials = { emailAddress: "ada@example.com", password: "correct horse", returnTo: "/rooms/abc?tab=pins" };
     expect(fetch).toHaveBeenCalledWith("/api/session", expect.objectContaining({ method: "POST", body: JSON.stringify(credentials) }));
-    expect(await screen.findByText("Members sign in with Memberful now. Connect your Memberful account to keep signing in as yourself.")).toBeInTheDocument();
+    expect(await screen.findByText("This workspace now uses Memberful. Connect your Memberful account to keep signing in.")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Connect Memberful" })).toHaveAttribute("href", MEMBERFUL_OAUTH);
     expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
@@ -426,6 +428,121 @@ describe("Connect Memberful", () => {
     render(<SignInPage workspace={withMemberful} onSignedIn={vi.fn()} />, { wrapper: FlashProvider });
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(location.search).toBe("");
+  });
+});
+
+describe("Sign in with single sign-on", () => {
+  const ssoOnly = { ...workspace, signInWithSso: "Acme", account: { ...workspace.account, ssoJoin: true, ssoSignIn: true } };
+  /** Where the provider signs someone in to connect their account there. */
+  const SSO_AUTHORIZE = "https://example.zitadel.cloud/oauth/v2/authorize?client_id=ember&state=s7a7e";
+
+  it("offers Sign in with the provider in place of the password form while SSO only is on, coming back to the page this tab was sent from", () => {
+    sessionStorage.setItem("ember:return-to", "/rooms/abc?tab=pins");
+    render(<SignInPage workspace={ssoOnly} onSignedIn={vi.fn()} />, { wrapper: FlashProvider });
+    expect(screen.getByRole("link", { name: "Sign in with Acme" })).toHaveAttribute("href", "/auth/sso?return_to=%2Frooms%2Fabc%3Ftab%3Dpins");
+    expect(screen.queryByLabelText("Email address")).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Sign in with Memberful" })).not.toBeInTheDocument();
+    expect(screen.getByText("Have a password?")).toBeInTheDocument();
+  });
+
+  it("lets someone sign in with a password instead, and back", async () => {
+    const user = userEvent.setup();
+    render(<SignInPage workspace={ssoOnly} onSignedIn={vi.fn()} />, { wrapper: FlashProvider });
+    await user.click(screen.getByRole("button", { name: "Sign in with a password" }));
+    expect(screen.getByLabelText("Email address")).toHaveFocus();
+    expect(screen.getByText("Use single sign-on?")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Sign in with Acme" }));
+    expect(screen.getByRole("link", { name: "Sign in with Acme" })).toHaveAttribute("href", "/auth/sso");
+  });
+
+  it("offers it under the password form while it's offered beside the password, and beside Memberful", () => {
+    render(<SignInPage workspace={{ ...workspace, signInWithMemberful: true, signInWithSso: "Acme" }} onSignedIn={vi.fn()} />, { wrapper: FlashProvider });
+    expect(screen.getByLabelText("Email address")).toBeInTheDocument();
+    expect(screen.getByText("Use single sign-on?")).toBeInTheDocument();
+    const sso = screen.getByRole("link", { name: "Sign in with Acme" });
+    expect(sso).toHaveAttribute("href", "/auth/sso");
+    expect(screen.getByRole("link", { name: "Sign in with Memberful" }).compareDocumentPosition(sso)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+
+  it("offers nothing of it while it isn't offered", () => {
+    render(<SignInPage workspace={workspace} onSignedIn={vi.fn()} />, { wrapper: FlashProvider });
+    expect(screen.queryByText("Use single sign-on?")).not.toBeInTheDocument();
+  });
+
+  it("says what the server says when a member signs in with a password", async () => {
+    respond(403, { error: SSO_SIGN_IN_NEEDED });
+    render(<SignInPage workspace={ssoOnly} onSignedIn={vi.fn()} />, { wrapper: FlashProvider });
+    await userEvent.click(screen.getByRole("button", { name: "Sign in with a password" }));
+    await signIn("compiler");
+    expect(await screen.findByRole("alert")).toHaveTextContent(SSO_SIGN_IN_NEEDED);
+  });
+
+  it("says why signing in with single sign-on didn't work, once, taking it out of the address", () => {
+    history.replaceState(null, "", "/session/new?sso=membership#top");
+    render(<SignInPage workspace={ssoOnly} onSignedIn={vi.fn()} />, { wrapper: FlashProvider });
+    expect(screen.getByRole("alert")).toHaveTextContent(SSO_SIGN_IN_PROBLEMS.membership);
+    expect(`${location.pathname}${location.search}${location.hash}`).toBe("/session/new#top");
+  });
+
+  it("asks for a password at once when someone here has the provider's email address already", () => {
+    history.replaceState(null, "", "/session/new?sso=taken");
+    render(<SignInPage workspace={ssoOnly} onSignedIn={vi.fn()} />, { wrapper: FlashProvider });
+    expect(screen.getByRole("alert")).toHaveTextContent(SSO_SIGN_IN_PROBLEMS.taken);
+    expect(screen.getByLabelText("Password")).toBeInTheDocument();
+  });
+
+  it("asks a member whose password checks out to connect their account at the provider", async () => {
+    respond(202, { ssoConnection: SSO_AUTHORIZE });
+    const onSignedIn = vi.fn();
+    render(<SignInPage workspace={ssoOnly} onSignedIn={onSignedIn} />, { wrapper: FlashProvider });
+    await userEvent.click(screen.getByRole("button", { name: "Sign in with a password" }));
+    await signIn("correct horse");
+    expect(await screen.findByText("This workspace now uses Acme. Connect your Acme account to keep signing in.")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Connect Acme" })).toHaveAttribute("href", SSO_AUTHORIZE);
+    expect(onSignedIn).not.toHaveBeenCalled();
+  });
+
+  describe("while Members only is on too", () => {
+    const eitherOnly = { ...ssoOnly, signInWithMemberful: true, account: { ...ssoOnly.account, memberfulJoin: true, memberfulSignIn: true } };
+    const MEMBERFUL_AUTHORIZE = "https://example.memberful.com/oauth?client_id=ember&state=m3m";
+
+    it("offers Sign in with the provider in place of the password form, and Sign in with Memberful under it", () => {
+      render(<SignInPage workspace={eitherOnly} onSignedIn={vi.fn()} />, { wrapper: FlashProvider });
+      const sso = screen.getByRole("link", { name: "Sign in with Acme" });
+      expect(sso).toHaveAttribute("href", "/auth/sso");
+      expect(sso.compareDocumentPosition(screen.getByRole("link", { name: "Sign in with Memberful" }))).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+      expect(screen.queryByLabelText("Email address")).not.toBeInTheDocument();
+      expect(screen.getByText("Have a password?")).toBeInTheDocument();
+    });
+
+    it("goes back to both from the password form", async () => {
+      const user = userEvent.setup();
+      render(<SignInPage workspace={eitherOnly} onSignedIn={vi.fn()} />, { wrapper: FlashProvider });
+      await user.click(screen.getByRole("button", { name: "Sign in with a password" }));
+      await user.click(screen.getByRole("button", { name: "Sign in with Acme or Memberful" }));
+      expect(screen.getByRole("link", { name: "Sign in with Acme" })).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "Sign in with Memberful" })).toBeInTheDocument();
+    });
+
+    it("offers single sign-on alone while Memberful signs nobody in, as without its site's keys", async () => {
+      const user = userEvent.setup();
+      render(<SignInPage workspace={{ ...eitherOnly, signInWithMemberful: false }} onSignedIn={vi.fn()} />, { wrapper: FlashProvider });
+      expect(screen.getByRole("link", { name: "Sign in with Acme" })).toBeInTheDocument();
+      expect(screen.queryByRole("link", { name: "Sign in with Memberful" })).not.toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Sign in with a password" }));
+      expect(screen.getByRole("button", { name: "Sign in with Acme" })).toBeInTheDocument();
+      expect(screen.queryByText(/Memberful/)).not.toBeInTheDocument();
+    });
+
+    it("asks a member whose password checks out to connect their account at either", async () => {
+      respond(202, { memberfulConnection: MEMBERFUL_AUTHORIZE, ssoConnection: SSO_AUTHORIZE });
+      render(<SignInPage workspace={eitherOnly} onSignedIn={vi.fn()} />, { wrapper: FlashProvider });
+      await userEvent.click(screen.getByRole("button", { name: "Sign in with a password" }));
+      await signIn("correct horse");
+      expect(await screen.findByText("This workspace now uses Memberful and Acme. Connect your account at either to keep signing in.")).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "Connect Memberful" })).toHaveAttribute("href", MEMBERFUL_AUTHORIZE);
+      expect(screen.getByRole("link", { name: "Connect Acme" })).toHaveAttribute("href", SSO_AUTHORIZE);
+    });
   });
 });
 

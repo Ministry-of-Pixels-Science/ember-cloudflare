@@ -60,6 +60,8 @@ const isSameAccount = (a: Account, b: Account) =>
   a.openSignUp === b.openSignUp &&
   a.memberfulJoin === b.memberfulJoin &&
   a.memberfulSignIn === b.memberfulSignIn &&
+  a.ssoJoin === b.ssoJoin &&
+  a.ssoSignIn === b.ssoSignIn &&
   a.emailDomainSignUp === b.emailDomainSignUp &&
   a.emailDomains.length === b.emailDomains.length &&
   a.emailDomains.every((domain, index) => domain === b.emailDomains[index]) &&

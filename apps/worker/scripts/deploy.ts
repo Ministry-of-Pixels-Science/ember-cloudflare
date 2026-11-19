@@ -98,8 +98,9 @@ const SETUP_TOKEN = /^[0-9a-f]{64}$/;
 const inPublicLog = () => (!!process.env.CI || !process.stdout.isTTY) && !process.env.WORKERS_CI;
 
 /**
- * The keys of a Memberful custom app, and the secret its site signs webhooks with, then a Turnstile
- * widget's, and a Resend API key, which only the deployer can give.
+ * The keys of a Memberful custom app, and the secret its site signs webhooks with, then the single
+ * sign-on provider's issuer and the app registered there, a Turnstile widget's keys, and a Resend API
+ * key, which only the deployer can give.
  */
 const GIVEN_KEYS = [
   "MEMBERFUL_URL",
@@ -107,6 +108,9 @@ const GIVEN_KEYS = [
   "MEMBERFUL_CLIENT_SECRET",
   "MEMBERFUL_API_KEY",
   "MEMBERFUL_WEBHOOK_SECRET",
+  "SSO_ISSUER",
+  "SSO_CLIENT_ID",
+  "SSO_CLIENT_SECRET",
   "TURNSTILE_SITE_KEY",
   "TURNSTILE_SECRET_KEY",
   "RESEND_API_KEY",

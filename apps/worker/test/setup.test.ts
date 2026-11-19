@@ -49,9 +49,10 @@ describe("Set up the workspace", () => {
       setupPlaceholders: { name: "Kevin Rose", emailAddress: "kevin@kevinrose.com" },
       guestSignIn: true,
       signInWithMemberful: false,
+      signInWithSso: null,
       turnstileSiteKey: null,
       passwordResetCodes: false,
-      account: { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true },
+      account: { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, ssoJoin: false, ssoSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true },
       version: "0.5 beta 9",
       // The suite's key pair's public key, uncompressed, without padding.
       vapidPublicKey: "BEYXTBB5_jNhNzXDmx5KEU55Vbbd-u--Lk9rM5OFQvUkPIBwZJ9QzAq0zdEzFw6yTV8cTriz_qYBVicY02_VxTQ",

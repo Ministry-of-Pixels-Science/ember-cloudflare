@@ -65,6 +65,7 @@ import {
 import type { AgentAccess, AgentProfile, AgentRoom } from "@ember/protocol/agents";
 import type { AppId } from "@ember/protocol/apps";
 import { ALL_HUDDLE_SOUNDS, PAST_HUDDLES_LISTED, type HuddleSoundChanges, type HuddleSounds, type LiveHuddle, type PastHuddle } from "@ember/protocol/huddles";
+import { DEFAULT_GROUPS_CLAIM, DEFAULT_SSO_NAME } from "@ember/protocol/sso";
 import { statement, type Db, type Statement } from "./db";
 import type { StoredPicture } from "./files/pictures";
 import { INVITATION_TTL_SECONDS, invitationPayload, messagePayload, type PushPayload } from "./push/payload";
@@ -117,6 +118,8 @@ export const NEW_ACCOUNT_LOOKS = {
   openSignUp: false,
   memberfulJoin: false,
   memberfulSignIn: false,
+  ssoJoin: false,
+  ssoSignIn: false,
   emailDomainSignUp: false,
   emailDomains: [] as string[],
   navigationIcons: {},
@@ -150,6 +153,8 @@ export interface JoinableAccount extends Omit<Account, "logo" | "huddles"> {
   assistantPromptTemplate: string | null;
   /** The SFU app huddles run through, while an administrator has them on, or else null. */
   huddles: SavedHuddles | null;
+  /** The single sign-on provider an administrator set up, or else null. */
+  sso: SavedSso | null;
   /** Whether AI apps may connect to Ember as the people in it, which an administrator turns on. Off until one does. */
   outsideAi: boolean;
   /** Where a deploy puts Ember, as the latest page opened there told it, or null until one has (`EmberAddresses.deployed`). */
@@ -164,6 +169,22 @@ export interface JoinableAccount extends Omit<Account, "logo" | "huddles"> {
 export interface SavedTurnstileKeys {
   siteKey: string;
   sealedSecretKey: string;
+}
+
+/**
+ * The single sign-on provider as the account keeps it: its issuer and the app registered there, its
+ * secret sealed (`seal`), each null while the deployment's secrets give them, and what the Single
+ * sign-on card sets besides (`SsoSettings`).
+ */
+export interface SavedSso {
+  issuer: string | null;
+  clientId: string | null;
+  sealedClientSecret: string | null;
+  name: string;
+  scopes: string[];
+  groupsClaim: string;
+  allowedGroups: string[];
+  linksVerifiedEmails: boolean;
 }
 
 /**
@@ -266,10 +287,12 @@ export type AccountChange = Partial<
     | "turnstileKeys"
     | "memberfulKeys"
     | "huddles"
+    | "sso"
     | "blockedWords"
   >
 > & {
   memberful?: Pick<Account, "memberfulJoin" | "memberfulSignIn">;
+  ssoSwitches?: Pick<Account, "ssoJoin" | "ssoSignIn">;
   navigationIcons?: NavigationIconChanges;
 };
 
@@ -283,6 +306,8 @@ export interface NewPerson {
   avatar: StoredPicture | null;
   /** The administrator whose invitation they joined with, if they did. */
   invitedBy?: UserId;
+  /** Whether they joined with a link Ember emailed to their address, which proves it's theirs. */
+  emailVerified?: boolean;
 }
 
 /** A session and the person it signs in. */
@@ -368,6 +393,46 @@ export interface LinkedAccount {
   emailAddress: string | null;
 }
 
+/**
+ * What a sign-in with an account elsewhere keeps of the provider's word besides what the account says of
+ * itself: the provider's session it came from (OpenID Connect's `sid`), if it named one, and the refresh
+ * token it gave, sealed (`seal`), to ask it again with at `dueAt`, if it gave one.
+ */
+export interface SignInKept {
+  sid: string | null;
+  refresh: { sealedToken: string; dueAt: number } | null;
+}
+
+/** What a sign-in at a Memberful site keeps: nothing more. */
+export const NOTHING_KEPT: SignInKept = { sid: null, refresh: null };
+
+/** Who a back-channel logout signs out: everyone signed in with the account `subject` names, or with the provider's session `sid`, or with both, by `startedBy`. */
+export interface LoggedOut {
+  subject: string | null;
+  sid: string | null;
+  /**
+   * Whether it ends every session of whoever the account with `subject` is linked to, however they
+   * signed in, as long as they need a membership, rather than only those the account signed in.
+   */
+  everywhere?: boolean;
+  /** The sessions it ends are those started by then, in milliseconds, so that one signed in after the provider said so stays. */
+  startedBy: number;
+}
+
+/** The sessions a back-channel logout ended, and whether it queued any revocations to close their sockets in rooms. */
+export interface LoggedOutSessions {
+  ended: Array<{ id: string; userId: UserId }>;
+  queued: boolean;
+}
+
+/** A refresh token the Workspace is due to ask the single sign-on provider with: the account it's for, and the token, sealed. */
+export interface DueRefresh {
+  subject: string;
+  sealedToken: string;
+  /** Since when the provider hasn't answered for it, in milliseconds since the epoch, or null while it has. */
+  failingSince: number | null;
+}
+
 /** Whose account connecting one elsewhere is for, and the digest of the password that checked out to start it, or "" without one. */
 export interface Connecting {
   userId: UserId;
@@ -383,6 +448,19 @@ export interface LinkedPerson {
   membershipNeeded: boolean;
   /** When their membership was last read, by the Workspace's clock: as a sign-in began, or a check asked Memberful. */
   checkedAt: number;
+  /** Whether another account of theirs, at a way in that's open, lets them in as last read, when this one's lapsing suspends nobody. */
+  otherwiseLetIn: boolean;
+}
+
+/**
+ * The ways in whose accounts can keep someone in while another of theirs lapses (`LinkedPerson.otherwiseLetIn`):
+ * those open and still being read, `checked`, as a Memberful site whose admin API the Workspace asks, and
+ * those open whose accounts count only while the Workspace keeps asking about them with a refresh token,
+ * `refreshed`, as a single sign-on provider. An account nobody asks about anymore says nothing of now.
+ */
+export interface OtherWays {
+  checked: string[];
+  refreshed: string[];
 }
 
 /** A membership the Workspace has yet to check with the Memberful site's admin API. */
@@ -789,9 +867,19 @@ const INSERT_SESSION_IF_UNCHANGED = `INSERT INTO sessions (id, user_id, token_di
 /** Keeps a digest made now of the password someone signed in with, in place of the one checked, unless it has changed since. */
 const REHASH_PASSWORD = `UPDATE users SET password_digest = ? WHERE id = ? AND password_digest = ?`;
 
-/** The same, for someone signing in with an account elsewhere that's linked to them, unless they've stopped being active. */
-const INSERT_LINKED_SESSION = `INSERT INTO sessions (id, user_id, token_digest, ip_address, user_agent, last_active_at, created_at, updated_at)
-  SELECT ?1, id, ?2, ?3, ?4, ?5, ?5, ?5 FROM users WHERE id = ?6 AND status = ${ACTIVE}`;
+/**
+ * The same, for someone signing in with an account elsewhere that's linked to them, unless they've
+ * stopped being active, recording its issuer, ?7, and the provider's session it came from, ?8, if any.
+ */
+const INSERT_LINKED_SESSION = `INSERT INTO sessions (id, user_id, token_digest, ip_address, user_agent, last_active_at, created_at, updated_at, identity_issuer, identity_sid)
+  SELECT ?1, id, ?2, ?3, ?4, ?5, ?5, ?5, ?7, ?8 FROM users WHERE id = ?6 AND status = ${ACTIVE}`;
+
+/** The same, for someone new who signed in with an account elsewhere, whom the same batch adds. */
+const INSERT_IDENTITY_SESSION = `INSERT INTO sessions (id, user_id, token_digest, ip_address, user_agent, last_active_at, created_at, updated_at, identity_issuer, identity_sid)
+  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?6, ?7, ?8)`;
+
+/** Keeps the refresh token ?3, sealed, that a single sign-on provider gave for the account at issuer ?1 with subject ?2, to ask it again with at ?4, as a sign-in that just had its word. */
+const KEEP_REFRESH_TOKEN = `UPDATE identities SET refresh_token = ?3, refresh_due_at = ?4, refresh_failing_since = NULL WHERE issuer = ?1 AND subject = ?2`;
 
 /** What `email_links.kind` holds for an invitation, and for a link someone asked for with an address at the email domains. */
 const INVITATION = "'invitation'";
@@ -927,8 +1015,14 @@ const passwordIn = ([row]: PasswordRow[]) => (row ? { userId: row.id, passwordDi
 /** The lowercase email addresses, among those in ?1, a JSON array, that someone has whatever their case. */
 const TAKEN_EMAIL_ADDRESSES = `SELECT lower(email_address) AS email_address FROM users WHERE lower(email_address) IN (SELECT lower(value) FROM json_each(?1))`;
 
-/** The people the accounts at issuer ?1 with the subjects ?2, a JSON array, are linked to, with when each account's membership was last read. */
-const LINKED_PEOPLE = `SELECT identities.subject, users.id, users.status, NOT ${NEEDS_NO_MEMBERSHIP} AS membership_needed, identities.checked_at
+/**
+ * The people the accounts at issuer ?1 with the subjects ?2, a JSON array, are linked to, with when each
+ * account's membership was last read, and whether another account of theirs lets them in as last read:
+ * one at the issuers ?3, a JSON array, or at the issuers ?4 while it keeps a refresh token (`OtherWays`).
+ */
+const LINKED_PEOPLE = `SELECT identities.subject, users.id, users.status, NOT ${NEEDS_NO_MEMBERSHIP} AS membership_needed, identities.checked_at,
+    EXISTS (SELECT 1 FROM identities AS other WHERE other.user_id = users.id AND other.issuer <> identities.issuer AND other.lapsed = 0
+      AND (other.issuer IN (SELECT value FROM json_each(?3)) OR (other.refresh_token IS NOT NULL AND other.issuer IN (SELECT value FROM json_each(?4))))) AS otherwise_let_in
   FROM identities JOIN users ON users.id = identities.user_id WHERE identities.issuer = ?1 AND identities.subject IN (SELECT value FROM json_each(?2))`;
 
 /**
@@ -969,8 +1063,12 @@ const SCHEDULE_MEMBERSHIP_CATCH_UP = `INSERT INTO membership_catch_ups (issuer, 
 /** Makes the catch-up at issuer ?1 due at ?2, unless one is due already, however much later, while anyone is linked to an account there. */
 const START_MEMBERSHIP_CATCH_UP = `INSERT INTO membership_catch_ups (issuer, due_at) SELECT ?1, ?2 WHERE ${ANYONE_LINKED} ON CONFLICT (issuer) DO NOTHING`;
 
-/** Records that the memberships of the accounts at issuer ?1 with the subjects ?2, a JSON array, were read at ?3, unless they were since. */
-const STAMP_MEMBERSHIPS = `UPDATE identities SET checked_at = ?3 WHERE issuer = ?1 AND subject IN (SELECT value FROM json_each(?2)) AND checked_at < ?3`;
+/**
+ * Records that the memberships of the accounts at issuer ?1 with the subjects ?2, a JSON array, were read
+ * at ?3, lapsed if ?4 is 1, unless they were since. A read at the same moment as one before, as linking an
+ * account records its first, is recorded too.
+ */
+const STAMP_MEMBERSHIPS = `UPDATE identities SET checked_at = ?3, lapsed = ?4 WHERE issuer = ?1 AND subject IN (SELECT value FROM json_each(?2)) AND checked_at <= ?3`;
 
 /** Whom an account elsewhere can be connected to: someone active, neither a guest nor a bot. */
 const CONNECTABLE = `users.status = ${ACTIVE} AND users.guest = 0 AND users.role <> ${BOT}`;
@@ -992,12 +1090,28 @@ const CONNECTING_PERSON = `SELECT NOT ${NEEDS_NO_MEMBERSHIP} AS membership_neede
   FROM users WHERE id = ?1 AND ${CONNECTABLE}`;
 
 /**
- * Links the account at issuer ?1 with subject ?2, its membership read at ?3, named ?7 with the email
- * address ?8, to person ?5 at ?4, if they can have one connected and their password's digest is still
- * ?6, or "" without one, as it was when they started connecting it.
+ * Links the account at issuer ?1 with subject ?2, its membership read at ?3, lapsed ?9, named ?7 with the
+ * email address ?8, which signs in by ?10, to person ?5 at ?4, if they can have one connected and their
+ * password's digest is still ?6, or "" without one, as it was when they started connecting it.
  */
-const CONNECT_IDENTITY = `INSERT INTO identities (issuer, subject, user_id, checked_at, created_at, updated_at, name, email_address)
-  SELECT ?1, ?2, id, ?3, ?4, ?4, ?7, ?8 FROM users WHERE id = ?5 AND ${CONNECTABLE} AND coalesce(password_digest, '') = ?6
+const CONNECT_IDENTITY = `INSERT INTO identities (issuer, subject, user_id, checked_at, created_at, updated_at, name, email_address, lapsed, via)
+  SELECT ?1, ?2, id, ?3, ?4, ?4, ?7, ?8, ?9, ?10 FROM users WHERE id = ?5 AND ${CONNECTABLE} AND coalesce(password_digest, '') = ?6
+  RETURNING user_id`;
+
+/**
+ * Links the account at issuer ?1 with subject ?2, its membership read at ?3, named ?5 with the email
+ * address ?6, at ?4, to whoever here has the address ?7, whatever its case, if only one person does, and
+ * they can have one connected and aren't connected to another account there: what signing in for the
+ * first time does with an address the single sign-on provider verified, while it's set to. Only someone
+ * who proved the address is theirs here too, by joining with a link emailed to it, and hasn't changed it
+ * since, is linked by it, so that nobody can claim a colleague's address ahead of them, and never an
+ * administrator, who connects one from their profile, with their password.
+ */
+const LINK_VERIFIED_EMAIL = `INSERT INTO identities (issuer, subject, user_id, checked_at, created_at, updated_at, name, email_address, via)
+  SELECT ?1, ?2, users.id, ?3, ?4, ?4, ?5, ?6, 'sso' FROM users WHERE lower(users.email_address) = lower(?7) AND ${CONNECTABLE}
+    AND users.email_verified_at IS NOT NULL AND users.role <> ${ADMINISTRATOR}
+    AND (SELECT count(*) FROM users AS same WHERE lower(same.email_address) = lower(?7)) = 1
+    AND NOT EXISTS (SELECT 1 FROM identities WHERE identities.user_id = users.id AND identities.issuer = ?1)
   RETURNING user_id`;
 
 /** Keeps what the account at issuer ?1 with subject ?2 says of itself now, its name ?3 and email address ?4, recording when, ?5, if either has changed. */
@@ -1027,6 +1141,43 @@ const UNLINK_ON_NEW_PASSWORD = `DELETE FROM identities WHERE user_id = ?1 AND co
  */
 const DISCONNECTING = `EXISTS (SELECT 1 FROM identities JOIN users ON users.id = identities.user_id
   WHERE identities.user_id = ?1 AND identities.issuer = ?2 AND users.password_digest = ?3 AND coalesce(users.email_address, '') <> '')`;
+
+/**
+ * The sessions a back-channel logout ends, of those signed in with an account at issuer ?1 and started by
+ * ?4: those that came from the provider's session ?2, those of whoever the account with subject ?3 is
+ * linked to, or those that are both, each a query of its own, since SQLite can't use an index through
+ * `? IS NULL OR`. Each names all four, so that each binds the same values.
+ */
+const LOGGED_OUT_BY_SID = `sessions.identity_issuer = ?1 AND sessions.identity_sid = ?2 AND ?3 IS NULL AND sessions.created_at <= ?4`;
+const LOGGED_OUT_BY_SUBJECT = `sessions.identity_issuer = ?1 AND ?2 IS NULL AND sessions.created_at <= ?4
+  AND sessions.user_id IN (SELECT user_id FROM identities WHERE issuer = ?1 AND subject = ?3)`;
+const LOGGED_OUT_BY_BOTH = `sessions.identity_issuer = ?1 AND sessions.identity_sid = ?2 AND sessions.created_at <= ?4
+  AND sessions.user_id IN (SELECT user_id FROM identities WHERE issuer = ?1 AND subject = ?3)`;
+
+/**
+ * The sessions started by ?4 of whoever the account at issuer ?1 with subject ?3 is linked to that it signed
+ * in, as `LOGGED_OUT_BY_SUBJECT`'s, and, should they need a membership, every other one of theirs however
+ * they signed in, as a provider that no longer vouches for the account ends while it's the only way in
+ * (`LoggedOut.everywhere`). Someone who needs none can sign in again with their password.
+ */
+const LOGGED_OUT_EVERYWHERE = `?2 IS NULL AND sessions.created_at <= ?4 AND sessions.user_id IN (SELECT user_id FROM identities WHERE issuer = ?1 AND subject = ?3)
+  AND (sessions.identity_issuer = ?1 OR NOT EXISTS (SELECT 1 FROM users WHERE users.id = sessions.user_id AND ${NEEDS_NO_MEMBERSHIP}))`;
+
+/** Which of those `loggedOut` names. */
+const loggedOutBy = ({ subject, sid, everywhere }: LoggedOut) =>
+  subject === null ? LOGGED_OUT_BY_SID : sid === null ? (everywhere ? LOGGED_OUT_EVERYWHERE : LOGGED_OUT_BY_SUBJECT) : LOGGED_OUT_BY_BOTH;
+
+/** The statements that end the sessions `loggedOut` (one of the four above) names, queuing their sockets' revocations with prefix ?5, code ?6, due at ?7. */
+const loggingOut = (loggedOut: string) => ({
+  queue: `INSERT INTO pending_revocations (room_id, tag, code, due_at)
+    SELECT memberships.room_id, ?5 || sessions.id, ?6, ?7 FROM sessions JOIN memberships ON memberships.user_id = sessions.user_id
+    WHERE ${loggedOut} RETURNING id`,
+  // Someone left with no session anywhere has no browser that should hear their pushes.
+  forgetPushes: `DELETE FROM push_subscriptions WHERE user_id IN (SELECT sessions.user_id FROM sessions WHERE ${loggedOut})
+    AND NOT EXISTS (SELECT 1 FROM sessions AS kept WHERE kept.user_id = push_subscriptions.user_id
+      AND kept.id NOT IN (SELECT sessions.id FROM sessions WHERE ${loggedOut}))`,
+  end: `DELETE FROM sessions WHERE ${loggedOut} RETURNING id, user_id`,
+});
 
 /** Queues revoking the sockets of every session of person ?1 but ?7, in every room they're in, while `DISCONNECTING`, as `QUEUE_OTHER_SESSION_REVOCATIONS` does. */
 const QUEUE_DISCONNECTED_SESSION_REVOCATIONS = `INSERT INTO pending_revocations (room_id, tag, code, due_at)
@@ -1316,6 +1467,42 @@ function memberfulKeysIn(settings: Record<string, unknown> | null): SavedMemberf
 }
 
 /**
+ * The single sign-on provider, which the account's settings keep as `sso`, `{ issuer, client_id,
+ * client_secret, name, scopes, groups_claim, allowed_groups, links_verified_emails }`, the secret sealed,
+ * or null while there's none.
+ */
+function ssoIn(settings: Record<string, unknown> | null): SavedSso | null {
+  const kept = settings?.sso;
+  if (typeof kept !== "object" || kept === null) return null;
+  const { issuer, client_id, client_secret, name, scopes, groups_claim, allowed_groups, links_verified_emails } = kept as Record<string, unknown>;
+  const textOrNull = (value: unknown) => (typeof value === "string" ? value : null);
+  const texts = (value: unknown) => (Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []);
+  return {
+    issuer: textOrNull(issuer),
+    clientId: textOrNull(client_id),
+    sealedClientSecret: textOrNull(client_secret),
+    name: typeof name === "string" && name !== "" ? name : DEFAULT_SSO_NAME,
+    scopes: texts(scopes),
+    groupsClaim: typeof groups_claim === "string" && groups_claim !== "" ? groups_claim : DEFAULT_GROUPS_CLAIM,
+    allowedGroups: texts(allowed_groups),
+    linksVerifiedEmails: links_verified_emails === true,
+  };
+}
+
+/** The same, as the account's settings keep it. */
+const storedSso = (sso: SavedSso | null) =>
+  sso && {
+    issuer: sso.issuer,
+    client_id: sso.clientId,
+    client_secret: sso.sealedClientSecret,
+    name: sso.name,
+    scopes: sso.scopes,
+    groups_claim: sso.groupsClaim,
+    allowed_groups: sso.allowedGroups,
+    links_verified_emails: sso.linksVerifiedEmails,
+  };
+
+/**
  * The Realtime SFU app huddles run through, which the account's settings keep as `huddles`,
  * `{ app_id, app_secret }`, the secret sealed, or null while huddles are off. The TURN key their relay
  * goes by is kept with it, as `relay`, so that turning huddles off forgets both.
@@ -1470,6 +1657,12 @@ function joinsWithMemberfulIn(settings: Record<string, unknown> | null): boolean
   const on = settings?.memberful_join;
   return isPresent(on === undefined ? settings?.memberful_sign_in : on);
 }
+
+/** Whether the single sign-on provider's people join with it, which the account's settings keep as `sso_join`: only while the setting is present. */
+const joinsWithSsoIn = (settings: Record<string, unknown> | null) => isPresent(settings?.sso_join);
+
+/** Whether single sign-on is the only way in, which the account's settings keep as `sso_sign_in`: only while the setting is present, and single sign-on is on. */
+const signsInWithSsoIn = (settings: Record<string, unknown> | null) => isPresent(settings?.sso_sign_in) && joinsWithSsoIn(settings);
 
 /** Whether people may join with an address at the email domains, which the account's settings keep as `email_domain_sign_up`: only while the setting is present. */
 const signsUpWithEmailDomainIn = (settings: Record<string, unknown> | null) => isPresent(settings?.email_domain_sign_up);
@@ -2263,6 +2456,9 @@ const SET_RESEND_API_KEY = setSetting("resend_api_key");
 const SET_TURNSTILE_KEYS = setSetting("turnstile_keys");
 const SET_MEMBERFUL_KEYS = setSetting("memberful_keys");
 const SET_HUDDLES = setSetting("huddles");
+const SET_SSO = setSetting("sso");
+const SET_SSO_JOIN = setSetting("sso_join");
+const SET_SSO_SIGN_IN = setSetting("sso_sign_in");
 const SET_ASSISTANT = setSetting("assistant");
 
 /**
@@ -2802,7 +2998,7 @@ const DEACTIVATE = `UPDATE users SET status = ${DEACTIVATED}, email_address = re
  * address, password, username, bio, avatar or picks of theirs, and no longer an administrator. Their
  * username is free for anyone then, as their email address is.
  */
-const DELETE_ACCOUNT = `UPDATE users SET name = ?1, status = ${DEACTIVATED}, role = ${MEMBER}, email_address = NULL, password_digest = NULL, username = NULL, bio = NULL,
+const DELETE_ACCOUNT = `UPDATE users SET name = ?1, status = ${DEACTIVATED}, role = ${MEMBER}, email_address = NULL, email_verified_at = NULL, password_digest = NULL, username = NULL, bio = NULL,
   avatar_key = NULL, avatar_variant = NULL, assistant_thinking = NULL, assistant_answer_length = NULL, assistant_model = NULL,
   huddle_music = 1, huddle_chimes = 1, huddle_ring = 1, invitation_dismissed_at = NULL, deleted_at = ?2, updated_at = ?2 WHERE id = ?3`;
 
@@ -2879,9 +3075,13 @@ const QUEUE_PICTURE_DELETION = `INSERT INTO pending_picture_deletions (object_ke
 /** Takes a picture's reservation, now that someone has it, so R2 keeps it. */
 const KEEP_PICTURE = `DELETE FROM pending_picture_deletions WHERE object_key = ?`;
 
-/** Saves someone's profile and records when, keeping their password unless given a new one's digest. */
-const CHANGE_PROFILE = `UPDATE users SET name = ?, username = ?, email_address = ?, bio = ?, password_digest = coalesce(?, password_digest), updated_at = ?
-  WHERE id = ?`;
+/**
+ * Saves someone's profile and records when, keeping their password unless given a new one's digest, and
+ * forgetting that they proved their email address once it's another.
+ */
+const CHANGE_PROFILE = `UPDATE users SET name = ?1, username = ?2, email_address = ?3, bio = ?4, password_digest = coalesce(?5, password_digest), updated_at = ?6,
+    email_verified_at = CASE WHEN email_address IS ?3 THEN email_verified_at END
+  WHERE id = ?7`;
 
 /** The same, with whether each is in a room, for its settings. */
 export const ACTIVE_PEOPLE_IN_ROOM = `SELECT users.id, users.name, memberships.user_id IS NOT NULL AS member
@@ -3248,6 +3448,8 @@ export class WorkspaceStore {
       openSignUp: signsUpOpenlyIn(settings),
       memberfulJoin: joinsWithMemberfulIn(settings),
       memberfulSignIn: signsInWithMemberful(settings),
+      ssoJoin: joinsWithSsoIn(settings),
+      ssoSignIn: signsInWithSsoIn(settings),
       emailDomainSignUp: signsUpWithEmailDomainIn(settings),
       emailDomains: emailDomainsIn(settings),
       navigationIcons: navigationIconsIn(settings),
@@ -3262,6 +3464,7 @@ export class WorkspaceStore {
       assistantInstructions: assistantInstructionsIn(settings),
       assistantPromptTemplate: assistantPromptTemplateIn(settings),
       huddles: huddlesIn(settings),
+      sso: ssoIn(settings),
       outsideAi: isPresent(settings?.outside_ai),
       deployedAddress: deployedAddressIn(settings),
       otherAddresses: otherAddressesIn(settings),
@@ -3271,10 +3474,11 @@ export class WorkspaceStore {
 
   /**
    * Changes the workspace's name, tagline, settings, custom domain and the ones it moved away from,
-   * navigation icons, From address, Resend API key, Turnstile's keys, Memberful's, huddles' SFU app,
-   * email domains and blocked words, as `change` has them, in one batch. Memberful's settings are stored
-   * both at once, so that an account from before `memberful_join` reads as they're saved. Blocked words
-   * aren't recorded as a change, since pages don't show them, so the logo's address stays as it is.
+   * navigation icons, From address, Resend API key, Turnstile's keys, Memberful's, huddles' SFU app, the
+   * single sign-on provider, email domains and blocked words, as `change` has them, in one batch.
+   * Memberful's settings are stored both at once, so that an account from before `memberful_join` reads
+   * as they're saved, and so are single sign-on's. Blocked words aren't recorded as a change, since pages
+   * don't show them, so the logo's address stays as it is.
    */
   async changeAccount(
     {
@@ -3297,6 +3501,8 @@ export class WorkspaceStore {
       turnstileKeys,
       memberfulKeys,
       huddles,
+      sso,
+      ssoSwitches,
       blockedWords,
     }: AccountChange,
     now: string,
@@ -3325,6 +3531,10 @@ export class WorkspaceStore {
         ? []
         : [statement(SET_MEMBERFUL_KEYS, JSON.stringify(memberfulKeys && { site: memberfulKeys.site, client_id: memberfulKeys.clientId, secrets: memberfulKeys.sealedSecrets }), now)]),
       ...(huddles === undefined ? [] : [statement(SET_HUDDLES, JSON.stringify(huddles && storedHuddles(huddles)), now)]),
+      ...(sso === undefined ? [] : [statement(SET_SSO, JSON.stringify(storedSso(sso)), now)]),
+      ...(ssoSwitches === undefined
+        ? []
+        : [statement(SET_SSO_JOIN, JSON.stringify(ssoSwitches.ssoJoin), now), statement(SET_SSO_SIGN_IN, JSON.stringify(ssoSwitches.ssoSignIn), now)]),
       ...(blockedWords === undefined ? [] : [statement(REMEMBER_BLOCKED_WORDS, JSON.stringify(blockedWords))]),
     ]);
   }
@@ -3408,7 +3618,7 @@ export class WorkspaceStore {
   async createMember(person: NewPerson, welcomes: Welcome[], sessionId: string, tokenDigest: string, client: Client, now: string): Promise<DirectRoom[]> {
     const results = await this.db.batch([
       statement(
-        `INSERT INTO users (id, name, email_address, password_digest, avatar_key, avatar_variant, invited_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO users (id, name, email_address, password_digest, avatar_key, avatar_variant, invited_by, email_verified_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         person.id,
         person.name,
         person.emailAddress,
@@ -3416,6 +3626,7 @@ export class WorkspaceStore {
         person.avatar?.key ?? null,
         person.avatar?.variant ?? null,
         person.invitedBy ?? null,
+        person.emailVerified ? now : null,
         now,
         now,
       ),
@@ -3429,21 +3640,23 @@ export class WorkspaceStore {
   }
 
   /**
-   * Adds someone who signed in with `account`, an account elsewhere, as a member with no password, linked
-   * to it, with their session, in every open room, spending the links to their email address and
-   * starting the DMs `welcomes` lists, as `createMember` adds someone who joins. If someone has their
-   * email address already, or the account is linked to someone already, a unique index refuses its
-   * statement, and so the whole batch.
+   * Adds someone who signed in with `account`, an account elsewhere, by `via`, as a member with no
+   * password, linked to it, with their session, in every open room, spending the links to their email
+   * address and starting the DMs `welcomes` lists, as `createMember` adds someone who joins. If someone
+   * has their email address already, or the account is linked to someone already, a unique index refuses
+   * its statement, and so the whole batch.
    */
   async createLinkedMember(
     person: NewLinkedPerson,
     account: LinkedAccount,
+    via: "memberful" | "sso",
     checkedAt: number,
     welcomes: Welcome[],
     sessionId: string,
     tokenDigest: string,
     client: Client,
     now: string,
+    kept: SignInKept,
   ): Promise<DirectRoom[]> {
     const results = await this.db.batch([
       statement(
@@ -3456,7 +3669,7 @@ export class WorkspaceStore {
         now,
       ),
       statement(
-        `INSERT INTO identities (issuer, subject, user_id, checked_at, created_at, updated_at, name, email_address) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO identities (issuer, subject, user_id, checked_at, created_at, updated_at, name, email_address, via) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         account.issuer,
         account.subject,
         person.id,
@@ -3465,8 +3678,10 @@ export class WorkspaceStore {
         now,
         account.name,
         account.emailAddress,
+        via,
       ),
-      statement(INSERT_SESSION, sessionId, person.id, tokenDigest, client.ip, client.userAgent, now, now, now),
+      ...this.keepingRefresh(account, kept),
+      statement(INSERT_IDENTITY_SESSION, sessionId, person.id, tokenDigest, client.ip, client.userAgent, now, account.issuer, kept.sid),
       statement(GRANT_OPEN_ROOMS_TO_USER, person.id, now, now),
       statement(SPEND_EMAIL_LINKS, person.emailAddress),
       ...welcoming(person.id, welcomes, now),
@@ -3479,33 +3694,177 @@ export class WorkspaceStore {
     return this.db.all<User>(WELCOMERS);
   }
 
-  /** The person the account elsewhere that `issuer` and `subject` name is linked to, whatever their status, or null for nobody. */
-  async linkedPerson(issuer: string, subject: string): Promise<LinkedPerson | null> {
-    return (await this.linkedPeople(issuer, [subject])).get(subject) ?? null;
+  /**
+   * The person the account elsewhere that `issuer` and `subject` name is linked to, whatever their status,
+   * or null for nobody, and whether an account of theirs at one of `otherWays` lets them in.
+   */
+  async linkedPerson(issuer: string, subject: string, otherWays: OtherWays): Promise<LinkedPerson | null> {
+    return (await this.linkedPeople(issuer, [subject], otherWays)).get(subject) ?? null;
   }
 
-  /** The people the accounts at `issuer` with `subjects` are linked to, whatever their status, by subject, leaving out those linked to nobody. */
-  async linkedPeople(issuer: string, subjects: string[]): Promise<Map<string, LinkedPerson>> {
-    const rows = await this.db.all<{ subject: string; id: UserId; status: number; membership_needed: number; checked_at: number }>(LINKED_PEOPLE, issuer, JSON.stringify(subjects));
+  /** The people the accounts at `issuer` with `subjects` are linked to, whatever their status, by subject, leaving out those linked to nobody, as `linkedPerson` finds them. */
+  async linkedPeople(issuer: string, subjects: string[], { checked, refreshed }: OtherWays): Promise<Map<string, LinkedPerson>> {
+    const rows = await this.db.all<{ subject: string; id: UserId; status: number; membership_needed: number; checked_at: number; otherwise_let_in: number }>(
+      LINKED_PEOPLE,
+      issuer,
+      JSON.stringify(subjects),
+      JSON.stringify(checked),
+      JSON.stringify(refreshed),
+    );
     return new Map(
       rows.map((row) => [
         row.subject,
-        { userId: row.id, status: STATUSES[row.status] ?? "active", membershipNeeded: row.membership_needed === 1, checkedAt: row.checked_at },
+        {
+          userId: row.id,
+          status: STATUSES[row.status] ?? "active",
+          membershipNeeded: row.membership_needed === 1,
+          checkedAt: row.checked_at,
+          otherwiseLetIn: row.otherwise_let_in === 1,
+        },
       ]),
     );
   }
 
   /**
    * Starts a session for someone who signed in with `account`, an account elsewhere that's linked to
-   * them, unless they've stopped being active, keeping what the account says of itself now.
+   * them, unless they've stopped being active, keeping what the account says of itself now, and what
+   * `kept` says of the provider's word.
    */
-  async startLinkedSession(userId: UserId, sessionId: string, tokenDigest: string, client: Client, now: string, account: LinkedAccount): Promise<StoredSession | null> {
-    const [, , [row]] = (await this.db.batch([
-      statement(INSERT_LINKED_SESSION, sessionId, tokenDigest, client.ip, client.userAgent, now, userId),
+  async startLinkedSession(
+    userId: UserId,
+    sessionId: string,
+    tokenDigest: string,
+    client: Client,
+    now: string,
+    account: LinkedAccount,
+    kept: SignInKept,
+  ): Promise<StoredSession | null> {
+    const results = await this.db.batch([
+      statement(INSERT_LINKED_SESSION, sessionId, tokenDigest, client.ip, client.userAgent, now, userId, account.issuer, kept.sid),
       statement(REFRESH_IDENTITY, account.issuer, account.subject, account.name, account.emailAddress, now),
+      ...this.keepingRefresh(account, kept),
       statement(SESSION, tokenDigest),
-    ])) as [unknown[], unknown[], SessionRow[]];
+    ]);
+    const [row] = results.at(-1) as SessionRow[];
     return row ? storedSession(row) : null;
+  }
+
+  /**
+   * Keeps what `account`, an account elsewhere linked already, says of itself now, and the refresh token
+   * `kept` has, if it has one, as starting a session with it does, for a sign-in that starts none.
+   */
+  async keepLinkedAccount(account: LinkedAccount, kept: SignInKept, now: string): Promise<void> {
+    await this.db.batch([statement(REFRESH_IDENTITY, account.issuer, account.subject, account.name, account.emailAddress, now), ...this.keepingRefresh(account, kept)]);
+  }
+
+  /** The statement that keeps the refresh token `kept` has for `account`, if it has one, to ask the provider with when it's due. */
+  private keepingRefresh(account: LinkedAccount, kept: SignInKept): Statement[] {
+    return kept.refresh ? [statement(KEEP_REFRESH_TOKEN, account.issuer, account.subject, kept.refresh.sealedToken, kept.refresh.dueAt)] : [];
+  }
+
+  /**
+   * Links `account`, at a single sign-on provider, to whoever here has `emailAddress`, which the provider
+   * says it verified, whatever its case, its membership read at `checkedAt`: only if one person does, who
+   * can have an account connected and isn't connected to another there. Answers whom it linked it to.
+   */
+  async linkVerifiedEmail(account: LinkedAccount, emailAddress: string, checkedAt: number, now: string): Promise<UserId | null> {
+    const { issuer, subject, name, emailAddress: shown } = account;
+    const [row] = await this.db.all<{ user_id: UserId }>(LINK_VERIFIED_EMAIL, issuer, subject, checkedAt, now, name, shown, emailAddress);
+    return row?.user_id ?? null;
+  }
+
+  /** The people with sessions a back-channel logout from `issuer` ends (`endLoggedOutSessions`), as it names them. */
+  async loggedOutPeople(issuer: string, loggedOut: LoggedOut): Promise<UserId[]> {
+    const { subject, sid } = loggedOut;
+    const startedBy = new Date(loggedOut.startedBy).toISOString();
+    const rows = await this.db.all<{ user_id: UserId }>(`SELECT DISTINCT sessions.user_id FROM sessions WHERE ${loggedOutBy(loggedOut)}`, issuer, sid, subject, startedBy);
+    if (subject === null || rows.length > 0) return rows.map((row) => row.user_id);
+    // Whoever the account is linked to, though they have no session it signed in, whose cached ones may be.
+    const [linked] = await this.db.all<{ user_id: UserId }>(`SELECT user_id FROM identities WHERE issuer = ? AND subject = ?`, issuer, subject);
+    return linked ? [linked.user_id] : [];
+  }
+
+  /**
+   * Ends the sessions signed in with an account at `issuer` that `loggedOut` names, in one transaction:
+   * queues closing their sockets with `code` in every room their people are in, due at `dueAt`, and
+   * forgets the push subscriptions of anyone it leaves without a session. Answers the sessions it ended,
+   * and whether it queued any revocations.
+   */
+  async endLoggedOutSessions(issuer: string, named: LoggedOut, code: CloseCode, dueAt: number): Promise<LoggedOutSessions> {
+    const loggedOut = loggingOut(loggedOutBy(named));
+    const { subject, sid } = named;
+    const startedBy = new Date(named.startedBy).toISOString();
+    const [queued, , ended] = await this.db.batch([
+      // Before the sessions go, which each finds what it does by.
+      statement(loggedOut.queue, issuer, sid, subject, startedBy, SESSION_TAG_PREFIX, code, dueAt),
+      statement(loggedOut.forgetPushes, issuer, sid, subject, startedBy),
+      statement(loggedOut.end, issuer, sid, subject, startedBy),
+    ]);
+    return { ended: (ended as Array<{ id: string; user_id: UserId }>).map((row) => ({ id: row.id, userId: row.user_id })), queued: queued!.length > 0 };
+  }
+
+  /**
+   * Forgets the refresh tokens of every issuer but `issuer`, the provider's, as nothing asks with them,
+   * and answers up to `limit` of those at `issuer` due by `now`, those due longest first.
+   */
+  async dueRefreshes(issuer: string, now: number, limit: number): Promise<DueRefresh[]> {
+    const [, due] = await this.db.batch([
+      statement(`UPDATE identities SET refresh_token = NULL, refresh_due_at = NULL WHERE refresh_due_at IS NOT NULL AND issuer <> ?`, issuer),
+      statement(
+        `SELECT subject, refresh_token, refresh_failing_since FROM identities WHERE refresh_due_at <= ? AND issuer = ? AND refresh_token IS NOT NULL ORDER BY refresh_due_at LIMIT ?`,
+        now,
+        issuer,
+        limit,
+      ),
+    ]);
+    return (due as Array<{ subject: string; refresh_token: string; refresh_failing_since: number | null }>).map((row) => ({
+      subject: row.subject,
+      sealedToken: row.refresh_token,
+      failingSince: row.refresh_failing_since,
+    }));
+  }
+
+  /**
+   * Puts the refresh token `sealedToken` back for the account at `issuer` with `subject`, due at `dueAt`,
+   * with since when the provider hasn't answered for it, `failingSince`, as acting on settling it failed,
+   * unless a sign-in has kept another since.
+   */
+  async restoreRefresh(issuer: string, subject: string, sealedToken: string, dueAt: number, failingSince: number | null): Promise<void> {
+    await this.db.run(
+      `UPDATE identities SET refresh_token = ?3, refresh_due_at = ?4, refresh_failing_since = ?5 WHERE issuer = ?1 AND subject = ?2 AND refresh_token IS NULL`,
+      issuer,
+      subject,
+      sealedToken,
+      dueAt,
+      failingSince,
+    );
+  }
+
+  /**
+   * Puts off asking with the refresh tokens due by `now` until `until`, keeping them, as while there's no
+   * provider to ask, which may be back, as once a secret that didn't open is set up again.
+   */
+  async putOffRefreshes(now: number, until: number): Promise<void> {
+    await this.db.run(`UPDATE identities SET refresh_due_at = ? WHERE refresh_due_at <= ?`, until, now);
+  }
+
+  /**
+   * Keeps what asking the provider with the refresh token `asked` came to, for the account at `issuer`
+   * with `subject`: the token it gave in its place, sealed, or `asked` again, to ask with at `dueAt`, with
+   * since when it hasn't answered, `failingSince`, if it hasn't, or neither, once it no longer takes it.
+   * Unless a sign-in has kept another since, which stays. Whether it kept it.
+   */
+  async settleRefresh(issuer: string, subject: string, asked: string, next: { sealedToken: string; dueAt: number; failingSince?: number } | null): Promise<boolean> {
+    const settled = await this.db.all(
+      `UPDATE identities SET refresh_token = ?4, refresh_due_at = ?5, refresh_failing_since = ?6 WHERE issuer = ?1 AND subject = ?2 AND refresh_token = ?3 RETURNING subject`,
+      issuer,
+      subject,
+      asked,
+      next?.sealedToken ?? null,
+      next?.dueAt ?? null,
+      next?.failingSince ?? null,
+    );
+    return settled.length > 0;
   }
 
   /**
@@ -3545,14 +3904,26 @@ export class WorkspaceStore {
   }
 
   /**
-   * Links `account`, an account elsewhere, to the person `connecting` is for, its membership read at
-   * `checkedAt`, unless they've stopped being able to have one connected, or their password has changed
-   * since it checked out. Whether it's linked. A unique index refuses it for an account linked to
-   * anyone already, or a second account of theirs at its issuer.
+   * Links `account`, an account elsewhere that signs in by `via`, to the person `connecting` is for, its
+   * membership read at `checkedAt`, unless they've stopped being able to have one connected, or their
+   * password has changed since it checked out. Whether it's linked. A unique index refuses it for an
+   * account linked to anyone already, or a second account of theirs at its issuer.
    */
-  async connectIdentity({ userId, passwordDigest }: Connecting, account: LinkedAccount, checkedAt: number, now: string): Promise<boolean> {
+  async connectIdentity(
+    { userId, passwordDigest }: Connecting,
+    account: LinkedAccount,
+    via: "memberful" | "sso",
+    checkedAt: number,
+    lapsed: boolean,
+    now: string,
+    kept: SignInKept,
+  ): Promise<boolean> {
     const { issuer, subject, name, emailAddress } = account;
-    return (await this.db.all(CONNECT_IDENTITY, issuer, subject, checkedAt, now, userId, passwordDigest, name, emailAddress)).length > 0;
+    const [connected] = await this.db.batch([
+      statement(CONNECT_IDENTITY, issuer, subject, checkedAt, now, userId, passwordDigest, name, emailAddress, lapsed ? 1 : 0, via),
+      ...this.keepingRefresh(account, kept),
+    ]);
+    return connected!.length > 0;
   }
 
   /**
@@ -3582,9 +3953,12 @@ export class WorkspaceStore {
     return (await this.db.all(`SELECT 1 FROM identities WHERE issuer = ? LIMIT 1`, issuer)).length > 0;
   }
 
-  /** A Memberful site anyone here, whatever their status, has an account at linked to them, the first if there are several, or null while nobody has. */
+  /**
+   * A Memberful site anyone here, whatever their status, has an account at linked to them, the first if
+   * there are several, or null while nobody has. A single sign-on provider's issuer never is one.
+   */
   async linkedSite(): Promise<string | null> {
-    const [linked] = await this.db.all<{ issuer: string }>(`SELECT issuer FROM identities LIMIT 1`);
+    const [linked] = await this.db.all<{ issuer: string }>(`SELECT issuer FROM identities WHERE via = 'memberful' LIMIT 1`);
     return linked?.issuer ?? null;
   }
 
@@ -3989,7 +4363,7 @@ export class WorkspaceStore {
       statement(`DELETE FROM sessions WHERE user_id = ?`, userId),
       statement(`DELETE FROM push_subscriptions WHERE user_id = ?`, userId),
       statement(`UPDATE users SET status = ${SUSPENDED}, updated_at = ? WHERE id = ? AND status = ${ACTIVE}`, now, userId),
-      statement(STAMP_MEMBERSHIPS, issuer, JSON.stringify([subject]), readAt),
+      statement(STAMP_MEMBERSHIPS, issuer, JSON.stringify([subject]), readAt, 1),
     ]);
     return queued!.length > 0;
   }
@@ -4004,13 +4378,13 @@ export class WorkspaceStore {
     await this.db.batch([
       statement(`UPDATE users SET status = ${ACTIVE}, updated_at = ? WHERE id = ? AND status = ${SUSPENDED}`, now, userId),
       statement(GRANT_OPEN_ROOMS_TO_USER, userId, now, now),
-      statement(STAMP_MEMBERSHIPS, issuer, JSON.stringify([subject]), readAt),
+      statement(STAMP_MEMBERSHIPS, issuer, JSON.stringify([subject]), readAt, 0),
     ]);
   }
 
-  /** Records that the memberships of the accounts at the Memberful site `issuer` with `subjects` were read at `readAt`, unless they were since. */
-  async stampMemberships(issuer: string, subjects: string[], readAt: number): Promise<void> {
-    if (subjects.length > 0) await this.db.run(STAMP_MEMBERSHIPS, issuer, JSON.stringify(subjects), readAt);
+  /** Records that the memberships of the accounts at `issuer` with `subjects` were read at `readAt`, lapsed or not, unless they were since. */
+  async stampMemberships(issuer: string, subjects: string[], readAt: number, lapsed: boolean): Promise<void> {
+    if (subjects.length > 0) await this.db.run(STAMP_MEMBERSHIPS, issuer, JSON.stringify(subjects), readAt, lapsed ? 1 : 0);
   }
 
   /** Every IP address a ban blocks. */
@@ -4168,16 +4542,24 @@ export class WorkspaceStore {
   }
 
   /**
-   * When the outbox's next revocation, purge, reindex, picture deletion or membership check is due, if
+   * When the outbox's next revocation, purge, reindex, picture deletion, membership check or refresh is due, if
    * any is waiting, leaving out the purges waiting on their rooms' revocations, which are due no sooner.
    */
   async nextDeliveryDue(): Promise<number | null> {
-    const [row] = await this.db.all<{ revocation: number | null; purge: number | null; reindex: number | null; picture: number | null; membership: number | null; catchUp: number | null }>(
+    const [row] = await this.db.all<{
+      revocation: number | null;
+      purge: number | null;
+      reindex: number | null;
+      picture: number | null;
+      membership: number | null;
+      catchUp: number | null;
+      refresh: number | null;
+    }>(
       `SELECT (SELECT min(due_at) FROM pending_revocations) AS revocation, (${NEXT_PURGE_DUE}) AS purge, (SELECT min(due_at) FROM pending_reindexes) AS reindex,
         (SELECT min(due_at) FROM pending_picture_deletions) AS picture, (SELECT min(due_at) FROM membership_checks) AS membership,
-        (SELECT min(due_at) FROM membership_catch_ups) AS catchUp`,
+        (SELECT min(due_at) FROM membership_catch_ups) AS catchUp, (SELECT min(refresh_due_at) FROM identities) AS refresh`,
     );
-    const due = [row?.revocation, row?.purge, row?.reindex, row?.picture, row?.membership, row?.catchUp].filter((time) => typeof time === "number");
+    const due = [row?.revocation, row?.purge, row?.reindex, row?.picture, row?.membership, row?.catchUp, row?.refresh].filter((time) => typeof time === "number");
     return due.length > 0 ? Math.min(...due) : null;
   }
 

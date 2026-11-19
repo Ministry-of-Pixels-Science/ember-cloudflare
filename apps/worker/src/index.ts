@@ -18,7 +18,6 @@ import {
   MEMBERFUL_DISCONNECT_WITHOUT_PASSWORD,
   MEMBERFUL_NOT_CONNECTED,
   MEMBERFUL_PASSWORD_NEEDED,
-  MEMBERFUL_SIGN_IN_NEEDED,
   MEMBERFUL_SIGN_IN_PATH,
   MEMBERFUL_SIGN_IN_PROBLEMS,
   MEMBERFUL_WEBHOOK_PATH,
@@ -52,6 +51,7 @@ import {
   SIGN_IN_LIMITED,
   SIGN_IN_REJECTED,
   signOutEndpointOf,
+  signsInElsewhereOnly,
   SIGN_UP_PATH,
   TRANSFER_PATH,
   TURNSTILE_CHECK_PATH,
@@ -68,7 +68,7 @@ import {
   type EmailSettings,
   type Favorites,
   type Involvement,
-  type MemberfulConnection,
+  type MemberfulAccount,
   type MemberfulStatus,
   type NewJoinCode,
   type NewRoomForm,
@@ -90,6 +90,25 @@ import { BLOCKED_WORDS_REFUSED } from "@ember/protocol/blocked-words";
 import { parseHuddleSoundChanges, type HuddleSoundsChanged, type PastHuddles } from "@ember/protocol/huddles";
 import { OUTSIDE_AUTHORIZE_PATH } from "@ember/protocol/outside";
 import { parseNewReport, parseReportHandling, type HandledReports, type Reports } from "@ember/protocol/reports";
+import {
+  MEMBERFUL_WITH_SSO,
+  OPEN_WITH_SSO,
+  PASSWORD_WITH_SSO,
+  SSO_CALLBACK_PATH,
+  SSO_CONNECTIONS_PATH,
+  SSO_DISCONNECT_PASSWORD_NEEDED,
+  SSO_DISCONNECT_WITHOUT_EMAIL,
+  SSO_DISCONNECT_WITHOUT_PASSWORD,
+  SSO_LOGOUT_PATH,
+  SSO_NOT_CONNECTED,
+  SSO_PASSWORD_NEEDED,
+  SSO_SETTINGS_PATH,
+  SSO_SIGN_IN_PATH,
+  SSO_SIGN_IN_PROBLEMS,
+  SSO_WITH_MEMBERFUL,
+  type ElsewhereConnection,
+  type SsoStatus,
+} from "@ember/protocol/sso";
 import { mentionPromptItem } from "@ember/richtext";
 import { isAccountLogoPath, showAccountLogo, storeLogo } from "./account-logo";
 import {
@@ -157,6 +176,7 @@ import { addressRefusal, answerProbe, deployedAddressOf, lookUpDns, originFor, p
 import { redirectToHttps, requiresHttps, withHeaders } from "./headers";
 import { health, isUpPath, up } from "./health";
 import { forgetHuddleRelay, forgetHuddles, saveHuddleRelay, saveHuddles } from "./huddles/settings";
+import { finishSsoSignIn, forgetSso, saveSso, ssoBackchannelLogout, ssoConnectionFor, ssoRefusal, startSsoSignIn } from "./sso";
 import { invite, lookUpEmailLink, resendInvitation, revokeInvitation } from "./invitations";
 import { askForEmailLink, emailSignUpPage, invitationPage, join, joinCodeOf, joinPage, joinWithEmailLink, signUp, signUpPage } from "./join";
 import { checkResendApiKey } from "./mail";
@@ -192,7 +212,8 @@ import { unfurlLink } from "./unfurl";
 import { isFromUnsupportedBrowser, unsupportedBrowserPage } from "./unsupported-browser";
 import { platformOf } from "./user-agent";
 import { versionOf } from "./version";
-import { ACCOUNT_BEFORE_SETUP, CREDENTIALS_HEADER, workspace, type YourProfile } from "./workspace";
+import type { SsoProvider } from "./sso-provider";
+import { ACCOUNT_BEFORE_SETUP, CREDENTIALS_HEADER, signInNeededWith, workspace, type OnlyWay, type SignInElsewhere, type YourProfile } from "./workspace";
 
 export { AppConnector } from "./apps/connector";
 export { OutsideAi } from "./outside/endpoint";
@@ -254,9 +275,9 @@ async function signInWithPassword({ emailAddress, password, returnTo }: Record<s
       user = await workspace(env).startSession(kept.userId, kept.passwordDigest, null, digest, client);
     }
   }
-  if (user === "memberful") {
-    const connecting = found && (await memberfulConnectionFor(request, env, found.userId, found.passwordDigest, returnTo));
-    return connecting ? connectionAnswer(connecting) : problem(403, MEMBERFUL_SIGN_IN_NEEDED);
+  if (typeof user === "string") {
+    const connecting = found && (await connectionsFor(request, env, user, found.userId, found.passwordDigest, returnTo));
+    return connecting ? connectionAnswer(connecting) : problem(403, signInNeededWith(user));
   }
   if (!user) return problem(401, SIGN_IN_REJECTED);
   return json({ user }, { status: 201, headers: { "Set-Cookie": sessionCookie(request, token) } });
@@ -264,8 +285,8 @@ async function signInWithPassword({ emailAddress, password, returnTo }: Record<s
 
 /**
  * Signs someone in with just a name, as someone new every time, when EMBER_GUEST_SIGN_IN allows it,
- * unless Memberful is members only, or the name is @ember's or an agent's, or has a word Blocked words
- * keeps out.
+ * unless Memberful is members only, or single sign-on the only way in, or the name is @ember's or an
+ * agent's, or has a word Blocked words keeps out.
  */
 async function signInGuest(given: unknown, request: Request, env: Env): Promise<Response> {
   if (!guestSignIn(env)) return problem(403, "Signing in with just a name is turned off");
@@ -275,9 +296,9 @@ async function signInGuest(given: unknown, request: Request, env: Env): Promise<
 
   const token = newSessionToken();
   const user = await workspace(env).signInGuest(name, await tokenDigest(token, env.SESSION_SECRET), clientOf(request));
-  if (user === "memberful") return problem(403, MEMBERFUL_SIGN_IN_NEEDED);
   if (user === "agent's name") return problem(422, agentsName(name));
   if (user === "blocked words") return problem(422, BLOCKED_WORDS_REFUSED);
+  if (typeof user === "string") return problem(403, signInNeededWith(user));
   return json({ user }, { status: 201, headers: { "Set-Cookie": sessionCookie(request, token) } });
 }
 
@@ -287,7 +308,7 @@ async function signInGuest(given: unknown, request: Request, env: Env): Promise<
  */
 async function bootstrap(request: Request, env: Env): Promise<Response> {
   const token = sessionToken(request);
-  const [{ account, user, signInWithMemberful, passwordResetCodes, turnstileSiteKey }, push] = await Promise.all([
+  const [{ account, user, signInWithMemberful, signInWithSso, passwordResetCodes, turnstileSiteKey }, push] = await Promise.all([
     workspace(env).bootstrap(token ? await credentialsFor(token, request, env) : null, deployedMemberfulOf(env)?.site ?? null, deployedAddressOf(request)),
     webPush(env),
   ]);
@@ -295,8 +316,9 @@ async function bootstrap(request: Request, env: Env): Promise<Response> {
     setup: account ? "complete" : "pending",
     setupAccess: setupAccessOf(request, env),
     setupPlaceholders: setupPlaceholdersOf(env),
-    guestSignIn: guestSignIn(env) && !account?.memberfulSignIn,
+    guestSignIn: guestSignIn(env) && !(account && signsInElsewhereOnly(account)),
     signInWithMemberful,
+    signInWithSso,
     // The deployment's keys take the place of any an administrator gave.
     turnstileSiteKey: turnstileKeysOf(env)?.siteKey ?? turnstileSiteKey,
     passwordResetCodes,
@@ -444,20 +466,22 @@ async function regenerateJoinCode(request: Request, env: Env): Promise<Response>
  * Changes the workspace, as its settings save it. Someone who isn't an administrator hears so before
  * anything they sent is checked. Ember's address can only be the one the request came to, or a custom
  * domain or where a deploy puts Ember while it reaches Ember (`addressRefusal`), Memberful, or its
- * Members only, can only be turned on once Ember has Memberful's keys, and Email domain only with a
- * domain to let in, while Ember can send email. Turning any of them off always works.
+ * Members only, can only be turned on once Ember has Memberful's keys, single sign-on, or SSO only,
+ * once a provider is set up (`ssoRefusal`), and Email domain only with a domain to let in, while Ember
+ * can send email. Turning any of them off always works.
  */
 async function changeAccount(request: Request, env: Env): Promise<Response> {
   const credentials = await credentialsOf(request, env);
   if (!credentials) return problem(401, "Not signed in");
   const changes = parseAccountChanges(await jsonBodyOf(request));
   const refusal =
-    typeof changes === "string" ? changes : ((await addressRefusal(changes.customDomain, request, env, credentials)) ?? (await memberfulRefusal(changes.settings, env)));
+    typeof changes === "string" ? changes : ((await addressRefusal(changes.customDomain, request, env, credentials)) ?? (await memberfulRefusal(changes.settings, env)) ?? (await ssoRefusal(changes.settings, env)));
   // Changes that are refused change nothing, but who's asking is still checked first.
   const account = await workspace(env).changeAccount(credentials, typeof changes === "string" || refusal ? {} : changes, urlOf(request).host);
   if (!account) return problem(401, "Not signed in");
   if (account === "forbidden") return problem(403, "Only administrators can change the workspace");
   if (account === "conflict") return problem(422, OPEN_WITH_MEMBERFUL);
+  if (account === "sso conflict") return problem(422, OPEN_WITH_SSO);
   if (account === "no email domains") return problem(422, NO_EMAIL_DOMAINS);
   if (account === "no email") return problem(422, EMAIL_DOMAIN_NEEDS_EMAIL);
   return refusal ? problem(422, refusal) : json({ account });
@@ -714,13 +738,19 @@ async function unbanPerson(request: Request, env: Env, userId: UserId): Promise<
 /**
  * Your profile as its page shows it, with a new sign-in link for you, as each of Campfire's profile
  * pages has (users/profiles/_transfer.html.erb), and where you stand with Memberful, at `site`, the one
- * Ember has the keys of, if it has any. No cache should keep it, since it holds your email address and
- * the link.
+ * Ember has the keys of, if it has any, and with the single sign-on provider, if one is set up. No cache
+ * should keep it, since it holds your email address and the link.
  */
-async function profileAnswer({ transfer, profile, memberful }: YourProfile, env: Env, site: string | null): Promise<Response> {
-  const transferId = await newTransferId(transfer, env.SESSION_SECRET);
-  const answer = { ...profile, memberful: memberfulStatusOf(memberful, site) };
+async function profileAnswer({ transfer, profile, elsewhere }: YourProfile, env: Env, site: string | null): Promise<Response> {
+  const [transferId, provider] = await Promise.all([newTransferId(transfer, env.SESSION_SECRET), elsewhere && workspace(env).ssoProvider()]);
+  const answer = { ...profile, memberful: memberfulStatusOf(elsewhere, site), sso: ssoStatusOf(elsewhere, provider ?? null) };
   return json({ profile: answer, transferId } satisfies ProfileAnswer, { headers: { "Cache-Control": "no-store" } });
+}
+
+/** The account you've connected at `issuer`, named as it was described, if you have. */
+function connectedAt(elsewhere: NonNullable<YourProfile["elsewhere"]>, issuer: string): MemberfulAccount | null {
+  const account = elsewhere.accounts.find((account) => account.issuer === issuer);
+  return account ? { name: account.name, emailAddress: account.emailAddress } : null;
 }
 
 /**
@@ -729,12 +759,22 @@ async function profileAnswer({ transfer, profile, memberful }: YourProfile, env:
  * connect. Null when there's nothing to show: without the site, for a guest, or while Memberful isn't
  * members only and you haven't connected one.
  */
-function memberfulStatusOf(memberful: YourProfile["memberful"], site: string | null): MemberfulStatus | null {
-  if (!memberful || site === null) return null;
-  const { membersOnly } = memberful;
-  const account = memberful.accounts.find((account) => account.issuer === site);
-  if (account) return { membersOnly, connected: { name: account.name, emailAddress: account.emailAddress } };
-  return membersOnly ? { membersOnly, connected: null } : null;
+function memberfulStatusOf(elsewhere: YourProfile["elsewhere"], site: string | null): MemberfulStatus | null {
+  if (!elsewhere || site === null) return null;
+  const { membersOnly } = elsewhere;
+  const connected = connectedAt(elsewhere, site);
+  return connected || membersOnly ? { membersOnly, connected } : null;
+}
+
+/**
+ * Where you stand with the single sign-on provider, for your profile, as with Memberful
+ * (`memberfulStatusOf`): the account you've connected there, or none yet while it's the only way in.
+ */
+function ssoStatusOf(elsewhere: YourProfile["elsewhere"], provider: SsoProvider | null): SsoStatus | null {
+  if (!elsewhere || provider === null) return null;
+  const { ssoOnly } = elsewhere;
+  const connected = connectedAt(elsewhere, provider.issuer);
+  return connected || ssoOnly ? { name: provider.name, ssoOnly, connected } : null;
 }
 
 /** Your profile, for its page. */
@@ -752,9 +792,9 @@ async function profile(request: Request, env: Env): Promise<Response> {
  * password, while you have one, takes your current password too, so that holding your session isn't
  * enough to take your account: it's checked as sign-in checks a password, counting against the same
  * limit (429), and refused (422) when it's missing or wrong. Someone without a password whom Memberful
- * signs in, as it does while Ember has the keys to the site they're linked at, is refused a
- * first one (422), for the same reason: it would be a way in that holding their session was enough to
- * make. A new password ends your other sessions, keeping this browser's push subscription at
+ * signs in, as it does while Ember has the keys to the site they're linked at, or single sign-on does,
+ * while they're linked at the provider set up, is refused a first one (422), for the same reason: it
+ * would be a way in that holding their session was enough to make. A new password ends your other sessions, keeping this browser's push subscription at
  * `pushSubscriptionEndpoint` and forgetting the rest.
  */
 async function changeProfile(request: Request, env: Env): Promise<Response> {
@@ -768,6 +808,7 @@ async function changeProfile(request: Request, env: Env): Promise<Response> {
   if (!check) return problem(401, "Not signed in");
   if (check === "limited") return problem(429, SIGN_IN_LIMITED);
   if (check === "memberful") return problem(422, PASSWORD_WITH_MEMBERFUL);
+  if (check === "sso") return problem(422, PASSWORD_WITH_SSO);
   const checked = check.passwordDigest;
   if (checked !== null) {
     if (!currentPassword) return problem(422, CURRENT_PASSWORD_NEEDED);
@@ -778,6 +819,7 @@ async function changeProfile(request: Request, env: Env): Promise<Response> {
   const yours = await workspace(env).changeProfile(credentials, rest, passwordDigest, checked, pushSubscriptionEndpoint || null, memberfulSite);
   if (!yours) return problem(401, "Not signed in");
   if (yours === "memberful") return problem(422, PASSWORD_WITH_MEMBERFUL);
+  if (yours === "sso") return problem(422, PASSWORD_WITH_SSO);
   if (yours === "email address taken") return problem(422, "That email address has an account already");
   if (yours === "name reserved") return problem(422, NAME_RESERVED);
   if (yours === "agent's name") return problem(422, agentsName(rest.name!));
@@ -818,79 +860,158 @@ async function deleteAccount(request: Request, env: Env): Promise<Response> {
 }
 
 /**
- * Connect Memberful on your profile: once your password checks out, while you have one, so that holding
- * your session isn't enough to add a way into your account, as for changing your email address or
- * password, answers where to sign in at the Memberful site to connect your account there to yours, with
- * the cookie that keeps the state it goes with, to come back to your profile. 401 without a valid
- * session; 403 while Memberful isn't members only, or Ember lacks its keys, or to a guest; 409
- * once you've connected one; 422 without your password, or with one that isn't yours; and 429 past
- * sign-in's limit, which checking the password counts against.
+ * What connecting an account elsewhere from your profile, and disconnecting it, goes by: Memberful, at
+ * the site Ember has the keys of, or the single sign-on provider, what each is called, and what's said
+ * when it doesn't work.
  */
-async function connectMemberful(request: Request, env: Env): Promise<Response> {
+interface ConnectingElsewhere {
+  via: SignInElsewhere;
+  name: string;
+  /** Where accounts there are linked from, or null while there's nowhere to connect one. */
+  issuerOf: (env: Env) => Promise<string | null>;
+  connectionFor: typeof memberfulConnectionFor | typeof ssoConnectionFor;
+  unavailable: string;
+  unneeded: string;
+  passwordNeeded: string;
+  /** Why it's refused to someone without a password whom the other way signs in. */
+  signsInOtherwise: string;
+  notConnected: string;
+  disconnectPasswordNeeded: string;
+  disconnectWithoutPassword: string;
+  disconnectWithoutEmail: string;
+}
+
+const CONNECTING_MEMBERFUL: ConnectingElsewhere = {
+  via: "memberful",
+  name: "Memberful",
+  issuerOf: memberfulSiteFor,
+  connectionFor: memberfulConnectionFor,
+  unavailable: MEMBERFUL_SIGN_IN_PROBLEMS.unavailable,
+  unneeded: MEMBERFUL_SIGN_IN_PROBLEMS.unneeded,
+  passwordNeeded: MEMBERFUL_PASSWORD_NEEDED,
+  signsInOtherwise: MEMBERFUL_WITH_SSO,
+  notConnected: MEMBERFUL_NOT_CONNECTED,
+  disconnectPasswordNeeded: MEMBERFUL_DISCONNECT_PASSWORD_NEEDED,
+  disconnectWithoutPassword: MEMBERFUL_DISCONNECT_WITHOUT_PASSWORD,
+  disconnectWithoutEmail: MEMBERFUL_DISCONNECT_WITHOUT_EMAIL,
+};
+
+const CONNECTING_SSO: ConnectingElsewhere = {
+  via: "sso",
+  name: "single sign-on",
+  issuerOf: async (env) => (await workspace(env).ssoProvider())?.issuer ?? null,
+  connectionFor: ssoConnectionFor,
+  unavailable: SSO_SIGN_IN_PROBLEMS.unavailable,
+  unneeded: SSO_SIGN_IN_PROBLEMS.unneeded,
+  passwordNeeded: SSO_PASSWORD_NEEDED,
+  signsInOtherwise: SSO_WITH_MEMBERFUL,
+  notConnected: SSO_NOT_CONNECTED,
+  disconnectPasswordNeeded: SSO_DISCONNECT_PASSWORD_NEEDED,
+  disconnectWithoutPassword: SSO_DISCONNECT_WITHOUT_PASSWORD,
+  disconnectWithoutEmail: SSO_DISCONNECT_WITHOUT_EMAIL,
+};
+
+/**
+ * Connect Memberful, or single sign-on, on your profile: once your password checks out, while you have
+ * one, so that holding your session isn't enough to add a way into your account, as for changing your
+ * email address or password, answers where to sign in there to connect your account there to yours,
+ * with the cookie that keeps the state it goes with, to come back to your profile. 401 without a valid
+ * session; 403 while it isn't the only way in, or there's nowhere to connect one (Ember lacks
+ * Memberful's keys, or no provider is set up), to a guest, or to someone without a password whom the
+ * other way signs in, which holding their session would be enough to add a way in to; 409 once you've
+ * connected one; 422 without your password, or with one that isn't yours; and 429 past sign-in's limit,
+ * which checking the password counts against.
+ */
+async function connectElsewhere(request: Request, env: Env, elsewhere: ConnectingElsewhere): Promise<Response> {
   const credentials = await credentialsOf(request, env);
   if (!credentials) return problem(401, "Not signed in");
-  const site = await memberfulSiteFor(env);
-  if (!site) return problem(403, MEMBERFUL_SIGN_IN_PROBLEMS.unavailable);
+  const issuer = await elsewhere.issuerOf(env);
+  if (!issuer) return problem(403, elsewhere.unavailable);
   const body: unknown = await jsonBodyOf(request);
   const { currentPassword } = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
-  const check = await workspace(env).memberfulConnectionCheck(credentials, request.headers.get("CF-Connecting-IP") ?? "unknown", site);
+  const check = await workspace(env).connectionCheck(elsewhere.via, credentials, request.headers.get("CF-Connecting-IP") ?? "unknown", issuer, await memberfulSiteFor(env));
   if (!check) return problem(401, "Not signed in");
   if (check === "limited") return problem(429, SIGN_IN_LIMITED);
-  if (check === "unneeded") return problem(403, MEMBERFUL_SIGN_IN_PROBLEMS.unneeded);
-  if (check === "forbidden") return problem(403, "Guests can't connect Memberful");
-  if (check === "connected") return problem(409, "You've connected Memberful already");
+  if (check === "unneeded") return problem(403, elsewhere.unneeded);
+  if (check === "forbidden") return problem(403, `Guests can't connect ${elsewhere.name}`);
+  if (check === "otherwise") return problem(403, elsewhere.signsInOtherwise);
+  if (check === "connected") return problem(409, `You've connected ${elsewhere.name} already`);
   if (check.passwordDigest !== "") {
-    if (typeof currentPassword !== "string" || !currentPassword) return problem(422, MEMBERFUL_PASSWORD_NEEDED);
+    if (typeof currentPassword !== "string" || !currentPassword) return problem(422, elsewhere.passwordNeeded);
     // One longer than the form takes is nobody's, as at sign-in.
     if (isPasswordTooLong(currentPassword) || !(await passwordHasher(env).verify(currentPassword, check.passwordDigest)).matches) return problem(422, CURRENT_PASSWORD_WRONG);
   }
-  const connecting = await memberfulConnectionFor(request, env, check.userId, check.passwordDigest, PROFILE_PATH);
+  const connecting = await elsewhere.connectionFor(request, env, check.userId, check.passwordDigest, PROFILE_PATH);
   // Something changed meanwhile: their password, the setting, or what they've connected.
-  return connecting ? connectionAnswer(connecting) : problem(409, "Connecting Memberful didn't start. Try again.");
+  return connecting ? connectionAnswer({ connection: connecting.connection, cookies: connecting.cookie === null ? [] : [connecting.cookie] }) : problem(409, `Connecting ${elsewhere.name} didn't start. Try again.`);
 }
 
 /**
- * Disconnect Memberful on your profile: once your password checks out, so that holding your session isn't
- * enough to change how you sign in, as for connecting one, unlinks your account from the one at the
- * Memberful site, ends your other sessions and forgets their browsers' push subscriptions, as a new
- * password does, keeping this browser's at `pushSubscriptionEndpoint`, and answers your profile as it
- * is then. 401 without a valid session; 403 to a guest, or while Ember lacks Memberful's keys;
+ * Disconnect Memberful, or single sign-on, on your profile: once your password checks out, so that
+ * holding your session isn't enough to change how you sign in, as for connecting one, unlinks your
+ * account from the one there, ends your other sessions and forgets their browsers' push subscriptions,
+ * as a new password does, keeping this browser's at `pushSubscriptionEndpoint`, and answers your profile
+ * as it is then. 401 without a valid session; 403 to a guest, or while there's nowhere to connect one;
  * 404 while you haven't connected one; 422 while you have no password, or no email address, to sign in
  * with once it's disconnected, or without your password, or with one that isn't yours; 429 past
  * sign-in's limit, which checking the password counts against; and 409 when your password, email
  * address or connection changed meanwhile.
  */
-async function disconnectMemberful(request: Request, env: Env): Promise<Response> {
+async function disconnectElsewhere(request: Request, env: Env, elsewhere: ConnectingElsewhere): Promise<Response> {
   const credentials = await credentialsOf(request, env);
   if (!credentials) return problem(401, "Not signed in");
-  const site = await memberfulSiteFor(env);
-  if (!site) return problem(403, MEMBERFUL_SIGN_IN_PROBLEMS.unavailable);
+  const issuer = await elsewhere.issuerOf(env);
+  if (!issuer) return problem(403, elsewhere.unavailable);
   const disconnection = parseMemberfulDisconnection(await jsonBodyOf(request));
   if (typeof disconnection === "string") return problem(422, disconnection);
   const { currentPassword, pushSubscriptionEndpoint } = disconnection;
-  const check = await workspace(env).memberfulDisconnectionCheck(credentials, request.headers.get("CF-Connecting-IP") ?? "unknown", site);
+  const check = await workspace(env).disconnectionCheck(credentials, request.headers.get("CF-Connecting-IP") ?? "unknown", issuer);
   if (!check) return problem(401, "Not signed in");
   if (check === "limited") return problem(429, SIGN_IN_LIMITED);
-  if (check === "forbidden") return problem(403, "Guests can't disconnect Memberful");
-  if (check === "not connected") return problem(404, MEMBERFUL_NOT_CONNECTED);
-  if (check === "no password") return problem(422, MEMBERFUL_DISCONNECT_WITHOUT_PASSWORD);
-  if (check === "no email address") return problem(422, MEMBERFUL_DISCONNECT_WITHOUT_EMAIL);
-  if (!currentPassword) return problem(422, MEMBERFUL_DISCONNECT_PASSWORD_NEEDED);
+  if (check === "forbidden") return problem(403, `Guests can't disconnect ${elsewhere.name}`);
+  if (check === "not connected") return problem(404, elsewhere.notConnected);
+  if (check === "no password") return problem(422, elsewhere.disconnectWithoutPassword);
+  if (check === "no email address") return problem(422, elsewhere.disconnectWithoutEmail);
+  if (!currentPassword) return problem(422, elsewhere.disconnectPasswordNeeded);
   // One longer than the form takes is nobody's, as at sign-in.
   if (isPasswordTooLong(currentPassword) || !(await passwordHasher(env).verify(currentPassword, check.passwordDigest)).matches) return problem(422, CURRENT_PASSWORD_WRONG);
-  const yours = await workspace(env).disconnectMemberful(credentials, site, check.passwordDigest, pushSubscriptionEndpoint || null);
+  const yours = await workspace(env).disconnectElsewhere(credentials, issuer, check.passwordDigest, pushSubscriptionEndpoint || null);
   if (!yours) return problem(401, "Not signed in");
   // Something changed meanwhile: their password, or what they've connected.
-  if (yours === "refused") return problem(409, "Disconnecting Memberful didn't work. Try again.");
-  return profileAnswer(yours, env, site);
+  if (yours === "refused") return problem(409, `Disconnecting ${elsewhere.name} didn't work. Try again.`);
+  return profileAnswer(yours, env, await memberfulSiteFor(env));
+}
+
+const connectMemberful = (request: Request, env: Env) => connectElsewhere(request, env, CONNECTING_MEMBERFUL);
+const disconnectMemberful = (request: Request, env: Env) => disconnectElsewhere(request, env, CONNECTING_MEMBERFUL);
+const connectSso = (request: Request, env: Env) => connectElsewhere(request, env, CONNECTING_SSO);
+const disconnectSso = (request: Request, env: Env) => disconnectElsewhere(request, env, CONNECTING_SSO);
+
+/**
+ * Sends the browser on to sign in at the Memberful site, or the single sign-on provider, to connect an
+ * account there, with the cookie that keeps the state it goes with, or on to Ember's custom domain to
+ * connect from there, which no cache should keep.
+ */
+function connectionAnswer({ connection, cookies }: { connection: ElsewhereConnection; cookies: string[] }): Response {
+  const answer = json(connection, { status: 202, headers: { "Cache-Control": "no-store" } });
+  for (const cookie of cookies) answer.headers.append("Set-Cookie", cookie);
+  return answer;
 }
 
 /**
- * Sends the browser on to sign in at the Memberful site to connect an account there, with the cookie that
- * keeps the state it goes with, or on to Ember's custom domain to connect from there, which no cache should keep.
+ * Starts connecting the account of `userId`, whose password checked out against `passwordDigest`, by
+ * `way`, as signing in with a password does while people sign in only elsewhere: at Memberful, at the
+ * provider, or at both while either signs people in, when whichever starts is offered. Null when none does.
  */
-const connectionAnswer = ({ connection, cookie }: { connection: MemberfulConnection; cookie: string | null }) =>
-  json(connection, { status: 202, headers: { ...(cookie === null ? {} : { "Set-Cookie": cookie }), "Cache-Control": "no-store" } });
+async function connectionsFor(request: Request, env: Env, way: OnlyWay, userId: UserId, passwordDigest: string, returnTo: unknown) {
+  const [memberful, sso] = await Promise.all([
+    way === "sso" ? null : memberfulConnectionFor(request, env, userId, passwordDigest, returnTo),
+    way === "memberful" ? null : ssoConnectionFor(request, env, userId, passwordDigest, returnTo),
+  ]);
+  if (!memberful && !sso) return null;
+  const connection = { ...memberful?.connection, ...sso?.connection } as ElsewhereConnection;
+  return { connection, cookies: [memberful?.cookie, sso?.cookie].filter((cookie): cookie is string => typeof cookie === "string") };
+}
 
 /**
  * Gives you the avatar the form brings, answering your profile then. Who's asking is checked before the
@@ -1323,6 +1444,8 @@ function apiAction(request: Request, env: Env, pathname: string): (() => Respons
   if (pathname === "/api/account/huddles" && request.method === "DELETE") return () => forgetHuddles(request, env);
   if (pathname === "/api/account/huddles/relay" && request.method === "PUT") return () => saveHuddleRelay(request, env);
   if (pathname === "/api/account/huddles/relay" && request.method === "DELETE") return () => forgetHuddleRelay(request, env);
+  if (pathname === SSO_SETTINGS_PATH && request.method === "PUT") return () => saveSso(request, env);
+  if (pathname === SSO_SETTINGS_PATH && request.method === "DELETE") return () => forgetSso(request, env);
   if (pathname === "/api/account/custom_domain_checks" && request.method === "POST") return () => checkCustomDomain(request, env);
   if (pathname === "/api/account/custom_domain_lookups" && request.method === "POST") return () => lookUpCustomDomain(request, env);
   if (pathname === LOGO_PATH && request.method === "PUT") return () => changeLogo(request, env);
@@ -1366,6 +1489,8 @@ function apiAction(request: Request, env: Env, pathname: string): (() => Respons
   if (pathname === "/api/outside/answers" && request.method === "POST") return () => answerOutsideAsk(request, env);
   if (pathname === MEMBERFUL_CONNECTIONS_PATH && request.method === "POST") return () => connectMemberful(request, env);
   if (pathname === MEMBERFUL_CONNECTIONS_PATH && request.method === "DELETE") return () => disconnectMemberful(request, env);
+  if (pathname === SSO_CONNECTIONS_PATH && request.method === "POST") return () => connectSso(request, env);
+  if (pathname === SSO_CONNECTIONS_PATH && request.method === "DELETE") return () => disconnectSso(request, env);
   if (pathname === AVATAR_PATH && request.method === "PUT") return () => changeAvatar(request, env);
   if (pathname === AVATAR_PATH && request.method === "DELETE") return () => removeAvatar(request, env);
   const someone = pathname.match(/^\/api\/users\/([^/]+)$/);
@@ -1473,6 +1598,8 @@ async function route(request: Request, env: Env, pathname: string): Promise<Resp
   if (pathname === CSP_REPORT_PATH) return cspReport(request);
   // Nor is Memberful's webhook, which its servers sign with the webhook's secret.
   if (pathname === MEMBERFUL_WEBHOOK_PATH) return memberfulWebhook(request, env);
+  // Nor is the single sign-on provider's back-channel logout, whose token its keys sign.
+  if (pathname === SSO_LOGOUT_PATH) return ssoBackchannelLogout(request, env);
   const write = request.method !== "GET" && request.method !== "HEAD";
   // Nor is an app's authorization server, reading who Ember is.
   if (pathname === CLIENT_DOCUMENT_PATH && !write) return clientDocument(request);
@@ -1494,6 +1621,8 @@ async function route(request: Request, env: Env, pathname: string): Promise<Resp
   if (pathname === MEMBERFUL_SIGN_IN_PATH) return startMemberfulSignIn(request, env);
   // Signing in, which a banned IP address can't do, though it's a GET.
   if (pathname === MEMBERFUL_CALLBACK_PATH) return (await isFromBannedAddress(request, env)) ? tooManyRequests() : finishMemberfulSignIn(request, env);
+  if (pathname === SSO_SIGN_IN_PATH) return startSsoSignIn(request, env);
+  if (pathname === SSO_CALLBACK_PATH) return (await isFromBannedAddress(request, env)) ? tooManyRequests() : finishSsoSignIn(request, env);
   if (isSetupPath(pathname)) return setupPage(request, env);
   if (pathname === SIGN_UP_PATH) return signUpPage(request, env);
   if (pathname === INVITATION_PATH) return invitationPage(request, env);

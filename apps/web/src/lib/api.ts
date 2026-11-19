@@ -127,6 +127,18 @@ import type {
 import type { MemberfulKeysChange, MemberfulSaved } from "@ember/protocol/memberful";
 import type { OutsideAiSettings, OutsideAnswer, OutsideAnswered, OutsideAsk, OutsideAsked, OutsideScope, YourOutsideAi } from "@ember/protocol/outside";
 import type { HandledReports, NewReport, Report, ReportHandling, ReportOutcome, Reports } from "@ember/protocol/reports";
+import {
+  SSO_CONNECTIONS_PATH,
+  SSO_SETTINGS_PATH,
+  type ElsewhereConnection,
+  type SsoConnection,
+  type SsoConnectionStart,
+  type SsoDisconnection,
+  type SsoForgotten,
+  type SsoSaved,
+  type SsoSettings,
+  type SsoSetup,
+} from "@ember/protocol/sso";
 import type { LogoVariants } from "@/lib/previews";
 
 // The session lives in an HttpOnly cookie, which the browser sends with every request and socket,
@@ -302,12 +314,12 @@ export async function resetPasswordWithCode(reset: PasswordResetWithCode): Promi
 
 /**
  * Signs in with an email address and password: who signed in, or, for a member whose password checks out
- * while Memberful is members only, until they've connected their Memberful account, where to connect it,
- * which signs them in and opens the page `credentials.returnTo` names.
+ * while Memberful is members only, or single sign-on the only way in, until they've connected their
+ * account there, where to connect it, at either while both are, which signs them in and opens the page `credentials.returnTo` names.
  */
-export async function signIn(credentials: PasswordSignIn): Promise<Me | MemberfulConnection> {
-  const answer = await request<{ user: Me } | MemberfulConnection>("/api/session", { method: "POST", body: JSON.stringify(credentials) });
-  return "memberfulConnection" in answer ? answer : answer.user;
+export async function signIn(credentials: PasswordSignIn): Promise<Me | ElsewhereConnection> {
+  const answer = await request<{ user: Me } | ElsewhereConnection>("/api/session", { method: "POST", body: JSON.stringify(credentials) });
+  return "user" in answer ? answer.user : answer;
 }
 
 /** Signs in with just a name, as someone new. */
@@ -403,6 +415,24 @@ export async function connectMemberful(currentPassword?: string): Promise<Member
  */
 export async function disconnectMemberful(disconnection: MemberfulDisconnection): Promise<ProfileAnswer> {
   return request<ProfileAnswer>(MEMBERFUL_CONNECTIONS_PATH, { method: "DELETE", body: JSON.stringify(disconnection) });
+}
+
+/**
+ * Starts connecting your account to an account at the single sign-on provider, with your password while
+ * you have one: where to sign in there, which sends the browser back to your profile. Fails with a 422
+ * ApiError without your password, or with one that isn't yours, and a 409 once you've connected one.
+ */
+export async function connectSso(currentPassword?: string): Promise<SsoConnection> {
+  const start: SsoConnectionStart = currentPassword === undefined ? {} : { currentPassword };
+  return request<SsoConnection>(SSO_CONNECTIONS_PATH, { method: "POST", body: JSON.stringify(start) });
+}
+
+/**
+ * Disconnects your account from your account at the single sign-on provider, with your password, as
+ * `disconnectMemberful` disconnects Memberful's.
+ */
+export async function disconnectSso(disconnection: SsoDisconnection): Promise<ProfileAnswer> {
+  return request<ProfileAnswer>(SSO_CONNECTIONS_PATH, { method: "DELETE", body: JSON.stringify(disconnection) });
 }
 
 /**
@@ -607,6 +637,23 @@ export async function saveHuddles(setup: HuddlesSetup): Promise<HuddlesSettings>
 /** Turns huddles off, forgetting the SFU app's keys Ember was given. Fails with a 403 ApiError for anyone but an administrator. */
 export async function forgetHuddles(): Promise<null> {
   return (await request<HuddlesForgotten>("/api/account/huddles", { method: "DELETE" })).huddles;
+}
+
+/**
+ * Gives Ember the single sign-on provider's issuer and the keys of the app registered there, answering
+ * the provider as it is then. Fails with a 422 ApiError on the field Ember refuses, or the provider's
+ * discovery document does, and a 403 one for anyone but an administrator.
+ */
+export async function saveSso(setup: SsoSetup): Promise<SsoSettings> {
+  return (await request<SsoSaved>(SSO_SETTINGS_PATH, { method: "PUT", body: JSON.stringify(setup) })).sso;
+}
+
+/**
+ * Forgets the provider an administrator gave, which turns single sign-on off, answering the provider as
+ * the deployment's secrets give it, if they do. Fails with a 403 ApiError for anyone but an administrator.
+ */
+export async function forgetSso(): Promise<SsoSettings | null> {
+  return (await request<SsoForgotten>(SSO_SETTINGS_PATH, { method: "DELETE" })).sso;
 }
 
 /**

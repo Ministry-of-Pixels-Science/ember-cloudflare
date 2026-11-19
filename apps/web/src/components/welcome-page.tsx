@@ -12,8 +12,9 @@ import { ApiError, changeAvatar, changeProfile, fetchProfile, isSignedOut } from
 import { loadPage } from "@/lib/page";
 import { rememberThisPage } from "@/lib/return-path";
 
-// The page someone new who joined with Memberful comes to before the page they signed in from: their
-// picture, the name Memberful gave Ember, and a username made from it, each theirs to change.
+// The page someone new who joined with Memberful, or single sign-on, comes to before the page they
+// signed in from: their picture, the name Memberful or the provider gave Ember, and a username made
+// from it, each theirs to change.
 
 const SIGN_IN_PATH = "/session/new";
 const NO_CONNECTION = "Couldn't reach Ember. Check your connection and try again.";

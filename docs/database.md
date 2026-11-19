@@ -647,6 +647,23 @@ Objects, D1 or speed call for something else.
   `pending_identities` rows, each statement checking that the row is still there, `password_digest`
   is still the one the Worker checked and `email_address` is one. Each row keeps the account's name and email address as Memberful last described it
   (workspace migration 0049), refreshed as it signs them in, only so their profile can name it.
+- **Single sign-on goes through the same tables.** A provider that speaks OpenID Connect links
+  accounts in `identities` by its issuer and the ID token's `sub`, connects them through
+  `pending_identities`, and suspends someone outside the groups it lets in as a lapsed membership
+  does, with no table of its own. The provider the Single sign-on card sets up is the account's
+  `sso` setting, its client secret sealed under SESSION_SECRET, beside `sso_join` and `sso_sign_in`.
+  `users.email_verified_at` keeps when someone joined with a link emailed to their address, which
+  saving their profile with another forgets, and is what linking by an address the provider verified
+  goes by, never linking an administrator.
+  Workspace migration 0079 adds what Memberful lacks. `identities.refresh_token` keeps the refresh
+  token each sign-in gave, sealed, and `refresh_due_at`, which an index serves, keeps when the
+  Workspace's alarm next asks the provider with it, without a queue. Settling one checks that the
+  token is still the one it asked with, so a sign-in meanwhile keeps its own. `sessions.identity_issuer`
+  and `identity_sid` say which provider and which of its sessions signed a session in, indexed
+  together, so a back-channel logout ends just those, or, by subject, the sessions any of that
+  account's sign-ins started, which a password's sessions never are. `identities.via` says which way
+  each account signs in, `memberful` for those from before, so the Memberful site Set up Memberful
+  keeps, while people are linked at it, is never a provider's issuer.
 - **Memberships are asked about, not taken from webhooks.** Memberful sends its webhooks in no
   particular order, so one only queues a check of a linked member in `membership_checks` (workspace
   migration 0038), keyed by issuer and subject, as `identities` is, which the Workspace's alarm asks

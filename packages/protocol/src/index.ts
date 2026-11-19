@@ -10,6 +10,7 @@ import { isActionId, isActionValue, type Card } from "./cards.ts";
 import type { StoredFile } from "./files.ts";
 import type { HuddleSounds, HuddlesSettings, LiveHuddle, MessageHuddle } from "./huddles.ts";
 import type { OutsideConnection } from "./outside.ts";
+import type { SsoSettings, SsoStatus } from "./sso.ts";
 import { MAX_ID_LENGTH } from "./pages.ts";
 import { MAX_PUSH_ENDPOINT_LENGTH } from "./push.ts";
 import { ROOM_ICON_NAMES } from "./room-icons.ts";
@@ -97,6 +98,8 @@ export type {
   PastHuddle,
   PastHuddles,
 } from "./huddles.ts";
+// And the rest of sso.ts, from "@ember/protocol/sso", which only the sign-in pages, the Single sign-on card and the Worker's single sign-on use.
+export type { SsoAccount, SsoConnection, SsoField, SsoForgotten, SsoSaved, SsoSettings, SsoSetup, SsoStatus } from "./sso.ts";
 export {
   FILE_NAME_NOT_KEPT,
   FILE_TOO_LARGE,
@@ -538,6 +541,20 @@ export interface Account {
    */
   memberfulSignIn: boolean;
   /**
+   * Whether the people the single sign-on provider signs in join with it, which an administrator turns on
+   * in Membership as Single sign-on, once it's set up. Off until one does. People who joined with it keep
+   * signing in with it once it's off, while it's set up.
+   */
+  ssoJoin: boolean;
+  /**
+   * Whether only the people the single sign-on provider signs in sign in, and administrators, which an
+   * administrator turns on in Membership as SSO only: then the join link, open sign-up, Email domain and
+   * signing in with just a name are off, and only administrators and the people they invite sign in with
+   * a password. Off until one turns it on, and never on while single sign-on is off, nor with Open or
+   * Memberful's Members only.
+   */
+  ssoSignIn: boolean;
+  /**
    * Whether people with an email address at one of `emailDomains` may join with a link Ember emails
    * them, which they ask for at `/join/email`, and which an administrator turns on in Membership as Email
    * domain. Off until one does, and off whatever this says while Memberful is members only
@@ -609,6 +626,11 @@ export interface WorkspaceSettings {
    * does, or for anyone else, or while the deployment's secrets give Memberful's keys.
    */
   memberfulSiteKept: string | null;
+  /**
+   * The single sign-on provider, as the Single sign-on card shows it to administrators, once it's set up,
+   * by an administrator or by the deployment's secrets, and null otherwise, or for anyone else.
+   */
+  sso: SsoSettings | null;
   /**
    * Where the keys of the Cloudflare Turnstile widget come from that checks whoever signs up, or asks
    * Ember to email them, is a person, as Membership's Turnstile card says: the deployment's secrets
@@ -847,21 +869,30 @@ export interface AccountSettings {
   openSignUp?: boolean;
   memberfulJoin?: boolean;
   memberfulSignIn?: boolean;
+  ssoJoin?: boolean;
+  ssoSignIn?: boolean;
   emailDomainSignUp?: boolean;
 }
 
-/** Whether the join link lets people in: its switch is on, and Memberful isn't members only, which turns it off. */
-export const joinsWithLink = ({ joinLink, memberfulSignIn }: Pick<Account, "joinLink" | "memberfulSignIn">) => joinLink && !memberfulSignIn;
+/**
+ * Whether people sign in only with an account elsewhere, but administrators and the people they invite:
+ * Memberful is members only, or single sign-on is the only way in. Then the join link, open sign-up,
+ * Email domain and signing in with just a name are off.
+ */
+export const signsInElsewhereOnly = ({ memberfulSignIn, ssoSignIn }: Pick<Account, "memberfulSignIn" | "ssoSignIn">) => memberfulSignIn || ssoSignIn;
 
-/** Whether anyone may create an account at `/join`: Open is on, and Memberful isn't members only, which it can't be on with. */
-export const signsUpOpenly = ({ openSignUp, memberfulSignIn }: Pick<Account, "openSignUp" | "memberfulSignIn">) => openSignUp && !memberfulSignIn;
+/** Whether the join link lets people in: its switch is on, and people don't sign in only elsewhere, which turns it off. */
+export const joinsWithLink = (account: Pick<Account, "joinLink" | "memberfulSignIn" | "ssoSignIn">) => account.joinLink && !signsInElsewhereOnly(account);
+
+/** Whether anyone may create an account at `/join`: Open is on, and people don't sign in only elsewhere, which it can't be on with. */
+export const signsUpOpenly = (account: Pick<Account, "openSignUp" | "memberfulSignIn" | "ssoSignIn">) => account.openSignUp && !signsInElsewhereOnly(account);
 
 /**
  * Whether people may join with an email address at the workspace's email domains: Email domain is on,
  * with a domain to let in, and Memberful isn't members only, which turns it off.
  */
-export const signsUpWithEmailDomain = ({ emailDomainSignUp, emailDomains, memberfulSignIn }: Pick<Account, "emailDomainSignUp" | "emailDomains" | "memberfulSignIn">) =>
-  emailDomainSignUp && emailDomains.length > 0 && !memberfulSignIn;
+export const signsUpWithEmailDomain = (account: Pick<Account, "emailDomainSignUp" | "emailDomains" | "memberfulSignIn" | "ssoSignIn">) =>
+  account.emailDomainSignUp && account.emailDomains.length > 0 && !signsInElsewhereOnly(account);
 
 /** Why turning on Open, or Memberful's Members only, is refused while the other is on: Members only lets only Memberful's members in. */
 export const OPEN_WITH_MEMBERFUL = "Open and Members only can't both be on. Turn one off first.";
@@ -1035,6 +1066,12 @@ export interface Profile {
    * nothing to connect, or while Memberful isn't members only and you haven't connected one.
    */
   memberful: MemberfulStatus | null;
+  /**
+   * Where you stand with single sign-on (`SsoStatus`): the account at the provider you've connected, or
+   * none yet while it's the only way in. Null when there's nothing to show: while it isn't set up, for a
+   * guest, or while it isn't the only way in and you haven't connected one.
+   */
+  sso: SsoStatus | null;
   /** How much @ember thinks and how long it answers you, and the most each may be, and the model you picked, if you did, and the ones you can pick, or null while Ember AI is off. */
   assistant: YourAssistant | null;
   /** The connected apps you can sign in to yourself, by name, each with your sign-in to it, if you've made one: none while Ember AI is off, or for a guest. */
@@ -1106,6 +1143,12 @@ export interface Bootstrap {
    * in with an account there, as members who joined with it keep doing once it's off.
    */
   signInWithMemberful: boolean;
+  /**
+   * What the sign-in page calls the single sign-on provider it offers Sign in with, while single sign-on
+   * lets its people join, or while anyone here signs in with it, as people who joined with it keep doing
+   * once it's off, or null while it offers none.
+   */
+  signInWithSso: string | null;
   /**
    * The site key of the Turnstile widget whose check the open sign-up form shows, and the forms that ask
    * Ember to email a link to join or a code to reset a password, to check that whoever fills them in is a
@@ -2322,6 +2365,8 @@ const SETTING_NAMES: Record<keyof AccountSettings, string> = {
   openSignUp: "Open",
   memberfulJoin: "Memberful",
   memberfulSignIn: "Members only",
+  ssoJoin: "Single sign-on",
+  ssoSignIn: "SSO only",
   emailDomainSignUp: "Email domain",
 };
 

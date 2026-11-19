@@ -174,7 +174,7 @@ test.describe("Sign in with Memberful", () => {
     await expect(page.getByLabel("Email address")).toHaveValue(member.email);
     expect(await shownPicture(page.getByRole("img", { name: "Your avatar" }))).toEqual({ type: "image/webp", width: 256, height: 512 });
     // Their profile names the account, which is how they sign in, so it offers them no password, and nothing to disconnect.
-    await expect(memberfulSection(page)).toContainText(`Connected to Memberful as ${member.fullName} (${member.email}), so you sign in with it.`);
+    await expect(memberfulSection(page)).toContainText(`Connected as ${member.fullName} (${member.email}). You sign in with Memberful.`);
     await expect(page.getByLabel("New password")).toHaveCount(0);
     await expect(memberfulSection(page).getByRole("button", { name: "Disconnect Memberful" })).toHaveCount(0);
 
@@ -275,12 +275,12 @@ test.describe("Connect Memberful", () => {
 
     await page.goto("/users/me/profile");
     const section = memberfulSection(page);
-    await expect(section).toContainText("Members sign in with Memberful. Connect your Memberful account to keep signing in as yourself.");
+    await expect(section).toContainText("Members sign in with Memberful. Connect your Memberful account to keep signing in.");
     await section.getByLabel("Password").fill(joiner.password);
     await section.getByRole("button", { name: "Connect Memberful" }).click();
     await signInThereAs(page, member);
     await expect(page.getByRole("alert")).toHaveText("Your Memberful account is connected.");
-    await expect(section).toContainText(`Connected to Memberful as ${member.fullName} (${member.email}), so you sign in with it.`);
+    await expect(section).toContainText(`Connected as ${member.fullName} (${member.email}). You sign in with Memberful.`);
     expect(new URL(page.url()).pathname + new URL(page.url()).search).toBe("/users/me/profile");
 
     // Signing in with Memberful is signing in as themselves, with the account they had.
@@ -294,7 +294,7 @@ test.describe("Connect Memberful", () => {
     await section.getByLabel("Password").fill(joiner.password);
     await section.getByRole("button", { name: "Disconnect Memberful" }).click();
     await expect(page.getByRole("alert")).toHaveText("Your Memberful account is disconnected.");
-    await expect(section).toContainText("Members sign in with Memberful. Connect your Memberful account to keep signing in as yourself.");
+    await expect(section).toContainText("Members sign in with Memberful. Connect your Memberful account to keep signing in.");
     await expect(page.getByLabel("Email address")).toHaveValue(joiner.emailAddress);
   });
 
@@ -315,12 +315,12 @@ test.describe("Connect Memberful", () => {
     await page.getByLabel("Email address").fill(joiner.emailAddress);
     await page.getByLabel("Password").fill(joiner.password);
     await page.getByRole("button", { name: "Sign in", exact: true }).click();
-    await expect(page.getByText("Members sign in with Memberful now. Connect your Memberful account to keep signing in as yourself.")).toBeVisible();
+    await expect(page.getByText("This workspace now uses Memberful. Connect your Memberful account to keep signing in.")).toBeVisible();
     await page.getByRole("link", { name: "Connect Memberful" }).click();
     await signInThereAs(page, member);
 
     // Signed in as themselves, on the page they were sent to sign in from.
     await expect(page.getByLabel("Email address")).toHaveValue(joiner.emailAddress);
-    await expect(memberfulSection(page)).toContainText(`Connected to Memberful as ${member.fullName} (${joiner.emailAddress}), so you sign in with it.`);
+    await expect(memberfulSection(page)).toContainText(`Connected as ${member.fullName} (${joiner.emailAddress}). You sign in with Memberful.`);
   });
 });

@@ -366,7 +366,7 @@ describe("One live connection per tab outside the open room", () => {
     const welcome: WorkspaceServerFrame = {
       type: "welcome",
       you: { id: "u1", name: "Ada", administrator: true },
-      account: { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true },
+      account: { name: "Ember", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, ssoJoin: false, ssoSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true },
     };
     expect(parseServerFrame<WorkspaceServerFrame>(JSON.stringify(welcome))).toEqual(welcome);
     expect(parseServerFrame<WorkspaceServerFrame>('{"type":7}')).toBeNull();
@@ -802,16 +802,23 @@ describe("Ways to join", () => {
     expect(parseAccountChanges({ settings: { openSignUp: null } })).toBe("Open must be true or false");
   });
 
-  it("lets people in with the join link while its switch is on, but never while Memberful is members only", () => {
-    expect(joinsWithLink({ joinLink: true, memberfulSignIn: false })).toBe(true);
-    expect(joinsWithLink({ joinLink: false, memberfulSignIn: false })).toBe(false);
-    expect(joinsWithLink({ joinLink: true, memberfulSignIn: true })).toBe(false);
+  it("lets people in with the join link while its switch is on, but never while Memberful is members only or single sign-on is the only way in", () => {
+    expect(joinsWithLink({ joinLink: true, memberfulSignIn: false, ssoSignIn: false })).toBe(true);
+    expect(joinsWithLink({ joinLink: false, memberfulSignIn: false, ssoSignIn: false })).toBe(false);
+    expect(joinsWithLink({ joinLink: true, memberfulSignIn: true, ssoSignIn: false })).toBe(false);
+    expect(joinsWithLink({ joinLink: true, memberfulSignIn: false, ssoSignIn: true })).toBe(false);
   });
 
-  it("lets anyone sign up while Open is on, but never while Memberful is members only", () => {
-    expect(signsUpOpenly({ openSignUp: true, memberfulSignIn: false })).toBe(true);
-    expect(signsUpOpenly({ openSignUp: false, memberfulSignIn: false })).toBe(false);
-    expect(signsUpOpenly({ openSignUp: true, memberfulSignIn: true })).toBe(false);
+  it("lets anyone sign up while Open is on, but never while Memberful is members only or single sign-on is the only way in", () => {
+    expect(signsUpOpenly({ openSignUp: true, memberfulSignIn: false, ssoSignIn: false })).toBe(true);
+    expect(signsUpOpenly({ openSignUp: false, memberfulSignIn: false, ssoSignIn: false })).toBe(false);
+    expect(signsUpOpenly({ openSignUp: true, memberfulSignIn: true, ssoSignIn: false })).toBe(false);
+    expect(signsUpOpenly({ openSignUp: true, memberfulSignIn: false, ssoSignIn: true })).toBe(false);
+  });
+
+  it("takes single sign-on's switches as true or false, beside the other settings", () => {
+    expect(parseAccountChanges({ settings: { ssoJoin: true, ssoSignIn: false } })).toEqual({ settings: { ssoJoin: true, ssoSignIn: false } });
+    expect(parseAccountChanges({ settings: { ssoSignIn: "yes" } })).toBe("SSO only must be true or false");
   });
 
   it("names why joining went to sign in in the sign-in page's address, and reads only the reasons it knows", () => {
@@ -925,11 +932,12 @@ describe("Join with an email domain", () => {
   });
 
   it("lets people in at the email domains while Email domain is on with a domain, but never while Memberful is members only", () => {
-    const on = { emailDomainSignUp: true, emailDomains: ["example.org"], memberfulSignIn: false };
+    const on = { emailDomainSignUp: true, emailDomains: ["example.org"], memberfulSignIn: false, ssoSignIn: false };
     expect(signsUpWithEmailDomain(on)).toBe(true);
     expect(signsUpWithEmailDomain({ ...on, emailDomainSignUp: false })).toBe(false);
     expect(signsUpWithEmailDomain({ ...on, emailDomains: [] })).toBe(false);
     expect(signsUpWithEmailDomain({ ...on, memberfulSignIn: true })).toBe(false);
+    expect(signsUpWithEmailDomain({ ...on, ssoSignIn: true })).toBe(false);
   });
 
   it.each([

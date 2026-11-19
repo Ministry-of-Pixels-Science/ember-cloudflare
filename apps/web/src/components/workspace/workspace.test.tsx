@@ -52,11 +52,12 @@ const roomList = (listed: Room[], favorites: RoomId[] = [], sharedOrder: RoomId[
 });
 const generalSettings: RoomSettings = { room: rooms[0]!, canAdminister: true, canChangeHuddles: true, people: [{ ...ada, member: true }] };
 const workspaceSettings: WorkspaceSettings = {
-  account: { name: "Analytical Engines", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true },
+  account: { name: "Analytical Engines", tagline: "", hideTranslationButtons: true, customStyles: "", restrictRoomCreation: false, logo: null, customDomain: null, joinLink: true, openSignUp: false, memberfulJoin: false, memberfulSignIn: false, ssoJoin: false, ssoSignIn: false, emailDomainSignUp: false, emailDomains: [], navigationIcons: {}, huddles: false, huddleCameras: true, huddleScreens: true },
   joinCode: "aB3d-Ef5h-iJ7k",
   canAdminister: false,
   memberfulSite: null,
   memberfulWebhooks: false,
+  sso: null,
   memberfulKeys: null,
   memberfulSiteKept: null,
   turnstile: null,
@@ -1357,7 +1358,7 @@ describe("Connect Memberful", () => {
 
     unmount();
     showWorkspace(address());
-    expect(await screen.findByRole("region", { name: "Memberful" })).toHaveTextContent("Connected to Memberful as Ada Lovelace (ada@example.com), so you sign in with it.");
+    expect(await screen.findByRole("region", { name: "Memberful" })).toHaveTextContent("Connected as Ada Lovelace (ada@example.com). You sign in with Memberful.");
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
@@ -1365,6 +1366,23 @@ describe("Connect Memberful", () => {
     showWorkspace("/rooms/random?memberful=claimed");
     expect(await screen.findByRole("alert")).toHaveTextContent("That Memberful account is connected to someone else here.");
     expect(await roomHeading()).toHaveTextContent("random");
+    expect(address()).toBe("/rooms/random");
+  });
+});
+
+describe("Connect single sign-on", () => {
+  const address = () => `${location.pathname}${location.search}${location.hash}`;
+
+  it("flashes that your account at the provider is connected, taking it out of the address", async () => {
+    serve({ "GET /api/users/me/profile": () => Response.json({ profile: { name: "Ada", emailAddress: "ada@example.com", bio: null, membershipNeeded: true, memberful: null, sso: null, apps: [], outsideAi: null } }) });
+    showWorkspace("/users/me/profile?sso=connected#top");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Single sign-on connected.");
+    expect(address()).toBe("/users/me/profile#top");
+  });
+
+  it("flashes what went wrong, on whatever page connecting it was started from", async () => {
+    showWorkspace("/rooms/random?sso=claimed");
+    expect(await screen.findByRole("alert")).toHaveTextContent("This account is already connected to another member.");
     expect(address()).toBe("/rooms/random");
   });
 });

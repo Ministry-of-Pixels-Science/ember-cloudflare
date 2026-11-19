@@ -122,6 +122,9 @@ function deploy(
     MEMBERFUL_CLIENT_SECRET: _secret,
     MEMBERFUL_API_KEY: _apiKey,
     MEMBERFUL_WEBHOOK_SECRET: _webhookSecret,
+    SSO_ISSUER: _issuer,
+    SSO_CLIENT_ID: _ssoClient,
+    SSO_CLIENT_SECRET: _ssoSecret,
     TURNSTILE_SITE_KEY: _siteKey,
     TURNSTILE_SECRET_KEY: _turnstileSecret,
     RESEND_API_KEY: _resendKey,
@@ -722,6 +725,17 @@ describe("Sign in with Memberful", () => {
     const { secrets, logs } = deploy(EVERY_SECRET, [], { env: { MEMBERFUL_URL: "", MEMBERFUL_CLIENT_ID: "", MEMBERFUL_CLIENT_SECRET: "" } });
     expect(secrets).toEqual({});
     expect(logs).toContain("Deploying with the Worker's secrets as they are");
+  });
+});
+
+describe("Single sign-on", () => {
+  it("uploads the provider's issuer and the app's keys the environment gives with every deploy, and never prints the secret", () => {
+    const keys = { SSO_ISSUER: "https://example.zitadel.cloud", SSO_CLIENT_ID: "client-id", SSO_CLIENT_SECRET: "sso-client-secret" };
+    const { status, secrets, logs } = deploy(EVERY_SECRET, [], { env: { ...keys, CI: "true", GITHUB_ACTIONS: "true" } });
+    expect(status).toBe(0);
+    expect(secrets).toEqual(keys);
+    expect(logs).toContain("Deploying with SSO_ISSUER, SSO_CLIENT_ID, SSO_CLIENT_SECRET from the environment");
+    expect(logs).not.toContain("sso-client-secret");
   });
 });
 

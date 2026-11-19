@@ -30,6 +30,7 @@ const workspace: Omit<Bootstrap, "user"> = {
   setupPlaceholders: { name: "Kevin Rose", emailAddress: "kevin@kevinrose.com" },
   guestSignIn: false,
   signInWithMemberful: false,
+  signInWithSso: null,
   turnstileSiteKey: null,
   passwordResetCodes: false,
   account: {
@@ -44,6 +45,8 @@ const workspace: Omit<Bootstrap, "user"> = {
     openSignUp: false,
     memberfulJoin: false,
     memberfulSignIn: false,
+    ssoJoin: false,
+    ssoSignIn: false,
     emailDomainSignUp: true,
     emailDomains: DOMAINS,
     navigationIcons: {},
