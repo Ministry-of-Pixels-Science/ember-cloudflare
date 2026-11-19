@@ -1,4 +1,4 @@
-import { HISTORY_PAGE_SIZE, MAX_MESSAGE_HTML_LENGTH, MAX_MESSAGE_LENGTH, MAX_SEARCH_LENGTH, MESSAGE_TOO_LONG, type BotAnswer, type Me, type Message, type NewWorkspace, type ProfileAnswer, type RoomId, type WorkspaceSettings } from "@ember/protocol";
+import { HISTORY_PAGE_SIZE, MAX_SEARCH_LENGTH, MESSAGE_TOO_LONG, type BotAnswer, type Me, type Message, type NewWorkspace, type ProfileAnswer, type RoomId, type WorkspaceSettings } from "@ember/protocol";
 import {
   MAX_OUTSIDE_CONNECTIONS,
   OUTSIDE_ASK_REFUSED,
@@ -13,9 +13,10 @@ import {
   type YourOutsideAi,
 } from "@ember/protocol/outside";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { MAX_MARKDOWN_LENGTH } from "../src/bots/markdown";
 import { ChatRoom } from "../src/chat-room";
 import { toBase64url } from "../src/encoding";
-import { MAX_SHOWN_LENGTH, MESSAGES_FOUND, SENDING_TOO_FAST } from "../src/outside/tools";
+import { MAX_SHOWN_LENGTH, MESSAGES_FOUND, SENDING_TOO_FAST, TOO_MUCH_MARKDOWN } from "../src/outside/tools";
 import { SearchIndex } from "../src/search-index";
 import { MAX_OUTSIDE_CLIENTS, OUTSIDE_SENDS_PER_MINUTE } from "../src/workspace";
 import { api, connect, cookieOf, createRoom, direct, freshDeploy, origin, post, roomSql, settle, shown, signIn, upload, workspaceSql, type Session, type Socket } from "./support";
@@ -866,14 +867,14 @@ describe("What a connected AI app sends", () => {
     ada.close();
   });
 
-  it("sends a message as long as one can be, with more Markdown than Slack takes in its blocks", async () => {
+  it("sends as much Markdown as a Slack payload's blocks hold", async () => {
     const { administrator, token, general } = await sending();
     const ada = await connect(general, administrator);
 
-    const sent = await found<Sent>(token, "send_message", { room_id: general, text: "w".repeat(MAX_MESSAGE_LENGTH) });
+    const sent = await found<Sent>(token, "send_message", { room_id: general, text: "w".repeat(MAX_MARKDOWN_LENGTH) });
     const { message: heard } = await ada.next("message.created");
     expect(heard.id).toBe(sent.message.id);
-    expect(heard.plainText).toHaveLength(MAX_MESSAGE_LENGTH);
+    expect(heard.plainText).toHaveLength(MAX_MARKDOWN_LENGTH);
     ada.close();
   });
 
@@ -907,13 +908,10 @@ describe("What a connected AI app sends", () => {
     const yes = await reply(ada, question, "<p>Yes</p>");
 
     expect(await refusal(token, "send_message", { room_id: general, text: "  " })).toBe("Give the message to send, as `text`.");
-    expect(await refusal(token, "send_message", { room_id: general, text: "word ".repeat(MAX_MESSAGE_LENGTH) })).toBe(MESSAGE_TOO_LONG);
-    // Short enough to read as Markdown, and still more than a message holds.
-    expect(await refusal(token, "send_message", { room_id: general, text: "w".repeat(MAX_MESSAGE_LENGTH + 1) })).toBe(MESSAGE_TOO_LONG);
-    // Text a message holds, as more markup than it holds, each `&` being `&amp;`.
-    expect(await refusal(token, "send_message", { room_id: general, text: "&".repeat(MAX_MESSAGE_HTML_LENGTH / 4) })).toBe(MESSAGE_TOO_LONG);
-    // A short text naming one long address over and over: megabytes of markup from kilobytes of Markdown, turned away before it's built.
-    expect(await refusal(token, "send_message", { room_id: general, text: `[r]: https://example.com/${"a".repeat(1_000)}\n\n${"[x][r] ".repeat(2_000)}` })).toBe(MESSAGE_TOO_LONG);
+    expect(await refusal(token, "send_message", { room_id: general, text: "word ".repeat(MAX_MARKDOWN_LENGTH) })).toBe(TOO_MUCH_MARKDOWN);
+    expect(await refusal(token, "send_message", { room_id: general, text: "w".repeat(MAX_MARKDOWN_LENGTH + 1) })).toBe(TOO_MUCH_MARKDOWN);
+    // Within the Markdown limit, yet reading as more markup than a message holds: one long address, named over and over.
+    expect(await refusal(token, "send_message", { room_id: general, text: `[r]: https://example.com/${"a".repeat(2_000)}\n\n${"[x][r] ".repeat(60)}` })).toBe(MESSAGE_TOO_LONG);
     expect(await refusal(token, "send_message", { room_id: secret.id, text: "Hello" })).toBe(NO_ROOM);
     expect(await refusal(token, "send_message", { room_id: general, text: "Hello", thread_id: "no-such-message" })).toBe("That message no longer exists");
     // A reply has no thread of its own.
