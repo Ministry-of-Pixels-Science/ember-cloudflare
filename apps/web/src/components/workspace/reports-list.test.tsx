@@ -1,5 +1,5 @@
-import type { Card, DirectoryUser, User } from "@ember/protocol";
-import { OPEN_REPORTS_LISTED, type HandledReports, type Report, type ReportedMessage, type Reports } from "@ember/protocol/reports";
+import { DELETED_PERSON_NAME, type Card, type DirectoryUser, type User } from "@ember/protocol";
+import { OPEN_REPORTS_LISTED, type HandledReports, type Report, type ReportedMessage, type ReportedPerson, type Reports } from "@ember/protocol/reports";
 import { bodyFromPlainText } from "@ember/richtext/dom";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -9,7 +9,7 @@ import { ApiError } from "@/lib/api";
 import { dateTimeLabel } from "@/lib/messages";
 import { CONFIRM_REMOVE } from "./people-list";
 import { CONFIRM_BAN } from "./person-page";
-import { CONFIRM_DELETE, ReportsList } from "./reports-list";
+import { CONFIRM_DELETE, DELETED_WITH_ACCOUNT, ReportsList } from "./reports-list";
 
 const listed = (user: User, changes: Partial<DirectoryUser> = {}): DirectoryUser => ({ ...user, bio: null, role: "member", status: "active", avatarUrl: `/users/${user.id}/avatar`, ...changes });
 const directory = (...people: DirectoryUser[]): People => new Map(people.map((person) => [person.id, person]));
@@ -45,7 +45,7 @@ const ofMessage = (id: string, message: ReportedMessage, changes: Partial<Report
   handled: null,
   ...changes,
 });
-const ofPerson = (id: string, person: { id: string; name: string; bio: string | null }, changes: Partial<Report> = {}): Report => ({
+const ofPerson = (id: string, person: ReportedPerson, changes: Partial<Report> = {}): Report => ({
   id,
   reporterId: "grace",
   reason: "spam",
@@ -212,6 +212,22 @@ describe("Reports", () => {
     expect(report).toHaveTextContent("Reported by Someone");
     expect(report).toHaveTextContent("Gone Person");
     expect(buttonsOf(report)).toEqual(["Dismiss"]);
+  });
+
+  it("shows a report of someone who deleted their account without what it kept of them, with nothing to do but Dismiss", async () => {
+    const deleted = { id: "gone", name: DELETED_PERSON_NAME };
+    const ofTheirMessage = ofMessage("r9", reportedMessage(deleted, { body: "", plainText: "", accountDeleted: true }), { note: "Keeps posting this" });
+    serve({ open: [ofTheirMessage, ofPerson("r10", { ...deleted, bio: null, accountDeleted: true })], handled: [] });
+    show({ open: 2, people: directory(...PEOPLE.values(), listed(deleted, { status: "deactivated" })) });
+    await waitFor(() => expect(openReports()).toBeInTheDocument());
+    const [message, person] = within(openReports()!).getAllByRole("listitem");
+    // Why it was reported, by whom, stays.
+    expect(message).toHaveTextContent(`HarassmentReported by Linus Torvalds, ${time(REPORTED_AT)}“Keeps posting this”`);
+    expect(message).toHaveTextContent(`${DELETED_PERSON_NAME} in general${DELETED_WITH_ACCOUNT.message}Written ${time("2026-11-17T10:00:00.000Z")}`);
+    expect(buttonsOf(message!)).toEqual(["Dismiss"]);
+    expect(person).toHaveTextContent(DELETED_WITH_ACCOUNT.person);
+    expect(person).not.toHaveTextContent("No bio");
+    expect(buttonsOf(person!)).toEqual(["Dismiss"]);
   });
 
   it("asks before deleting the message, and moves every report it closed to the handled ones", async () => {
