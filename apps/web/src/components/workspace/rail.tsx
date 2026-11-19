@@ -5,6 +5,7 @@ import { useAccount } from "@/hooks/use-account";
 import { NEW_DIRECT_PATH, PROFILE_PATH, SEARCHES_PATH, WORKSPACE_SETTINGS_PATH } from "@/hooks/use-route";
 import { cn } from "@/lib/utils";
 import { AppearanceMenu } from "./appearance-menu";
+import { HistoryButtons } from "./history-buttons";
 import { NavigationIcon } from "./navigation-icon";
 import { opensNewDirect } from "./new-direct-dialog";
 import { OpenSearchContext, opensSearch } from "./search-box";
@@ -110,6 +111,8 @@ export function Rail({ me, workspaceName, current, activity, newRelease, openRep
       aria-label="Workspace"
       className="flex h-full w-[calc(var(--spacing-rail)+env(safe-area-inset-left))] flex-col items-center gap-3 overflow-y-auto overscroll-contain border-r bg-surface pt-4 pr-3 pb-[max(16px,env(safe-area-inset-bottom))] pl-[calc(12px+env(safe-area-inset-left))] [scrollbar-width:none]"
     >
+      {/* Back and Forward at the top, in line with the page's top bar, for a pointer: fingers have their own way back. */}
+      <HistoryButtons className="touch:hidden" />
       <PageLink
         href="/"
         aria-label="Ember home"

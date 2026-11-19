@@ -98,9 +98,7 @@ export function RoomView({ room, messageId, threadId, replyId, invitation, onDis
     const inThread = threadId !== undefined || (last.threadId !== undefined && last.messageId === messageId);
     if (inThread || goTo(messageId ?? null)) visited.current = { messageId, visit, threadId };
   }, [messageId, visit, threadId, state.connections]);
-  const typingUsers = Object.values(state.typing)
-    .map((t) => t.user)
-    .filter((u) => u.id !== me.id);
+  const typists = Object.values(state.typing).filter(({ user }) => user.id !== me.id);
   const composer = useRef<ComposerHandle>(null);
   const { editing, editors } = useMessageEditors(composer);
   useImperativeHandle(ref, () => ({ focusComposer: editors.returnFocus }), [editors]);
@@ -164,7 +162,7 @@ export function RoomView({ room, messageId, threadId, replyId, invitation, onDis
               roomName={name}
               direct={direct}
               userId={me.id}
-              typing={typingUsers}
+              typing={typists}
               disabled={state.offline}
               // Only while the room's first messages are on their way, not once it's been out of reach a while.
               deferEditor={state.status === "connecting" && !state.offline}

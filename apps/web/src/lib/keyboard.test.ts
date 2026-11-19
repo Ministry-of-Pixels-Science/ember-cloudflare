@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  backShortcut,
   breaksLine,
   formattingKeys,
+  forwardShortcut,
   formattingShortcut,
   huddleShortcut,
   muteShortcut,
@@ -329,6 +331,15 @@ describe("writesSnippet", () => {
   });
 });
 
+describe("Back and Forward", () => {
+  it("names the keys browsers go back and forward by: Cmd and a bracket on an Apple keyboard, Alt and an arrow on another", () => {
+    expect(backShortcut(true)).toEqual({ keys: ["⌘", "["], aria: "Meta+[" });
+    expect(forwardShortcut(true)).toEqual({ keys: ["⌘", "]"], aria: "Meta+]" });
+    expect(backShortcut(false)).toEqual({ keys: ["Alt", "←"], aria: "Alt+ArrowLeft" });
+    expect(forwardShortcut(false)).toEqual({ keys: ["Alt", "→"], aria: "Alt+ArrowRight" });
+  });
+});
+
 describe("SHORTCUTS", () => {
   it("names Cmd and Option on an Apple keyboard, and Ctrl and Alt on another", () => {
     const keys = (apple: boolean) => SHORTCUTS.flatMap(({ rows }) => rows.flatMap((row) => row.keys(apple)));
@@ -350,6 +361,13 @@ describe("SHORTCUTS", () => {
     const writing = SHORTCUTS.find(({ group }) => group === "Write a message")!.rows;
     expect(writing.find(({ action }) => action === "Upload files")!.keys(true)).toEqual(uploadShortcut(true).keys);
     expect(writing.find(({ action }) => action === "Write a text snippet")!.keys(false)).toEqual(snippetShortcut(false).keys);
+  });
+
+  it("lists the browser's keys for Back and Forward first, as the rail's buttons' tooltips show them", () => {
+    const navigate = SHORTCUTS.find(({ group }) => group === "Navigate")!.rows;
+    expect(navigate.slice(0, 2).map(({ action }) => action)).toEqual(["Go back", "Go forward"]);
+    expect(navigate.slice(0, 2).map((row) => row.keys(true))).toEqual([backShortcut(true).keys, forwardShortcut(true).keys]);
+    expect(navigate.slice(0, 2).map((row) => row.keys(false))).toEqual([backShortcut(false).keys, forwardShortcut(false).keys]);
   });
 
   it("lists the huddle keys as their buttons' tooltips show them", () => {

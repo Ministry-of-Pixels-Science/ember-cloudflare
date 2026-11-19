@@ -47,7 +47,7 @@ import {
 import { askWaiting, goOn, type Answered, type Asking, type GatewayRefusal, type Question } from "./assistant/gateway";
 import { takesEmbersTools } from "./assistant/offered";
 import { roomSearch } from "./assistant/room-search";
-import { ToolError } from "./assistant/tool-calls";
+import { ToolError, type EmberTool } from "./assistant/tool-calls";
 import { saidCard, toolCallOf, toolCards, type CardCall } from "./apps/cards";
 import {
   appTool,
@@ -58,12 +58,10 @@ import {
   givenAs,
   givenTools,
   ToolGone,
-  usedCard,
+  type AllowsCall,
   type GivenTool,
   type PickedTool,
-  type ShowsCall,
   type ShowsCard,
-  type Unmade,
 } from "./apps/tools";
 import { CALL_WAITS_MS, fits, WaitingCalls, type WaitingCall } from "./apps/waiting-calls";
 import { JobQueue } from "./at-once";
@@ -263,6 +261,14 @@ const ANSWERS_WAITING = 100;
 /** How often @ember says again that it's typing while it answers, as apps forget typing they haven't heard of for 5 seconds. */
 const TYPING_AGAIN_MS = 3_000;
 
+/** How `typists` and `doings` name a bot typing in thread `threadId`, or in the room. */
+const typistOf = (bot: User, threadId: string | undefined) => `${bot.id} ${threadId ?? ""}`;
+
+/** What the room's typing line says an answerer is doing, after its name, while a call of an app's tool it's making runs. */
+const usingApp = ({ appName, name }: GivenTool) => `is using ${appName}: ${name}`;
+/** What it says while the answerer searches the room. */
+const SEARCHING_ROOM = "is searching this room";
+
 /** Why the room posts nothing for a question for @ember: Ember AI was turned off, or @ember taken out of the room. */
 const ASSISTANT_GONE = "Ember AI has been turned off, or @ember is no longer in the room";
 /** Why it posts nothing for a question for an agent: Ember AI was turned off, or the agent deleted or taken out of the room. */
@@ -374,6 +380,12 @@ export class ChatRoom extends DurableObject<Env> {
   private readonly calling = new Set<string>();
   /** How many jobs each bot is typing for, by its id and the thread it's typing in, if it's in one. */
   private readonly typists = new Map<string, number>();
+  /**
+   * What each bot that's typing is doing meanwhile, as `typists` names them, if it's more than writing:
+   * the calls of its tools it's making, for each of its answers there, in the order they began, the room
+   * told of the latest.
+   */
+  private readonly doings = new Map<string, string[]>();
   /**
    * Who has read the room since its latest message, as far as this object has seen. Only a new message
    * in the room marks it unread, so until one comes another read of theirs would change nothing, and
@@ -1858,8 +1870,10 @@ export class ChatRoom extends DurableObject<Env> {
     const read = readable(conversation, where.inThread).map(({ id }) => id);
     const given = takesTools ? givenTools(access.appTools) : [];
     const askedBy = { roomId, askerId: author.id };
-    const appTools = given.map((tool) => appTool(this.env, bot.id, tool, askedBy, { described: tool, shown: this.showsCallsOf(roomId, access, message, tool), cards: this.showsCardsOf(roomId, bot, message, tool) }));
-    const tools = takesTools ? [roomSearch(this.env, roomId, read), ...appTools] : [];
+    const appTools = given.map((tool) =>
+      this.sayingWhile(bot, message, usingApp(tool), appTool(this.env, bot.id, tool, askedBy, { described: tool, allows: this.allowsCallsOf(roomId, access, message, tool), cards: this.showsCardsOf(roomId, bot, message, tool) })),
+    );
+    const tools = takesTools ? [this.sayingWhile(bot, message, SEARCHING_ROOM, roomSearch(this.env, roomId, read)), ...appTools] : [];
     const asked = loggedIn({ ...questionFor({ ...bot, instructions, promptTemplate }, conversation, author, where, levels, new Date(), webTools, webSearchOn), tools }, access);
     const [answered, people] = await Promise.all([askWaiting(this.env, gateway, asked, waitFor(asked)), this.peopleWhoWrote(conversation)]);
     return this.outcomeOf(access, message, answered, writtenBy(people, conversation, where.inThread), given.map(givenAs));
@@ -1880,28 +1894,42 @@ export class ChatRoom extends DurableObject<Env> {
     const inThread = message.parentId !== undefined;
     const read = readable(conversation, inThread).map(({ id }) => id);
     const asked = { roomId, askerId: call.asker.id };
-    const appTools = call.tools.map((tool) => appTool(this.env, bot.id, tool, asked, { shown: this.showsCallsOf(roomId, access, message, tool), cards: this.showsCardsOf(roomId, bot, message, tool) }));
-    const tools = [roomSearch(this.env, roomId, read), ...appTools];
+    const appTools = call.tools.map((tool) =>
+      this.sayingWhile(bot, message, usingApp(tool), appTool(this.env, bot.id, tool, asked, { allows: this.allowsCallsOf(roomId, access, message, tool), cards: this.showsCardsOf(roomId, bot, message, tool) })),
+    );
+    const tools = [this.sayingWhile(bot, message, SEARCHING_ROOM, roomSearch(this.env, roomId, read)), ...appTools];
     const paused = { ...call.paused, question: loggedIn(call.paused.question, access) };
     const [answered, people] = await Promise.all([goOn(this.env, gateway, tools, paused, allowed, waitFor(paused.question)), this.peopleWhoWrote(conversation)]);
     return this.outcomeOf(access, message, answered, writtenBy(people, conversation, inThread), call.tools);
   }
 
   /**
-   * What shows room `roomId` the calls of `tool` that the bot `access` finds makes, answering `message`,
-   * without asking first, or undefined unless its calls of it are always allowed there: a card for each,
-   * as its reply, which says what the tool was called with, and then that the call wasn't made, if it
-   * wasn't. A call isn't shown, and so isn't made, once the bot's calls of it ask first in the room, as
-   * they do once it's private.
+   * What says whether room `roomId` still allows each call of `tool` that the bot `access` finds makes,
+   * answering `message`, without asking first, or undefined unless its calls of it are always allowed
+   * there: not once they ask first in the room, as they do once it's private, nor once the bot is gone
+   * from it, or the question or its thread is, as then nothing it answers would be posted.
    */
-  private showsCallsOf(roomId: RoomId, { bot, appTools }: AssistantAccess, message: Message, tool: GivenTool): ShowsCall | undefined {
+  private allowsCallsOf(roomId: RoomId, { bot, appTools }: AssistantAccess, message: Message, tool: GivenTool): AllowsCall | undefined {
     if (!isAlwaysAllowed(appTools, tool)) return undefined;
-    return async (input) => {
-      let cardId: string | undefined;
-      const card = ({ appTools }: AssistantAccess) => (isAlwaysAllowed(appTools, tool) ? slackMessage(usedCard(bot.name, tool, input), true) : ASKS_FIRST_NOW);
-      const unshown = await this.postCallCard(roomId, bot, message, card, async (posted) => void (cardId = posted.id));
-      return unshown ?? { unmade: (why) => this.showUnmade(roomId, cardId!, tool, input, why) };
+    return async () => {
+      const access = await workspace(this.env).answererIn(roomId, bot.id, message.creator.id);
+      if (access && !isAlwaysAllowed(access.appTools, tool)) return ASKS_FIRST_NOW;
+      return this.serially(async () => {
+        if (await this.isDeleted()) return "the room is gone";
+        if (!access || (await this.revocationsFor(roomId).refuse([access.bot.id], access.authorizedAt))) return answererGone(bot.id);
+        const store = this.storeFor(roomId);
+        if (!(await this.findUndeleted(store, message.id))) return "the message is gone";
+        return message.parentId !== undefined && (await this.inThread(store, message.parentId, false)) === null ? THREAD_GONE : null;
+      });
     };
+  }
+
+  /**
+   * `tool`, whose every call has the room's typing line say, after the name of `bot`, who's typing as it
+   * answers `message`, that it's `doing` it, while it runs.
+   */
+  private sayingWhile(bot: User, message: Message, doing: string, tool: EmberTool): EmberTool {
+    return { ...tool, run: (input) => this.doingWhile(bot, message.parentId, doing, () => tool.run(input)) };
   }
 
   /**
@@ -1911,12 +1939,6 @@ export class ChatRoom extends DurableObject<Env> {
    */
   private showsCardsOf(roomId: RoomId, bot: User, message: Message, tool: GivenTool): ShowsCard {
     return (card) => this.postCallCard(roomId, bot, message, ({ appTools }) => toolCards(card, tool.appId, toolsOf(appTools, tool.appId)) ?? "it shows nothing here");
-  }
-
-  /** Has the card `messageId`, which showed the room a call of `tool` made without asking first, say the call wasn't made, and `why`. */
-  private async showUnmade(roomId: RoomId, messageId: string, tool: GivenTool, input: Record<string, unknown>, why: Unmade): Promise<void> {
-    const unchanged = await this.changeCallCard(roomId, messageId, (botName) => usedCard(botName, tool, input, why));
-    if (unchanged !== null) console.error(`The card of a call that wasn't made, message ${messageId}, wasn't changed: ${unchanged}`);
   }
 
   /**
@@ -2157,11 +2179,10 @@ export class ChatRoom extends DurableObject<Env> {
    * again, as apps stop showing someone typing once a message of theirs arrives.
    */
   private async typingWhile<T>(bot: User, threadId: string | undefined, work: () => Promise<T>): Promise<T> {
-    const typing = (typing: boolean) => this.broadcast({ type: "typing", user: bot, typing, ...(threadId !== undefined && { threadId }) });
-    const typist = `${bot.id} ${threadId ?? ""}`;
+    const typist = typistOf(bot, threadId);
     this.typists.set(typist, (this.typists.get(typist) ?? 0) + 1);
-    typing(true);
-    const again = setInterval(() => typing(true), TYPING_AGAIN_MS);
+    this.sayTyping(bot, threadId);
+    const again = setInterval(() => this.sayTyping(bot, threadId), TYPING_AGAIN_MS);
     try {
       return await work();
     } finally {
@@ -2169,8 +2190,37 @@ export class ChatRoom extends DurableObject<Env> {
       const jobs = this.typists.get(typist)! - 1;
       if (jobs === 0) this.typists.delete(typist);
       else this.typists.set(typist, jobs);
-      typing(jobs > 0);
+      this.sayTyping(bot, threadId);
     }
+  }
+
+  /**
+   * Runs `work`, a call of one of the tools of `bot`, which is typing as it answers in thread `threadId`,
+   * if there is one, else in the room: the room hears, beside its typing, that it's `doing` it, until
+   * it's done, and then what a call it's making for another answer there is doing, if one still runs, or
+   * that it's only typing again, while it still is.
+   */
+  private async doingWhile<T>(bot: User, threadId: string | undefined, doing: string, work: () => Promise<T>): Promise<T> {
+    const typist = typistOf(bot, threadId);
+    this.doings.set(typist, [...(this.doings.get(typist) ?? []), doing]);
+    this.sayTyping(bot, threadId);
+    try {
+      return await work();
+    } finally {
+      const doings = this.doings.get(typist)!;
+      const left = doings.toSpliced(doings.lastIndexOf(doing), 1);
+      if (left.length === 0) this.doings.delete(typist);
+      else this.doings.set(typist, left);
+      this.sayTyping(bot, threadId);
+    }
+  }
+
+  /** Tells the room whether `bot` is typing in thread `threadId`, or in the room, and what it's doing meanwhile, if it's more than writing. */
+  private sayTyping(bot: User, threadId: string | undefined): void {
+    const typist = typistOf(bot, threadId);
+    const typing = this.typists.has(typist);
+    const doing = typing ? this.doings.get(typist)?.at(-1) : undefined;
+    this.broadcast({ type: "typing", user: bot, typing, ...(threadId !== undefined && { threadId }), ...(doing !== undefined && { doing }) });
   }
 
   /**
